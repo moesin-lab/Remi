@@ -63,6 +63,7 @@ import {
 } from "@shared/feishu-task-card.js";
 import {
   FEISHU_CONCIERGE_CONFIG_CAPABILITY,
+  FEISHU_CONCIERGE_MULTI_CAPABILITY,
   FEISHU_DECISION_CARD_CAPABILITY,
   FEISHU_ISSUE_DECISION_CARD_CAPABILITY,
   type FeishuDecisionDegradeReason,
@@ -269,22 +270,43 @@ export class FeishuBotRepo {
    * handover until the old host acknowledges stopped. */
   forRuntime(workspaceId: string, runtimeId: string): FeishuBotRepo {
     const cache = activeRequestReadCache();
-    const configKey = cacheKey("multiremi_feishu_bot_configs", "runtime", workspaceId, runtimeId);
-    let configured = cache?.get<Row | null>(configKey);
-    if (configured === undefined) {
-      configured = this.ctx.db.query("SELECT bot_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND runtime_id = ?")
-        .get(workspaceId, runtimeId) as Row | null;
-      cache?.set(configKey, configured ?? null);
-    }
-    if (configured) return this.forBot(String(configured.bot_id));
     const stateKey = cacheKey("multiremi_feishu_bot_runtime_states", "owner", workspaceId, runtimeId);
     let previous = cache?.get<Row | null>(stateKey);
     if (previous === undefined) {
-      previous = this.ctx.db.query("SELECT bot_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ? AND (state <> 'stopped' OR release_pending = 1) ORDER BY reported_at DESC LIMIT 1")
+      previous = this.ctx.db.query("SELECT bot_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ? AND (state <> 'stopped' OR release_pending = 1) ORDER BY release_pending DESC, reported_at DESC, bot_id LIMIT 1")
         .get(workspaceId, runtimeId) as Row | null;
       cache?.set(stateKey, previous ?? null);
     }
-    return this.forBot(String(previous?.bot_id ?? "default"));
+    if (previous && !this.supportsMulti(workspaceId, runtimeId)) return this.forBot(String(previous.bot_id));
+    const configKey = cacheKey("multiremi_feishu_bot_configs", "runtime", workspaceId, runtimeId);
+    let configured = cache?.get<Row | null>(configKey);
+    if (configured === undefined) {
+      configured = this.ctx.db.query("SELECT bot_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND runtime_id = ? AND enabled = 1 ORDER BY created_at, bot_id LIMIT 1")
+        .get(workspaceId, runtimeId) as Row | null;
+      cache?.set(configKey, configured ?? null);
+    }
+    return this.forBot(String(configured?.bot_id ?? previous?.bot_id ?? "default"));
+  }
+
+  supportsMulti(workspaceId: string, runtimeId: string): boolean {
+    const runtime = this.ctx.runtimes().getRuntimeLite(runtimeId);
+    return runtime?.workspaceId === workspaceId && runtime.metadata[FEISHU_CONCIERGE_MULTI_CAPABILITY] === true;
+  }
+
+  /** Explicit scope never grants a host access merely because it knows a bot ID. */
+  forDaemon(workspaceId: string, runtimeId: string, botId?: string, finishing = false): FeishuBotRepo {
+    if (botId === undefined) return this.forRuntime(workspaceId, runtimeId);
+    const bot = this.forBot(botId);
+    if (bot.getConfig(workspaceId)?.runtimeId === runtimeId || finishing && bot.getRuntimeStatus(workspaceId, runtimeId)) return bot;
+    throw new FeishuBotConfigError("runtime does not host this Feishu bot", 403, "runtime_not_selected");
+  }
+
+  relatedBots(workspaceId: string, runtimeId: string): FeishuBotRepo[] {
+    if (!this.supportsMulti(workspaceId, runtimeId)) return [this.forRuntime(workspaceId, runtimeId)];
+    const rows = this.ctx.db.query(`SELECT bot_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND runtime_id = ?
+      UNION SELECT bot_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ?
+        AND (state <> 'stopped' OR release_pending = 1) ORDER BY bot_id`).all(workspaceId, runtimeId, workspaceId, runtimeId) as Row[];
+    return rows.map(row => this.forBot(String(row.bot_id)));
   }
 
   forTask(taskId: string): FeishuBotRepo {
@@ -318,15 +340,16 @@ export class FeishuBotRepo {
   }
 
   private assertAssignmentAvailable(workspaceId: string, runtimeId: string, appId: string): void {
-    const conflict = this.ctx.db.query("SELECT runtime_id, app_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id <> ? AND (runtime_id = ? OR app_id = ?) LIMIT 1")
-      .get(workspaceId, this.botId, runtimeId, appId) as Row | null;
-    if (conflict?.app_id === appId) throw new FeishuBotConfigError("this Feishu application already belongs to another bot", 409, "app_already_assigned");
-    if (conflict) throw new FeishuBotConfigError("each Runtime currently hosts one bot; select another Runtime", 409, "runtime_already_assigned");
+    const multi = this.supportsMulti(workspaceId, runtimeId);
+    const appConflict = this.ctx.db.query("SELECT 1 FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id <> ? AND app_id = ? LIMIT 1")
+      .get(workspaceId, this.botId, appId);
+    if (appConflict) throw new FeishuBotConfigError("this Feishu application already belongs to another bot", 409, "app_already_assigned");
     if (this.ctx.db.query("SELECT 1 FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND bot_id <> ? AND stopping_app_id = ? AND release_pending = 1 LIMIT 1").get(workspaceId, this.botId, appId)) {
       throw new FeishuBotConfigError("wait for the previous bot to confirm stopped before reusing this application", 409, "app_bot_stopping");
     }
-    if (this.ctx.db.query("SELECT 1 FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ? AND bot_id <> ? AND (state <> 'stopped' OR release_pending = 1) LIMIT 1").get(workspaceId, runtimeId, this.botId)) {
-      throw new FeishuBotConfigError("wait for the previous bot to confirm stopped before reusing this Runtime", 409, "runtime_bot_stopping");
+    if (!multi && (this.ctx.db.query("SELECT 1 FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND runtime_id = ? AND bot_id <> ? LIMIT 1").get(workspaceId, runtimeId, this.botId)
+      || this.ctx.db.query("SELECT 1 FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ? AND bot_id <> ? AND (state <> 'stopped' OR release_pending = 1) LIMIT 1").get(workspaceId, runtimeId, this.botId))) {
+      throw new FeishuBotConfigError("该机器的 daemon 版本只能托管一个机器人，请升级后再选", 409, "runtime_already_assigned");
     }
   }
 
@@ -749,7 +772,10 @@ export class FeishuBotRepo {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       const existing = this.rawConfigRow(workspaceId);
       if (!existing) return null;
-      if (enabled) this.requireDeployableRuntime(workspaceId, String(existing.runtime_id));
+      if (enabled) {
+        this.requireDeployableRuntime(workspaceId, String(existing.runtime_id));
+        this.assertAssignmentAvailable(workspaceId, String(existing.runtime_id), String(existing.app_id));
+      }
       else this.reserveStoppedAcknowledgement(workspaceId, existing);
       this.ctx.db.run(
         `UPDATE multiremi_feishu_bot_configs
@@ -2672,7 +2698,7 @@ export class FeishuBotRepo {
       JOIN multiremi_turn_execution_records task ON task.id = request.task_id
       JOIN multiremi_feishu_bot_configs c ON c.workspace_id = task.workspace_id
       JOIN multiremi_runtimes host ON host.id = c.runtime_id AND host.workspace_id = c.workspace_id
-      WHERE c.workspace_id = ? AND c.runtime_id = ? AND c.enabled = 1
+      WHERE c.workspace_id = ? AND c.runtime_id = ? AND c.bot_id = ? AND c.enabled = 1
         AND request.status IN ('responded', 'timeout', 'cancelled')
         AND NOT EXISTS (
           SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries patch
@@ -2700,7 +2726,7 @@ export class FeishuBotRepo {
       SELECT candidates.* FROM candidates
       ${audienceFilter}
       ORDER BY responded_at DESC, id DESC
-    `).all(workspaceId, runtimeId, chatCutoff,
+    `).all(workspaceId, runtimeId, this.botId, chatCutoff,
       ...(daemonId === undefined ? [] : [daemonId, workspaceId, runtimeId])) as Row[];
     return rows.map(row => daemonId === undefined
       ? { requestId: String(row.id), taskId: String(row.task_id) }
@@ -3305,6 +3331,7 @@ export class FeishuBotRepo {
       || config.runtimeId !== runtimeId
       || runtimeStatus?.state !== "online"
       || runtimeStatus.appliedRevision !== config.revision
+      || (!this.supportsMulti(workspaceId, runtimeId) && this.forRuntime(workspaceId, runtimeId).botId !== this.botId)
     ) return null;
     this.drainOutboundOperations(workspaceId, now);
     if (nowInput === undefined) now.setTime(Date.now());
@@ -4154,6 +4181,9 @@ export class FeishuBotRepo {
     if (this.getRuntimeStatus(workspaceId, runtimeId)?.releasePending) {
       return { revision, desired_state: "stopped", config_available: false };
     }
+    if (!this.supportsMulti(workspaceId, runtimeId) && this.forRuntime(workspaceId, runtimeId).botId !== this.botId) {
+      return { revision, desired_state: "stopped", config_available: false };
+    }
     const blockers = this.liveForeignRuntimeIds(workspaceId, runtimeId);
     if (blockers.length > 0) {
       // Hold the new host at `stopped` until the previous one lets go.
@@ -4196,7 +4226,16 @@ export class FeishuBotRepo {
     runtimeId: string,
     input: ReportFeishuBotRuntimeStatusInput,
   ): MultiremiFeishuBotRuntimeStatus {
+    // Serialize the stop acknowledgement and the next owner's revision with
+    // configuration changes. A legacy daemon has no bot_id to disambiguate them.
+    if (input.state === "stopped" && !this.supportsMulti(workspaceId, runtimeId)) {
+      if (!this.ctx.db.inTransaction) return this.ctx.db.transaction(() => this.reportRuntimeStatus(workspaceId, runtimeId, input))();
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+    }
     const previous = this.getRuntimeStatus(workspaceId, runtimeId);
+    const releasingLegacyOwner = input.state === "stopped" && !this.supportsMulti(workspaceId, runtimeId)
+      && this.forRuntime(workspaceId, runtimeId).botId === this.botId
+      && previous && (previous.state !== "stopped" || previous.releasePending);
     const state: FeishuBotRuntimeState = RUNTIME_STATES.has(input.state) ? input.state : "failed";
     const now = nowIso();
     this.ctx.db.run(
@@ -4225,6 +4264,19 @@ export class FeishuBotRepo {
       now,
     );
     const current = this.getRuntimeStatus(workspaceId, runtimeId)!;
+    if (releasingLegacyOwner) {
+      const next = this.forRuntime(workspaceId, runtimeId);
+      const config = next.getConfig(workspaceId);
+      if (next.botId !== this.botId && config?.enabled && config.runtimeId === runtimeId) {
+        // The old supervisor compares only revision, then adopts the revision
+        // returned with credentials. Bump the stored revision too, so config,
+        // inbound validation and outbound readiness all agree on the new owner.
+        const revision = Math.max(config.revision, current.appliedRevision, previous.appliedRevision,
+          this.getConfig(workspaceId)?.revision ?? 0) + 1;
+        this.ctx.db.run("UPDATE multiremi_feishu_bot_configs SET revision = ?, updated_at = ? WHERE workspace_id = ? AND bot_id = ?",
+          revision, now, workspaceId, next.botId);
+      }
+    }
     if (!previous || previous.appliedRevision !== current.appliedRevision || previous.state !== current.state
       || previous.botName !== current.botName || previous.botOpenId !== current.botOpenId
       || previous.errorCode !== current.errorCode || previous.errorMessage !== current.errorMessage
@@ -4394,9 +4446,10 @@ export class FeishuBotRepo {
     }
     const runtime = this.ctx.runtimes().getRuntime(config.runtimeId);
     const runtimeOnline = Boolean(runtime && isRuntimeEffectivelyOnline(runtime));
+    const unsupported = !this.supportsMulti(workspaceId, config.runtimeId) && this.forRuntime(workspaceId, config.runtimeId).botId !== this.botId;
     const reported = this.getRuntimeStatus(workspaceId, config.runtimeId);
     const staleRuntimeIds = this.liveForeignRuntimeIds(workspaceId, config.runtimeId);
-    const desiredState: FeishuBotDesiredState = config.enabled && !reported?.releasePending && staleRuntimeIds.length === 0
+    const desiredState: FeishuBotDesiredState = !unsupported && config.enabled && !reported?.releasePending && staleRuntimeIds.length === 0
       ? "running"
       : "stopped";
 
@@ -4408,17 +4461,17 @@ export class FeishuBotRepo {
       staleRuntimeCount: staleRuntimeIds.length,
     });
     return {
-      status,
+      status: unsupported && config.enabled ? "failed" : status,
       config,
       desiredState,
       runtimeOnline,
       appliedRevision: reported?.appliedRevision ?? null,
       botName: reported?.botName ?? config.botName,
       lastHeartbeatAt: runtime?.lastHeartbeatAt ?? null,
-      errorCode: status === "failed" || status === "degraded"
+      errorCode: unsupported ? "runtime_unsupported" : status === "failed" || status === "degraded"
         ? reported?.errorCode ?? config.lastTestErrorCode
         : null,
-      errorMessage: status === "failed" || status === "degraded"
+      errorMessage: unsupported ? "该机器的 daemon 版本只能托管一个机器人，请升级后再选" : status === "failed" || status === "degraded"
         ? reported?.errorMessage ?? config.lastTestError
         : null,
       staleRuntimeIds,

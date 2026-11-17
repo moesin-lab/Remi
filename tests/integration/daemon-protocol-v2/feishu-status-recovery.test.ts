@@ -59,3 +59,49 @@ it("recovers an unacknowledged online report and releases outbound without a new
     else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousKey;
   }
 }, 15_000);
+
+
+it("runs two scoped bot hosts over v2 and stops only the deleted bot", async () => {
+  const previousKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
+  process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 77).toString("base64");
+  try {
+    const h = await DaemonProtocolHarness.create(); fixtures.push(h);
+    const starts: string[] = [], stops: string[] = [], sent: string[] = [];
+    h.daemon.setFeishuConciergeHost(botId => ({
+      start: async assignment => {
+        expect(assignment.config.bot_id).toBe(botId);
+        expect(assignment.config.app_id).toBe(`cli_${botId}`);
+        starts.push(botId!); return {};
+      },
+      stop: async () => { stops.push(botId!); },
+      sendOutbound: async delivery => {
+        expect(delivery.botId).toBe(botId);
+        sent.push(botId!); return { messageId: `om_${delivery.id}` };
+      },
+    }));
+    await h.startDaemon(); await h.settleHeartbeat();
+    const runtimeId = h.ledger.find(entry => entry.type === "hello")!.frame.p.runtimes[0].runtime_id as string;
+    expect(h.store.getRuntime(runtimeId)!.metadata.feishu_concierge_multi_v1).toBe(true);
+    const agent = h.store.createAgent({ name: "Multi", provider: "claude", workspaceId: "local", runtimeId });
+    for (const id of ["default", "second"]) h.store.feishuBotFor(id).upsertConfig("local", {
+      senderAccessPolicy: "agent", agentId: agent.id, runtimeId, appId: `cli_${id}`,
+      appSecretOp: "set", appSecret: `secret-${id}`, domain: "feishu", enabled: true,
+    });
+    const online = (id: string) => h.store.feishuBotFor(id).getRuntimeStatus("local", runtimeId)?.state === "online";
+    await waitFor(() => online("default") && online("second"), "both scoped bots online");
+    expect(h.received.some(frame => frame.t === "feishu.directive")).toBe(false);
+    for (const id of ["default", "second"]) h.store.submitFeishuBotMessage("local", runtimeId, {
+      revision: 1, externalSessionKey: "oc_same", externalMessageId: "om_same", chatId: "oc_same",
+      chatType: "p2p", text: "answer", deliveryMode: "native_cot_v1",
+    }, id);
+    await waitFor(() => sent.includes("default") && sent.includes("second"), "outbounds sent by matching hosts");
+    h.store.feishuBotFor("second").deleteConfig("local");
+    await waitFor(() => stops.includes("second"), "deleted bot stopped");
+    expect(online("default")).toBe(true);
+    expect(starts.filter(id => id === "default")).toHaveLength(1);
+    expect(stops).not.toContain("default");
+  } finally {
+    if (previousKey === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
+    else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousKey;
+  }
+}, 15_000);

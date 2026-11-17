@@ -186,6 +186,7 @@ export const DAEMON_DOWNLINK_EVENT_FRAMES = [
   "runtime.profile",
   "feishu.outbound",
   "feishu.directive",
+  "feishu.bot_directive",
   "ssh_mesh.reconcile",
   "platform.drain",
   "plugin.desired_revision",
@@ -343,6 +344,7 @@ export interface DaemonRuntimeCapabilities {
   bot_menu_protocol?: number;
   agent_plugin_protocol?: number;
   feishu_concierge_protocol?: number;
+  feishu_concierge_multi?: number;
   feishu_decision_card?: number;
   feishu_issue_decision_card?: number;
 }

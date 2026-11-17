@@ -1,3 +1,5 @@
+import { reportFrame } from "../../fixtures/report-session.js";
+import { runtimeInputSnapshot } from "../../../packages/server/src/api/daemon-protocol/runtime-input-snapshot.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
@@ -29,7 +31,7 @@ function setup() {
   const request = (path: string, method = "GET", payload?: unknown) => app.request(`/api/workspaces/local/${path}`, {
     method, headers, ...(payload ? { body: JSON.stringify(payload) } : {}),
   });
-  return { store, agents, body, request };
+  return { store, app, agents, body, request };
 }
 
 describe("multiple Feishu bots", () => {
@@ -171,5 +173,155 @@ describe("multiple Feishu bots", () => {
     expect(store.reportFeishuBotOutbound("local", "rt_two", first.id, { claimToken: first.claimToken, status: "sent" })).toBe(false);
     expect(store.reportFeishuBotOutbound("local", "rt_one", first.id, { claimToken: first.claimToken, status: "sent" })).toBe(true);
     expect(store.reportFeishuBotOutbound("local", "rt_two", second.id, { claimToken: second.claimToken, status: "sent" })).toBe(true);
+  });
+});
+
+describe("multiple Feishu bots on one runtime", () => {
+  async function multi() {
+    const fixture = setup();
+    fixture.store.heartbeatRuntime("rt_one", { supportsFeishuBotConfig: true, supportsFeishuBotMulti: true });
+    expect((await fixture.request("feishu-bot", "PUT", fixture.body(0))).status).toBe(200);
+    const response = await fixture.request("feishu-bots", "POST", { ...fixture.body(1), runtime_id: "rt_one" });
+    expect(response.status).toBe(201);
+    return { ...fixture, botId: (await response.json()).bot_id as string };
+  }
+
+  it("scopes credentials, routing, downlinks, outbound claims and stop acknowledgements", async () => {
+    const { store, app, agents, request, botId } = await multi();
+    const candidates = await (await request("feishu-bot/candidates")).json();
+    expect(candidates.runtimes.find((r: { id: string }) => r.id === "rt_one")).toMatchObject({
+      supports_multi: true, assigned_bot_ids: ["default", botId], assigned_bot_names: ["Bot 0", "Bot 1"],
+    });
+    const token = await store.createAccessToken({ name: "multi host", type: "daemon", workspaceId: "local", daemonId: "daemon_one" });
+    const listed = await app.request("/api/daemon/runtimes/rt_one/feishu-bots", { headers: { Authorization: `Bearer ${token.token}` } });
+    expect(listed.status).toBe(200);
+    expect(JSON.stringify(await listed.json())).not.toContain("secret");
+    const directives = () => runtimeInputSnapshot(store, "rt_one").filter(entity => entity.type.startsWith("feishu."));
+    expect(directives().filter(entity => entity.type === "feishu.bot_directive").map(entity => entity.payload.bot_id).sort()).toEqual([botId, "default"].sort());
+    expect(directives().some(entity => entity.type === "feishu.directive")).toBe(false);
+    expect(store.getFeishuBotDaemonConfig("local", "rt_one", botId)?.app_secret).toBe("test-secret-1");
+    expect(store.listFeishuBotDaemonAssignments("local", "rt_one")).toHaveLength(2);
+    expect(JSON.stringify(store.listFeishuBotDaemonAssignments("local", "rt_one"))).not.toContain("test-secret");
+    const input = { revision: 1, externalMessageId: "om_shared_multi", externalSessionKey: "oc_same_multi", chatId: "oc_multi", chatType: "p2p" as const, text: "hi", deliveryMode: "native_cot_v1" as const };
+    const tasks = ["default", botId].map((id, i) => {
+      store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "online", appliedRevision: 1 }, id);
+      const task = store.submitFeishuBotMessage("local", "rt_one", input, id);
+      expect(task.agentId).toBe(agents[i]!.id);
+      return task;
+    });
+    expect(tasks[0]!.chatSessionId).not.toBe(tasks[1]!.chatSessionId);
+    for (const task of tasks) {
+      expect(store.claimTask("rt_one")?.id).toBe(task.taskId);
+      store.startTask(task.taskId); store.completeTask(task.taskId, { output: "reply" });
+    }
+    const outbounds = store.pendingFeishuBotOutbounds("local", "rt_one");
+    expect(outbounds.map(outbound => outbound.botId).sort()).toEqual([botId, "default"].sort());
+    const claimed = store.claimFeishuBotOutbounds("local", "rt_one");
+    expect(claimed).toHaveLength(2);
+    for (const delivery of claimed) expect(store.reportFeishuBotOutbound("local", "rt_one", delivery.id,
+      { claimToken: delivery.claimToken, status: "sent" }, undefined, delivery.botId)).toBe(true);
+    expect((await request(`feishu-bot?bot_id=${botId}`, "DELETE")).status).toBe(200);
+    expect(store.feishuBotDirectivesForRuntime("local", "rt_one").find(d => d.bot_id === botId)?.desired_state).toBe("stopped");
+    store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "stopped", appliedRevision: 1 }, botId);
+    expect(store.feishuBotDirectivesForRuntime("local", "rt_one").map(d => d.bot_id)).toEqual(["default"]);
+    expect(store.feishuBotStatusSnapshot("local").status).toBe("online");
+  });
+
+  it("falls back deterministically when multi capability disappears and gates new assignments", async () => {
+    const { store, request, body, botId } = await multi();
+    store.heartbeatRuntime("rt_one", { supportsFeishuBotConfig: true });
+    expect(store.getFeishuBotDaemonConfig("local", "rt_one")?.bot_id).toBe("default");
+    expect(runtimeInputSnapshot(store, "rt_one").filter(e => e.type === "feishu.directive")).toHaveLength(1);
+    expect(runtimeInputSnapshot(store, "rt_one").some(e => e.type === "feishu.bot_directive")).toBe(false);
+    expect(store.feishuBotFor(botId).statusSnapshot("local")).toMatchObject({ status: "failed", errorCode: "runtime_unsupported", desiredState: "stopped" });
+    const rejected = await request("feishu-bots", "POST", { ...body(1), app_id: "cli_third", runtime_id: "rt_one" });
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({ code: "runtime_already_assigned" });
+  });
+
+  for (const change of ["disable", "delete", "move"] as const) for (const peerState of ["online", "stopped"] as const) {
+    it(`keeps the legacy owner until stopped when an online bot is ${change}d and its peer is ${peerState}`, async () => {
+      const { store, request, body, botId } = await multi();
+      // Both configurations start with the same revision. Queue B's reply while
+      // multi is enabled. B may still have a live state at the downgrade.
+      expect(store.getFeishuBotConfig("local")?.revision).toBe(1);
+      expect(store.feishuBotFor(botId).getConfig("local")?.revision).toBe(1);
+      store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "online", appliedRevision: 1 }, botId);
+      const task = store.submitFeishuBotMessage("local", "rt_one", {
+        revision: 1, externalMessageId: "om_legacy_switch", externalSessionKey: "oc_legacy_switch",
+        chatId: "oc_legacy_switch", chatType: "p2p", text: "hi", deliveryMode: "native_cot_v1",
+      }, botId);
+      expect(store.claimTask("rt_one")?.id).toBe(task.taskId);
+      store.startTask(task.taskId);
+      store.completeTask(task.taskId, { output: "B reply" });
+      expect(store.pendingFeishuBotOutbounds("local", "rt_one").some(d => d.botId === botId)).toBe(true);
+      store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: peerState, appliedRevision: 1 }, botId);
+      store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "online", appliedRevision: 1 }, "default");
+      store.heartbeatRuntime("rt_one", { supportsFeishuBotConfig: true });
+      const oldRevision = store.feishuBotDirectiveForRuntime("local", "rt_one")!.revision;
+      if (change === "disable") expect((await request("feishu-bot/stop", "POST", {})).status).toBe(200);
+      else if (change === "delete") expect((await request("feishu-bot", "DELETE")).status).toBe(200);
+      else expect((await request("feishu-bot", "PUT", { ...body(0), runtime_id: "rt_two" })).status).toBe(200);
+
+      for (let report = 0; report < 2; report++) {
+        expect(store.feishuBotDirectiveForRuntime("local", "rt_one")?.desired_state).toBe("stopped");
+        expect(store.feishuBotDirectiveForRuntime("local", "rt_one", botId)?.desired_state).toBe("stopped");
+        const directives = runtimeInputSnapshot(store, "rt_one").filter(e => e.type === "feishu.directive");
+        expect(directives).toHaveLength(1);
+        expect(directives[0]!.payload.desired_state).toBe("stopped");
+        expect(store.getFeishuBotDaemonConfig("local", "rt_one")).toBeNull();
+        store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "online", appliedRevision: oldRevision });
+        expect(store.feishuBotFor("default").getRuntimeStatus("local", "rt_one")?.state).toBe("online");
+        expect(store.feishuBotFor(botId).getRuntimeStatus("local", "rt_one")?.state).toBe(peerState);
+        expect(store.claimFeishuBotOutbounds("local", "rt_one")).toEqual([]);
+        expect(store.claimFeishuBotOutbound("local", "rt_one", undefined, true, true, true, true, botId)).toBeNull();
+      }
+      store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "stopped", appliedRevision: oldRevision });
+      expect(store.feishuBotFor("default").getRuntimeStatus("local", "rt_one")).toMatchObject({ state: "stopped", releasePending: false });
+      const next = store.getFeishuBotDaemonConfig("local", "rt_one")!;
+      expect(next.bot_id).toBe(botId);
+      expect(next.revision).toBeGreaterThan(oldRevision);
+      expect(store.feishuBotDirectiveForRuntime("local", "rt_one")).toMatchObject({ desired_state: "running", revision: next.revision });
+      expect(store.claimFeishuBotOutbounds("local", "rt_one")).toEqual([]);
+      // A stale status cannot unlock B, even after ownership has switched.
+      store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "online", appliedRevision: oldRevision });
+      expect(store.claimFeishuBotOutbounds("local", "rt_one")).toEqual([]);
+      store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "online", appliedRevision: next.revision });
+      const claimed = store.claimFeishuBotOutbounds("local", "rt_one");
+      expect(claimed.length).toBeGreaterThan(0);
+      expect(claimed.some(d => d.taskId === task.taskId)).toBe(true);
+    });
+  }
+
+  it("rejects foreign bot credentials, messages and online reports before writing any state", async () => {
+    const { store, app, botId } = await multi();
+    expect(() => store.reportFeishuBotRuntimeStatus("local", "rt_two", { state: "online", appliedRevision: 1 }, botId)).toThrow("runtime does not host");
+    expect(store.feishuBotFor(botId).getRuntimeStatus("local", "rt_two")).toBeNull();
+    const report = await reportFrame(store, "concierge.status_report", {
+      runtime_id: "rt_two", bot_id: botId, applied_revision: 1, state: "online",
+    });
+    expect(report).toMatchObject({ ok: false, code: "runtime_not_selected" });
+    expect(store.feishuBotFor(botId).getRuntimeStatus("local", "rt_two")).toBeNull();
+    const token = await store.createAccessToken({ name: "other", type: "daemon", workspaceId: "local", daemonId: "daemon_two" });
+    for (const [method, path] of [["GET", `feishu-bot?bot_id=${botId}`], ["POST", "feishu-bot/messages"]]) {
+      const response = await app.request(`/api/daemon/runtimes/rt_two/${path}`, {
+        method, headers: { Authorization: `Bearer ${token.token}`, "content-type": "application/json" },
+        ...(method === "POST" ? { body: JSON.stringify({ bot_id: botId, revision: 1 }) } : {}),
+      });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({ code: "runtime_not_selected" });
+    }
+    const response = await app.request("/api/daemon/runtimes/rt_two/feishu-bots", { headers: { Authorization: `Bearer ${token.token}` } });
+    expect(response.status).toBe(409);
+  });
+
+  it("keeps handover fences per bot when it moves to another runtime", async () => {
+    const { store, request, body, botId } = await multi();
+    store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "online", appliedRevision: 1 }, botId);
+    expect((await request(`feishu-bot?bot_id=${botId}`, "PUT", body(1))).status).toBe(200);
+    expect(store.feishuBotDirectiveForRuntime("local", "rt_two", botId)?.desired_state).toBe("stopped");
+    expect(store.feishuBotDirectiveForRuntime("local", "rt_one", "default")?.desired_state).toBe("running");
+    store.reportFeishuBotRuntimeStatus("local", "rt_one", { state: "stopped", appliedRevision: 2 }, botId);
+    expect(store.feishuBotDirectiveForRuntime("local", "rt_two", botId)?.desired_state).toBe("running");
   });
 });

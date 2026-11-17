@@ -307,6 +307,22 @@ describe("FeishuBotSection (admin form)", () => {
     expect(secret).toHaveAttribute("placeholder", "cli_••••••");
   });
 
+  it("allows a multi-capable machine already hosting other bots and shows their names", async () => {
+    candidatesRef.current = { ...CANDIDATES, runtimes: [{ ...CANDIDATES.runtimes[0], supports_multi: true,
+      assigned_bot_id: "other", assigned_bot_ids: ["other", "second"], assigned_bot_names: ["Alice", "Bob"] }] };
+    renderSection();
+    await userEvent.click(screen.getByRole("combobox", { name: "Host machine" }));
+    const option = screen.getByRole("option", { name: /Hosting: Alice、Bob/ });
+    expect(option).not.toHaveAttribute("data-disabled");
+  });
+
+  it("disables an older machine assigned to another bot and explains the upgrade", async () => {
+    candidatesRef.current = { ...CANDIDATES, runtimes: [{ ...CANDIDATES.runtimes[0], assigned_bot_id: "other", supports_multi: false }] };
+    renderSection();
+    await userEvent.click(screen.getByRole("combobox", { name: "Host machine" }));
+    expect(screen.getByRole("option", { name: /Upgrade daemon to host multiple bots/ })).toHaveAttribute("data-disabled");
+  });
+
   it("shows the Agent name and machine name without exposing provider engines", () => {
     renderSection();
     expect(screen.getByText("Default Agent")).toBeInTheDocument();

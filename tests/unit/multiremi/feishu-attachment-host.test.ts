@@ -82,6 +82,34 @@ describe("Feishu attachment concierge delivery", () => {
     });
   }
 
+  for (const deliveryBotId of ["bot_second", undefined]) {
+    it(`downloads the second bot's attachments using ${deliveryBotId ? "delivery" : "host"} scope`, async () => {
+      const bytes = Buffer.from("second bot file");
+      const sent: unknown[] = [];
+      const daemon = {
+        downloadFeishuBotOutboundAttachment: async (id: string, claimToken: string, attachmentId: string, botId?: string) => {
+          expect(id).toBe(base.id);
+          expect(claimToken).toBe(base.claimToken);
+          expect(base.attachments!.some(a => a.id === attachmentId)).toBe(true);
+          // Match the server's bot filter: an omitted or wrong ID is a 404.
+          if (botId !== "bot_second") throw new Error("attachment not found");
+          return bytes;
+        },
+      } as unknown as MultiremiDaemon;
+      const handle = {
+        sendProactiveAttachment: async (input: any) => { sent.push(input); return { messageId: "om_second" }; },
+      } as unknown as FeishuChannelHandle;
+      const host = controlPlaneConciergeHost({
+        botId: deliveryBotId ? "bot_fallback" : "bot_second", daemon: () => daemon,
+        current: () => handle, attach: () => {}, workspacesRoot: () => "/tmp/test",
+      });
+      await expect(host.sendOutbound!({ ...base, botId: deliveryBotId })).resolves.toEqual({ messageId: "om_second" });
+      expect(sent).toHaveLength(2);
+      expect(sent[0]).toMatchObject({ buffer: bytes, filename: "report.html" });
+      expect(sent[1]).toMatchObject({ buffer: bytes, filename: "chart.png" });
+    });
+  }
+
   it("awaits the caption before sending the first file and keeps retry UUIDs and the original thread", async () => {
     const events: string[] = [];
     const captions: any[] = [];

@@ -30,11 +30,11 @@ summary: 主侧栏的 IM 平台、平台能力页面、飞书连接与路由边�
 Remi 的 Agent/Runtime 绑定、Issue 话题、持久 outbox 和独立的 Messaging Core 继续由原领域实现。
 一个工作区可配置多个机器人，也可有多个采集连接；两条链路不共享凭据。机器人页可新增、命名、选择和删除机器人，`?bot=<bot_id>` 在机器人、访问控制和群聊页面之间保留选择。表单和缓存同时按工作区与机器人隔离。
 
-每个机器人使用独立飞书应用，分别保存 Agent/Runtime、路由、发送者策略、修订、运行状态和审计。当前 Runtime v1 协议只有一个 connector slot，故一个 Runtime 只能分配一个机器人（停用配置也占用这个绑定）；应用或 Runtime 重复分配返回 409。迁移保留原机器人的 `default` 标识、密文及历史记录。切换承载机、停止或删除已启用的机器人后，旧 Runtime 确认停止前，原承载机和应用都不能分配给另一个机器人。
+每个机器人使用独立飞书应用，分别保存 Agent/Runtime、路由、发送者策略、修订、运行状态和审计。上报 `feishu_concierge_multi` 的 Runtime 可以承载多个机器人，各自使用独立的连接器、凭据、指令和 outbound；旧版 daemon 仍只有一个 connector slot，重复分配 Runtime 返回 409 并提示升级。飞书应用不能重复分配。迁移保留原机器人的 `default` 标识、密文及历史记录。切换承载机、停止或删除已启用的机器人后，旧 Runtime 确认停止前，原应用不能复用，旧版 daemon 的承载机也不能分配给另一个机器人。能力回退时，无 `bot_id` 的旧协议先保留未停止或待释放的 owner；该 owner 确认 stopped 后才切换到下一个启用配置，并递增新 owner 的配置修订，避免旧 supervisor 将同修订的两个机器人误认为同一连接。
 
 同一 Runtime 更换应用时也先等待旧连接器确认停止，再启动新应用；连续编辑期间持续保留最初仍在运行的应用占用。停止后立即部署同样需要完成停止确认。
 
-每个机器人独立配置一套统一菜单，不再按工作区成员、角色或外部账号编辑定向菜单。旧 Agent Bot 绑定和自动 Issue 话题设置仍由默认机器人使用，只在默认机器人的页面显示。多个企业及同一企业的多套应用可分别添加机器人；企业分组、平台实例及单 Runtime 多机器人并发尚未实现。
+每个机器人独立配置一套统一菜单，不再按工作区成员、角色或外部账号编辑定向菜单。旧 Agent Bot 绑定和自动 Issue 话题设置仍由默认机器人使用，只在默认机器人的页面显示。多个企业及同一企业的多套应用可分别添加机器人；企业分组和平台实例尚未实现。
 
 ## 实现归属与扩展
 
@@ -75,3 +75,10 @@ Remi 的 Agent/Runtime 绑定、Issue 话题、持久 outbox 和独立的 Messag
 平台目录及路径测试在 [core/im-platforms](../../frontend/packages/core/im-platforms)；页面、迁移后的交互回归和按页查询测试在 [views/im-platforms](../../frontend/packages/views/im-platforms)。运行方式和 CI 覆盖见 [TESTING.md](../../TESTING.md)。
 
 机器人与话题表单不要求人类责任人。符合发送者授权和提案策略的群消息可直接建单；事项按执行 Agent 与父子关系完成交付验收，详见 [事项责任](issue-responsibility.md)。旧可选联系人字段仅保留兼容与审计。
+
+
+同一 runtime 托管多个飞书 bot 需要 daemon 声明 `feishu_concierge_multi: 1`。机器候选返回
+`supports_multi`、`assigned_bot_ids` 和 `assigned_bot_names`；页面列出已托管的 bot，多 bot
+机器仍可选择。旧 daemon 机器托管其他 bot 时显示升级提示并禁选；能力回退后，只有最早
+启用的 bot 可运行，其余 bot 的独立状态显示 `runtime_unsupported`。各 bot 的凭据、通道、
+消息去重、菜单发布与停止确认独立，迁移仍使用原来的 stopped 确认或 90 秒过期交接。

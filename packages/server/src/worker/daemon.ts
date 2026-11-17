@@ -105,7 +105,7 @@ import {
   type DaemonTaskCompletionFields,
   type DaemonTurnInput,
 } from "@multiremi/contracts/daemon-protocol.js";
-import { FeishuConciergeSupervisor, type FeishuConciergeHost } from "./feishu-concierge.js";
+import { FeishuConciergeHosts, FeishuConciergeSupervisor, type FeishuConciergeHost } from "./feishu-concierge.js";
 import { deliverFeishuOutbound } from "./feishu-outbound.js";
 import { redactFeishuBotError } from "@multiremi/feishu-bot/diagnostics.js";
 import { rewriteMarkdownImages } from "@shared/feishu-markdown-images.js";
@@ -1356,8 +1356,9 @@ export class MultiremiDaemon {
   private runtimeModelRetryWake: (() => void) | null = null;
   private botMenuPublisher: ((config: ResolvedBotMenuConfig, dryRun: boolean) => Promise<BotMenuPublishResult>) | null = null;
   private botMenuPublishChain: Promise<void> = Promise.resolve();
-  private feishuConcierge: FeishuConciergeSupervisor | null = null;
-  private feishuConciergeReconcile: Promise<void> = Promise.resolve();
+  private feishuConcierge: FeishuConciergeHosts | null = null;
+  private feishuConciergeMulti = false;
+  private readonly botMenuPublishers = new Map<string, NonNullable<MultiremiDaemon["botMenuPublisher"]>>();
 
   constructor(options: MultiremiDaemonOptions) {
     if (options.inProcessRuntimeModelDiscoveryEnabled && !options.providerFactory) {
@@ -1670,7 +1671,7 @@ export class MultiremiDaemon {
             this.options.runtimeId, this.sshMeshManager.getHeartbeatStatus(),
             { ackGeneration: this.appliedDrainGeneration, activeTaskCount: this.protocolClient.processActiveTaskCount(), scope: "daemon", activeTaskIds: [...this.activeTaskIds] },
             capabilities.supports_bot_menu === true,
-            Boolean(capabilities.feishu_concierge_protocol), this.pollAbort.signal,
+            Boolean(capabilities.feishu_concierge_protocol), this.pollAbort.signal, [], Boolean(capabilities.feishu_concierge_multi),
           );
           for (const task of ack.cancelled_tasks ?? []) {
             if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
@@ -1760,16 +1761,16 @@ export class MultiremiDaemon {
     return this.client.checkExternalWorkspaceMembership(workspaceId, externalId);
   }
 
-  submitFeishuBotMessage(input: SubmitFeishuBotMessageInput): Promise<SubmitFeishuBotMessageResult> {
-    return this.client.submitFeishuBotMessage(this.options.runtimeId!, input);
+  submitFeishuBotMessage(input: SubmitFeishuBotMessageInput, botId?: string): Promise<SubmitFeishuBotMessageResult> {
+    return this.client.submitFeishuBotMessage(this.options.runtimeId!, input, botId);
   }
 
-  uploadFeishuBotAttachment(input: UploadFeishuBotAttachmentInput): Promise<{ id: string }> {
-    return this.client.uploadFeishuBotAttachment(this.options.runtimeId!, input);
+  uploadFeishuBotAttachment(input: UploadFeishuBotAttachmentInput, botId?: string): Promise<{ id: string }> {
+    return this.client.uploadFeishuBotAttachment(this.options.runtimeId!, input, botId);
   }
 
-  downloadFeishuBotOutboundAttachment(deliveryId: string, claimToken: string, attachmentId: string): Promise<Buffer> {
-    return this.client.downloadFeishuBotOutboundAttachment(this.options.runtimeId!, deliveryId, claimToken, attachmentId);
+  downloadFeishuBotOutboundAttachment(deliveryId: string, claimToken: string, attachmentId: string, botId?: string): Promise<Buffer> {
+    return this.client.downloadFeishuBotOutboundAttachment(this.options.runtimeId!, deliveryId, claimToken, attachmentId, botId);
   }
 
   getFeishuBotTaskSnapshot(taskId: string): Promise<FeishuBotTaskSnapshot> {
@@ -1777,25 +1778,25 @@ export class MultiremiDaemon {
   }
 
   /** Cards this Runtime still owes click handlers for (MUL-407 restart recovery). */
-  listFeishuBotDecisionCards(): Promise<Array<{
+  listFeishuBotDecisionCards(botId?: string): Promise<Array<{
     requestId: string;
     taskId: string;
     chatId: string;
     messageId: string;
     recipientOpenId: string;
   }>> {
-    return this.client.listFeishuBotDecisionCards(this.options.runtimeId!);
+    return this.client.listFeishuBotDecisionCards(this.options.runtimeId!, botId);
   }
 
   /** Issue decision cards this Runtime must re-register after a restart (MUL-412). */
-  listFeishuIssueDecisionCards(): Promise<Array<{
+  listFeishuIssueDecisionCards(botId?: string): Promise<Array<{
     decisionId: string;
     issueId: string;
     chatId: string;
     messageId: string;
     recipientOpenId: string;
   }>> {
-    return this.client.listFeishuIssueDecisionCards(this.options.runtimeId!);
+    return this.client.listFeishuIssueDecisionCards(this.options.runtimeId!, botId);
   }
 
   getFeishuIssueDecision(decisionId: string): Promise<MultiremiIssueDecision | null> {
@@ -1847,22 +1848,22 @@ export class MultiremiDaemon {
     return this.client.respondTaskHumanRequest(requestId, response, credential);
   }
 
-  resetFeishuBotSession(revision: number, externalSessionKey: string): Promise<boolean> {
-    return this.client.resetFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey);
+  resetFeishuBotSession(revision: number, externalSessionKey: string, botId?: string): Promise<boolean> {
+    return this.client.resetFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey, botId);
   }
 
   cancelFeishuBotSessionTask(
     revision: number,
     externalSessionKey: string,
     options: { chatId?: string | null; senderOpenId?: string | null; target?: string | null } = {},
+    botId?: string,
   ): Promise<FeishuBotCancelResult> {
     return this.client.cancelFeishuBotSessionTask(
-      this.options.runtimeId!, revision, externalSessionKey, options,
-    );
+      this.options.runtimeId!, revision, externalSessionKey, options, botId);
   }
 
-  inspectFeishuBotSession(revision: number, externalSessionKey: string) {
-    return this.client.inspectFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey);
+  inspectFeishuBotSession(revision: number, externalSessionKey: string, botId?: string) {
+    return this.client.inspectFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey, botId);
   }
 
   async ensureTopicWorkspace(sessionKey: string, topicId: string): Promise<string | null> {
@@ -1877,9 +1878,10 @@ export class MultiremiDaemon {
       supports_skill_directory: true,
       external_chats: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
       external_chat_models: this.options.provider === "codex" && typeof process.getuid === "function" ? 1 : 0,
-      supports_bot_menu: this.botMenuPublisher !== null,
-      bot_menu_protocol: this.botMenuPublisher ? BOT_MENU_PROTOCOL_VERSION : 0,
+      supports_bot_menu: this.botMenuPublisher !== null || this.botMenuPublishers.size > 0,
+      bot_menu_protocol: this.botMenuPublisher || this.botMenuPublishers.size ? BOT_MENU_PROTOCOL_VERSION : 0,
       agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
+      feishu_concierge_multi: concierge && this.feishuConciergeMulti ? 1 : 0,
       feishu_concierge_protocol: concierge ? FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION : 0,
       feishu_decision_card: concierge ? FEISHU_DECISION_CARD_PROTOCOL_VERSION : 0,
       feishu_issue_decision_card: concierge ? FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION : 0,
@@ -1888,7 +1890,12 @@ export class MultiremiDaemon {
 
   setBotMenuPublisher(
     publisher: ((config: ResolvedBotMenuConfig, dryRun: boolean) => Promise<BotMenuPublishResult>) | null,
+    botId?: string,
   ): void {
+    if (botId !== undefined) {
+      if (publisher) this.botMenuPublishers.set(botId, publisher); else this.botMenuPublishers.delete(botId);
+      return;
+    }
     this.botMenuPublisher = publisher;
   }
 
@@ -1897,21 +1904,23 @@ export class MultiremiDaemon {
    * host is what advertises `feishu_concierge_protocol` on the heartbeat, so a
    * daemon that cannot boot a Remi core never gets offered the bot.
    */
-  setFeishuConciergeHost(host: FeishuConciergeHost | null): void {
+  setFeishuConciergeHost(host: FeishuConciergeHost | ((botId?: string) => FeishuConciergeHost) | null): void {
     if (!host) {
       this.feishuConcierge = null;
       return;
     }
-    this.feishuConcierge = new FeishuConciergeSupervisor({
-      host,
+    this.feishuConciergeMulti = typeof host === "function";
+    this.feishuConcierge = new FeishuConciergeHosts(botId => new FeishuConciergeSupervisor({
+      botId,
+      host: typeof host === "function" ? host(botId) : host,
       // Both callbacks read runtimeId at call time: the daemon can re-register
       // and get a new id while the connector is running.
-      fetchConfig: async () => this.client.getFeishuBotConfig(this.options.runtimeId!),
+      fetchConfig: async () => this.client.getFeishuBotConfig(this.options.runtimeId!, botId),
       report: async (input) => {
-        await this.client.reportFeishuBotRuntimeStatus(this.options.runtimeId!, input);
+        await this.client.reportFeishuBotRuntimeStatus(this.options.runtimeId!, input, botId);
       },
       log: { info: (message) => log.info(message), warn: (message) => log.warn(message) },
-    });
+    }));
   }
 
   /**
@@ -1919,8 +1928,8 @@ export class MultiremiDaemon {
    * not recover, say. Without this the control plane keeps showing `online` for
    * a bot that stopped answering, and no heartbeat would ever restart it.
    */
-  async reportFeishuConciergeFailure(error: unknown): Promise<void> {
-    await this.feishuConcierge?.reportChannelFailure(error);
+  async reportFeishuConciergeFailure(error: unknown, botId?: string): Promise<void> {
+    await this.feishuConcierge?.get(botId)?.reportChannelFailure(error);
   }
 
   /**
@@ -1931,7 +1940,6 @@ export class MultiremiDaemon {
   async shutdownFeishuConcierge(): Promise<void> {
     const supervisor = this.feishuConcierge;
     if (!supervisor) return;
-    await this.feishuConciergeReconcile.catch(() => {});
     await supervisor.shutdown().catch((error) => {
       log.warn(`Feishu concierge shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -2652,7 +2660,8 @@ export class MultiremiDaemon {
     runtimeId: string,
     request: NonNullable<MultiremiDaemonHeartbeatConfigAck["pending_bot_menu"]>,
   ): Promise<void> {
-    if (!this.botMenuPublisher) {
+    const publisher = request.config.target?.botId ? this.botMenuPublishers.get(request.config.target.botId) ?? this.botMenuPublisher : this.botMenuPublisher;
+    if (!publisher) {
       await this.client.reportBotMenuPublishResult(runtimeId, request.id, {
         status: "failed",
         error: "Feishu bot menu publisher is unavailable",
@@ -2665,7 +2674,7 @@ export class MultiremiDaemon {
     // Feishu message survive.
     log.info(`bot menu publish ${request.id} started (dry_run=${request.dry_run})`);
     try {
-      const result = await this.botMenuPublisher(request.config, request.dry_run);
+      const result = await publisher(request.config, request.dry_run);
       log.info(`bot menu publish ${request.id} finished in ${Date.now() - startedAt}ms`);
       await this.client.reportBotMenuPublishResult(runtimeId, request.id, {
         status: "completed",
@@ -2685,31 +2694,20 @@ export class MultiremiDaemon {
    * Hand a changed concierge directive to the supervisor without waiting
    * for it. Booting a Remi core takes seconds, and the heartbeat loop is also
    * what claims tasks — blocking it on a connector start would stall unrelated
-   * work. This and the independent heartbeat tick share a serial queue, so
-   * they cannot overlap two starts.
+   * work. Each bot serializes its own transitions and heartbeat ticks.
    */
   private applyFeishuBotDirective(ack: MultiremiDaemonHeartbeatConfigAck): void {
-    const supervisor = this.feishuConcierge;
-    if (!supervisor || !ack.feishu_bot) return;
-    const directive = ack.feishu_bot;
-    this.feishuConciergeReconcile = this.feishuConciergeReconcile
-      .catch(() => {})
-      .then(() => supervisor.apply(directive))
-      .catch((error) => {
-        log.warn(`Feishu concierge reconcile failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
+    const hosts = this.feishuConcierge;
+    if (!hosts) return;
+    const directives = ack.feishu_bots ?? (ack.feishu_bot ? [{ ...ack.feishu_bot, bot_id: undefined }] : []);
+    // Start each bot independently; supervisor serializes its own transitions.
+    for (const directive of directives) {
+      void hosts.apply(directive, directive.bot_id).catch(error => log.warn(`Feishu concierge reconcile failed: ${redactFeishuBotError(error)}`));
+    }
   }
 
-  /** v2 only sends each unchanged directive once; retry from the heartbeat lane. */
   private tickFeishuConcierge(): void {
-    const supervisor = this.feishuConcierge;
-    if (!supervisor) return;
-    this.feishuConciergeReconcile = this.feishuConciergeReconcile
-      .catch(() => {})
-      .then(() => supervisor.tick())
-      .catch((error) => {
-        log.warn(`Feishu concierge heartbeat reconcile failed: ${error instanceof Error ? error.message : String(error)}`);
-      });
+    void this.feishuConcierge?.tick();
   }
 
   private queueFeishuBotOutbound(runtimeId: string,
@@ -2732,7 +2730,7 @@ export class MultiremiDaemon {
     delivery: NonNullable<MultiremiDaemonHeartbeatConfigAck["pending_feishu_outbound"]>,
     signal: AbortSignal = this.pollAbort.signal,
   ): Promise<void> {
-    const supervisor = this.feishuConcierge;
+    const supervisor = this.feishuConcierge?.get(this.feishuConciergeMulti ? delivery.botId : undefined);
     try {
       if (!supervisor) throw new Error("Feishu concierge is unavailable");
       const resolveImage = createFeishuImageResolver({
@@ -2742,7 +2740,7 @@ export class MultiremiDaemon {
             runtimeId,
             delivery.id,
             delivery.claimToken,
-            source.attachmentId,
+            source.attachmentId, delivery.botId,
           ),
           source.name,
         ),
@@ -2758,9 +2756,9 @@ export class MultiremiDaemon {
       }
       await deliverFeishuOutbound(delivery, {
         signal,
-        prepareMention: openId => this.client.prepareFeishuBotOutboundMention(runtimeId, delivery.id, delivery.claimToken, openId),
+        prepareMention: openId => this.client.prepareFeishuBotOutboundMention(runtimeId, delivery.id, delivery.claimToken, openId, delivery.botId),
         send: options => supervisor.sendOutbound({ ...delivery, body }, options),
-        report: input => this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, input),
+        report: input => this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, input, delivery.botId),
       });
     } catch (error) {
       await this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, {
@@ -2768,7 +2766,7 @@ export class MultiremiDaemon {
         status: "failed",
         error: redactFeishuBotError(error),
         retryable: !isPermanentFeishuDeliveryError(error),
-      });
+      }, delivery.botId);
     }
   }
 

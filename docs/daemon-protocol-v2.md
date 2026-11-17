@@ -1120,6 +1120,16 @@ server → reject  { code: "daemon_protocol_upgrade_required", min_protocol: 2,
 `hb` 更新。上述能力缺失均按 false/0 处理，不能沿用数据库里的旧值。`feishu_concierge_protocol`
 达到服务端支持版本时同时表示 `supportsFeishuBotConfig`。
 
+`feishu_concierge_multi: 1` 单独声明多 bot 能力，写入 `feishu_concierge_multi_v1`，hello/心跳缺失即撤销。
+多 bot host 只接收 `feishu.bot_directive`，每个相关 bot 一条无凭据配置（含 `bot_id`）；旧 host
+仍接收最早 enabled 配置（按 created_at、bot_id 排序）的 `feishu.directive`。已移出或删除但尚未
+确认 stopped 的 bot 继续收到停止指令。每 bot 至多一条 pending outbound，载荷含 `bot_id`。
+状态 RPC 与 outbound result 透传可选 `bot_id`；显式指定时必须属于该 runtime 的配置，收尾报告
+也可由该 bot 已有的 runtime state 授权，不能凭任意 bot ID 建立 online 状态。
+凭据仍只通过 `/api/daemon/runtimes/:runtimeId/feishu-bot?bot_id=...` 拉取；多 bot host 的
+`/feishu-bots` 诊断列表仅返回 bot_id、revision、enabled、desired_state，不含凭据。
+
+
 服务端在 `hello` 时按 `protocol` 与 `cli_version` 双重判定。载荷级语义变化随发布用
 `min_cli_version` 把关，协议号只在传输与帧封装变化时升；统一消息/轮载荷仍使用协议 2。
 新 daemon 收到旧服务端的 `welcome.min_cli_version` 时进入 `upgrade_wait`，停止领轮。

@@ -111,6 +111,7 @@ import type {
 } from "@multiremi/contracts/types.js";
 import {
   FEISHU_CONCIERGE_CONFIG_CAPABILITY,
+  FEISHU_CONCIERGE_MULTI_CAPABILITY,
   FEISHU_DECISION_CARD_CAPABILITY,
   FEISHU_ISSUE_DECISION_CARD_CAPABILITY,
   MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
@@ -2460,6 +2461,7 @@ export class RuntimesRepo {
     supportsBotMenu?: boolean;
     botMenuProtocol?: number;
     supportsFeishuBotConfig?: boolean;
+    supportsFeishuBotMulti?: boolean;
     supportsDecisionCard?: boolean;
     supportsIssueDecisionCard?: boolean;
   } = {}): MultiremiDaemonHeartbeatAck {
@@ -2480,6 +2482,9 @@ export class RuntimesRepo {
     if (options.supportsBotMenu !== undefined) {
       metadataPatch.feishu_bot_menu = options.supportsBotMenu;
       metadataPatch.feishu_bot_menu_protocol = options.botMenuProtocol ?? 0;
+    }
+    if (options.supportsFeishuBotConfig !== undefined || options.supportsFeishuBotMulti !== undefined) {
+      metadataPatch[FEISHU_CONCIERGE_MULTI_CAPABILITY] = options.supportsFeishuBotMulti === true;
     }
     if (options.supportsFeishuBotConfig !== undefined) {
       metadataPatch[FEISHU_CONCIERGE_CONFIG_CAPABILITY] = options.supportsFeishuBotConfig;

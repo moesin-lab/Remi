@@ -961,6 +961,7 @@ export interface MultiremiDaemonRuntimeInput {
    * `MultiremiFeishuBotDirective`.
    */
   feishu_bot?: MultiremiFeishuBotDirective;
+  feishu_bots?: (MultiremiFeishuBotDirective & { bot_id: string })[];
   /** One leased proactive reply for the Runtime hosting the Feishu concierge. */
   pending_feishu_outbound?: MultiremiFeishuBotOutboundDelivery;
   pending_feishu_outbounds?: MultiremiFeishuBotOutboundDelivery[];
@@ -4438,6 +4439,7 @@ export interface ReportBotMenuPublishInput {
 
 /** Capability a Runtime must advertise before it can be selected to host the bot. */
 export const FEISHU_CONCIERGE_CONFIG_CAPABILITY = "feishu_concierge_config_v1";
+export const FEISHU_CONCIERGE_MULTI_CAPABILITY = "feishu_concierge_multi_v1";
 
 /**
  * Metadata flag a bot host sets when it can render server-built decision cards
@@ -4591,6 +4593,7 @@ export interface FeishuPresentationCheckpoint {
 }
 
 export interface MultiremiFeishuBotOutboundDelivery {
+  botId?: string;
   attachments?: Array<Pick<MultiremiAttachment, "id" | "filename" | "contentType" | "sizeBytes">>;
   /** Original inbound messages only; never the root of an unrelated proactive reply. */
   receiptMessageIds?: string[];
@@ -4684,6 +4687,7 @@ export type FeishuBotErrorCode =
   | "insufficient_permissions"
   | "agent_unavailable"
   | "runtime_unavailable"
+  | "runtime_unsupported"
   | "connector_start_failed"
   | "network_unreachable"
   | "unknown";

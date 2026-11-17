@@ -353,6 +353,7 @@ export class MultiremiDaemonClient {
     supportsFeishuConcierge = false,
     signal?: AbortSignal,
     bindingAcks: RuntimeExecutionBindingAck[] = [],
+    supportsFeishuMulti = false,
   ): Promise<MultiremiDaemonHeartbeatConfigAck> {
     let resp: Partial<MultiremiDaemonHeartbeatConfigAck>;
     try {
@@ -363,6 +364,7 @@ export class MultiremiDaemonClient {
         supports_batch_import: true,
         supports_directory_scan: true,
         supports_skill_directory: true,
+        feishu_concierge_multi: supportsFeishuMulti ? 1 : 0,
         supports_bot_menu: supportsBotMenu,
         bot_menu_protocol: supportsBotMenu ? BOT_MENU_PROTOCOL_VERSION : 0,
         agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
@@ -400,6 +402,7 @@ export class MultiremiDaemonClient {
     }
     const rawOutbound = resp.pending_feishu_outbound as Record<string, unknown> | undefined;
     const normalizeOutbound = (rawOutbound: Record<string, unknown>): MultiremiFeishuBotOutboundDelivery => ({
+          botId: typeof (rawOutbound.bot_id ?? rawOutbound.botId) === "string" ? String(rawOutbound.bot_id ?? rawOutbound.botId) : undefined,
           id: String(rawOutbound.id ?? ""),
           claimToken: String(rawOutbound.claim_token ?? rawOutbound.claimToken ?? ""),
           chatId: String(rawOutbound.chat_id ?? rawOutbound.chatId ?? ""),
@@ -502,8 +505,8 @@ export class MultiremiDaemonClient {
    * when the control plane has not assigned the bot here — including on servers
    * from before MUL-206, which answer with an unstructured 404.
    */
-  async getFeishuBotConfig(runtimeId: string): Promise<MultiremiFeishuBotAssignment | null> {
-    const path = `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot`;
+  async getFeishuBotConfig(runtimeId: string, botId?: string): Promise<MultiremiFeishuBotAssignment | null> {
+    const path = `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot${botId === undefined ? "" : `?bot_id=${encodeURIComponent(botId)}`}`;
     let payload: MultiremiFeishuBotDaemonPayload;
     try {
       payload = await this.get<MultiremiFeishuBotDaemonPayload>(path);
@@ -540,11 +543,12 @@ export class MultiremiDaemonClient {
       error_code?: FeishuBotErrorCode | null;
       error_message?: string | null;
     },
+    botId?: string,
   ): Promise<void> {
     if (!this.reportTransport) throw new Error("daemon WS report transport is not bound");
     // A successful RPC means the control plane persisted the state. A silent
     // best-effort drop could otherwise strand the outbox behind `starting`.
-    const payload = { ...input, runtime_id: runtimeId };
+    const payload = { ...input, bot_id: botId, runtime_id: runtimeId };
     try {
       await this.reportTransport.rpc("concierge.status_report", payload);
     } catch (error) {
@@ -568,9 +572,10 @@ export class MultiremiDaemonClient {
       interactionOpenId?: string | null;
       degraded?: FeishuDecisionDegradeReason | null;
     },
+    botId?: string,
   ): Promise<void> {
     const payload = {
-      request_id: deliveryId, runtime_id: runtimeId,
+      bot_id: botId, request_id: deliveryId, runtime_id: runtimeId,
       claim_token: input.claimToken,
       status: input.status,
       external_message_id: input.externalMessageId ?? undefined,
@@ -588,7 +593,7 @@ export class MultiremiDaemonClient {
    * Cards this Runtime must keep answering clicks for (MUL-407). The host calls
    * this on every start to rebuild the click map it lost with the process.
    */
-  async listFeishuBotDecisionCards(runtimeId: string): Promise<Array<{
+  async listFeishuBotDecisionCards(runtimeId: string, botId?: string): Promise<Array<{
     requestId: string;
     taskId: string;
     chatId: string;
@@ -596,7 +601,7 @@ export class MultiremiDaemonClient {
     recipientOpenId: string;
   }>> {
     const resp = await this.get<{ cards?: Array<Record<string, unknown>> }>(
-      `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/decision-cards`,
+      `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/decision-cards${botId === undefined ? "" : `?bot_id=${encodeURIComponent(botId)}`}`,
     );
     return (resp.cards ?? []).flatMap((card) => {
       // Only the human-request family keys on a Task; an Issue decision names
@@ -619,7 +624,7 @@ export class MultiremiDaemonClient {
    * list from the human-request one because the identity a registration needs
    * differs: an Issue and a decision, not a Task and a request.
    */
-  async listFeishuIssueDecisionCards(runtimeId: string): Promise<Array<{
+  async listFeishuIssueDecisionCards(runtimeId: string, botId?: string): Promise<Array<{
     decisionId: string;
     issueId: string;
     chatId: string;
@@ -627,7 +632,7 @@ export class MultiremiDaemonClient {
     recipientOpenId: string;
   }>> {
     const resp = await this.get<{ cards?: Array<Record<string, unknown>> }>(
-      `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/decision-cards`,
+      `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/decision-cards${botId === undefined ? "" : `?bot_id=${encodeURIComponent(botId)}`}`,
     );
     return (resp.cards ?? []).flatMap((card) => {
       if (card.lane !== "issue_decision") return [];
@@ -665,9 +670,10 @@ export class MultiremiDaemonClient {
 
   async prepareFeishuBotOutboundMention(
     runtimeId: string, deliveryId: string, claimToken: string, openId: string | null,
+    botId?: string,
   ): Promise<string | null> {
     const result = await this.waitForFeishuReport(runtimeId, deliveryId, {
-      request_id: deliveryId, runtime_id: runtimeId, claim_token: claimToken, status: "prepared", mention_open_id: openId,
+      bot_id: botId, request_id: deliveryId, runtime_id: runtimeId, claim_token: claimToken, status: "prepared", mention_open_id: openId,
     });
     if (result.ok !== true || (result.mention_open_id !== null && !isFeishuOpenId(result.mention_open_id))) {
       throw new Error("Invalid Feishu outbound mention checkpoint response");
@@ -680,8 +686,9 @@ export class MultiremiDaemonClient {
     deliveryId: string,
     claimToken: string,
     attachmentId: string,
+    botId?: string,
   ): Promise<Response> {
-    const path = `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/outbound/${encodeURIComponent(deliveryId)}/attachments/${encodeURIComponent(attachmentId)}`;
+    const path = `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/outbound/${encodeURIComponent(deliveryId)}/attachments/${encodeURIComponent(attachmentId)}${botId === undefined ? "" : `?bot_id=${encodeURIComponent(botId)}`}`;
     const headers = new Headers(this.headers());
     headers.set(FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER, claimToken);
     const response = await fetch(this.baseUrl + path, { headers });
@@ -695,6 +702,7 @@ export class MultiremiDaemonClient {
   async submitFeishuBotMessage(
     runtimeId: string,
     input: SubmitFeishuBotMessageInput,
+    botId?: string,
   ): Promise<SubmitFeishuBotMessageResult> {
     const response = await this.post<{
       chatSessionId: string;
@@ -707,6 +715,7 @@ export class MultiremiDaemonClient {
       deliveryQueued?: boolean;
       senderAllowed: SubmitFeishuBotMessageResult["senderAllowed"];
     }>(`/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/messages`, {
+      bot_id: botId,
       revision: input.revision,
       external_session_key: input.externalSessionKey,
       external_message_id: input.externalMessageId,
@@ -726,9 +735,10 @@ export class MultiremiDaemonClient {
     return response;
   }
 
-  async uploadFeishuBotAttachment(runtimeId: string, input: UploadFeishuBotAttachmentInput): Promise<{ id: string }> {
+  async uploadFeishuBotAttachment(runtimeId: string, input: UploadFeishuBotAttachmentInput, botId?: string): Promise<{ id: string }> {
     if (input.buffer.byteLength > CHAT_ATTACHMENT_MAX_BYTES) throw new Error("Attachment exceeds the 20MB limit");
     const form = new FormData();
+    if (botId !== undefined) form.set("bot_id", botId);
     form.set("revision", String(input.revision));
     form.set("external_session_key", input.externalSessionKey);
     form.set("external_message_id", input.externalMessageId);
@@ -753,8 +763,9 @@ export class MultiremiDaemonClient {
 
   async downloadFeishuBotOutboundAttachment(
     runtimeId: string, deliveryId: string, claimToken: string, attachmentId: string,
+    botId?: string,
   ): Promise<Buffer> {
-    const path = `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/outbound/${encodeURIComponent(deliveryId)}/attachments/${encodeURIComponent(attachmentId)}`;
+    const path = `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/outbound/${encodeURIComponent(deliveryId)}/attachments/${encodeURIComponent(attachmentId)}${botId === undefined ? "" : `?bot_id=${encodeURIComponent(botId)}`}`;
     const headers = new Headers(this.headers());
     headers.set(FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER, claimToken);
     return this.requestAttachmentBytes(path, headers);
@@ -773,10 +784,10 @@ export class MultiremiDaemonClient {
     return readChatAttachmentBytes(response);
   }
 
-  async resetFeishuBotSession(runtimeId: string, revision: number, externalSessionKey: string): Promise<boolean> {
+  async resetFeishuBotSession(runtimeId: string, revision: number, externalSessionKey: string, botId?: string): Promise<boolean> {
     const response = await this.post<{ reset: boolean }>(
       `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/session/reset`,
-      { revision, external_session_key: externalSessionKey },
+      { bot_id: botId, revision, external_session_key: externalSessionKey },
     );
     return response.reset === true;
   }
@@ -786,6 +797,7 @@ export class MultiremiDaemonClient {
     revision: number,
     externalSessionKey: string,
     options: { chatId?: string | null; senderOpenId?: string | null; target?: string | null } = {},
+    botId?: string,
   ): Promise<FeishuBotCancelResult> {
     const response = await this.post<{
       outcome?: string;
@@ -808,6 +820,7 @@ export class MultiremiDaemonClient {
     }>(
       `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/session/cancel`,
       {
+        bot_id: botId,
         revision,
         external_session_key: externalSessionKey,
         ...(options.chatId ? { chat_id: options.chatId } : {}),
@@ -848,6 +861,7 @@ export class MultiremiDaemonClient {
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    botId?: string,
   ): Promise<FeishuBotSessionSnapshot> {
     const response = await this.post<{
       chat_session_id?: string | null;
@@ -863,6 +877,7 @@ export class MultiremiDaemonClient {
         usage?: TaskUsageEntry[];
       } | null;
     }>(`/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/session/inspect`, {
+      bot_id: botId,
       revision,
       external_session_key: externalSessionKey,
     });
@@ -1813,7 +1828,8 @@ export function normalizeDaemonRuntimeInput(runtimeId: string, resp: Partial<Mul
   const rawOutbound = resp.pending_feishu_outbound as Record<string, unknown> | undefined;
   const pendingFeishuOutbound: MultiremiFeishuBotOutboundDelivery | undefined = rawOutbound
     ? {
-        id: String(rawOutbound.id ?? ""),
+        botId: typeof (rawOutbound.bot_id ?? rawOutbound.botId) === "string" ? String(rawOutbound.bot_id ?? rawOutbound.botId) : undefined,
+          id: String(rawOutbound.id ?? ""),
         claimToken: String(rawOutbound.claim_token ?? rawOutbound.claimToken ?? ""),
         chatId: String(rawOutbound.chat_id ?? rawOutbound.chatId ?? ""),
         threadId: typeof (rawOutbound.thread_id ?? rawOutbound.threadId) === "string"

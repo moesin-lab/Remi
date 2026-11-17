@@ -153,7 +153,7 @@ export function registerFeishuBotRoutes(
     const agents = store.listAgents()
       .filter((agent) => agent.workspaceId === workspaceId && !agent.archivedAt)
       .map((agent) => ({ id: agent.id, name: agent.name, provider: agent.provider }));
-    const assignedBots = new Map(store.feishuBotFor().listConfigs(workspaceId).map(bot => [bot.runtimeId, bot.botId]));
+    const assignedBots = store.feishuBotFor().listConfigs(workspaceId);
     const runtimes = store.listRuntimes()
       .filter((runtime) => runtime.workspaceId === workspaceId)
       .map((runtime) => ({
@@ -166,7 +166,11 @@ export function registerFeishuBotRoutes(
         online: isRuntimeEffectivelyOnline(runtime),
         supports_config: runtimeSupportsFeishuBotConfig(runtime),
         last_heartbeat_at: runtime.lastHeartbeatAt,
-        assigned_bot_id: assignedBots.get(runtime.id) ?? null,
+        assigned_bot_id: assignedBots.filter(bot => bot.runtimeId === runtime.id)
+          .sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.createdAt.localeCompare(b.createdAt) || a.botId.localeCompare(b.botId))[0]?.botId ?? null,
+        assigned_bot_ids: assignedBots.filter(bot => bot.runtimeId === runtime.id).map(bot => bot.botId),
+        assigned_bot_names: assignedBots.filter(bot => bot.runtimeId === runtime.id).map(bot => bot.name || bot.botId),
+        supports_multi: store.supportsFeishuBotMulti(workspaceId, runtime.id),
       }));
     return c.json({
       workspace_id: workspaceId,

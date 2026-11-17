@@ -502,7 +502,7 @@ describe("workspace Feishu bot config permissions", () => {
       method: "POST", headers: memberHeaders, body: configBody(agentId, { app_id: "cli_shared_new_bot" }),
     });
     expect(stoppingHost.status).toBe(409);
-    expect(await stoppingHost.json()).toMatchObject({ code: "runtime_bot_stopping" });
+    expect(await stoppingHost.json()).toMatchObject({ code: "runtime_already_assigned" });
     store.registerRuntime({ id: "rt_new_bot", name: "Second bot host", provider: "codex", workspaceId: "local", daemonId: "daemon-new-bot" });
     store.heartbeatRuntime("rt_new_bot", { supportsFeishuBotConfig: true });
     const created = await app.request("/api/workspaces/local/feishu-bots", {

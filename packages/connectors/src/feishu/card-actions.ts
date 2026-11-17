@@ -16,6 +16,7 @@ interface PendingAction {
   timeoutTimer: ReturnType<typeof setTimeout>;
   /** ChatId that owns this action — used for scoped rejection. */
   chatId?: string;
+  appId?: string;
   /** Question metadata for AskUserQuestion form submissions. */
   questions?: Array<{ question: string; options: Array<{ label: string }> }>;
 }
@@ -50,6 +51,7 @@ export function registerPendingAction(
   reject: (reason: string) => void,
   questions?: Array<{ question: string; options: Array<{ label: string }> }>,
   chatId?: string,
+  appId?: string,
 ): string {
   actionCounter = (actionCounter + 1) % 1_000_000;
   const suffix = `${actionCounter.toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -64,7 +66,7 @@ export function registerPendingAction(
     }
   }, ACTION_TIMEOUT_MS);
 
-  pendingActions.set(actionId, { resolve, reject, timeoutTimer, chatId, questions });
+  pendingActions.set(actionId, { resolve, reject, timeoutTimer, chatId, questions, appId });
   log.info(`Registered pending action: ${actionId} (chat=${chatId ?? "unknown"})`);
   return actionId;
 }
@@ -202,10 +204,10 @@ export function handleButtonClick(valueJson: string): boolean {
  * Reject pending actions for a specific chatId only.
  * Used when a new message arrives — only cancels actions for that chat, not others.
  */
-export function rejectPendingActionsForChat(chatId: string, reason: string): number {
+export function rejectPendingActionsForChat(chatId: string, reason: string, appId?: string): number {
   let count = 0;
   for (const [actionId, action] of pendingActions) {
-    if (action.chatId === chatId) {
+    if (action.chatId === chatId && action.appId === appId) {
       clearTimeout(action.timeoutTimer);
       action.reject(reason);
       pendingActions.delete(actionId);

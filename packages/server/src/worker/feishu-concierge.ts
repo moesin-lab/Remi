@@ -91,6 +91,7 @@ export interface FeishuConciergeStatusReport {
 }
 
 export interface FeishuConciergeSupervisorOptions {
+  botId?: string;
   host: FeishuConciergeHost;
   fetchConfig: () => Promise<MultiremiFeishuBotAssignment | null>;
   report: (input: FeishuConciergeStatusReport) => Promise<void>;
@@ -127,7 +128,8 @@ export class FeishuConciergeSupervisor {
   private retryAtMs = 0;
   private latestDirective: MultiremiFeishuBotDirective | null = null;
 
-  constructor(private readonly options: FeishuConciergeSupervisorOptions) {}
+  readonly botId: string | undefined;
+  constructor(private readonly options: FeishuConciergeSupervisorOptions) { this.botId = options.botId; }
 
   /** Test/telemetry view of what this Runtime believes it is running. */
   snapshot(): { state: FeishuBotRuntimeState; appliedRevision: number; botName: string | null } {
@@ -337,4 +339,33 @@ function errorCodeOf(error: unknown): FeishuBotErrorCode {
   // recognise, including HTTP codes like `runtime_not_found`; those say nothing
   // useful, so an unrecognised code stays a start failure.
   return normalized && normalized !== "unknown" ? normalized : "connector_start_failed";
+}
+
+/** Independent bot lifecycles; one slow or failed channel never queues another bot. */
+export class FeishuConciergeHosts {
+  private readonly bots = new Map<string | undefined, FeishuConciergeSupervisor>();
+  private readonly pending = new Set<Promise<void>>();
+  private closing = false;
+  constructor(private readonly create: (botId?: string) => FeishuConciergeSupervisor) {}
+  get(botId?: string): FeishuConciergeSupervisor | undefined { return this.bots.get(botId); }
+  apply(directive: MultiremiFeishuBotDirective, botId?: string): Promise<void> {
+    if (this.closing) return Promise.resolve();
+    let bot = this.bots.get(botId);
+    if (!bot) { bot = this.create(botId); this.bots.set(botId, bot); }
+    const run = bot.apply(directive);
+    this.pending.add(run);
+    void run.finally(() => this.pending.delete(run)).catch(() => {});
+    return run;
+  }
+  async tick(): Promise<void> {
+    if (this.closing) return;
+    const run = Promise.allSettled([...this.bots.values()].map(bot => bot.tick())).then(() => {});
+    this.pending.add(run);
+    try { await run; } finally { this.pending.delete(run); }
+  }
+  async shutdown(): Promise<void> {
+    this.closing = true;
+    await Promise.allSettled([...this.pending]);
+    await Promise.allSettled([...this.bots.values()].map(bot => bot.shutdown()));
+  }
 }

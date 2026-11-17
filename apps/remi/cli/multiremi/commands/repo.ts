@@ -1,3 +1,4 @@
+import { proxyFetch } from "@shared/proxy-fetch.js";
 /**
  * Multiremi CLI — `repo` command handler.
  *
@@ -16,7 +17,7 @@ export async function repo(positional: string[], options: CliOptions): Promise<v
     throw new Error("MULTIREMI_DAEMON_PORT not set (this command is intended to run inside a Multiremi daemon task)");
   }
   const workDir = process.cwd();
-  const response = await fetch(`http://127.0.0.1:${daemonPort}/repo/checkout`, {
+  const response = await proxyFetch(`http://127.0.0.1:${daemonPort}/repo/checkout`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

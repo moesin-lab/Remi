@@ -1,3 +1,4 @@
+import { proxyWebSocket } from "@shared/proxy-fetch.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -342,7 +343,7 @@ export class DaemonProtocolClient {
     const generation = ++this.generation;
     this.transition("connecting");
     try {
-      const socket = (this.options.connect ?? ((target, init) => new WebSocket(target, init as never)))(url, { headers });
+      const socket = (this.options.connect ?? proxyWebSocket)(url, { headers });
       this.socket = socket;
       let inspecting = false;
       const listen = (type: string, handler: (event: any) => void) => {

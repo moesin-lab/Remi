@@ -649,7 +649,7 @@ export function safeCreateRuntimeUpdateRequest(
     return store.createRuntimeUpdateRequest(runtimeId, input);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (message === "target_version is required") return { apiError: message, statusCode: 400 };
+    if (message === "target_version is required" || message === "target_commit must be a full CLI build commit") return { apiError: message, statusCode: 400 };
     if (message === "Agent and ACP versions are managed by the Remi release; upgrade the machine's Remi CLI instead") {
       return { apiError: message, statusCode: 409 };
     }

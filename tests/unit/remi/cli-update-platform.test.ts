@@ -11,7 +11,7 @@ const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const commit = "a".repeat(40);
 const version = "0.2.95-stable.ab12cd34";
-function fixture(reportedCommit: string | null = commit) {
+function fixture(reportedCommit: string | null = commit, version = "0.2.95-stable.ab12cd34") {
   const root = mkdtempSync(join(tmpdir(), "platform-cli-update-")); roots.push(root);
   const staged = join(root, "staged"); mkdirSync(staged);
   const binary = join(staged, "remi");
@@ -149,6 +149,23 @@ test("same version with a different commit installs; the identical build skips d
   expect(await performUpdate({ ...current.options, currentVersion: version, currentCommit: commit })).toMatchObject({ status: "current", source: "platform" });
   expect(current.requests).toHaveLength(1);
   expect(compareVersions(version, "0.2.95-stable.other")).not.toBe(0);
+});
+test("an unpinned platform hotfix installs even when its build hash sorts before the current hash", async () => {
+  const hotfixVersion = "0.2.95-stable.0a1b2c3d";
+  const currentVersion = "0.2.95-stable.ff001122";
+  const f = fixture(commit, hotfixVersion);
+  expect(compareVersions(hotfixVersion, currentVersion)).toBeLessThan(0);
+  expect(await performUpdate({ ...f.options, currentVersion, currentCommit: "b".repeat(40) }))
+    .toMatchObject({ status: "installed", version: hotfixVersion, source: "platform", commit });
+  expect(f.requests).toHaveLength(2);
+  expect(readFileSync(f.launcherPath, "utf8")).not.toContain("echo previous");
+});
+test("an unpinned platform update still skips a lower prerelease label regardless of build hash", async () => {
+  const f = fixture(commit, "0.2.95-beta.ff001122");
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.95-stable.0a1b2c3d", currentCommit: "b".repeat(40) }))
+    .toMatchObject({ status: "current", source: "platform" });
+  expect(f.requests).toHaveLength(1);
+  expect(readFileSync(f.launcherPath, "utf8")).toContain("echo previous");
 });
 test("GitHub fetch errors and status text do not expose credentials", async () => {
   const token = "do-not-print-this";

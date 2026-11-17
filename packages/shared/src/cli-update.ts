@@ -119,6 +119,12 @@ export function compareVersions(a: string, b: string): number {
   return left.localeCompare(right, "en", { numeric: true }) || (left < right ? -1 : 1);
 }
 
+function versionWithoutBuildHash(version: string): string {
+  // Platform versions append a commit hash (e.g. -stable.ab12cd34).
+  // Hashes identify builds but cannot establish their chronological order.
+  return version.split("+")[0]!.replace(/(-.+)\.[0-9a-f]{8,40}$/, "$1");
+}
+
 export async function fetchLatestRelease(
   repository: string,
   fetchImpl: typeof fetch = fetch,
@@ -182,8 +188,11 @@ async function installVerifiedUpdate(options: UpdateOptions): Promise<UpdateResu
   parseVersion(latestVersion);
   if (options.targetVersion && latestVersion !== options.targetVersion.replace(/^v/, "")) throw new Error("Release does not match target_version");
   await options.onProgress?.(`Using ${artifact.source} update source`);
+  const versionOrder = artifact.commit
+    ? compareVersions(versionWithoutBuildHash(latestVersion), versionWithoutBuildHash(currentVersion))
+    : compareVersions(latestVersion, currentVersion);
   if (!options.targetVersion && !options.targetCommit && (
-    compareVersions(latestVersion, currentVersion) < 0
+    versionOrder < 0
     || (artifact.commit
       ? latestVersion === currentVersion && artifact.commit === options.currentCommit
       : compareVersions(latestVersion, currentVersion) === 0))) {

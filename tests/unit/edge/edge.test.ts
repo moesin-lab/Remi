@@ -102,8 +102,14 @@ test('20 live handovers under concurrent HTTP, SSE and WS have zero failures', a
 
 test('100 MiB upload/download stream with bounded RSS growth', async () => {
   const total = 100 * 1024 * 1024; const chunk = new Uint8Array(64 * 1024).fill(97);
-  const generate = () => { let bytes = 0; return new ReadableStream<Uint8Array>({ pull(c) { if (bytes === total) c.close(); else { c.enqueue(chunk); bytes += chunk.length; } } }); };
+  const generate = () => { let bytes = 0; return new ReadableStream<Uint8Array>({ async pull(c) {
+    // Bound the synthetic producer's uninterrupted work and let native I/O
+    // progress every MiB, keeping the original RSS ceiling and measured peak.
+    if (bytes && bytes % (1024 * 1024) === 0) await sleep(1);
+    if (bytes === total) c.close(); else { c.enqueue(chunk); bytes += chunk.length; }
+  } }); };
   const b = backend(async req => {
+    if (new URL(req.url).pathname === '/warmup') return new Response('ok');
     if (req.method === 'POST') { let bytes = 0; for await (const part of req.body!) bytes += part.length; return new Response(String(bytes)); }
     return new Response(generate());
   });
@@ -114,11 +120,11 @@ test('100 MiB upload/download stream with bounded RSS growth', async () => {
   cleanups.push(async () => { child.send('stop'); await child.exited; });
   const reader = child.stdout.getReader(); const line = await reader.read(); const url = new TextDecoder().decode(line.value).trim(); reader.releaseLock();
   const query = (message: string) => new Promise<{ baseline: number; peak?: number }>(resolve => { receive = resolve; child.send(message); });
-  await fetch(url).then(r => r.text()); await query('start');
-  const upload = await fetch(url, { method: 'POST', body: generate() }); expect(await upload.text()).toBe(String(total));
+  await fetch(new URL('/warmup', url)).then(r => r.text()); await query('start');
+  const upload = await fetch(url, { method: 'POST', body: generate() }); expect(await upload.text()).toBe(String(total)); const uploadMemory = await query('sample');
   const download = await fetch(url); let bytes = 0; for await (const part of download.body!) bytes += part.length; expect(bytes).toBe(total);
   const { baseline, peak } = await query('report');
-  console.log(`100MiB isolated edge: RSS baseline=${baseline}, peak=${peak}, growth=${peak! - baseline}`);
+  console.log(`100MiB isolated edge: RSS baseline=${baseline}, upload peak=${uploadMemory.peak}, peak=${peak}, growth=${peak! - baseline}`);
   expect(peak! - baseline).toBeLessThan(80 * 1024 * 1024);
 }, 20000);
 
@@ -418,4 +424,86 @@ test('isolated edge relays an immediate Bun backend WS close after 101', async (
   expect(status.backends[0].failures).toBe(0); expect(status.backends[0].state).toBe('live');
   expect(status.metrics.errors).toEqual({ '502': 0, '503': 0, '504': 0 });
   expect(status.metrics.wsRelays).toBe(2);
+});
+
+test('WS streams 64 x 1 MiB to a slow steady TCP reader without hanging', async () => {
+  const count = 64; const size = 1024 * 1024;
+  const b = Bun.serve({ port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
+    maxPayloadLength: 4 * 1024 * 1024, backpressureLimit: 4 * 1024 * 1024, closeOnBackpressureLimit: false,
+    message(ws) {
+      let sent = 0;
+      const producer = setInterval(() => {
+        if (ws.getBufferedAmount() >= 4 * 1024 * 1024) return;
+        if (ws.send(new Uint8Array(size).fill(sent)) !== 0 && ++sent === count) clearInterval(producer);
+      }, 1);
+      cleanups.push(() => clearInterval(producer));
+    },
+  } });
+  cleanups.push(() => { void b.stop(true); });
+  const e = edge({ backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
+  await new Promise<void>((resolve, reject) => {
+    const socket = connect(Number(e.server.port), '127.0.0.1'); cleanups.push(() => socket.destroy());
+    let head = Buffer.alloc(0); let upgraded = false; let frameHeader = Buffer.alloc(0);
+    let remaining = 0; let received = 0; let resume: ReturnType<typeof setTimeout>;
+    cleanups.push(() => clearTimeout(resume));
+    socket.on('connect', () => socket.write('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n'));
+    socket.on('error', reject); socket.on('end', () => reject(new Error(`Early EOF after ${received} frames`)));
+    socket.on('data', data => {
+      let bytes: Buffer = typeof data === 'string' ? Buffer.from(data) : data;
+      try {
+        // Read normally, but yield after each TCP chunk so the sender must buffer.
+        socket.pause(); resume = setTimeout(() => socket.resume(), 1);
+        if (!upgraded) {
+          head = Buffer.concat([head, bytes]); const boundary = head.indexOf('\r\n\r\n');
+          if (boundary < 0) return;
+          expect(head.subarray(0, boundary).toString()).toStartWith('HTTP/1.1 101');
+          bytes = head.subarray(boundary + 4); head = Buffer.alloc(0); upgraded = true;
+          socket.write(Buffer.from([0x81, 0x81, 0, 0, 0, 0, 0x78]));
+        }
+        while (bytes.length) {
+          if (!remaining) {
+            const take = Math.min(10 - frameHeader.length, bytes.length);
+            frameHeader = Buffer.concat([frameHeader, bytes.subarray(0, take)]); bytes = bytes.subarray(take);
+            if (frameHeader.length < 10) return;
+            expect(frameHeader[0]).toBe(0x82); expect(frameHeader[1]).toBe(127);
+            expect(Number(frameHeader.readBigUInt64BE(2))).toBe(size);
+            frameHeader = Buffer.alloc(0); remaining = size;
+          }
+          const take = Math.min(remaining, bytes.length);
+          expect(bytes.subarray(0, take).every(value => value === received)).toBe(true);
+          remaining -= take; bytes = bytes.subarray(take);
+          if (!remaining && ++received === count) { socket.destroy(); resolve(); return; }
+        }
+      } catch (error) { reject(error); }
+    });
+  });
+  expect(e.status().metrics.upstreamErrors).toBe(0);
+}, 20000);
+
+test('standalone edge rejects an empty EDGE_PORT instead of binding an ephemeral port', async () => {
+  for (const port of ['', '   ']) {
+    const child = Bun.spawn([process.execPath, 'apps/edge/main.ts'], { env: { ...process.env, EDGE_PORT: port }, stdout: 'pipe', stderr: 'pipe' });
+    expect(await child.exited).not.toBe(0); expect(await new Response(child.stderr).text()).toContain('Invalid EDGE_PORT');
+    expect(await new Response(child.stdout).text()).not.toContain('listening');
+  }
+});
+
+test('bodyless POST uses a fresh upstream connection and avoids stale keep-alive failures', async () => {
+  let connections = 0; let requests = 0;
+  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: {
+    open() { connections++; },
+    data(socket, bytes) {
+      requests++;
+      // Advertise keep-alive but close the first connection immediately afterward.
+      const response = 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok';
+      if (bytes.toString().startsWith('GET ')) socket.end(response); else socket.write(response);
+    },
+  } });
+  cleanups.push(() => raw.stop(true));
+  const e = edge({ backends: [{ id: 'b', url: `http://127.0.0.1:${raw.port}`, state: 'live' }] });
+  expect(await (await fetch(e.server.url)).text()).toBe('ok');
+  const post = await fetch(e.server.url, { method: 'POST' });
+  expect(post.status).toBe(200); expect(await post.text()).toBe('ok');
+  expect(connections).toBe(2); expect(requests).toBe(2);
+  expect(e.status().backends[0].failures).toBe(0); expect(e.status().metrics.upstreamErrors).toBe(0);
 });

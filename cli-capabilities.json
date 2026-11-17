@@ -6482,6 +6482,55 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "daemon.drain": {
+      "command": "remi daemon drain",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "daemon.drain",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "daemon.drain.status": {
+      "command": "remi daemon drain status",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "daemon.drain.status",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "daemon.undrain": {
+      "command": "remi daemon undrain",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "daemon.undrain",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "daemon.group": {
       "command": "remi daemon",
       "aliases": [],
@@ -11432,6 +11481,9 @@
       "category": "retired_route",
       "reason": "已移除：改用 remi message resolve <message> --no-resolved"
     },
+    "DELETE /api/daemons/:daemonId/drain": {
+      "command": "daemon.undrain"
+    },
     "DELETE /api/execution-endpoints/:id": {
       "command": "runtime.endpoint.delete"
     },
@@ -11870,6 +11922,9 @@
     },
     "GET /api/daemons/:daemonId": {
       "command": "daemon.get"
+    },
+    "GET /api/daemons/:daemonId/drain": {
+      "command": "daemon.drain.status"
     },
     "GET /api/dashboard/agent-runtime": {
       "command": "dashboard.agent-runtime"
@@ -13229,6 +13284,9 @@
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Daemon heartbeat, claim, report, and execution protocol is machine-to-server traffic."
+    },
+    "POST /api/daemons/:daemonId/drain": {
+      "command": "daemon.drain"
     },
     "POST /api/execution-endpoints": {
       "command": "runtime.endpoint.create"

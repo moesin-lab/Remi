@@ -3459,6 +3459,24 @@ runMigrations(this.db);
     return this.runtimes.getRuntimeUpdateRequest(runtimeId, requestId);
   }
 
+  beginDaemonDrain(...args: Parameters<RuntimesRepo["beginDaemonDrain"]>) { return this.runtimes.beginDaemonDrain(...args); }
+  undrainDaemon(...args: Parameters<RuntimesRepo["undrainDaemon"]>) { return this.runtimes.undrainDaemon(...args); }
+  getDaemonDrainStatus(...args: Parameters<RuntimesRepo["getDaemonDrainStatus"]>) { return this.runtimes.getDaemonDrainStatus(...args); }
+  reconcileDaemonDrain(runtimeId: string) { return this.runtimes.reconcileDaemonDrain(runtimeId); }
+  daemonDrainDirective(runtimeId: string) {
+    const maintenance = this.getPlatformMaintenance();
+    return { mode: maintenance.mode === "draining" || this.hasCliUpdateDrainForRuntime(runtimeId) ? "draining" as const : "normal" as const,
+      generation: maintenance.generation };
+  }
+  nextDaemonDrainWakeAt(runtimeId: string): number | null {
+    if (!this.hasCliUpdateDrainForRuntime(runtimeId)) return null;
+    const runtime = this.getRuntimeLite(runtimeId);
+    if (!runtime) return null;
+    const state = this.getDaemonDrainStatus(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id);
+    const at = state.deadline ? Date.parse(state.deadline) : NaN;
+    return Number.isFinite(at) && at > Date.now() ? at : null;
+  }
+
   hasCliUpdateDrainForRuntime(runtimeId: string): boolean {
     return this.runtimes.hasCliUpdateDrainForRuntime(runtimeId);
   }

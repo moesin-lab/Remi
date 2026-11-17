@@ -573,6 +573,7 @@ export interface AccessTokensSurface {
 }
 
 export interface TasksSurface {
+  recoverOrphans: import("./repos/tasks-repo.js").TasksRepo["recoverOrphans"];
   completeTask: import("./repos/tasks-repo.js").TasksRepo["completeTask"];
   createTurnForMessageWithinWorkspaceLock: import("./repos/tasks-repo.js").TasksRepo["createTurnForMessageWithinWorkspaceLock"];
   countDelegationPairHops: import("./repos/tasks-repo.js").TasksRepo["countDelegationPairHops"];

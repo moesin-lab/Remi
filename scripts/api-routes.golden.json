@@ -1,21 +1,21 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 835,
+    "routeCount": 838,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 593,
+      "compat": 596,
       "root": 16
     },
-    "getRoutes": 364,
-    "getRoutesWithBody": 360,
+    "getRoutes": 365,
+    "getRoutesWithBody": 361,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
       "GET /api/trace/ws",
       "GET /ws"
     ],
-    "mutationRoutes": 471,
+    "mutationRoutes": 473,
     "mutationRoutesCovered": 299,
     "flows": [
       "agents-compat",
@@ -83,6 +83,7 @@
     "DELETE /api/comments/:id",
     "DELETE /api/comments/:id/reactions",
     "DELETE /api/comments/:id/resolve",
+    "DELETE /api/daemons/:daemonId/drain",
     "DELETE /api/execution-endpoints/:id",
     "DELETE /api/execution-groups/:id",
     "DELETE /api/execution-profiles/:id",
@@ -208,6 +209,7 @@
     "GET /api/daemon/workspaces/:workspaceId/repos",
     "GET /api/daemon/ws",
     "GET /api/daemons/:daemonId",
+    "GET /api/daemons/:daemonId/drain",
     "GET /api/dashboard/agent-runtime",
     "GET /api/dashboard/runtime/daily",
     "GET /api/dashboard/usage/by-agent",
@@ -609,6 +611,7 @@
     "POST /api/daemon/tasks/:taskId/start",
     "POST /api/daemon/tasks/:taskId/wait-local-directory",
     "POST /api/daemon/workspaces/:workspaceId/external-membership/check",
+    "POST /api/daemons/:daemonId/drain",
     "POST /api/execution-endpoints",
     "POST /api/execution-endpoints/inspect",
     "POST /api/execution-groups",
@@ -1024,6 +1027,7 @@
     "GET /api/daemon/workspaces/:workspaceId/repos",
     "GET /api/daemon/ws",
     "GET /api/daemons/:daemonId",
+    "GET /api/daemons/:daemonId/drain",
     "GET /api/dashboard/agent-runtime",
     "GET /api/dashboard/runtime/daily",
     "GET /api/dashboard/usage/by-agent",
@@ -7551,6 +7555,28 @@
             "allowed": true
           },
           {
+            "id": "daemon.drain",
+            "command": "remi daemon drain",
+            "capability": "daemon.drain",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "daemon.drain.status",
+            "command": "remi daemon drain status",
+            "capability": "daemon.drain.status",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "daemon.get",
             "command": "remi daemon get",
             "capability": "daemon.get",
@@ -7587,6 +7613,17 @@
             "id": "daemon.retirement-plan",
             "command": "remi daemon retirement-plan",
             "capability": "daemon.retirement-plan",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "daemon.undrain",
+            "command": "remi daemon undrain",
+            "capability": "daemon.undrain",
             "outputs": [
               "table",
               "json",
@@ -12944,6 +12981,25 @@
         "updated_by": null,
         "updated_at": null,
         "projects": []
+      }
+    },
+    {
+      "key": "get-sweep GET /api/daemons/:daemonId/drain",
+      "route": "GET /api/daemons/:daemonId/drain",
+      "path": "/api/daemons/dmn_snapshot/drain",
+      "status": 200,
+      "body": {
+        "workspace_id": "local",
+        "daemon_id": "dmn_snapshot",
+        "mode": "normal",
+        "status": "normal",
+        "started_at": null,
+        "deadline": null,
+        "reason": null,
+        "forced_at": null,
+        "remaining_tasks": 1,
+        "awaiting_daemon_ack": false,
+        "expiry_action": "runtime_recovery"
       }
     },
     {

@@ -310,7 +310,7 @@ export class Edge extends EventEmitter {
       upstream.onoverflow = () => this.closeRelay(relay, 1013, 'Backpressure limit');
       upstream.onmessage = event => {
         if (relay.ended) return;
-        const data = typeof event.data === 'string' ? event.data : Buffer.from(event.data as ArrayBuffer);
+        const data = event.data;
         relay.pending.push(data); relay.bytes += Buffer.byteLength(data);
         this.flush(relay);
         if (!relay.client || relay.blocked) upstream.pause();
@@ -373,6 +373,7 @@ export class Edge extends EventEmitter {
         relay.pending.unshift(data); relay.bytes += Buffer.byteLength(data);
         pause(); return;
       }
+      if (Buffer.isBuffer(data)) relay.upstream.releaseMessage(data);
       // Positive and -1 both accept the entire message. Never enqueue it twice.
     }
     if (relay.client.getBufferedAmount() >= this.options.wsBufferLimit) { pause(); return; }

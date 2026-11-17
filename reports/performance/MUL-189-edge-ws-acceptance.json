@@ -1,0 +1,1070 @@
+[
+  {
+    "count": 64,
+    "size": 4194304,
+    "baseline": 48914432,
+    "peak": 87650304,
+    "memory": {
+      "rss": 77148160,
+      "heapTotal": 2419712,
+      "heapUsed": 18667153,
+      "external": 17411193,
+      "arrayBuffers": 8579188
+    },
+    "concatBytes": 1511862,
+    "maxima": {
+      "heapUsed": 18667153,
+      "external": 17411193,
+      "arrayBuffers": 8579188,
+      "parser": 4236310,
+      "pending": 0,
+      "downstream": 4815991,
+      "upstream": 0,
+      "readable": 88064
+    },
+    "timeline": [
+      {
+        "second": 0,
+        "rss": 48914432,
+        "external": 446749,
+        "arrayBuffers": 0
+      },
+      {
+        "second": 1,
+        "rss": 81039360,
+        "external": 11712163,
+        "arrayBuffers": 5580494
+      },
+      {
+        "second": 2,
+        "rss": 83718144,
+        "external": 13276497,
+        "arrayBuffers": 6462332
+      },
+      {
+        "second": 3,
+        "rss": 85549056,
+        "external": 15010665,
+        "arrayBuffers": 7332240
+      },
+      {
+        "second": 4,
+        "rss": 82124800,
+        "external": 16688119,
+        "arrayBuffers": 8212234
+      },
+      {
+        "second": 5,
+        "rss": 76759040,
+        "external": 17410849,
+        "arrayBuffers": 8578844
+      }
+    ],
+    "closeCalls": [
+      {
+        "code": 1011,
+        "reason": ""
+      }
+    ],
+    "activeRelays": 0,
+    "relayTimers": 0,
+    "status": {
+      "held": false,
+      "waiting": 0,
+      "backends": [
+        {
+          "id": "b",
+          "url": "http://localhost:37581/",
+          "state": "live",
+          "restore": "live",
+          "failures": 0,
+          "successes": 0,
+          "requests": 1,
+          "inFlight": 0,
+          "websockets": 0,
+          "wsTotal": 1,
+          "upstreamErrors": 0,
+          "drained": false
+        }
+      ],
+      "metrics": {
+        "requests": 1,
+        "upstreamErrors": 0,
+        "wsRelays": 1,
+        "errors": {
+          "502": 0,
+          "503": 0,
+          "504": 0
+        },
+        "holds": 0,
+        "holdMs": 0,
+        "holdDurationBuckets": {
+          "le10": 0,
+          "le100": 0,
+          "le1000": 0,
+          "le10000": 0,
+          "infinity": 0
+        }
+      }
+    },
+    "afterGC": {
+      "baseline": 48914432,
+      "peak": 87650304,
+      "memory": {
+        "rss": 77148160,
+        "heapTotal": 2278400,
+        "heapUsed": 18667153,
+        "external": 537626,
+        "arrayBuffers": 0
+      },
+      "concatBytes": 1511862,
+      "maxima": {
+        "heapUsed": 18667153,
+        "external": 17411193,
+        "arrayBuffers": 8579188,
+        "parser": 4236310,
+        "pending": 0,
+        "downstream": 4815991,
+        "upstream": 0,
+        "readable": 88064
+      },
+      "timeline": [
+        {
+          "second": 0,
+          "rss": 48914432,
+          "external": 446749,
+          "arrayBuffers": 0
+        },
+        {
+          "second": 1,
+          "rss": 81039360,
+          "external": 11712163,
+          "arrayBuffers": 5580494
+        },
+        {
+          "second": 2,
+          "rss": 83718144,
+          "external": 13276497,
+          "arrayBuffers": 6462332
+        },
+        {
+          "second": 3,
+          "rss": 85549056,
+          "external": 15010665,
+          "arrayBuffers": 7332240
+        },
+        {
+          "second": 4,
+          "rss": 82124800,
+          "external": 16688119,
+          "arrayBuffers": 8212234
+        },
+        {
+          "second": 5,
+          "rss": 76759040,
+          "external": 17410849,
+          "arrayBuffers": 8578844
+        }
+      ],
+      "closeCalls": [
+        {
+          "code": 1011,
+          "reason": ""
+        }
+      ],
+      "activeRelays": 0,
+      "relayTimers": 0,
+      "status": {
+        "held": false,
+        "waiting": 0,
+        "backends": [
+          {
+            "id": "b",
+            "url": "http://localhost:37581/",
+            "state": "live",
+            "restore": "live",
+            "failures": 0,
+            "successes": 0,
+            "requests": 1,
+            "inFlight": 0,
+            "websockets": 0,
+            "wsTotal": 1,
+            "upstreamErrors": 0,
+            "drained": false
+          }
+        ],
+        "metrics": {
+          "requests": 1,
+          "upstreamErrors": 0,
+          "wsRelays": 1,
+          "errors": {
+            "502": 0,
+            "503": 0,
+            "504": 0
+          },
+          "holds": 0,
+          "holdMs": 0,
+          "holdDurationBuckets": {
+            "le10": 0,
+            "le100": 0,
+            "le1000": 0,
+            "le10000": 0,
+            "infinity": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "count": 64,
+    "size": 1048576,
+    "baseline": 49090560,
+    "peak": 80543744,
+    "memory": {
+      "rss": 66379776,
+      "heapTotal": 2356224,
+      "heapUsed": 8257657,
+      "external": 7032561,
+      "arrayBuffers": 5345908
+    },
+    "concatBytes": 1458614,
+    "maxima": {
+      "heapUsed": 8257657,
+      "external": 7032561,
+      "arrayBuffers": 5345908,
+      "parser": 1083242,
+      "pending": 0,
+      "downstream": 2059145,
+      "upstream": 0,
+      "readable": 88064
+    },
+    "timeline": [
+      {
+        "second": 0,
+        "rss": 49090560,
+        "external": 446749,
+        "arrayBuffers": 0
+      },
+      {
+        "second": 1,
+        "rss": 66572288,
+        "external": 7032217,
+        "arrayBuffers": 5345564
+      }
+    ],
+    "closeCalls": [
+      {
+        "code": 1011,
+        "reason": ""
+      }
+    ],
+    "activeRelays": 0,
+    "relayTimers": 0,
+    "status": {
+      "held": false,
+      "waiting": 0,
+      "backends": [
+        {
+          "id": "b",
+          "url": "http://localhost:27013/",
+          "state": "live",
+          "restore": "live",
+          "failures": 0,
+          "successes": 0,
+          "requests": 1,
+          "inFlight": 0,
+          "websockets": 0,
+          "wsTotal": 1,
+          "upstreamErrors": 0,
+          "drained": false
+        }
+      ],
+      "metrics": {
+        "requests": 1,
+        "upstreamErrors": 0,
+        "wsRelays": 1,
+        "errors": {
+          "502": 0,
+          "503": 0,
+          "504": 0
+        },
+        "holds": 0,
+        "holdMs": 0,
+        "holdDurationBuckets": {
+          "le10": 0,
+          "le100": 0,
+          "le1000": 0,
+          "le10000": 0,
+          "infinity": 0
+        }
+      }
+    },
+    "afterGC": {
+      "baseline": 49090560,
+      "peak": 80543744,
+      "memory": {
+        "rss": 62877696,
+        "heapTotal": 2290688,
+        "heapUsed": 8257657,
+        "external": 1144783,
+        "arrayBuffers": 0
+      },
+      "concatBytes": 1458614,
+      "maxima": {
+        "heapUsed": 8257657,
+        "external": 7032561,
+        "arrayBuffers": 5345908,
+        "parser": 1083242,
+        "pending": 0,
+        "downstream": 2059145,
+        "upstream": 0,
+        "readable": 88064
+      },
+      "timeline": [
+        {
+          "second": 0,
+          "rss": 49090560,
+          "external": 446749,
+          "arrayBuffers": 0
+        },
+        {
+          "second": 1,
+          "rss": 66572288,
+          "external": 7032217,
+          "arrayBuffers": 5345564
+        }
+      ],
+      "closeCalls": [
+        {
+          "code": 1011,
+          "reason": ""
+        }
+      ],
+      "activeRelays": 0,
+      "relayTimers": 0,
+      "status": {
+        "held": false,
+        "waiting": 0,
+        "backends": [
+          {
+            "id": "b",
+            "url": "http://localhost:27013/",
+            "state": "live",
+            "restore": "live",
+            "failures": 0,
+            "successes": 0,
+            "requests": 1,
+            "inFlight": 0,
+            "websockets": 0,
+            "wsTotal": 1,
+            "upstreamErrors": 0,
+            "drained": false
+          }
+        ],
+        "metrics": {
+          "requests": 1,
+          "upstreamErrors": 0,
+          "wsRelays": 1,
+          "errors": {
+            "502": 0,
+            "503": 0,
+            "504": 0
+          },
+          "holds": 0,
+          "holdMs": 0,
+          "holdDurationBuckets": {
+            "le10": 0,
+            "le100": 0,
+            "le1000": 0,
+            "le10000": 0,
+            "infinity": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "count": 192,
+    "size": 524288,
+    "baseline": 48967680,
+    "peak": 80465920,
+    "memory": {
+      "rss": 69120000,
+      "heapTotal": 2340864,
+      "heapUsed": 16959501,
+      "external": 15727573,
+      "arrayBuffers": 13040372
+    },
+    "concatBytes": 4075318,
+    "maxima": {
+      "heapUsed": 16959501,
+      "external": 15727573,
+      "arrayBuffers": 13040372,
+      "parser": 566116,
+      "pending": 0,
+      "downstream": 1558189,
+      "upstream": 0,
+      "readable": 88064
+    },
+    "timeline": [
+      {
+        "second": 0,
+        "rss": 48967680,
+        "external": 446749,
+        "arrayBuffers": 0
+      },
+      {
+        "second": 1,
+        "rss": 76414976,
+        "external": 12709457,
+        "arrayBuffers": 10291336
+      }
+    ],
+    "closeCalls": [
+      {
+        "code": 1011,
+        "reason": ""
+      }
+    ],
+    "activeRelays": 0,
+    "relayTimers": 0,
+    "status": {
+      "held": false,
+      "waiting": 0,
+      "backends": [
+        {
+          "id": "b",
+          "url": "http://localhost:12545/",
+          "state": "live",
+          "restore": "live",
+          "failures": 0,
+          "successes": 0,
+          "requests": 1,
+          "inFlight": 0,
+          "websockets": 0,
+          "wsTotal": 1,
+          "upstreamErrors": 0,
+          "drained": false
+        }
+      ],
+      "metrics": {
+        "requests": 1,
+        "upstreamErrors": 0,
+        "wsRelays": 1,
+        "errors": {
+          "502": 0,
+          "503": 0,
+          "504": 0
+        },
+        "holds": 0,
+        "holdMs": 0,
+        "holdDurationBuckets": {
+          "le10": 0,
+          "le100": 0,
+          "le1000": 0,
+          "le10000": 0,
+          "infinity": 0
+        }
+      }
+    },
+    "afterGC": {
+      "baseline": 48967680,
+      "peak": 80465920,
+      "memory": {
+        "rss": 69693440,
+        "heapTotal": 2291712,
+        "heapUsed": 16959501,
+        "external": 1197654,
+        "arrayBuffers": 0
+      },
+      "concatBytes": 4075318,
+      "maxima": {
+        "heapUsed": 16959501,
+        "external": 15727573,
+        "arrayBuffers": 13040372,
+        "parser": 566116,
+        "pending": 0,
+        "downstream": 1558189,
+        "upstream": 0,
+        "readable": 88064
+      },
+      "timeline": [
+        {
+          "second": 0,
+          "rss": 48967680,
+          "external": 446749,
+          "arrayBuffers": 0
+        },
+        {
+          "second": 1,
+          "rss": 76414976,
+          "external": 12709457,
+          "arrayBuffers": 10291336
+        }
+      ],
+      "closeCalls": [
+        {
+          "code": 1011,
+          "reason": ""
+        }
+      ],
+      "activeRelays": 0,
+      "relayTimers": 0,
+      "status": {
+        "held": false,
+        "waiting": 0,
+        "backends": [
+          {
+            "id": "b",
+            "url": "http://localhost:12545/",
+            "state": "live",
+            "restore": "live",
+            "failures": 0,
+            "successes": 0,
+            "requests": 1,
+            "inFlight": 0,
+            "websockets": 0,
+            "wsTotal": 1,
+            "upstreamErrors": 0,
+            "drained": false
+          }
+        ],
+        "metrics": {
+          "requests": 1,
+          "upstreamErrors": 0,
+          "wsRelays": 1,
+          "errors": {
+            "502": 0,
+            "503": 0,
+            "504": 0
+          },
+          "holds": 0,
+          "holdMs": 0,
+          "holdDurationBuckets": {
+            "le10": 0,
+            "le100": 0,
+            "le1000": 0,
+            "le10000": 0,
+            "infinity": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "count": 384,
+    "size": 4194304,
+    "baseline": 48734208,
+    "peak": 117456896,
+    "memory": {
+      "rss": 106119168,
+      "heapTotal": 2599936,
+      "heapUsed": 59283029,
+      "external": 57838397,
+      "arrayBuffers": 29277620
+    },
+    "concatBytes": 8139382,
+    "maxima": {
+      "heapUsed": 59283029,
+      "external": 57838397,
+      "arrayBuffers": 29277620,
+      "parser": 4238212,
+      "pending": 0,
+      "downstream": 5055020,
+      "upstream": 0,
+      "readable": 88064
+    },
+    "timeline": [
+      {
+        "second": 0,
+        "rss": 48734208,
+        "external": 446749,
+        "arrayBuffers": 0
+      },
+      {
+        "second": 1,
+        "rss": 75550720,
+        "external": 11220605,
+        "arrayBuffers": 5380716
+      },
+      {
+        "second": 2,
+        "rss": 86990848,
+        "external": 12875059,
+        "arrayBuffers": 6203422
+      },
+      {
+        "second": 3,
+        "rss": 76406784,
+        "external": 14463859,
+        "arrayBuffers": 7014198
+      },
+      {
+        "second": 4,
+        "rss": 81518592,
+        "external": 16125099,
+        "arrayBuffers": 7871738
+      },
+      {
+        "second": 5,
+        "rss": 84561920,
+        "external": 17686465,
+        "arrayBuffers": 8651104
+      },
+      {
+        "second": 6,
+        "rss": 85987328,
+        "external": 19313893,
+        "arrayBuffers": 9506604
+      },
+      {
+        "second": 7,
+        "rss": 92811264,
+        "external": 21003147,
+        "arrayBuffers": 10438238
+      },
+      {
+        "second": 8,
+        "rss": 95227904,
+        "external": 22611383,
+        "arrayBuffers": 11269878
+      },
+      {
+        "second": 9,
+        "rss": 90099712,
+        "external": 24124015,
+        "arrayBuffers": 11989178
+      },
+      {
+        "second": 10,
+        "rss": 93896704,
+        "external": 25762177,
+        "arrayBuffers": 12855456
+      },
+      {
+        "second": 11,
+        "rss": 93741056,
+        "external": 27352177,
+        "arrayBuffers": 13649068
+      },
+      {
+        "second": 12,
+        "rss": 93126656,
+        "external": 28876541,
+        "arrayBuffers": 14417888
+      },
+      {
+        "second": 13,
+        "rss": 98123776,
+        "external": 30494639,
+        "arrayBuffers": 15240826
+      },
+      {
+        "second": 14,
+        "rss": 99020800,
+        "external": 32186287,
+        "arrayBuffers": 16139898
+      },
+      {
+        "second": 15,
+        "rss": 101036032,
+        "external": 33675731,
+        "arrayBuffers": 16924830
+      },
+      {
+        "second": 16,
+        "rss": 100192256,
+        "external": 35127875,
+        "arrayBuffers": 17583182
+      },
+      {
+        "second": 17,
+        "rss": 98680832,
+        "external": 36783099,
+        "arrayBuffers": 18467846
+      },
+      {
+        "second": 18,
+        "rss": 103804928,
+        "external": 38428657,
+        "arrayBuffers": 19340580
+      },
+      {
+        "second": 19,
+        "rss": 99586048,
+        "external": 39937821,
+        "arrayBuffers": 20079184
+      },
+      {
+        "second": 20,
+        "rss": 101089280,
+        "external": 41581885,
+        "arrayBuffers": 20920508
+      },
+      {
+        "second": 21,
+        "rss": 104525824,
+        "external": 43429219,
+        "arrayBuffers": 21887202
+      },
+      {
+        "second": 22,
+        "rss": 104574976,
+        "external": 44901959,
+        "arrayBuffers": 22677446
+      },
+      {
+        "second": 23,
+        "rss": 108081152,
+        "external": 46446475,
+        "arrayBuffers": 23429386
+      },
+      {
+        "second": 24,
+        "rss": 103231488,
+        "external": 48018735,
+        "arrayBuffers": 24209070
+      },
+      {
+        "second": 25,
+        "rss": 102666240,
+        "external": 49679615,
+        "arrayBuffers": 25038514
+      },
+      {
+        "second": 26,
+        "rss": 110727168,
+        "external": 51131235,
+        "arrayBuffers": 25785622
+      },
+      {
+        "second": 27,
+        "rss": 109727744,
+        "external": 52654631,
+        "arrayBuffers": 26648538
+      },
+      {
+        "second": 28,
+        "rss": 109051904,
+        "external": 54397517,
+        "arrayBuffers": 27510784
+      },
+      {
+        "second": 29,
+        "rss": 113532928,
+        "external": 55975189,
+        "arrayBuffers": 28295052
+      },
+      {
+        "second": 30,
+        "rss": 116629504,
+        "external": 57575433,
+        "arrayBuffers": 29102720
+      }
+    ],
+    "closeCalls": [
+      {
+        "code": 1011,
+        "reason": ""
+      }
+    ],
+    "activeRelays": 0,
+    "relayTimers": 0,
+    "status": {
+      "held": false,
+      "waiting": 0,
+      "backends": [
+        {
+          "id": "b",
+          "url": "http://localhost:23461/",
+          "state": "live",
+          "restore": "live",
+          "failures": 0,
+          "successes": 0,
+          "requests": 1,
+          "inFlight": 0,
+          "websockets": 0,
+          "wsTotal": 1,
+          "upstreamErrors": 0,
+          "drained": false
+        }
+      ],
+      "metrics": {
+        "requests": 1,
+        "upstreamErrors": 0,
+        "wsRelays": 1,
+        "errors": {
+          "502": 0,
+          "503": 0,
+          "504": 0
+        },
+        "holds": 0,
+        "holdMs": 0,
+        "holdDurationBuckets": {
+          "le10": 0,
+          "le100": 0,
+          "le1000": 0,
+          "le10000": 0,
+          "infinity": 0
+        }
+      }
+    },
+    "afterGC": {
+      "baseline": 48734208,
+      "peak": 117456896,
+      "memory": {
+        "rss": 101478400,
+        "heapTotal": 2294784,
+        "heapUsed": 59283029,
+        "external": 324247,
+        "arrayBuffers": 0
+      },
+      "concatBytes": 8139382,
+      "maxima": {
+        "heapUsed": 59283029,
+        "external": 57838397,
+        "arrayBuffers": 29277620,
+        "parser": 4238212,
+        "pending": 0,
+        "downstream": 5055020,
+        "upstream": 0,
+        "readable": 88064
+      },
+      "timeline": [
+        {
+          "second": 0,
+          "rss": 48734208,
+          "external": 446749,
+          "arrayBuffers": 0
+        },
+        {
+          "second": 1,
+          "rss": 75550720,
+          "external": 11220605,
+          "arrayBuffers": 5380716
+        },
+        {
+          "second": 2,
+          "rss": 86990848,
+          "external": 12875059,
+          "arrayBuffers": 6203422
+        },
+        {
+          "second": 3,
+          "rss": 76406784,
+          "external": 14463859,
+          "arrayBuffers": 7014198
+        },
+        {
+          "second": 4,
+          "rss": 81518592,
+          "external": 16125099,
+          "arrayBuffers": 7871738
+        },
+        {
+          "second": 5,
+          "rss": 84561920,
+          "external": 17686465,
+          "arrayBuffers": 8651104
+        },
+        {
+          "second": 6,
+          "rss": 85987328,
+          "external": 19313893,
+          "arrayBuffers": 9506604
+        },
+        {
+          "second": 7,
+          "rss": 92811264,
+          "external": 21003147,
+          "arrayBuffers": 10438238
+        },
+        {
+          "second": 8,
+          "rss": 95227904,
+          "external": 22611383,
+          "arrayBuffers": 11269878
+        },
+        {
+          "second": 9,
+          "rss": 90099712,
+          "external": 24124015,
+          "arrayBuffers": 11989178
+        },
+        {
+          "second": 10,
+          "rss": 93896704,
+          "external": 25762177,
+          "arrayBuffers": 12855456
+        },
+        {
+          "second": 11,
+          "rss": 93741056,
+          "external": 27352177,
+          "arrayBuffers": 13649068
+        },
+        {
+          "second": 12,
+          "rss": 93126656,
+          "external": 28876541,
+          "arrayBuffers": 14417888
+        },
+        {
+          "second": 13,
+          "rss": 98123776,
+          "external": 30494639,
+          "arrayBuffers": 15240826
+        },
+        {
+          "second": 14,
+          "rss": 99020800,
+          "external": 32186287,
+          "arrayBuffers": 16139898
+        },
+        {
+          "second": 15,
+          "rss": 101036032,
+          "external": 33675731,
+          "arrayBuffers": 16924830
+        },
+        {
+          "second": 16,
+          "rss": 100192256,
+          "external": 35127875,
+          "arrayBuffers": 17583182
+        },
+        {
+          "second": 17,
+          "rss": 98680832,
+          "external": 36783099,
+          "arrayBuffers": 18467846
+        },
+        {
+          "second": 18,
+          "rss": 103804928,
+          "external": 38428657,
+          "arrayBuffers": 19340580
+        },
+        {
+          "second": 19,
+          "rss": 99586048,
+          "external": 39937821,
+          "arrayBuffers": 20079184
+        },
+        {
+          "second": 20,
+          "rss": 101089280,
+          "external": 41581885,
+          "arrayBuffers": 20920508
+        },
+        {
+          "second": 21,
+          "rss": 104525824,
+          "external": 43429219,
+          "arrayBuffers": 21887202
+        },
+        {
+          "second": 22,
+          "rss": 104574976,
+          "external": 44901959,
+          "arrayBuffers": 22677446
+        },
+        {
+          "second": 23,
+          "rss": 108081152,
+          "external": 46446475,
+          "arrayBuffers": 23429386
+        },
+        {
+          "second": 24,
+          "rss": 103231488,
+          "external": 48018735,
+          "arrayBuffers": 24209070
+        },
+        {
+          "second": 25,
+          "rss": 102666240,
+          "external": 49679615,
+          "arrayBuffers": 25038514
+        },
+        {
+          "second": 26,
+          "rss": 110727168,
+          "external": 51131235,
+          "arrayBuffers": 25785622
+        },
+        {
+          "second": 27,
+          "rss": 109727744,
+          "external": 52654631,
+          "arrayBuffers": 26648538
+        },
+        {
+          "second": 28,
+          "rss": 109051904,
+          "external": 54397517,
+          "arrayBuffers": 27510784
+        },
+        {
+          "second": 29,
+          "rss": 113532928,
+          "external": 55975189,
+          "arrayBuffers": 28295052
+        },
+        {
+          "second": 30,
+          "rss": 116629504,
+          "external": 57575433,
+          "arrayBuffers": 29102720
+        }
+      ],
+      "closeCalls": [
+        {
+          "code": 1011,
+          "reason": ""
+        }
+      ],
+      "activeRelays": 0,
+      "relayTimers": 0,
+      "status": {
+        "held": false,
+        "waiting": 0,
+        "backends": [
+          {
+            "id": "b",
+            "url": "http://localhost:23461/",
+            "state": "live",
+            "restore": "live",
+            "failures": 0,
+            "successes": 0,
+            "requests": 1,
+            "inFlight": 0,
+            "websockets": 0,
+            "wsTotal": 1,
+            "upstreamErrors": 0,
+            "drained": false
+          }
+        ],
+        "metrics": {
+          "requests": 1,
+          "upstreamErrors": 0,
+          "wsRelays": 1,
+          "errors": {
+            "502": 0,
+            "503": 0,
+            "504": 0
+          },
+          "holds": 0,
+          "holdMs": 0,
+          "holdDurationBuckets": {
+            "le10": 0,
+            "le100": 0,
+            "le1000": 0,
+            "le10000": 0,
+            "infinity": 0
+          }
+        }
+      }
+    }
+  }
+]

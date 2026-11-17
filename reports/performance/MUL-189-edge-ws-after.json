@@ -1,0 +1,3288 @@
+{
+  "source": "packages/edge/src/index.ts",
+  "bun": "1.3.14",
+  "platform": "linux",
+  "arch": "x64",
+  "node": "v22.23.2",
+  "runs": [
+    {
+      "count": 64,
+      "size": 4194304,
+      "received": {
+        "received": 64,
+        "bytes": 268435456
+      },
+      "baseline": 48758784,
+      "peak": 87212032,
+      "memory": {
+        "rss": 79208448,
+        "heapTotal": 2421760,
+        "heapUsed": 18397101,
+        "external": 17141157,
+        "arrayBuffers": 8447118
+      },
+      "concatBytes": 1401782,
+      "maxima": {
+        "heapUsed": 18397101,
+        "external": 17141157,
+        "arrayBuffers": 8447118,
+        "parser": 4237906,
+        "pending": 0,
+        "downstream": 4719890,
+        "upstream": 0,
+        "readable": 88064
+      },
+      "timeline": [
+        {
+          "second": 0,
+          "rss": 48758784,
+          "external": 446863,
+          "arrayBuffers": 0
+        },
+        {
+          "second": 1,
+          "rss": 84742144,
+          "external": 11590671,
+          "arrayBuffers": 5580520
+        },
+        {
+          "second": 2,
+          "rss": 76718080,
+          "external": 13006175,
+          "arrayBuffers": 6313528
+        },
+        {
+          "second": 3,
+          "rss": 81645568,
+          "external": 14801837,
+          "arrayBuffers": 7222914
+        },
+        {
+          "second": 4,
+          "rss": 82755584,
+          "external": 16411261,
+          "arrayBuffers": 8051326
+        },
+        {
+          "second": 5,
+          "rss": 78426112,
+          "external": 17140813,
+          "arrayBuffers": 8446774
+        }
+      ],
+      "closeCalls": [
+        {
+          "code": 1011,
+          "reason": ""
+        }
+      ],
+      "activeRelays": 0,
+      "relayTimers": 0,
+      "status": {
+        "held": false,
+        "waiting": 0,
+        "backends": [
+          {
+            "id": "b",
+            "url": "http://localhost:32517/",
+            "state": "live",
+            "restore": "live",
+            "failures": 0,
+            "successes": 0,
+            "requests": 1,
+            "inFlight": 0,
+            "websockets": 0,
+            "wsTotal": 1,
+            "upstreamErrors": 0,
+            "drained": false
+          }
+        ],
+        "metrics": {
+          "requests": 1,
+          "upstreamErrors": 0,
+          "wsRelays": 1,
+          "errors": {
+            "502": 0,
+            "503": 0,
+            "504": 0
+          },
+          "holds": 0,
+          "holdMs": 0,
+          "holdDurationBuckets": {
+            "le10": 0,
+            "le100": 0,
+            "le1000": 0,
+            "le10000": 0,
+            "infinity": 0
+          }
+        }
+      }
+    },
+    {
+      "count": 64,
+      "size": 1048576,
+      "received": {
+        "received": 64,
+        "bytes": 67108864
+      },
+      "baseline": 48758784,
+      "peak": 95367168,
+      "memory": {
+        "rss": 77930496,
+        "heapTotal": 2446336,
+        "heapUsed": 24021115,
+        "external": 22722899,
+        "arrayBuffers": 13638940
+      },
+      "concatBytes": 2728300,
+      "maxima": {
+        "heapUsed": 24021115,
+        "external": 22722899,
+        "arrayBuffers": 13638940,
+        "parser": 4237906,
+        "pending": 0,
+        "downstream": 4719890,
+        "upstream": 0,
+        "readable": 88064
+      },
+      "timeline": [
+        {
+          "second": 0,
+          "rss": 48758784,
+          "external": 446863,
+          "arrayBuffers": 0
+        },
+        {
+          "second": 1,
+          "rss": 84742144,
+          "external": 11590671,
+          "arrayBuffers": 5580520
+        },
+        {
+          "second": 2,
+          "rss": 76718080,
+          "external": 13006175,
+          "arrayBuffers": 6313528
+        },
+        {
+          "second": 3,
+          "rss": 81645568,
+          "external": 14801837,
+          "arrayBuffers": 7222914
+        },
+        {
+          "second": 4,
+          "rss": 82755584,
+          "external": 16411261,
+          "arrayBuffers": 8051326
+        },
+        {
+          "second": 5,
+          "rss": 78426112,
+          "external": 17140813,
+          "arrayBuffers": 8446774
+        },
+        {
+          "second": 6,
+          "rss": 78323712,
+          "external": 22722555,
+          "arrayBuffers": 13638596
+        }
+      ],
+      "closeCalls": [
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        }
+      ],
+      "activeRelays": 0,
+      "relayTimers": 0,
+      "status": {
+        "held": false,
+        "waiting": 0,
+        "backends": [
+          {
+            "id": "b",
+            "url": "http://localhost:32517/",
+            "state": "live",
+            "restore": "live",
+            "failures": 0,
+            "successes": 0,
+            "requests": 2,
+            "inFlight": 0,
+            "websockets": 0,
+            "wsTotal": 2,
+            "upstreamErrors": 0,
+            "drained": false
+          }
+        ],
+        "metrics": {
+          "requests": 2,
+          "upstreamErrors": 0,
+          "wsRelays": 2,
+          "errors": {
+            "502": 0,
+            "503": 0,
+            "504": 0
+          },
+          "holds": 0,
+          "holdMs": 0,
+          "holdDurationBuckets": {
+            "le10": 0,
+            "le100": 0,
+            "le1000": 0,
+            "le10000": 0,
+            "infinity": 0
+          }
+        }
+      }
+    },
+    {
+      "count": 192,
+      "size": 524288,
+      "received": {
+        "received": 192,
+        "bytes": 100663296
+      },
+      "baseline": 48758784,
+      "peak": 95367168,
+      "memory": {
+        "rss": 82776064,
+        "heapTotal": 2467840,
+        "heapUsed": 38918407,
+        "external": 37600783,
+        "arrayBuffers": 27339388
+      },
+      "concatBytes": 5762702,
+      "maxima": {
+        "heapUsed": 38918407,
+        "external": 37600783,
+        "arrayBuffers": 27339388,
+        "parser": 4237906,
+        "pending": 0,
+        "downstream": 4719890,
+        "upstream": 0,
+        "readable": 88064
+      },
+      "timeline": [
+        {
+          "second": 0,
+          "rss": 48758784,
+          "external": 446863,
+          "arrayBuffers": 0
+        },
+        {
+          "second": 1,
+          "rss": 84742144,
+          "external": 11590671,
+          "arrayBuffers": 5580520
+        },
+        {
+          "second": 2,
+          "rss": 76718080,
+          "external": 13006175,
+          "arrayBuffers": 6313528
+        },
+        {
+          "second": 3,
+          "rss": 81645568,
+          "external": 14801837,
+          "arrayBuffers": 7222914
+        },
+        {
+          "second": 4,
+          "rss": 82755584,
+          "external": 16411261,
+          "arrayBuffers": 8051326
+        },
+        {
+          "second": 5,
+          "rss": 78426112,
+          "external": 17140813,
+          "arrayBuffers": 8446774
+        },
+        {
+          "second": 6,
+          "rss": 78323712,
+          "external": 22722555,
+          "arrayBuffers": 13638596
+        },
+        {
+          "second": 7,
+          "rss": 88305664,
+          "external": 32330111,
+          "arrayBuffers": 22600728
+        },
+        {
+          "second": 8,
+          "rss": 82780160,
+          "external": 37600439,
+          "arrayBuffers": 27339044
+        }
+      ],
+      "closeCalls": [
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        }
+      ],
+      "activeRelays": 0,
+      "relayTimers": 0,
+      "status": {
+        "held": false,
+        "waiting": 0,
+        "backends": [
+          {
+            "id": "b",
+            "url": "http://localhost:32517/",
+            "state": "live",
+            "restore": "live",
+            "failures": 0,
+            "successes": 0,
+            "requests": 3,
+            "inFlight": 0,
+            "websockets": 0,
+            "wsTotal": 3,
+            "upstreamErrors": 0,
+            "drained": false
+          }
+        ],
+        "metrics": {
+          "requests": 3,
+          "upstreamErrors": 0,
+          "wsRelays": 3,
+          "errors": {
+            "502": 0,
+            "503": 0,
+            "504": 0
+          },
+          "holds": 0,
+          "holdMs": 0,
+          "holdDurationBuckets": {
+            "le10": 0,
+            "le100": 0,
+            "le1000": 0,
+            "le10000": 0,
+            "infinity": 0
+          }
+        }
+      }
+    },
+    {
+      "count": 384,
+      "size": 4194304,
+      "received": {
+        "received": 384,
+        "bytes": 1610612736
+      },
+      "baseline": 48758784,
+      "peak": 111935488,
+      "memory": {
+        "rss": 74682368,
+        "heapTotal": 2426880,
+        "heapUsed": 10325447,
+        "external": 9167551,
+        "arrayBuffers": 6334038
+      },
+      "concatBytes": 14474500,
+      "maxima": {
+        "heapUsed": 64227766,
+        "external": 62827878,
+        "arrayBuffers": 40603099,
+        "parser": 4238314,
+        "pending": 0,
+        "downstream": 4914715,
+        "upstream": 0,
+        "readable": 88064
+      },
+      "timeline": [
+        {
+          "second": 0,
+          "rss": 48758784,
+          "external": 446863,
+          "arrayBuffers": 0
+        },
+        {
+          "second": 1,
+          "rss": 84742144,
+          "external": 11590671,
+          "arrayBuffers": 5580520
+        },
+        {
+          "second": 2,
+          "rss": 76718080,
+          "external": 13006175,
+          "arrayBuffers": 6313528
+        },
+        {
+          "second": 3,
+          "rss": 81645568,
+          "external": 14801837,
+          "arrayBuffers": 7222914
+        },
+        {
+          "second": 4,
+          "rss": 82755584,
+          "external": 16411261,
+          "arrayBuffers": 8051326
+        },
+        {
+          "second": 5,
+          "rss": 78426112,
+          "external": 17140813,
+          "arrayBuffers": 8446774
+        },
+        {
+          "second": 6,
+          "rss": 78323712,
+          "external": 22722555,
+          "arrayBuffers": 13638596
+        },
+        {
+          "second": 7,
+          "rss": 88305664,
+          "external": 32330111,
+          "arrayBuffers": 22600728
+        },
+        {
+          "second": 8,
+          "rss": 82780160,
+          "external": 37600439,
+          "arrayBuffers": 27339044
+        },
+        {
+          "second": 9,
+          "rss": 97304576,
+          "external": 47986388,
+          "arrayBuffers": 32737593
+        },
+        {
+          "second": 10,
+          "rss": 99827712,
+          "external": 49610708,
+          "arrayBuffers": 33589865
+        },
+        {
+          "second": 11,
+          "rss": 96628736,
+          "external": 51180110,
+          "arrayBuffers": 34364159
+        },
+        {
+          "second": 12,
+          "rss": 102719488,
+          "external": 52934190,
+          "arrayBuffers": 35368699
+        },
+        {
+          "second": 13,
+          "rss": 103710720,
+          "external": 54587540,
+          "arrayBuffers": 36251229
+        },
+        {
+          "second": 14,
+          "rss": 103464960,
+          "external": 56255472,
+          "arrayBuffers": 37121829
+        },
+        {
+          "second": 15,
+          "rss": 104316928,
+          "external": 57885702,
+          "arrayBuffers": 37980499
+        },
+        {
+          "second": 16,
+          "rss": 100171776,
+          "external": 59499262,
+          "arrayBuffers": 38822975
+        },
+        {
+          "second": 17,
+          "rss": 102383616,
+          "external": 61114024,
+          "arrayBuffers": 39706081
+        },
+        {
+          "second": 18,
+          "rss": 103993344,
+          "external": 62687692,
+          "arrayBuffers": 40528961
+        },
+        {
+          "second": 19,
+          "rss": 106983424,
+          "external": 6558242,
+          "arrayBuffers": 4983238
+        },
+        {
+          "second": 20,
+          "rss": 104833024,
+          "external": 8083790,
+          "arrayBuffers": 5826290
+        },
+        {
+          "second": 21,
+          "rss": 88317952,
+          "external": 9689710,
+          "arrayBuffers": 6681446
+        },
+        {
+          "second": 22,
+          "rss": 87228416,
+          "external": 6288889,
+          "arrayBuffers": 4889160
+        },
+        {
+          "second": 23,
+          "rss": 80797696,
+          "external": 8070387,
+          "arrayBuffers": 5812034
+        },
+        {
+          "second": 24,
+          "rss": 85368832,
+          "external": 9750171,
+          "arrayBuffers": 6695430
+        },
+        {
+          "second": 25,
+          "rss": 87400448,
+          "external": 11519185,
+          "arrayBuffers": 7671868
+        },
+        {
+          "second": 26,
+          "rss": 86077440,
+          "external": 13266911,
+          "arrayBuffers": 8560970
+        },
+        {
+          "second": 27,
+          "rss": 89993216,
+          "external": 5332461,
+          "arrayBuffers": 4432948
+        },
+        {
+          "second": 28,
+          "rss": 90214400,
+          "external": 7092057,
+          "arrayBuffers": 5305740
+        },
+        {
+          "second": 29,
+          "rss": 90066944,
+          "external": 8486425,
+          "arrayBuffers": 6017612
+        },
+        {
+          "second": 30,
+          "rss": 89780224,
+          "external": 5045369,
+          "arrayBuffers": 4238220
+        },
+        {
+          "second": 31,
+          "rss": 81883136,
+          "external": 6696445,
+          "arrayBuffers": 5118736
+        },
+        {
+          "second": 32,
+          "rss": 89571328,
+          "external": 8380723,
+          "arrayBuffers": 6031238
+        },
+        {
+          "second": 33,
+          "rss": 87871488,
+          "external": 9941775,
+          "arrayBuffers": 6821730
+        },
+        {
+          "second": 34,
+          "rss": 87392256,
+          "external": 11556945,
+          "arrayBuffers": 7688356
+        },
+        {
+          "second": 35,
+          "rss": 91676672,
+          "external": 5618531,
+          "arrayBuffers": 4545186
+        },
+        {
+          "second": 36,
+          "rss": 88555520,
+          "external": 7366331,
+          "arrayBuffers": 5395502
+        },
+        {
+          "second": 37,
+          "rss": 89808896,
+          "external": 8752515,
+          "arrayBuffers": 6095130
+        }
+      ],
+      "closeCalls": [
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        }
+      ],
+      "activeRelays": 0,
+      "relayTimers": 0,
+      "status": {
+        "held": false,
+        "waiting": 0,
+        "backends": [
+          {
+            "id": "b",
+            "url": "http://localhost:32517/",
+            "state": "live",
+            "restore": "live",
+            "failures": 0,
+            "successes": 0,
+            "requests": 4,
+            "inFlight": 0,
+            "websockets": 0,
+            "wsTotal": 4,
+            "upstreamErrors": 0,
+            "drained": false
+          }
+        ],
+        "metrics": {
+          "requests": 4,
+          "upstreamErrors": 0,
+          "wsRelays": 4,
+          "errors": {
+            "502": 0,
+            "503": 0,
+            "504": 0
+          },
+          "holds": 0,
+          "holdMs": 0,
+          "holdDurationBuckets": {
+            "le10": 0,
+            "le100": 0,
+            "le1000": 0,
+            "le10000": 0,
+            "infinity": 0
+          }
+        }
+      }
+    },
+    {
+      "count": 384,
+      "size": 4194304,
+      "received": {
+        "received": 384,
+        "bytes": 1610612736
+      },
+      "baseline": 48758784,
+      "peak": 111935488,
+      "memory": {
+        "rss": 86212608,
+        "heapTotal": 2529280,
+        "heapUsed": 8062057,
+        "external": 6852465,
+        "arrayBuffers": 5198888
+      },
+      "concatBytes": 23010170,
+      "maxima": {
+        "heapUsed": 64227766,
+        "external": 62827878,
+        "arrayBuffers": 40603099,
+        "parser": 4238314,
+        "pending": 0,
+        "downstream": 5173245,
+        "upstream": 0,
+        "readable": 88064
+      },
+      "timeline": [
+        {
+          "second": 0,
+          "rss": 48758784,
+          "external": 446863,
+          "arrayBuffers": 0
+        },
+        {
+          "second": 1,
+          "rss": 84742144,
+          "external": 11590671,
+          "arrayBuffers": 5580520
+        },
+        {
+          "second": 2,
+          "rss": 76718080,
+          "external": 13006175,
+          "arrayBuffers": 6313528
+        },
+        {
+          "second": 3,
+          "rss": 81645568,
+          "external": 14801837,
+          "arrayBuffers": 7222914
+        },
+        {
+          "second": 4,
+          "rss": 82755584,
+          "external": 16411261,
+          "arrayBuffers": 8051326
+        },
+        {
+          "second": 5,
+          "rss": 78426112,
+          "external": 17140813,
+          "arrayBuffers": 8446774
+        },
+        {
+          "second": 6,
+          "rss": 78323712,
+          "external": 22722555,
+          "arrayBuffers": 13638596
+        },
+        {
+          "second": 7,
+          "rss": 88305664,
+          "external": 32330111,
+          "arrayBuffers": 22600728
+        },
+        {
+          "second": 8,
+          "rss": 82780160,
+          "external": 37600439,
+          "arrayBuffers": 27339044
+        },
+        {
+          "second": 9,
+          "rss": 97304576,
+          "external": 47986388,
+          "arrayBuffers": 32737593
+        },
+        {
+          "second": 10,
+          "rss": 99827712,
+          "external": 49610708,
+          "arrayBuffers": 33589865
+        },
+        {
+          "second": 11,
+          "rss": 96628736,
+          "external": 51180110,
+          "arrayBuffers": 34364159
+        },
+        {
+          "second": 12,
+          "rss": 102719488,
+          "external": 52934190,
+          "arrayBuffers": 35368699
+        },
+        {
+          "second": 13,
+          "rss": 103710720,
+          "external": 54587540,
+          "arrayBuffers": 36251229
+        },
+        {
+          "second": 14,
+          "rss": 103464960,
+          "external": 56255472,
+          "arrayBuffers": 37121829
+        },
+        {
+          "second": 15,
+          "rss": 104316928,
+          "external": 57885702,
+          "arrayBuffers": 37980499
+        },
+        {
+          "second": 16,
+          "rss": 100171776,
+          "external": 59499262,
+          "arrayBuffers": 38822975
+        },
+        {
+          "second": 17,
+          "rss": 102383616,
+          "external": 61114024,
+          "arrayBuffers": 39706081
+        },
+        {
+          "second": 18,
+          "rss": 103993344,
+          "external": 62687692,
+          "arrayBuffers": 40528961
+        },
+        {
+          "second": 19,
+          "rss": 106983424,
+          "external": 6558242,
+          "arrayBuffers": 4983238
+        },
+        {
+          "second": 20,
+          "rss": 104833024,
+          "external": 8083790,
+          "arrayBuffers": 5826290
+        },
+        {
+          "second": 21,
+          "rss": 88317952,
+          "external": 9689710,
+          "arrayBuffers": 6681446
+        },
+        {
+          "second": 22,
+          "rss": 87228416,
+          "external": 6288889,
+          "arrayBuffers": 4889160
+        },
+        {
+          "second": 23,
+          "rss": 80797696,
+          "external": 8070387,
+          "arrayBuffers": 5812034
+        },
+        {
+          "second": 24,
+          "rss": 85368832,
+          "external": 9750171,
+          "arrayBuffers": 6695430
+        },
+        {
+          "second": 25,
+          "rss": 87400448,
+          "external": 11519185,
+          "arrayBuffers": 7671868
+        },
+        {
+          "second": 26,
+          "rss": 86077440,
+          "external": 13266911,
+          "arrayBuffers": 8560970
+        },
+        {
+          "second": 27,
+          "rss": 89993216,
+          "external": 5332461,
+          "arrayBuffers": 4432948
+        },
+        {
+          "second": 28,
+          "rss": 90214400,
+          "external": 7092057,
+          "arrayBuffers": 5305740
+        },
+        {
+          "second": 29,
+          "rss": 90066944,
+          "external": 8486425,
+          "arrayBuffers": 6017612
+        },
+        {
+          "second": 30,
+          "rss": 89780224,
+          "external": 5045369,
+          "arrayBuffers": 4238220
+        },
+        {
+          "second": 31,
+          "rss": 81883136,
+          "external": 6696445,
+          "arrayBuffers": 5118736
+        },
+        {
+          "second": 32,
+          "rss": 89571328,
+          "external": 8380723,
+          "arrayBuffers": 6031238
+        },
+        {
+          "second": 33,
+          "rss": 87871488,
+          "external": 9941775,
+          "arrayBuffers": 6821730
+        },
+        {
+          "second": 34,
+          "rss": 87392256,
+          "external": 11556945,
+          "arrayBuffers": 7688356
+        },
+        {
+          "second": 35,
+          "rss": 91676672,
+          "external": 5618531,
+          "arrayBuffers": 4545186
+        },
+        {
+          "second": 36,
+          "rss": 88555520,
+          "external": 7366331,
+          "arrayBuffers": 5395502
+        },
+        {
+          "second": 37,
+          "rss": 89808896,
+          "external": 8752515,
+          "arrayBuffers": 6095130
+        },
+        {
+          "second": 38,
+          "rss": 92397568,
+          "external": 9906508,
+          "arrayBuffers": 4672958
+        },
+        {
+          "second": 39,
+          "rss": 82190336,
+          "external": 11626002,
+          "arrayBuffers": 5596292
+        },
+        {
+          "second": 40,
+          "rss": 82612224,
+          "external": 13294710,
+          "arrayBuffers": 6463664
+        },
+        {
+          "second": 41,
+          "rss": 79126528,
+          "external": 6354657,
+          "arrayBuffers": 4783146
+        },
+        {
+          "second": 42,
+          "rss": 81559552,
+          "external": 7796083,
+          "arrayBuffers": 5542076
+        },
+        {
+          "second": 43,
+          "rss": 89714688,
+          "external": 9390041,
+          "arrayBuffers": 6387490
+        },
+        {
+          "second": 44,
+          "rss": 83955712,
+          "external": 10807315,
+          "arrayBuffers": 7098212
+        },
+        {
+          "second": 45,
+          "rss": 90124288,
+          "external": 12540473,
+          "arrayBuffers": 8058778
+        },
+        {
+          "second": 46,
+          "rss": 89120768,
+          "external": 6334893,
+          "arrayBuffers": 4889670
+        },
+        {
+          "second": 47,
+          "rss": 84230144,
+          "external": 8013197,
+          "arrayBuffers": 5774794
+        },
+        {
+          "second": 48,
+          "rss": 92213248,
+          "external": 9791459,
+          "arrayBuffers": 6626619
+        },
+        {
+          "second": 49,
+          "rss": 78663680,
+          "external": 6305545,
+          "arrayBuffers": 4790710
+        },
+        {
+          "second": 50,
+          "rss": 91488256,
+          "external": 7851841,
+          "arrayBuffers": 5610478
+        },
+        {
+          "second": 51,
+          "rss": 83570688,
+          "external": 9298565,
+          "arrayBuffers": 6286642
+        },
+        {
+          "second": 52,
+          "rss": 92450816,
+          "external": 10729001,
+          "arrayBuffers": 7034582
+        },
+        {
+          "second": 53,
+          "rss": 87764992,
+          "external": 5250529,
+          "arrayBuffers": 4258546
+        },
+        {
+          "second": 54,
+          "rss": 87375872,
+          "external": 6771239,
+          "arrayBuffers": 5007944
+        },
+        {
+          "second": 55,
+          "rss": 90357760,
+          "external": 8455395,
+          "arrayBuffers": 5943556
+        },
+        {
+          "second": 56,
+          "rss": 95031296,
+          "external": 10127621,
+          "arrayBuffers": 6823206
+        },
+        {
+          "second": 57,
+          "rss": 91983872,
+          "external": 11709217,
+          "arrayBuffers": 7612226
+        },
+        {
+          "second": 58,
+          "rss": 90075136,
+          "external": 5516537,
+          "arrayBuffers": 4453900
+        },
+        {
+          "second": 59,
+          "rss": 94597120,
+          "external": 7150429,
+          "arrayBuffers": 5295216
+        },
+        {
+          "second": 60,
+          "rss": 98054144,
+          "external": 8716391,
+          "arrayBuffers": 6090030
+        },
+        {
+          "second": 61,
+          "rss": 101740544,
+          "external": 10335883,
+          "arrayBuffers": 6938962
+        },
+        {
+          "second": 62,
+          "rss": 91541504,
+          "external": 11892511,
+          "arrayBuffers": 7725030
+        },
+        {
+          "second": 63,
+          "rss": 92278784,
+          "external": 6371579,
+          "arrayBuffers": 4869118
+        },
+        {
+          "second": 64,
+          "rss": 93261824,
+          "external": 7895631,
+          "arrayBuffers": 5622610
+        },
+        {
+          "second": 65,
+          "rss": 92577792,
+          "external": 9576849,
+          "arrayBuffers": 6533268
+        },
+        {
+          "second": 66,
+          "rss": 91344896,
+          "external": 11305787,
+          "arrayBuffers": 7403582
+        },
+        {
+          "second": 67,
+          "rss": 94547968,
+          "external": 12714941,
+          "arrayBuffers": 8108224
+        },
+        {
+          "second": 68,
+          "rss": 97890304,
+          "external": 6611517,
+          "arrayBuffers": 5046004
+        }
+      ],
+      "closeCalls": [
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        }
+      ],
+      "activeRelays": 0,
+      "relayTimers": 0,
+      "status": {
+        "held": false,
+        "waiting": 0,
+        "backends": [
+          {
+            "id": "b",
+            "url": "http://localhost:32517/",
+            "state": "live",
+            "restore": "live",
+            "failures": 0,
+            "successes": 0,
+            "requests": 6,
+            "inFlight": 0,
+            "websockets": 0,
+            "wsTotal": 5,
+            "upstreamErrors": 0,
+            "drained": false
+          }
+        ],
+        "metrics": {
+          "requests": 6,
+          "upstreamErrors": 0,
+          "wsRelays": 5,
+          "errors": {
+            "502": 0,
+            "503": 0,
+            "504": 0
+          },
+          "holds": 0,
+          "holdMs": 0,
+          "holdDurationBuckets": {
+            "le10": 0,
+            "le100": 0,
+            "le1000": 0,
+            "le10000": 0,
+            "infinity": 0
+          }
+        }
+      }
+    },
+    {
+      "count": 384,
+      "size": 4194304,
+      "received": {
+        "received": 384,
+        "bytes": 1610612736
+      },
+      "baseline": 48758784,
+      "peak": 111935488,
+      "memory": {
+        "rss": 82247680,
+        "heapTotal": 2549760,
+        "heapUsed": 10707252,
+        "external": 9459620,
+        "arrayBuffers": 7196626
+      },
+      "concatBytes": 31325680,
+      "maxima": {
+        "heapUsed": 64227766,
+        "external": 62827878,
+        "arrayBuffers": 40603099,
+        "parser": 4238314,
+        "pending": 0,
+        "downstream": 5173245,
+        "upstream": 0,
+        "readable": 88064
+      },
+      "timeline": [
+        {
+          "second": 0,
+          "rss": 48758784,
+          "external": 446863,
+          "arrayBuffers": 0
+        },
+        {
+          "second": 1,
+          "rss": 84742144,
+          "external": 11590671,
+          "arrayBuffers": 5580520
+        },
+        {
+          "second": 2,
+          "rss": 76718080,
+          "external": 13006175,
+          "arrayBuffers": 6313528
+        },
+        {
+          "second": 3,
+          "rss": 81645568,
+          "external": 14801837,
+          "arrayBuffers": 7222914
+        },
+        {
+          "second": 4,
+          "rss": 82755584,
+          "external": 16411261,
+          "arrayBuffers": 8051326
+        },
+        {
+          "second": 5,
+          "rss": 78426112,
+          "external": 17140813,
+          "arrayBuffers": 8446774
+        },
+        {
+          "second": 6,
+          "rss": 78323712,
+          "external": 22722555,
+          "arrayBuffers": 13638596
+        },
+        {
+          "second": 7,
+          "rss": 88305664,
+          "external": 32330111,
+          "arrayBuffers": 22600728
+        },
+        {
+          "second": 8,
+          "rss": 82780160,
+          "external": 37600439,
+          "arrayBuffers": 27339044
+        },
+        {
+          "second": 9,
+          "rss": 97304576,
+          "external": 47986388,
+          "arrayBuffers": 32737593
+        },
+        {
+          "second": 10,
+          "rss": 99827712,
+          "external": 49610708,
+          "arrayBuffers": 33589865
+        },
+        {
+          "second": 11,
+          "rss": 96628736,
+          "external": 51180110,
+          "arrayBuffers": 34364159
+        },
+        {
+          "second": 12,
+          "rss": 102719488,
+          "external": 52934190,
+          "arrayBuffers": 35368699
+        },
+        {
+          "second": 13,
+          "rss": 103710720,
+          "external": 54587540,
+          "arrayBuffers": 36251229
+        },
+        {
+          "second": 14,
+          "rss": 103464960,
+          "external": 56255472,
+          "arrayBuffers": 37121829
+        },
+        {
+          "second": 15,
+          "rss": 104316928,
+          "external": 57885702,
+          "arrayBuffers": 37980499
+        },
+        {
+          "second": 16,
+          "rss": 100171776,
+          "external": 59499262,
+          "arrayBuffers": 38822975
+        },
+        {
+          "second": 17,
+          "rss": 102383616,
+          "external": 61114024,
+          "arrayBuffers": 39706081
+        },
+        {
+          "second": 18,
+          "rss": 103993344,
+          "external": 62687692,
+          "arrayBuffers": 40528961
+        },
+        {
+          "second": 19,
+          "rss": 106983424,
+          "external": 6558242,
+          "arrayBuffers": 4983238
+        },
+        {
+          "second": 20,
+          "rss": 104833024,
+          "external": 8083790,
+          "arrayBuffers": 5826290
+        },
+        {
+          "second": 21,
+          "rss": 88317952,
+          "external": 9689710,
+          "arrayBuffers": 6681446
+        },
+        {
+          "second": 22,
+          "rss": 87228416,
+          "external": 6288889,
+          "arrayBuffers": 4889160
+        },
+        {
+          "second": 23,
+          "rss": 80797696,
+          "external": 8070387,
+          "arrayBuffers": 5812034
+        },
+        {
+          "second": 24,
+          "rss": 85368832,
+          "external": 9750171,
+          "arrayBuffers": 6695430
+        },
+        {
+          "second": 25,
+          "rss": 87400448,
+          "external": 11519185,
+          "arrayBuffers": 7671868
+        },
+        {
+          "second": 26,
+          "rss": 86077440,
+          "external": 13266911,
+          "arrayBuffers": 8560970
+        },
+        {
+          "second": 27,
+          "rss": 89993216,
+          "external": 5332461,
+          "arrayBuffers": 4432948
+        },
+        {
+          "second": 28,
+          "rss": 90214400,
+          "external": 7092057,
+          "arrayBuffers": 5305740
+        },
+        {
+          "second": 29,
+          "rss": 90066944,
+          "external": 8486425,
+          "arrayBuffers": 6017612
+        },
+        {
+          "second": 30,
+          "rss": 89780224,
+          "external": 5045369,
+          "arrayBuffers": 4238220
+        },
+        {
+          "second": 31,
+          "rss": 81883136,
+          "external": 6696445,
+          "arrayBuffers": 5118736
+        },
+        {
+          "second": 32,
+          "rss": 89571328,
+          "external": 8380723,
+          "arrayBuffers": 6031238
+        },
+        {
+          "second": 33,
+          "rss": 87871488,
+          "external": 9941775,
+          "arrayBuffers": 6821730
+        },
+        {
+          "second": 34,
+          "rss": 87392256,
+          "external": 11556945,
+          "arrayBuffers": 7688356
+        },
+        {
+          "second": 35,
+          "rss": 91676672,
+          "external": 5618531,
+          "arrayBuffers": 4545186
+        },
+        {
+          "second": 36,
+          "rss": 88555520,
+          "external": 7366331,
+          "arrayBuffers": 5395502
+        },
+        {
+          "second": 37,
+          "rss": 89808896,
+          "external": 8752515,
+          "arrayBuffers": 6095130
+        },
+        {
+          "second": 38,
+          "rss": 92397568,
+          "external": 9906508,
+          "arrayBuffers": 4672958
+        },
+        {
+          "second": 39,
+          "rss": 82190336,
+          "external": 11626002,
+          "arrayBuffers": 5596292
+        },
+        {
+          "second": 40,
+          "rss": 82612224,
+          "external": 13294710,
+          "arrayBuffers": 6463664
+        },
+        {
+          "second": 41,
+          "rss": 79126528,
+          "external": 6354657,
+          "arrayBuffers": 4783146
+        },
+        {
+          "second": 42,
+          "rss": 81559552,
+          "external": 7796083,
+          "arrayBuffers": 5542076
+        },
+        {
+          "second": 43,
+          "rss": 89714688,
+          "external": 9390041,
+          "arrayBuffers": 6387490
+        },
+        {
+          "second": 44,
+          "rss": 83955712,
+          "external": 10807315,
+          "arrayBuffers": 7098212
+        },
+        {
+          "second": 45,
+          "rss": 90124288,
+          "external": 12540473,
+          "arrayBuffers": 8058778
+        },
+        {
+          "second": 46,
+          "rss": 89120768,
+          "external": 6334893,
+          "arrayBuffers": 4889670
+        },
+        {
+          "second": 47,
+          "rss": 84230144,
+          "external": 8013197,
+          "arrayBuffers": 5774794
+        },
+        {
+          "second": 48,
+          "rss": 92213248,
+          "external": 9791459,
+          "arrayBuffers": 6626619
+        },
+        {
+          "second": 49,
+          "rss": 78663680,
+          "external": 6305545,
+          "arrayBuffers": 4790710
+        },
+        {
+          "second": 50,
+          "rss": 91488256,
+          "external": 7851841,
+          "arrayBuffers": 5610478
+        },
+        {
+          "second": 51,
+          "rss": 83570688,
+          "external": 9298565,
+          "arrayBuffers": 6286642
+        },
+        {
+          "second": 52,
+          "rss": 92450816,
+          "external": 10729001,
+          "arrayBuffers": 7034582
+        },
+        {
+          "second": 53,
+          "rss": 87764992,
+          "external": 5250529,
+          "arrayBuffers": 4258546
+        },
+        {
+          "second": 54,
+          "rss": 87375872,
+          "external": 6771239,
+          "arrayBuffers": 5007944
+        },
+        {
+          "second": 55,
+          "rss": 90357760,
+          "external": 8455395,
+          "arrayBuffers": 5943556
+        },
+        {
+          "second": 56,
+          "rss": 95031296,
+          "external": 10127621,
+          "arrayBuffers": 6823206
+        },
+        {
+          "second": 57,
+          "rss": 91983872,
+          "external": 11709217,
+          "arrayBuffers": 7612226
+        },
+        {
+          "second": 58,
+          "rss": 90075136,
+          "external": 5516537,
+          "arrayBuffers": 4453900
+        },
+        {
+          "second": 59,
+          "rss": 94597120,
+          "external": 7150429,
+          "arrayBuffers": 5295216
+        },
+        {
+          "second": 60,
+          "rss": 98054144,
+          "external": 8716391,
+          "arrayBuffers": 6090030
+        },
+        {
+          "second": 61,
+          "rss": 101740544,
+          "external": 10335883,
+          "arrayBuffers": 6938962
+        },
+        {
+          "second": 62,
+          "rss": 91541504,
+          "external": 11892511,
+          "arrayBuffers": 7725030
+        },
+        {
+          "second": 63,
+          "rss": 92278784,
+          "external": 6371579,
+          "arrayBuffers": 4869118
+        },
+        {
+          "second": 64,
+          "rss": 93261824,
+          "external": 7895631,
+          "arrayBuffers": 5622610
+        },
+        {
+          "second": 65,
+          "rss": 92577792,
+          "external": 9576849,
+          "arrayBuffers": 6533268
+        },
+        {
+          "second": 66,
+          "rss": 91344896,
+          "external": 11305787,
+          "arrayBuffers": 7403582
+        },
+        {
+          "second": 67,
+          "rss": 94547968,
+          "external": 12714941,
+          "arrayBuffers": 8108224
+        },
+        {
+          "second": 68,
+          "rss": 97890304,
+          "external": 6611517,
+          "arrayBuffers": 5046004
+        },
+        {
+          "second": 69,
+          "rss": 90910720,
+          "external": 16453236,
+          "arrayBuffers": 10238105
+        },
+        {
+          "second": 70,
+          "rss": 80248832,
+          "external": 6420154,
+          "arrayBuffers": 4971476
+        },
+        {
+          "second": 71,
+          "rss": 94228480,
+          "external": 7780130,
+          "arrayBuffers": 5889076
+        },
+        {
+          "second": 72,
+          "rss": 95309824,
+          "external": 9071376,
+          "arrayBuffers": 6783238
+        },
+        {
+          "second": 73,
+          "rss": 88408064,
+          "external": 10191870,
+          "arrayBuffers": 7490892
+        },
+        {
+          "second": 74,
+          "rss": 87293952,
+          "external": 11230602,
+          "arrayBuffers": 8177368
+        },
+        {
+          "second": 75,
+          "rss": 80998400,
+          "external": 6257402,
+          "arrayBuffers": 4993208
+        },
+        {
+          "second": 76,
+          "rss": 93155328,
+          "external": 7396186,
+          "arrayBuffers": 5779736
+        },
+        {
+          "second": 77,
+          "rss": 90947584,
+          "external": 8653892,
+          "arrayBuffers": 6619138
+        },
+        {
+          "second": 78,
+          "rss": 83726336,
+          "external": 9740752,
+          "arrayBuffers": 7353742
+        },
+        {
+          "second": 79,
+          "rss": 85012480,
+          "external": 10914378,
+          "arrayBuffers": 8175112
+        },
+        {
+          "second": 80,
+          "rss": 97611776,
+          "external": 5693502,
+          "arrayBuffers": 4586268
+        },
+        {
+          "second": 81,
+          "rss": 91426816,
+          "external": 6747020,
+          "arrayBuffers": 5287530
+        },
+        {
+          "second": 82,
+          "rss": 86097920,
+          "external": 7889440,
+          "arrayBuffers": 6077694
+        },
+        {
+          "second": 83,
+          "rss": 93851648,
+          "external": 9294342,
+          "arrayBuffers": 7064292
+        },
+        {
+          "second": 84,
+          "rss": 81522688,
+          "external": 10360686,
+          "arrayBuffers": 7778380
+        },
+        {
+          "second": 85,
+          "rss": 93990912,
+          "external": 5940930,
+          "arrayBuffers": 4789794
+        },
+        {
+          "second": 86,
+          "rss": 80371712,
+          "external": 7428408,
+          "arrayBuffers": 5836952
+        },
+        {
+          "second": 87,
+          "rss": 94445568,
+          "external": 8589886,
+          "arrayBuffers": 6646174
+        },
+        {
+          "second": 88,
+          "rss": 90644480,
+          "external": 9818570,
+          "arrayBuffers": 7456554
+        },
+        {
+          "second": 89,
+          "rss": 84004864,
+          "external": 11030966,
+          "arrayBuffers": 8316694
+        },
+        {
+          "second": 90,
+          "rss": 90284032,
+          "external": 5867062,
+          "arrayBuffers": 4693900
+        },
+        {
+          "second": 91,
+          "rss": 84316160,
+          "external": 6962010,
+          "arrayBuffers": 5436592
+        },
+        {
+          "second": 92,
+          "rss": 82497536,
+          "external": 8352488,
+          "arrayBuffers": 6386750
+        },
+        {
+          "second": 93,
+          "rss": 95207424,
+          "external": 9474524,
+          "arrayBuffers": 7156530
+        },
+        {
+          "second": 94,
+          "rss": 83877888,
+          "external": 10480416,
+          "arrayBuffers": 7810166
+        },
+        {
+          "second": 95,
+          "rss": 92807168,
+          "external": 5314334,
+          "arrayBuffers": 4405364
+        },
+        {
+          "second": 96,
+          "rss": 80179200,
+          "external": 6522276,
+          "arrayBuffers": 5172986
+        },
+        {
+          "second": 97,
+          "rss": 92332032,
+          "external": 7958484,
+          "arrayBuffers": 6168874
+        },
+        {
+          "second": 98,
+          "rss": 94814208,
+          "external": 9002286,
+          "arrayBuffers": 6882436
+        },
+        {
+          "second": 99,
+          "rss": 82247680,
+          "external": 9404196,
+          "arrayBuffers": 7196282
+        }
+      ],
+      "closeCalls": [
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        },
+        {
+          "code": 1011,
+          "reason": ""
+        }
+      ],
+      "activeRelays": 0,
+      "relayTimers": 0,
+      "status": {
+        "held": false,
+        "waiting": 0,
+        "backends": [
+          {
+            "id": "b",
+            "url": "http://localhost:32517/",
+            "state": "live",
+            "restore": "live",
+            "failures": 0,
+            "successes": 0,
+            "requests": 7,
+            "inFlight": 0,
+            "websockets": 0,
+            "wsTotal": 6,
+            "upstreamErrors": 0,
+            "drained": false
+          }
+        ],
+        "metrics": {
+          "requests": 7,
+          "upstreamErrors": 0,
+          "wsRelays": 6,
+          "errors": {
+            "502": 0,
+            "503": 0,
+            "504": 0
+          },
+          "holds": 0,
+          "holdMs": 0,
+          "holdDurationBuckets": {
+            "le10": 0,
+            "le100": 0,
+            "le1000": 0,
+            "le10000": 0,
+            "infinity": 0
+          }
+        }
+      }
+    }
+  ],
+  "beforeGC": {
+    "baseline": 48758784,
+    "peak": 111935488,
+    "memory": {
+      "rss": 82247680,
+      "heapTotal": 2549760,
+      "heapUsed": 10707252,
+      "external": 9459620,
+      "arrayBuffers": 7196626
+    },
+    "concatBytes": 31325680,
+    "maxima": {
+      "heapUsed": 64227766,
+      "external": 62827878,
+      "arrayBuffers": 40603099,
+      "parser": 4238314,
+      "pending": 0,
+      "downstream": 5173245,
+      "upstream": 0,
+      "readable": 88064
+    },
+    "timeline": [
+      {
+        "second": 0,
+        "rss": 48758784,
+        "external": 446863,
+        "arrayBuffers": 0
+      },
+      {
+        "second": 1,
+        "rss": 84742144,
+        "external": 11590671,
+        "arrayBuffers": 5580520
+      },
+      {
+        "second": 2,
+        "rss": 76718080,
+        "external": 13006175,
+        "arrayBuffers": 6313528
+      },
+      {
+        "second": 3,
+        "rss": 81645568,
+        "external": 14801837,
+        "arrayBuffers": 7222914
+      },
+      {
+        "second": 4,
+        "rss": 82755584,
+        "external": 16411261,
+        "arrayBuffers": 8051326
+      },
+      {
+        "second": 5,
+        "rss": 78426112,
+        "external": 17140813,
+        "arrayBuffers": 8446774
+      },
+      {
+        "second": 6,
+        "rss": 78323712,
+        "external": 22722555,
+        "arrayBuffers": 13638596
+      },
+      {
+        "second": 7,
+        "rss": 88305664,
+        "external": 32330111,
+        "arrayBuffers": 22600728
+      },
+      {
+        "second": 8,
+        "rss": 82780160,
+        "external": 37600439,
+        "arrayBuffers": 27339044
+      },
+      {
+        "second": 9,
+        "rss": 97304576,
+        "external": 47986388,
+        "arrayBuffers": 32737593
+      },
+      {
+        "second": 10,
+        "rss": 99827712,
+        "external": 49610708,
+        "arrayBuffers": 33589865
+      },
+      {
+        "second": 11,
+        "rss": 96628736,
+        "external": 51180110,
+        "arrayBuffers": 34364159
+      },
+      {
+        "second": 12,
+        "rss": 102719488,
+        "external": 52934190,
+        "arrayBuffers": 35368699
+      },
+      {
+        "second": 13,
+        "rss": 103710720,
+        "external": 54587540,
+        "arrayBuffers": 36251229
+      },
+      {
+        "second": 14,
+        "rss": 103464960,
+        "external": 56255472,
+        "arrayBuffers": 37121829
+      },
+      {
+        "second": 15,
+        "rss": 104316928,
+        "external": 57885702,
+        "arrayBuffers": 37980499
+      },
+      {
+        "second": 16,
+        "rss": 100171776,
+        "external": 59499262,
+        "arrayBuffers": 38822975
+      },
+      {
+        "second": 17,
+        "rss": 102383616,
+        "external": 61114024,
+        "arrayBuffers": 39706081
+      },
+      {
+        "second": 18,
+        "rss": 103993344,
+        "external": 62687692,
+        "arrayBuffers": 40528961
+      },
+      {
+        "second": 19,
+        "rss": 106983424,
+        "external": 6558242,
+        "arrayBuffers": 4983238
+      },
+      {
+        "second": 20,
+        "rss": 104833024,
+        "external": 8083790,
+        "arrayBuffers": 5826290
+      },
+      {
+        "second": 21,
+        "rss": 88317952,
+        "external": 9689710,
+        "arrayBuffers": 6681446
+      },
+      {
+        "second": 22,
+        "rss": 87228416,
+        "external": 6288889,
+        "arrayBuffers": 4889160
+      },
+      {
+        "second": 23,
+        "rss": 80797696,
+        "external": 8070387,
+        "arrayBuffers": 5812034
+      },
+      {
+        "second": 24,
+        "rss": 85368832,
+        "external": 9750171,
+        "arrayBuffers": 6695430
+      },
+      {
+        "second": 25,
+        "rss": 87400448,
+        "external": 11519185,
+        "arrayBuffers": 7671868
+      },
+      {
+        "second": 26,
+        "rss": 86077440,
+        "external": 13266911,
+        "arrayBuffers": 8560970
+      },
+      {
+        "second": 27,
+        "rss": 89993216,
+        "external": 5332461,
+        "arrayBuffers": 4432948
+      },
+      {
+        "second": 28,
+        "rss": 90214400,
+        "external": 7092057,
+        "arrayBuffers": 5305740
+      },
+      {
+        "second": 29,
+        "rss": 90066944,
+        "external": 8486425,
+        "arrayBuffers": 6017612
+      },
+      {
+        "second": 30,
+        "rss": 89780224,
+        "external": 5045369,
+        "arrayBuffers": 4238220
+      },
+      {
+        "second": 31,
+        "rss": 81883136,
+        "external": 6696445,
+        "arrayBuffers": 5118736
+      },
+      {
+        "second": 32,
+        "rss": 89571328,
+        "external": 8380723,
+        "arrayBuffers": 6031238
+      },
+      {
+        "second": 33,
+        "rss": 87871488,
+        "external": 9941775,
+        "arrayBuffers": 6821730
+      },
+      {
+        "second": 34,
+        "rss": 87392256,
+        "external": 11556945,
+        "arrayBuffers": 7688356
+      },
+      {
+        "second": 35,
+        "rss": 91676672,
+        "external": 5618531,
+        "arrayBuffers": 4545186
+      },
+      {
+        "second": 36,
+        "rss": 88555520,
+        "external": 7366331,
+        "arrayBuffers": 5395502
+      },
+      {
+        "second": 37,
+        "rss": 89808896,
+        "external": 8752515,
+        "arrayBuffers": 6095130
+      },
+      {
+        "second": 38,
+        "rss": 92397568,
+        "external": 9906508,
+        "arrayBuffers": 4672958
+      },
+      {
+        "second": 39,
+        "rss": 82190336,
+        "external": 11626002,
+        "arrayBuffers": 5596292
+      },
+      {
+        "second": 40,
+        "rss": 82612224,
+        "external": 13294710,
+        "arrayBuffers": 6463664
+      },
+      {
+        "second": 41,
+        "rss": 79126528,
+        "external": 6354657,
+        "arrayBuffers": 4783146
+      },
+      {
+        "second": 42,
+        "rss": 81559552,
+        "external": 7796083,
+        "arrayBuffers": 5542076
+      },
+      {
+        "second": 43,
+        "rss": 89714688,
+        "external": 9390041,
+        "arrayBuffers": 6387490
+      },
+      {
+        "second": 44,
+        "rss": 83955712,
+        "external": 10807315,
+        "arrayBuffers": 7098212
+      },
+      {
+        "second": 45,
+        "rss": 90124288,
+        "external": 12540473,
+        "arrayBuffers": 8058778
+      },
+      {
+        "second": 46,
+        "rss": 89120768,
+        "external": 6334893,
+        "arrayBuffers": 4889670
+      },
+      {
+        "second": 47,
+        "rss": 84230144,
+        "external": 8013197,
+        "arrayBuffers": 5774794
+      },
+      {
+        "second": 48,
+        "rss": 92213248,
+        "external": 9791459,
+        "arrayBuffers": 6626619
+      },
+      {
+        "second": 49,
+        "rss": 78663680,
+        "external": 6305545,
+        "arrayBuffers": 4790710
+      },
+      {
+        "second": 50,
+        "rss": 91488256,
+        "external": 7851841,
+        "arrayBuffers": 5610478
+      },
+      {
+        "second": 51,
+        "rss": 83570688,
+        "external": 9298565,
+        "arrayBuffers": 6286642
+      },
+      {
+        "second": 52,
+        "rss": 92450816,
+        "external": 10729001,
+        "arrayBuffers": 7034582
+      },
+      {
+        "second": 53,
+        "rss": 87764992,
+        "external": 5250529,
+        "arrayBuffers": 4258546
+      },
+      {
+        "second": 54,
+        "rss": 87375872,
+        "external": 6771239,
+        "arrayBuffers": 5007944
+      },
+      {
+        "second": 55,
+        "rss": 90357760,
+        "external": 8455395,
+        "arrayBuffers": 5943556
+      },
+      {
+        "second": 56,
+        "rss": 95031296,
+        "external": 10127621,
+        "arrayBuffers": 6823206
+      },
+      {
+        "second": 57,
+        "rss": 91983872,
+        "external": 11709217,
+        "arrayBuffers": 7612226
+      },
+      {
+        "second": 58,
+        "rss": 90075136,
+        "external": 5516537,
+        "arrayBuffers": 4453900
+      },
+      {
+        "second": 59,
+        "rss": 94597120,
+        "external": 7150429,
+        "arrayBuffers": 5295216
+      },
+      {
+        "second": 60,
+        "rss": 98054144,
+        "external": 8716391,
+        "arrayBuffers": 6090030
+      },
+      {
+        "second": 61,
+        "rss": 101740544,
+        "external": 10335883,
+        "arrayBuffers": 6938962
+      },
+      {
+        "second": 62,
+        "rss": 91541504,
+        "external": 11892511,
+        "arrayBuffers": 7725030
+      },
+      {
+        "second": 63,
+        "rss": 92278784,
+        "external": 6371579,
+        "arrayBuffers": 4869118
+      },
+      {
+        "second": 64,
+        "rss": 93261824,
+        "external": 7895631,
+        "arrayBuffers": 5622610
+      },
+      {
+        "second": 65,
+        "rss": 92577792,
+        "external": 9576849,
+        "arrayBuffers": 6533268
+      },
+      {
+        "second": 66,
+        "rss": 91344896,
+        "external": 11305787,
+        "arrayBuffers": 7403582
+      },
+      {
+        "second": 67,
+        "rss": 94547968,
+        "external": 12714941,
+        "arrayBuffers": 8108224
+      },
+      {
+        "second": 68,
+        "rss": 97890304,
+        "external": 6611517,
+        "arrayBuffers": 5046004
+      },
+      {
+        "second": 69,
+        "rss": 90910720,
+        "external": 16453236,
+        "arrayBuffers": 10238105
+      },
+      {
+        "second": 70,
+        "rss": 80248832,
+        "external": 6420154,
+        "arrayBuffers": 4971476
+      },
+      {
+        "second": 71,
+        "rss": 94228480,
+        "external": 7780130,
+        "arrayBuffers": 5889076
+      },
+      {
+        "second": 72,
+        "rss": 95309824,
+        "external": 9071376,
+        "arrayBuffers": 6783238
+      },
+      {
+        "second": 73,
+        "rss": 88408064,
+        "external": 10191870,
+        "arrayBuffers": 7490892
+      },
+      {
+        "second": 74,
+        "rss": 87293952,
+        "external": 11230602,
+        "arrayBuffers": 8177368
+      },
+      {
+        "second": 75,
+        "rss": 80998400,
+        "external": 6257402,
+        "arrayBuffers": 4993208
+      },
+      {
+        "second": 76,
+        "rss": 93155328,
+        "external": 7396186,
+        "arrayBuffers": 5779736
+      },
+      {
+        "second": 77,
+        "rss": 90947584,
+        "external": 8653892,
+        "arrayBuffers": 6619138
+      },
+      {
+        "second": 78,
+        "rss": 83726336,
+        "external": 9740752,
+        "arrayBuffers": 7353742
+      },
+      {
+        "second": 79,
+        "rss": 85012480,
+        "external": 10914378,
+        "arrayBuffers": 8175112
+      },
+      {
+        "second": 80,
+        "rss": 97611776,
+        "external": 5693502,
+        "arrayBuffers": 4586268
+      },
+      {
+        "second": 81,
+        "rss": 91426816,
+        "external": 6747020,
+        "arrayBuffers": 5287530
+      },
+      {
+        "second": 82,
+        "rss": 86097920,
+        "external": 7889440,
+        "arrayBuffers": 6077694
+      },
+      {
+        "second": 83,
+        "rss": 93851648,
+        "external": 9294342,
+        "arrayBuffers": 7064292
+      },
+      {
+        "second": 84,
+        "rss": 81522688,
+        "external": 10360686,
+        "arrayBuffers": 7778380
+      },
+      {
+        "second": 85,
+        "rss": 93990912,
+        "external": 5940930,
+        "arrayBuffers": 4789794
+      },
+      {
+        "second": 86,
+        "rss": 80371712,
+        "external": 7428408,
+        "arrayBuffers": 5836952
+      },
+      {
+        "second": 87,
+        "rss": 94445568,
+        "external": 8589886,
+        "arrayBuffers": 6646174
+      },
+      {
+        "second": 88,
+        "rss": 90644480,
+        "external": 9818570,
+        "arrayBuffers": 7456554
+      },
+      {
+        "second": 89,
+        "rss": 84004864,
+        "external": 11030966,
+        "arrayBuffers": 8316694
+      },
+      {
+        "second": 90,
+        "rss": 90284032,
+        "external": 5867062,
+        "arrayBuffers": 4693900
+      },
+      {
+        "second": 91,
+        "rss": 84316160,
+        "external": 6962010,
+        "arrayBuffers": 5436592
+      },
+      {
+        "second": 92,
+        "rss": 82497536,
+        "external": 8352488,
+        "arrayBuffers": 6386750
+      },
+      {
+        "second": 93,
+        "rss": 95207424,
+        "external": 9474524,
+        "arrayBuffers": 7156530
+      },
+      {
+        "second": 94,
+        "rss": 83877888,
+        "external": 10480416,
+        "arrayBuffers": 7810166
+      },
+      {
+        "second": 95,
+        "rss": 92807168,
+        "external": 5314334,
+        "arrayBuffers": 4405364
+      },
+      {
+        "second": 96,
+        "rss": 80179200,
+        "external": 6522276,
+        "arrayBuffers": 5172986
+      },
+      {
+        "second": 97,
+        "rss": 92332032,
+        "external": 7958484,
+        "arrayBuffers": 6168874
+      },
+      {
+        "second": 98,
+        "rss": 94814208,
+        "external": 9002286,
+        "arrayBuffers": 6882436
+      },
+      {
+        "second": 99,
+        "rss": 82247680,
+        "external": 9404196,
+        "arrayBuffers": 7196282
+      }
+    ],
+    "closeCalls": [
+      {
+        "code": 1011,
+        "reason": ""
+      },
+      {
+        "code": 1011,
+        "reason": ""
+      },
+      {
+        "code": 1011,
+        "reason": ""
+      },
+      {
+        "code": 1011,
+        "reason": ""
+      },
+      {
+        "code": 1011,
+        "reason": ""
+      },
+      {
+        "code": 1011,
+        "reason": ""
+      }
+    ],
+    "activeRelays": 0,
+    "relayTimers": 0,
+    "status": {
+      "held": false,
+      "waiting": 0,
+      "backends": [
+        {
+          "id": "b",
+          "url": "http://localhost:32517/",
+          "state": "live",
+          "restore": "live",
+          "failures": 0,
+          "successes": 0,
+          "requests": 7,
+          "inFlight": 0,
+          "websockets": 0,
+          "wsTotal": 6,
+          "upstreamErrors": 0,
+          "drained": false
+        }
+      ],
+      "metrics": {
+        "requests": 7,
+        "upstreamErrors": 0,
+        "wsRelays": 6,
+        "errors": {
+          "502": 0,
+          "503": 0,
+          "504": 0
+        },
+        "holds": 0,
+        "holdMs": 0,
+        "holdDurationBuckets": {
+          "le10": 0,
+          "le100": 0,
+          "le1000": 0,
+          "le10000": 0,
+          "infinity": 0
+        }
+      }
+    }
+  },
+  "afterGC": {
+    "baseline": 48758784,
+    "peak": 111935488,
+    "memory": {
+      "rss": 76349440,
+      "heapTotal": 2430976,
+      "heapUsed": 10707252,
+      "external": 743394,
+      "arrayBuffers": 0
+    },
+    "concatBytes": 31325680,
+    "maxima": {
+      "heapUsed": 64227766,
+      "external": 62827878,
+      "arrayBuffers": 40603099,
+      "parser": 4238314,
+      "pending": 0,
+      "downstream": 5173245,
+      "upstream": 0,
+      "readable": 88064
+    },
+    "timeline": [
+      {
+        "second": 0,
+        "rss": 48758784,
+        "external": 446863,
+        "arrayBuffers": 0
+      },
+      {
+        "second": 1,
+        "rss": 84742144,
+        "external": 11590671,
+        "arrayBuffers": 5580520
+      },
+      {
+        "second": 2,
+        "rss": 76718080,
+        "external": 13006175,
+        "arrayBuffers": 6313528
+      },
+      {
+        "second": 3,
+        "rss": 81645568,
+        "external": 14801837,
+        "arrayBuffers": 7222914
+      },
+      {
+        "second": 4,
+        "rss": 82755584,
+        "external": 16411261,
+        "arrayBuffers": 8051326
+      },
+      {
+        "second": 5,
+        "rss": 78426112,
+        "external": 17140813,
+        "arrayBuffers": 8446774
+      },
+      {
+        "second": 6,
+        "rss": 78323712,
+        "external": 22722555,
+        "arrayBuffers": 13638596
+      },
+      {
+        "second": 7,
+        "rss": 88305664,
+        "external": 32330111,
+        "arrayBuffers": 22600728
+      },
+      {
+        "second": 8,
+        "rss": 82780160,
+        "external": 37600439,
+        "arrayBuffers": 27339044
+      },
+      {
+        "second": 9,
+        "rss": 97304576,
+        "external": 47986388,
+        "arrayBuffers": 32737593
+      },
+      {
+        "second": 10,
+        "rss": 99827712,
+        "external": 49610708,
+        "arrayBuffers": 33589865
+      },
+      {
+        "second": 11,
+        "rss": 96628736,
+        "external": 51180110,
+        "arrayBuffers": 34364159
+      },
+      {
+        "second": 12,
+        "rss": 102719488,
+        "external": 52934190,
+        "arrayBuffers": 35368699
+      },
+      {
+        "second": 13,
+        "rss": 103710720,
+        "external": 54587540,
+        "arrayBuffers": 36251229
+      },
+      {
+        "second": 14,
+        "rss": 103464960,
+        "external": 56255472,
+        "arrayBuffers": 37121829
+      },
+      {
+        "second": 15,
+        "rss": 104316928,
+        "external": 57885702,
+        "arrayBuffers": 37980499
+      },
+      {
+        "second": 16,
+        "rss": 100171776,
+        "external": 59499262,
+        "arrayBuffers": 38822975
+      },
+      {
+        "second": 17,
+        "rss": 102383616,
+        "external": 61114024,
+        "arrayBuffers": 39706081
+      },
+      {
+        "second": 18,
+        "rss": 103993344,
+        "external": 62687692,
+        "arrayBuffers": 40528961
+      },
+      {
+        "second": 19,
+        "rss": 106983424,
+        "external": 6558242,
+        "arrayBuffers": 4983238
+      },
+      {
+        "second": 20,
+        "rss": 104833024,
+        "external": 8083790,
+        "arrayBuffers": 5826290
+      },
+      {
+        "second": 21,
+        "rss": 88317952,
+        "external": 9689710,
+        "arrayBuffers": 6681446
+      },
+      {
+        "second": 22,
+        "rss": 87228416,
+        "external": 6288889,
+        "arrayBuffers": 4889160
+      },
+      {
+        "second": 23,
+        "rss": 80797696,
+        "external": 8070387,
+        "arrayBuffers": 5812034
+      },
+      {
+        "second": 24,
+        "rss": 85368832,
+        "external": 9750171,
+        "arrayBuffers": 6695430
+      },
+      {
+        "second": 25,
+        "rss": 87400448,
+        "external": 11519185,
+        "arrayBuffers": 7671868
+      },
+      {
+        "second": 26,
+        "rss": 86077440,
+        "external": 13266911,
+        "arrayBuffers": 8560970
+      },
+      {
+        "second": 27,
+        "rss": 89993216,
+        "external": 5332461,
+        "arrayBuffers": 4432948
+      },
+      {
+        "second": 28,
+        "rss": 90214400,
+        "external": 7092057,
+        "arrayBuffers": 5305740
+      },
+      {
+        "second": 29,
+        "rss": 90066944,
+        "external": 8486425,
+        "arrayBuffers": 6017612
+      },
+      {
+        "second": 30,
+        "rss": 89780224,
+        "external": 5045369,
+        "arrayBuffers": 4238220
+      },
+      {
+        "second": 31,
+        "rss": 81883136,
+        "external": 6696445,
+        "arrayBuffers": 5118736
+      },
+      {
+        "second": 32,
+        "rss": 89571328,
+        "external": 8380723,
+        "arrayBuffers": 6031238
+      },
+      {
+        "second": 33,
+        "rss": 87871488,
+        "external": 9941775,
+        "arrayBuffers": 6821730
+      },
+      {
+        "second": 34,
+        "rss": 87392256,
+        "external": 11556945,
+        "arrayBuffers": 7688356
+      },
+      {
+        "second": 35,
+        "rss": 91676672,
+        "external": 5618531,
+        "arrayBuffers": 4545186
+      },
+      {
+        "second": 36,
+        "rss": 88555520,
+        "external": 7366331,
+        "arrayBuffers": 5395502
+      },
+      {
+        "second": 37,
+        "rss": 89808896,
+        "external": 8752515,
+        "arrayBuffers": 6095130
+      },
+      {
+        "second": 38,
+        "rss": 92397568,
+        "external": 9906508,
+        "arrayBuffers": 4672958
+      },
+      {
+        "second": 39,
+        "rss": 82190336,
+        "external": 11626002,
+        "arrayBuffers": 5596292
+      },
+      {
+        "second": 40,
+        "rss": 82612224,
+        "external": 13294710,
+        "arrayBuffers": 6463664
+      },
+      {
+        "second": 41,
+        "rss": 79126528,
+        "external": 6354657,
+        "arrayBuffers": 4783146
+      },
+      {
+        "second": 42,
+        "rss": 81559552,
+        "external": 7796083,
+        "arrayBuffers": 5542076
+      },
+      {
+        "second": 43,
+        "rss": 89714688,
+        "external": 9390041,
+        "arrayBuffers": 6387490
+      },
+      {
+        "second": 44,
+        "rss": 83955712,
+        "external": 10807315,
+        "arrayBuffers": 7098212
+      },
+      {
+        "second": 45,
+        "rss": 90124288,
+        "external": 12540473,
+        "arrayBuffers": 8058778
+      },
+      {
+        "second": 46,
+        "rss": 89120768,
+        "external": 6334893,
+        "arrayBuffers": 4889670
+      },
+      {
+        "second": 47,
+        "rss": 84230144,
+        "external": 8013197,
+        "arrayBuffers": 5774794
+      },
+      {
+        "second": 48,
+        "rss": 92213248,
+        "external": 9791459,
+        "arrayBuffers": 6626619
+      },
+      {
+        "second": 49,
+        "rss": 78663680,
+        "external": 6305545,
+        "arrayBuffers": 4790710
+      },
+      {
+        "second": 50,
+        "rss": 91488256,
+        "external": 7851841,
+        "arrayBuffers": 5610478
+      },
+      {
+        "second": 51,
+        "rss": 83570688,
+        "external": 9298565,
+        "arrayBuffers": 6286642
+      },
+      {
+        "second": 52,
+        "rss": 92450816,
+        "external": 10729001,
+        "arrayBuffers": 7034582
+      },
+      {
+        "second": 53,
+        "rss": 87764992,
+        "external": 5250529,
+        "arrayBuffers": 4258546
+      },
+      {
+        "second": 54,
+        "rss": 87375872,
+        "external": 6771239,
+        "arrayBuffers": 5007944
+      },
+      {
+        "second": 55,
+        "rss": 90357760,
+        "external": 8455395,
+        "arrayBuffers": 5943556
+      },
+      {
+        "second": 56,
+        "rss": 95031296,
+        "external": 10127621,
+        "arrayBuffers": 6823206
+      },
+      {
+        "second": 57,
+        "rss": 91983872,
+        "external": 11709217,
+        "arrayBuffers": 7612226
+      },
+      {
+        "second": 58,
+        "rss": 90075136,
+        "external": 5516537,
+        "arrayBuffers": 4453900
+      },
+      {
+        "second": 59,
+        "rss": 94597120,
+        "external": 7150429,
+        "arrayBuffers": 5295216
+      },
+      {
+        "second": 60,
+        "rss": 98054144,
+        "external": 8716391,
+        "arrayBuffers": 6090030
+      },
+      {
+        "second": 61,
+        "rss": 101740544,
+        "external": 10335883,
+        "arrayBuffers": 6938962
+      },
+      {
+        "second": 62,
+        "rss": 91541504,
+        "external": 11892511,
+        "arrayBuffers": 7725030
+      },
+      {
+        "second": 63,
+        "rss": 92278784,
+        "external": 6371579,
+        "arrayBuffers": 4869118
+      },
+      {
+        "second": 64,
+        "rss": 93261824,
+        "external": 7895631,
+        "arrayBuffers": 5622610
+      },
+      {
+        "second": 65,
+        "rss": 92577792,
+        "external": 9576849,
+        "arrayBuffers": 6533268
+      },
+      {
+        "second": 66,
+        "rss": 91344896,
+        "external": 11305787,
+        "arrayBuffers": 7403582
+      },
+      {
+        "second": 67,
+        "rss": 94547968,
+        "external": 12714941,
+        "arrayBuffers": 8108224
+      },
+      {
+        "second": 68,
+        "rss": 97890304,
+        "external": 6611517,
+        "arrayBuffers": 5046004
+      },
+      {
+        "second": 69,
+        "rss": 90910720,
+        "external": 16453236,
+        "arrayBuffers": 10238105
+      },
+      {
+        "second": 70,
+        "rss": 80248832,
+        "external": 6420154,
+        "arrayBuffers": 4971476
+      },
+      {
+        "second": 71,
+        "rss": 94228480,
+        "external": 7780130,
+        "arrayBuffers": 5889076
+      },
+      {
+        "second": 72,
+        "rss": 95309824,
+        "external": 9071376,
+        "arrayBuffers": 6783238
+      },
+      {
+        "second": 73,
+        "rss": 88408064,
+        "external": 10191870,
+        "arrayBuffers": 7490892
+      },
+      {
+        "second": 74,
+        "rss": 87293952,
+        "external": 11230602,
+        "arrayBuffers": 8177368
+      },
+      {
+        "second": 75,
+        "rss": 80998400,
+        "external": 6257402,
+        "arrayBuffers": 4993208
+      },
+      {
+        "second": 76,
+        "rss": 93155328,
+        "external": 7396186,
+        "arrayBuffers": 5779736
+      },
+      {
+        "second": 77,
+        "rss": 90947584,
+        "external": 8653892,
+        "arrayBuffers": 6619138
+      },
+      {
+        "second": 78,
+        "rss": 83726336,
+        "external": 9740752,
+        "arrayBuffers": 7353742
+      },
+      {
+        "second": 79,
+        "rss": 85012480,
+        "external": 10914378,
+        "arrayBuffers": 8175112
+      },
+      {
+        "second": 80,
+        "rss": 97611776,
+        "external": 5693502,
+        "arrayBuffers": 4586268
+      },
+      {
+        "second": 81,
+        "rss": 91426816,
+        "external": 6747020,
+        "arrayBuffers": 5287530
+      },
+      {
+        "second": 82,
+        "rss": 86097920,
+        "external": 7889440,
+        "arrayBuffers": 6077694
+      },
+      {
+        "second": 83,
+        "rss": 93851648,
+        "external": 9294342,
+        "arrayBuffers": 7064292
+      },
+      {
+        "second": 84,
+        "rss": 81522688,
+        "external": 10360686,
+        "arrayBuffers": 7778380
+      },
+      {
+        "second": 85,
+        "rss": 93990912,
+        "external": 5940930,
+        "arrayBuffers": 4789794
+      },
+      {
+        "second": 86,
+        "rss": 80371712,
+        "external": 7428408,
+        "arrayBuffers": 5836952
+      },
+      {
+        "second": 87,
+        "rss": 94445568,
+        "external": 8589886,
+        "arrayBuffers": 6646174
+      },
+      {
+        "second": 88,
+        "rss": 90644480,
+        "external": 9818570,
+        "arrayBuffers": 7456554
+      },
+      {
+        "second": 89,
+        "rss": 84004864,
+        "external": 11030966,
+        "arrayBuffers": 8316694
+      },
+      {
+        "second": 90,
+        "rss": 90284032,
+        "external": 5867062,
+        "arrayBuffers": 4693900
+      },
+      {
+        "second": 91,
+        "rss": 84316160,
+        "external": 6962010,
+        "arrayBuffers": 5436592
+      },
+      {
+        "second": 92,
+        "rss": 82497536,
+        "external": 8352488,
+        "arrayBuffers": 6386750
+      },
+      {
+        "second": 93,
+        "rss": 95207424,
+        "external": 9474524,
+        "arrayBuffers": 7156530
+      },
+      {
+        "second": 94,
+        "rss": 83877888,
+        "external": 10480416,
+        "arrayBuffers": 7810166
+      },
+      {
+        "second": 95,
+        "rss": 92807168,
+        "external": 5314334,
+        "arrayBuffers": 4405364
+      },
+      {
+        "second": 96,
+        "rss": 80179200,
+        "external": 6522276,
+        "arrayBuffers": 5172986
+      },
+      {
+        "second": 97,
+        "rss": 92332032,
+        "external": 7958484,
+        "arrayBuffers": 6168874
+      },
+      {
+        "second": 98,
+        "rss": 94814208,
+        "external": 9002286,
+        "arrayBuffers": 6882436
+      },
+      {
+        "second": 99,
+        "rss": 82247680,
+        "external": 9404196,
+        "arrayBuffers": 7196282
+      }
+    ],
+    "closeCalls": [
+      {
+        "code": 1011,
+        "reason": ""
+      },
+      {
+        "code": 1011,
+        "reason": ""
+      },
+      {
+        "code": 1011,
+        "reason": ""
+      },
+      {
+        "code": 1011,
+        "reason": ""
+      },
+      {
+        "code": 1011,
+        "reason": ""
+      },
+      {
+        "code": 1011,
+        "reason": ""
+      }
+    ],
+    "activeRelays": 0,
+    "relayTimers": 0,
+    "status": {
+      "held": false,
+      "waiting": 0,
+      "backends": [
+        {
+          "id": "b",
+          "url": "http://localhost:32517/",
+          "state": "live",
+          "restore": "live",
+          "failures": 0,
+          "successes": 0,
+          "requests": 7,
+          "inFlight": 0,
+          "websockets": 0,
+          "wsTotal": 6,
+          "upstreamErrors": 0,
+          "drained": false
+        }
+      ],
+      "metrics": {
+        "requests": 7,
+        "upstreamErrors": 0,
+        "wsRelays": 6,
+        "errors": {
+          "502": 0,
+          "503": 0,
+          "504": 0
+        },
+        "holds": 0,
+        "holdMs": 0,
+        "holdDurationBuckets": {
+          "le10": 0,
+          "le100": 0,
+          "le1000": 0,
+          "le10000": 0,
+          "infinity": 0
+        }
+      }
+    }
+  },
+  "baselineRevision": "58d483d57448466bcd51c01bd1ced4fdea031fb0"
+}

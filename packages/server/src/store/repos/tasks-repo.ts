@@ -1,7 +1,7 @@
 import { readCurrentTurnRow } from "@multiremi/store/execution-reads.js";
 import { readAttemptTurn, readTurnRow } from "@multiremi/store/execution-reads.js";
 import { withTurnChangeBatch } from "../turn-execution-records.js";
-import { attemptInputState, acknowledgeAttemptInput } from '../inbox/attempt-input.js';
+import { readAttemptInputRow, attemptInputState, acknowledgeAttemptInput } from '../inbox/attempt-input.js';
 import { InputUnreadError, assertOfferedInputRead, lockLane,reRingAfterTurnEnd,sweepIdleLanes,acknowledgeInput } from "../inbox/lane-machine.js";
 import { countMessageDelegationPairHops, sendMessageWithinTransaction } from "../inbox/send-message.js";
 import { patchDecisionRecord } from "../inbox/decision-records.js";
@@ -5402,7 +5402,7 @@ ${placementAfter.sql}
       if(turn){lockLane(this.ctx,turn.session_id,turn.agent_id,turn.execution_scope);
         if(input.turnInputToSeq===undefined){const to=current.projectionToSeq??turn.wake_seq??0;if(to>=Number(turn.input_to_seq??0))acknowledgeInput(this.ctx,turn.id,Number(turn.input_to_seq??0),to,false);}
         if(input.turnInputToSeq!==undefined){
-          const offered=this.ctx.db.query('SELECT projection_to_seq FROM multiremi_turn_attempts WHERE id=?').get(taskId)?.projection_to_seq??0;
+          const offered=readAttemptInputRow(this.ctx, taskId)?.projection_to_seq??0;
           if(turn.current_attempt_id!==taskId||input.turnInputToSeq>offered||input.turnInputToSeq<Number(turn.input_to_seq??0))throw new Error('stale_attempt');
           const scopeSql=this.ctx.db.dialect==='postgres'?"COALESCE(metadata::jsonb->>'execution_scope','')":"COALESCE(json_extract(metadata,'$.execution_scope'),'')";
           // Offered interrupts must finish in this turn; unoffered input is re-rung after it ends.

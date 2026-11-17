@@ -4,10 +4,10 @@
 
 | 帧 | 上轮读/写=总数 | 本轮读/写=总数 | 目标 | 尚超出 |
 |---|---:|---:|---:|---:|
-| turn.complete |197/52=249|177/52=229|60|169|
+| turn.complete |197/52=249|175/52=227|60|167|
 | task.fail |141/25=166|116/25=141|40|101|
 
-旧 context-only 的 2/40 两档：complete 165/48=213，fail 107/27=134；测试常数已同步，扩展规模不变性断言保留。
+旧 context-only 的 2/40 两档：complete 163/48=211，fail 107/27=134；测试常数已同步，扩展规模不变性断言保留。
 
 本轮合并 turn/attempt raw row、message、Session 的窄投影、Chat/Project/资源/操作者、自动任务归属、评论存在性和下行目标读取。Chat workspace lineage 改用 RuntimeLite，只需要 daemon/legacyDaemon 身份。未增加延后任务、未删除 ACK/终态/usage/outbox/通知。
 
@@ -25,9 +25,9 @@
 
 相关行为回归：10 文件 168 pass / 53 skip / 0 fail；skip 是未配置真实 PG 等前提，不能算 PG 通过。完整 CI 及最终 head 结论以 PR 描述/交付评论为准。
 
-## turn.complete: 229 executions
+## turn.complete: 227 executions
 
-类别执行数：{'校验': 130, '锁': 11, '其他': 47, '必要写入': 41}。
+类别执行数：{'校验': 128, '锁': 11, '其他': 47, '必要写入': 41}。
 
 ### turn.complete-001 · 11 次 · 校验
 
@@ -39,7 +39,7 @@ SELECT runtime.*, profile.display_name AS daemon_display_name, drain.daemon_id A
 
 来源：packages/server/src/store/repos/runtimes-repo.ts:635、packages/server/src/store/repos/runtimes-repo.ts:543。
 
-执行位置 / scope:generation：1 / 1:0, 8 / 1:2, 168 / None:None, 175 / 2:0, 179 / 2:2, 185 / None:None, 190 / 3:0, 194 / 3:2, 200 / 4:0, 207 / 5:0, 228 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：1 / 1:0, 8 / 1:2, 166 / None:None, 173 / 2:0, 177 / 2:2, 183 / None:None, 188 / 3:0, 192 / 3:2, 198 / 4:0, 205 / 5:0, 226 / 5:2。参数见相邻 JSON。
 
 ### turn.complete-002 · 2 次 · 校验
 
@@ -63,7 +63,7 @@ SELECT id, workspace_id, runtime_id, status, agent_id, chat_session_id, issue_id
 
 来源：packages/server/src/store/repos/tasks-repo.ts:2701、packages/server/src/store/repos/tasks-repo.ts:5361、packages/server/src/api/daemon-protocol/task-offers.ts:249。
 
-执行位置 / scope:generation：3 / 1:0, 166 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：3 / 1:0, 164 / 1:4。参数见相邻 JSON。
 
 ### turn.complete-004 · 5 次 · 锁
 
@@ -75,7 +75,7 @@ UPDATE multiremi_workspaces SET updated_at = updated_at WHERE id = ?
 
 来源：packages/server/src/store/context.ts:1084、packages/server/src/store/request-read-cache.ts:203。
 
-执行位置 / scope:generation：4 / 1:1, 151 / 1:3, 178 / 2:1, 193 / 3:1, 214 / 5:1。参数见相邻 JSON。
+执行位置 / scope:generation：4 / 1:1, 149 / 1:3, 176 / 2:1, 191 / 3:1, 212 / 5:1。参数见相邻 JSON。
 
 ### turn.complete-005 · 4 次 · 校验
 
@@ -87,7 +87,7 @@ SELECT * FROM multiremi_turn_execution_records WHERE id = ?
 
 来源：packages/server/src/store/repos/tasks-repo.ts:2673、packages/server/src/store/repos/tasks-repo.ts:2653。
 
-执行位置 / scope:generation：5 / 1:2, 47 / 1:2, 131 / 1:2, 221 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：5 / 1:2, 45 / 1:2, 129 / 1:2, 219 / 5:2。参数见相邻 JSON。
 
 ### turn.complete-006 · 2 次 · 其他
 
@@ -99,7 +99,7 @@ SELECT u.task_id AS task_id,u.provider,COALESCE(u.model,u.requested_model,'unkno
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/usage-projection.ts:21。
 
-执行位置 / scope:generation：6 / 1:2, 222 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：6 / 1:2, 220 / 5:2。参数见相邻 JSON。
 
 ### turn.complete-007 · 2 次 · 校验
 
@@ -111,7 +111,7 @@ SELECT id FROM multiremi_autopilot_run_records WHERE task_id = ? ORDER BY create
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/tasks-repo.ts:7355。
 
-执行位置 / scope:generation：7 / 1:2, 223 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：7 / 1:2, 221 / 5:2。参数见相邻 JSON。
 
 ### turn.complete-008 · 2 次 · 校验
 
@@ -123,7 +123,7 @@ SELECT * FROM multiremi_workspaces WHERE id = ?
 
 来源：packages/server/src/store/repos/workspaces-repo.ts:582、packages/server/src/store/repos/tasks-repo.ts:4800、packages/server/src/store/repos/tasks-repo.ts:3060。
 
-执行位置 / scope:generation：10 / 1:2, 64 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：10 / 1:2, 62 / 1:2。参数见相邻 JSON。
 
 ### turn.complete-009 · 1 次 · 校验
 
@@ -147,7 +147,7 @@ SELECT scoped.*, CASE WHEN scoped.chat_id IS NOT NULL THEN chat.workspace_id ELS
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/issue-sessions-repo.ts:439。
 
-执行位置 / scope:generation：12 / 1:2, 29 / 1:2, 48 / 1:2, 67 / 1:2, 97 / 1:2, 110 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：12 / 1:2, 28 / 1:2, 46 / 1:2, 65 / 1:2, 95 / 1:2, 108 / 1:2。参数见相邻 JSON。
 
 ### turn.complete-011 · 1 次 · 锁
 
@@ -173,17 +173,17 @@ INSERT INTO multiremi_session_lanes(session_id,reader_type,reader_id,execution_s
 
 执行位置 / scope:generation：14 / 1:2。参数见相邻 JSON。
 
-### turn.complete-013 · 1 次 · 校验
+### turn.complete-013 · 4 次 · 校验
 
 ```sql
-SELECT projection_to_seq FROM multiremi_turn_attempts WHERE id=?
+SELECT * FROM multiremi_turn_attempts WHERE id=?
 ```
 
-确认最终 ACK 不越过 daemon 已获得的输入；这一窄读取与后续完整 receipt 行的读取分属不同锁代际。
+核对 turn/current attempt、终态状态、输入水位或派生轮卡；写入后、取得新锁后及异步新快照必须重读。
 
-来源：packages/server/src/store/repos/tasks-repo.ts:5405、packages/server/src/store/turn-execution-records.ts:142。
+来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/execution-reads.ts:18。
 
-执行位置 / scope:generation：15 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：15 / 1:2, 38 / 1:2, 70 / 1:2, 104 / 1:2。参数见相邻 JSON。
 
 ### turn.complete-014 · 1 次 · 校验
 
@@ -197,19 +197,7 @@ SELECT 1 FROM multiremi_conversation_log WHERE session_id=? AND kind='message' A
 
 执行位置 / scope:generation：16 / 1:2。参数见相邻 JSON。
 
-### turn.complete-015 · 4 次 · 校验
-
-```sql
-SELECT * FROM multiremi_turn_attempts WHERE id=?
-```
-
-核对 turn/current attempt、终态状态、输入水位或派生轮卡；写入后、取得新锁后及异步新快照必须重读。
-
-来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/execution-reads.ts:18。
-
-执行位置 / scope:generation：17 / 1:2, 40 / 1:2, 72 / 1:2, 106 / 1:2。参数见相邻 JSON。
-
-### turn.complete-016 · 1 次 · 校验
+### turn.complete-015 · 1 次 · 校验
 
 ```sql
 SELECT seq,sender_type,sender_id,body_md,to_agent_id,wake_applied,metadata FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND visibility='shown' AND deleted_at IS NULL
@@ -219,9 +207,9 @@ SELECT seq,sender_type,sender_id,body_md,to_agent_id,wake_applied,metadata FROM 
 
 来源：packages/server/src/store/inbox/lane-machine.ts:131、packages/server/src/store/repos/tasks-repo.ts:5415。
 
-执行位置 / scope:generation：18 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：17 / 1:2。参数见相邻 JSON。
 
-### turn.complete-017 · 1 次 · 校验
+### turn.complete-016 · 1 次 · 校验
 
 ```sql
 SELECT cursor_seq,cursor_offset FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?
@@ -231,9 +219,9 @@ SELECT cursor_seq,cursor_offset FROM multiremi_session_lanes WHERE session_id=? 
 
 来源：packages/server/src/store/inbox/lane-machine.ts:144、packages/server/src/store/repos/tasks-repo.ts:5424。
 
-执行位置 / scope:generation：19 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：18 / 1:2。参数见相邻 JSON。
 
-### turn.complete-018 · 3 次 · 校验
+### turn.complete-017 · 3 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_conversation_heads WHERE session_id = ?
@@ -243,9 +231,9 @@ SELECT * FROM multiremi_conversation_heads WHERE session_id = ?
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/conversation-log-repo.ts:575。
 
-执行位置 / scope:generation：20 / 1:2, 77 / 1:2, 129 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：19 / 1:2, 75 / 1:2, 127 / 1:2。参数见相邻 JSON。
 
-### turn.complete-019 · 1 次 · 必要写入
+### turn.complete-018 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_turn_attempts SET input_ack_seq=?,input_read_seq=?,input_read_offset=?,input_trigger_ack=1 WHERE id=?
@@ -255,9 +243,9 @@ UPDATE multiremi_turn_attempts SET input_ack_seq=?,input_read_seq=?,input_read_o
 
 来源：packages/server/src/store/inbox/attempt-input.ts:59、packages/server/src/store/repos/tasks-repo.ts:5425。
 
-执行位置 / scope:generation：21 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：20 / 1:2。参数见相邻 JSON。
 
-### turn.complete-020 · 2 次 · 校验
+### turn.complete-019 · 2 次 · 校验
 
 ```sql
 SELECT 1 AS present FROM multiremi_conversation_log log JOIN multiremi_issue_sessions s ON s.id = log.session_id WHERE s.issue_id = ? AND log.sender_type = 'agent' AND log.sender_id = ? AND log.kind = 'message' AND log.message_kind IN ('request', 'reply', 'final') AND log.to_type = 'none' AND SUBSTR(log.id, 1, 4) = 'cmt_' AND log.visibility='shown' AND log.deleted_at IS NULL AND log.task_id = (SELECT turn_id FROM multiremi_turn_attempts WHERE id=?) AND log.created_at >= ? LIMIT 1
@@ -267,9 +255,9 @@ SELECT 1 AS present FROM multiremi_conversation_log log JOIN multiremi_issue_ses
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/tasks-repo.ts:7259。
 
-执行位置 / scope:generation：22 / 1:2, 50 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：21 / 1:2, 48 / 1:2。参数见相邻 JSON。
 
-### turn.complete-021 · 1 次 · 锁
+### turn.complete-020 · 1 次 · 锁
 
 ```sql
 UPDATE multiremi_turns SET current_attempt_id=current_attempt_id WHERE id IN (SELECT turn_id FROM multiremi_turn_execution_records WHERE id = ? AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human'))
@@ -279,9 +267,9 @@ UPDATE multiremi_turns SET current_attempt_id=current_attempt_id WHERE id IN (SE
 
 来源：packages/server/src/store/turn-execution-records.ts:180、packages/server/src/store/repos/tasks-repo.ts:5434。
 
-执行位置 / scope:generation：23 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：22 / 1:2。参数见相邻 JSON。
 
-### turn.complete-022 · 1 次 · 校验
+### turn.complete-021 · 1 次 · 校验
 
 ```sql
 SELECT target.*,owner.current_attempt_id AS mutation_current_attempt_id, owner.session_id AS mutation_session_id,owner.agent_id AS mutation_agent_id, owner.reply_message_id AS mutation_reply_message_id,owner.started_at AS mutation_started_at FROM (SELECT id,turn_id,('completed') AS mutation_0,(?) AS mutation_1,(?) AS mutation_2,(COALESCE(?, session_id)) AS mutation_3,(COALESCE(?, work_dir)) AS mutation_4,(NULL) AS mutation_5,(NULL) AS mutation_6,(?) AS mutation_7,(?) AS mutation_8 FROM multiremi_turn_execution_records WHERE id = ? AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')) target JOIN multiremi_turns owner ON owner.id=target.turn_id
@@ -291,93 +279,9 @@ SELECT target.*,owner.current_attempt_id AS mutation_current_attempt_id, owner.s
 
 来源：packages/server/src/store/turn-execution-records.ts:189、packages/server/src/store/repos/tasks-repo.ts:5434。
 
-执行位置 / scope:generation：24 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：23 / 1:2。参数见相邻 JSON。
 
-### turn.complete-023 · 1 次 · 校验
-
-```sql
-SELECT id FROM multiremi_turns WHERE id=?
-```
-
-核对 turn/current attempt、终态状态、输入水位或派生轮卡；写入后、取得新锁后及异步新快照必须重读。
-
-来源：packages/server/src/store/repos/conversation-log-repo.ts:127、packages/server/src/store/turn-execution-records.ts:229。
-
-执行位置 / scope:generation：25 / 1:2。参数见相邻 JSON。
-
-### turn.complete-024 · 3 次 · 校验
-
-```sql
-SELECT s.*, ( SELECT COUNT(*) FROM multiremi_conversation_log e WHERE e.session_id = s.parent_session_id AND e.kind <> 'head' AND e.seq > 0 AND ((s.inherit_mode = 'follow' AND (s.follow_frozen_seq IS NULL OR e.seq <= s.follow_frozen_seq)) OR (s.inherit_mode <> 'follow' AND e.seq <= s.inherit_cutoff_seq)) ) AS inherited_event_count FROM multiremi_issue_sessions s WHERE id = ?
-```
-
-读取规范消息/回复/决策事实和可见范围；输入连续性、回复来源及通知投影都依赖这些列。
-
-来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/issue-sessions-repo.ts:433。
-
-执行位置 / scope:generation：26 / 1:2, 96 / 1:2, 108 / 1:2。参数见相邻 JSON。
-
-### turn.complete-025 · 3 次 · 校验
-
-```sql
-SELECT chat.id, chat.workspace_id, chat.creator_id, chat.agent_id, chat.runtime_workspace_id, chat.project_id, chat.title, chat.status, chat.session_id, chat.work_dir, chat.session_runtime_id, chat.session_provider, chat.session_execution_fingerprint, chat.latest_task_id, chat.pinned, chat.origin_autopilot_id, chat.origin_run_id, chat.created_at, chat.updated_at, (SELECT COUNT(*) FROM multiremi_conversation_log m LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = '' LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id AND shared.workspace_id = chat.workspace_id WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown' AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS unread_count, (SELECT MIN(m.created_at) FROM multiremi_conversation_log m LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = '' LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id AND shared.workspace_id = chat.workspace_id WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown' AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS reader_unread_since, (SELECT SUBSTR(m.body, 1, 240) FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_content, (SELECT m.role FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_role, (SELECT m.created_at FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_created_at FROM multiremi_chat_sessions chat WHERE chat.id = ?
-```
-
-读取规范消息/回复/决策事实和可见范围；输入连续性、回复来源及通知投影都依赖这些列。
-
-来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/chat-repo.ts:254。
-
-执行位置 / scope:generation：27 / 1:2, 73 / 1:2, 109 / 1:2。参数见相邻 JSON。
-
-### turn.complete-026 · 1 次 · 校验
-
-```sql
-SELECT workspace_id FROM multiremi_autopilots WHERE session_id=?
-```
-
-解析 autopilot Session 的所属工作区；消息统一入口不能只支持 Issue/Chat。
-
-来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/inbox/send-message.ts:77。
-
-执行位置 / scope:generation：28 / 1:2。参数见相邻 JSON。
-
-### turn.complete-027 · 4 次 · 校验
-
-```sql
-SELECT * FROM multiremi_conversation_log WHERE id=? AND kind='message'
-```
-
-读取规范消息/回复/决策事实和可见范围；输入连续性、回复来源及通知投影都依赖这些列。
-
-来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/inbox/send-message.ts:22。
-
-执行位置 / scope:generation：30 / 1:2, 43 / 1:2, 76 / 1:2, 87 / 1:2。参数见相邻 JSON。
-
-### turn.complete-028 · 7 次 · 校验
-
-```sql
-SELECT i.*, w.id AS existing_workspace_id FROM multiremi_issues i LEFT JOIN multiremi_workspaces w ON w.id = i.workspace_id WHERE i.id = ?
-```
-
-核对 Issue 归属、父子状态与执行负责人，完成一个 turn 不等于整个 Issue 已完成。
-
-来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/issues-repo.ts:850。
-
-执行位置 / scope:generation：31 / 1:2, 59 / 1:2, 74 / 1:2, 115 / 1:2, 122 / 1:2, 127 / 1:2, 154 / 1:4。参数见相邻 JSON。
-
-### turn.complete-029 · 2 次 · 校验
-
-```sql
-SELECT l.* FROM multiremi_issue_labels l JOIN multiremi_issue_to_labels il ON il.label_id = l.id WHERE il.issue_id = ? ORDER BY lower(l.name) ASC
-```
-
-批量构建 Issue 的标签投影，保持现有通知内容。
-
-来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/issues-repo.ts:5399。
-
-执行位置 / scope:generation：32 / 1:2, 155 / 1:4。参数见相邻 JSON。
-
-### turn.complete-030 · 3 次 · 校验
+### turn.complete-022 · 3 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_turns WHERE id=?
@@ -387,9 +291,81 @@ SELECT * FROM multiremi_turns WHERE id=?
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/execution-reads.ts:12。
 
-执行位置 / scope:generation：33 / 1:2, 75 / 1:2, 107 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：24 / 1:2, 73 / 1:2, 105 / 1:2。参数见相邻 JSON。
 
-### turn.complete-031 · 1 次 · 校验
+### turn.complete-023 · 3 次 · 校验
+
+```sql
+SELECT s.*, ( SELECT COUNT(*) FROM multiremi_conversation_log e WHERE e.session_id = s.parent_session_id AND e.kind <> 'head' AND e.seq > 0 AND ((s.inherit_mode = 'follow' AND (s.follow_frozen_seq IS NULL OR e.seq <= s.follow_frozen_seq)) OR (s.inherit_mode <> 'follow' AND e.seq <= s.inherit_cutoff_seq)) ) AS inherited_event_count FROM multiremi_issue_sessions s WHERE id = ?
+```
+
+读取规范消息/回复/决策事实和可见范围；输入连续性、回复来源及通知投影都依赖这些列。
+
+来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/issue-sessions-repo.ts:433。
+
+执行位置 / scope:generation：25 / 1:2, 94 / 1:2, 106 / 1:2。参数见相邻 JSON。
+
+### turn.complete-024 · 3 次 · 校验
+
+```sql
+SELECT chat.id, chat.workspace_id, chat.creator_id, chat.agent_id, chat.runtime_workspace_id, chat.project_id, chat.title, chat.status, chat.session_id, chat.work_dir, chat.session_runtime_id, chat.session_provider, chat.session_execution_fingerprint, chat.latest_task_id, chat.pinned, chat.origin_autopilot_id, chat.origin_run_id, chat.created_at, chat.updated_at, (SELECT COUNT(*) FROM multiremi_conversation_log m LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = '' LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id AND shared.workspace_id = chat.workspace_id WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown' AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS unread_count, (SELECT MIN(m.created_at) FROM multiremi_conversation_log m LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = '' LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id AND shared.workspace_id = chat.workspace_id WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown' AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS reader_unread_since, (SELECT SUBSTR(m.body, 1, 240) FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_content, (SELECT m.role FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_role, (SELECT m.created_at FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_created_at FROM multiremi_chat_sessions chat WHERE chat.id = ?
+```
+
+读取规范消息/回复/决策事实和可见范围；输入连续性、回复来源及通知投影都依赖这些列。
+
+来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/chat-repo.ts:254。
+
+执行位置 / scope:generation：26 / 1:2, 71 / 1:2, 107 / 1:2。参数见相邻 JSON。
+
+### turn.complete-025 · 1 次 · 校验
+
+```sql
+SELECT workspace_id FROM multiremi_autopilots WHERE session_id=?
+```
+
+解析 autopilot Session 的所属工作区；消息统一入口不能只支持 Issue/Chat。
+
+来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/inbox/send-message.ts:77。
+
+执行位置 / scope:generation：27 / 1:2。参数见相邻 JSON。
+
+### turn.complete-026 · 4 次 · 校验
+
+```sql
+SELECT * FROM multiremi_conversation_log WHERE id=? AND kind='message'
+```
+
+读取规范消息/回复/决策事实和可见范围；输入连续性、回复来源及通知投影都依赖这些列。
+
+来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/inbox/send-message.ts:22。
+
+执行位置 / scope:generation：29 / 1:2, 41 / 1:2, 74 / 1:2, 85 / 1:2。参数见相邻 JSON。
+
+### turn.complete-027 · 7 次 · 校验
+
+```sql
+SELECT i.*, w.id AS existing_workspace_id FROM multiremi_issues i LEFT JOIN multiremi_workspaces w ON w.id = i.workspace_id WHERE i.id = ?
+```
+
+核对 Issue 归属、父子状态与执行负责人，完成一个 turn 不等于整个 Issue 已完成。
+
+来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/issues-repo.ts:850。
+
+执行位置 / scope:generation：30 / 1:2, 57 / 1:2, 72 / 1:2, 113 / 1:2, 120 / 1:2, 125 / 1:2, 152 / 1:4。参数见相邻 JSON。
+
+### turn.complete-028 · 2 次 · 校验
+
+```sql
+SELECT l.* FROM multiremi_issue_labels l JOIN multiremi_issue_to_labels il ON il.label_id = l.id WHERE il.issue_id = ? ORDER BY lower(l.name) ASC
+```
+
+批量构建 Issue 的标签投影，保持现有通知内容。
+
+来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/issues-repo.ts:5399。
+
+执行位置 / scope:generation：31 / 1:2, 153 / 1:4。参数见相邻 JSON。
+
+### turn.complete-029 · 1 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_agents WHERE id = ?
@@ -399,9 +375,9 @@ SELECT * FROM multiremi_agents WHERE id = ?
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/agents-skills-repo.ts:756。
 
-执行位置 / scope:generation：34 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：32 / 1:2。参数见相邻 JSON。
 
-### turn.complete-032 · 1 次 · 其他
+### turn.complete-030 · 1 次 · 其他
 
 ```sql
 SELECT s.* FROM multiremi_skills s JOIN multiremi_agent_skills aks ON aks.skill_id = s.id WHERE aks.agent_id = ? AND s.archived_at IS NULL ORDER BY aks.created_at ASC, s.name ASC
@@ -411,9 +387,9 @@ SELECT s.* FROM multiremi_skills s JOIN multiremi_agent_skills aks ON aks.skill_
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/agents-skills-repo.ts:897。
 
-执行位置 / scope:generation：35 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：33 / 1:2。参数见相邻 JSON。
 
-### turn.complete-033 · 2 次 · 必要写入
+### turn.complete-031 · 2 次 · 必要写入
 
 ```sql
 UPDATE multiremi_conversation_heads SET workspace_id=COALESCE(workspace_id,?),updated_at=updated_at WHERE session_id=?
@@ -423,9 +399,9 @@ UPDATE multiremi_conversation_heads SET workspace_id=COALESCE(workspace_id,?),up
 
 来源：packages/server/src/store/inbox/send-message.ts:159、packages/server/src/store/repos/conversation-log-repo.ts:128、packages/server/src/store/repos/issues-repo.ts:4432。
 
-执行位置 / scope:generation：36 / 1:2, 78 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：34 / 1:2, 76 / 1:2。参数见相邻 JSON。
 
-### turn.complete-034 · 3 次 · 校验
+### turn.complete-032 · 3 次 · 校验
 
 ```sql
 SELECT id,workspace_id,parent_issue_id,assignee_type,assignee_id FROM multiremi_issues WHERE id=?
@@ -435,9 +411,9 @@ SELECT id,workspace_id,parent_issue_id,assignee_type,assignee_id FROM multiremi_
 
 来源：packages/server/src/store/issue-responsibility.ts:20、packages/server/src/store/issue-responsibility.ts:24。
 
-执行位置 / scope:generation：37 / 1:2, 79 / 1:2, 116 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：35 / 1:2, 77 / 1:2, 114 / 1:2。参数见相邻 JSON。
 
-### turn.complete-035 · 3 次 · 校验
+### turn.complete-033 · 3 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_conversation_log WHERE id = ?
@@ -447,9 +423,9 @@ SELECT * FROM multiremi_conversation_log WHERE id = ?
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:599、packages/server/src/store/repos/conversation-log-repo.ts:474、packages/server/src/store/inbox/send-message.ts:234。
 
-执行位置 / scope:generation：38 / 1:2, 86 / 1:2, 100 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：36 / 1:2, 84 / 1:2, 98 / 1:2。参数见相邻 JSON。
 
-### turn.complete-036 · 2 次 · 必要写入
+### turn.complete-034 · 2 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, updated_at) VALUES (?, 1, 1, ?) ON CONFLICT(session_id) DO UPDATE SET head_seq = multiremi_conversation_heads.head_seq + 1, log_version = multiremi_conversation_heads.log_version + 1, updated_at = excluded.updated_at RETURNING head_seq
@@ -459,9 +435,9 @@ INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, upd
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:553、packages/server/src/store/repos/conversation-log-repo.ts:486。
 
-执行位置 / scope:generation：39 / 1:2, 101 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：37 / 1:2, 99 / 1:2。参数见相邻 JSON。
 
-### turn.complete-037 · 2 次 · 必要写入
+### turn.complete-035 · 2 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_conversation_log ( session_id, seq, id, kind, visibility, sender_type, sender_id, task_id, body_md, body_html, render_version, reply_to_id, resolved_at, resolved_by_type, resolved_by_id, metadata, revision, created_at, updated_at, deleted_at, to_type,to_ref,to_agent_id,to_member_id,message_kind,wake_requested,wake_applied,wake_reason,dedupe_key, options,card_token_hash,card_token_recipient,card_token_consumed_at ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -471,9 +447,9 @@ INSERT INTO multiremi_conversation_log ( session_id, seq, id, kind, visibility, 
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:493、packages/server/src/store/inbox/send-message.ts:236、packages/server/src/store/repos/issue-sessions-repo.ts:723。
 
-执行位置 / scope:generation：41 / 1:2, 102 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：39 / 1:2, 100 / 1:2。参数见相邻 JSON。
 
-### turn.complete-038 · 6 次 · 校验
+### turn.complete-036 · 6 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_conversation_log WHERE session_id = ? AND seq = ?
@@ -483,9 +459,9 @@ SELECT * FROM multiremi_conversation_log WHERE session_id = ? AND seq = ?
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/conversation-log-repo.ts:592。
 
-执行位置 / scope:generation：42 / 1:2, 81 / 1:2, 84 / 1:2, 103 / 1:2, 142 / 1:2, 146 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：40 / 1:2, 79 / 1:2, 82 / 1:2, 101 / 1:2, 140 / 1:2, 144 / 1:2。参数见相邻 JSON。
 
-### turn.complete-039 · 1 次 · 必要写入
+### turn.complete-037 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_turn_attempts SET status=?,branch_name=?,session_id=?,work_dir=?,wait_reason=?,failure_reason=?,ended_at=?,updated_at=? WHERE id=?
@@ -495,9 +471,9 @@ UPDATE multiremi_turn_attempts SET status=?,branch_name=?,session_id=?,work_dir=
 
 来源：packages/server/src/store/turn-execution-records.ts:158、packages/server/src/store/turn-execution-records.ts:236。
 
-执行位置 / scope:generation：44 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：42 / 1:2。参数见相邻 JSON。
 
-### turn.complete-040 · 1 次 · 必要写入
+### turn.complete-038 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_turns SET status=?,ended_at=?,reply_message_id=? WHERE id=?
@@ -507,9 +483,9 @@ UPDATE multiremi_turns SET status=?,ended_at=?,reply_message_id=? WHERE id=?
 
 来源：packages/server/src/store/turn-execution-records.ts:158、packages/server/src/store/turn-execution-records.ts:237。
 
-执行位置 / scope:generation：45 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：43 / 1:2。参数见相邻 JSON。
 
-### turn.complete-041 · 1 次 · 必要写入
+### turn.complete-039 · 1 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_task_traces (task_id, location, updated_at) VALUES (?, 'none', ?) ON CONFLICT(task_id) DO UPDATE SET location = 'none', runtime_id = NULL, updated_at = excluded.updated_at WHERE multiremi_task_traces.location = 'daemon'
@@ -519,9 +495,9 @@ INSERT INTO multiremi_task_traces (task_id, location, updated_at) VALUES (?, 'no
 
 来源：packages/server/src/store/repos/task-traces-repo.ts:55、packages/server/src/store/store.ts:1093。
 
-执行位置 / scope:generation：46 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：44 / 1:2。参数见相邻 JSON。
 
-### turn.complete-042 · 1 次 · 校验
+### turn.complete-040 · 1 次 · 校验
 
 ```sql
 SELECT id FROM multiremi_message_question_records WHERE task_id = ? AND status IN ('pending','responded')
@@ -531,9 +507,9 @@ SELECT id FROM multiremi_message_question_records WHERE task_id = ? AND status I
 
 来源：packages/server/src/store/repos/tasks-repo.ts:6986、packages/server/src/store/repos/tasks-repo.ts:6572。
 
-执行位置 / scope:generation：49 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：47 / 1:2。参数见相邻 JSON。
 
-### turn.complete-043 · 1 次 · 校验
+### turn.complete-041 · 1 次 · 校验
 
 ```sql
 SELECT reply_message_id FROM multiremi_turns WHERE current_attempt_id = ?
@@ -543,9 +519,9 @@ SELECT reply_message_id FROM multiremi_turns WHERE current_attempt_id = ?
 
 来源：packages/server/src/store/repos/tasks-repo.ts:6580、packages/server/src/store/repos/tasks-repo.ts:5457。
 
-执行位置 / scope:generation：51 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：49 / 1:2。参数见相邻 JSON。
 
-### turn.complete-044 · 1 次 · 校验
+### turn.complete-042 · 1 次 · 校验
 
 ```sql
 SELECT t.id, t.status, t.current_attempt_id FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id = t.id WHERE a.id = ?
@@ -555,9 +531,9 @@ SELECT t.id, t.status, t.current_attempt_id FROM multiremi_turns t JOIN multirem
 
 来源：packages/server/src/store/repos/tasks-repo.ts:6637、packages/server/src/store/repos/tasks-repo.ts:5457。
 
-执行位置 / scope:generation：52 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：50 / 1:2。参数见相邻 JSON。
 
-### turn.complete-045 · 1 次 · 必要写入
+### turn.complete-043 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_access_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE type = 'task' AND task_id = ? AND revoked_at IS NULL
@@ -567,9 +543,9 @@ UPDATE multiremi_access_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE ty
 
 来源：packages/server/src/store/repos/access-tokens-repo.ts:243、packages/server/src/store/repos/tasks-repo.ts:6662。
 
-执行位置 / scope:generation：53 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：51 / 1:2。参数见相邻 JSON。
 
-### turn.complete-046 · 2 次 · 校验
+### turn.complete-044 · 2 次 · 校验
 
 ```sql
 SELECT workspace_id FROM multiremi_issues WHERE id = ?
@@ -579,9 +555,9 @@ SELECT workspace_id FROM multiremi_issues WHERE id = ?
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/context.ts:1586。
 
-执行位置 / scope:generation：54 / 1:2, 88 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：52 / 1:2, 86 / 1:2。参数见相邻 JSON。
 
-### turn.complete-047 · 2 次 · 必要写入
+### turn.complete-045 · 2 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_issue_activity (id, issue_id, workspace_id, actor_type, actor_id, type, body, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -591,9 +567,9 @@ INSERT INTO multiremi_issue_activity (id, issue_id, workspace_id, actor_type, ac
 
 来源：packages/server/src/store/context.ts:1448、packages/server/src/store/repos/tasks-repo.ts:6763、packages/server/src/store/repos/issues-repo.ts:4450。
 
-执行位置 / scope:generation：55 / 1:2, 89 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：53 / 1:2, 87 / 1:2。参数见相邻 JSON。
 
-### turn.complete-048 · 1 次 · 校验
+### turn.complete-046 · 1 次 · 校验
 
 ```sql
 SELECT log.*,log.sender_type AS author_type,log.sender_id AS author_id,log.reply_to_id AS parent_id, s.issue_id, log.session_id AS issue_session_id, log.body_md AS body, CASE WHEN log.sender_type = 'platform' THEN 'system' ELSE 'comment' END AS type FROM multiremi_conversation_log log JOIN multiremi_issue_sessions s ON s.id = log.session_id WHERE log.id = ? AND log.kind IN ('message', 'system') AND log.deleted_at IS NULL
@@ -603,9 +579,9 @@ SELECT log.*,log.sender_type AS author_type,log.sender_id AS author_id,log.reply
 
 来源：packages/server/src/store/context.ts:1579、packages/server/src/store/repos/tasks-repo.ts:7199。
 
-执行位置 / scope:generation：56 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：54 / 1:2。参数见相邻 JSON。
 
-### turn.complete-049 · 1 次 · 锁
+### turn.complete-047 · 1 次 · 锁
 
 ```sql
 UPDATE multiremi_workspaces SET updated_at = updated_at WHERE id = (SELECT workspace_id FROM multiremi_issues WHERE id = ?)
@@ -615,9 +591,9 @@ UPDATE multiremi_workspaces SET updated_at = updated_at WHERE id = (SELECT works
 
 来源：packages/server/src/store/repos/issues-repo.ts:4367、packages/server/src/store/repos/tasks-repo.ts:7214。
 
-执行位置 / scope:generation：57 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：55 / 1:2。参数见相邻 JSON。
 
-### turn.complete-050 · 1 次 · 锁
+### turn.complete-048 · 1 次 · 锁
 
 ```sql
 UPDATE multiremi_issues SET id = id WHERE id = ?
@@ -627,9 +603,9 @@ UPDATE multiremi_issues SET id = id WHERE id = ?
 
 来源：packages/server/src/store/issue-row-lock.ts:5、packages/server/src/store/repos/issues-repo.ts:4373。
 
-执行位置 / scope:generation：58 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：56 / 1:2。参数见相邻 JSON。
 
-### turn.complete-051 · 3 次 · 校验
+### turn.complete-049 · 3 次 · 校验
 
 ```sql
 SELECT cmt.*, log.id AS log_id, log.body_md AS log_body_md, log.updated_at AS log_updated_at, log.resolved_at AS log_resolved_at, log.resolved_by_type AS log_resolved_by_type, log.resolved_by_id AS log_resolved_by_id FROM multiremi_issue_message_records cmt LEFT JOIN multiremi_conversation_log log ON log.id = cmt.id WHERE cmt.id = ?
@@ -639,9 +615,9 @@ SELECT cmt.*, log.id AS log_id, log.body_md AS log_body_md, log.updated_at AS lo
 
 来源：packages/server/src/store/repos/issues-repo.ts:4907、packages/server/src/store/repos/issues-repo.ts:4384、packages/server/src/store/repos/issues-repo.ts:4457、packages/server/src/store/repos/issues-repo.ts:4585。
 
-执行位置 / scope:generation：60 / 1:2, 90 / 1:2, 156 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：58 / 1:2, 88 / 1:2, 154 / 1:4。参数见相邻 JSON。
 
-### turn.complete-052 · 3 次 · 其他
+### turn.complete-050 · 3 次 · 其他
 
 ```sql
 SELECT * FROM multiremi_comment_reactions WHERE comment_id IN (?) ORDER BY created_at ASC
@@ -651,9 +627,9 @@ SELECT * FROM multiremi_comment_reactions WHERE comment_id IN (?) ORDER BY creat
 
 来源：packages/server/src/store/repos/issues-repo.ts:5691、packages/server/src/store/repos/issues-repo.ts:6216。
 
-执行位置 / scope:generation：61 / 1:2, 91 / 1:2, 157 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：59 / 1:2, 89 / 1:2, 155 / 1:4。参数见相邻 JSON。
 
-### turn.complete-053 · 3 次 · 其他
+### turn.complete-051 · 3 次 · 其他
 
 ```sql
 SELECT * FROM multiremi_attachments WHERE comment_id IN (?) ORDER BY created_at ASC
@@ -663,9 +639,9 @@ SELECT * FROM multiremi_attachments WHERE comment_id IN (?) ORDER BY created_at 
 
 来源：packages/server/src/store/repos/issues-repo.ts:5845、packages/server/src/store/repos/issues-repo.ts:6217。
 
-执行位置 / scope:generation：62 / 1:2, 92 / 1:2, 158 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：60 / 1:2, 90 / 1:2, 156 / 1:4。参数见相邻 JSON。
 
-### turn.complete-054 · 1 次 · 其他
+### turn.complete-052 · 1 次 · 其他
 
 ```sql
 SELECT * FROM multiremi_skill_files WHERE skill_id IN (SELECT value FROM json_each(?)) ORDER BY skill_id ASC, path ASC
@@ -675,9 +651,9 @@ SELECT * FROM multiremi_skill_files WHERE skill_id IN (SELECT value FROM json_ea
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/agents-skills-repo.ts:906。
 
-执行位置 / scope:generation：63 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：61 / 1:2。参数见相邻 JSON。
 
-### turn.complete-055 · 1 次 · 必要写入
+### turn.complete-053 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_issues SET updated_at = ? WHERE id = ?
@@ -687,9 +663,9 @@ UPDATE multiremi_issues SET updated_at = ? WHERE id = ?
 
 来源：packages/server/src/store/repos/issues-repo.ts:4410、packages/server/src/store/repos/tasks-repo.ts:7214。
 
-执行位置 / scope:generation：65 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：63 / 1:2。参数见相邻 JSON。
 
-### turn.complete-056 · 1 次 · 校验
+### turn.complete-054 · 1 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_issue_message_records WHERE id = ?
@@ -699,9 +675,9 @@ SELECT * FROM multiremi_issue_message_records WHERE id = ?
 
 来源：packages/server/src/store/context.ts:1568、packages/server/src/store/repos/issues-repo.ts:6270。
 
-执行位置 / scope:generation：66 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：64 / 1:2。参数见相邻 JSON。
 
-### turn.complete-057 · 1 次 · 必要写入
+### turn.complete-055 · 1 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_session_participants ( id, session_id, participant_type, participant_id, role, status, joined_at, updated_at ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(session_id, participant_type, participant_id) DO UPDATE SET role = excluded.role, status = 'active', updated_at = excluded.updated_at
@@ -711,9 +687,9 @@ INSERT INTO multiremi_session_participants ( id, session_id, participant_type, p
 
 来源：packages/server/src/store/repos/issue-sessions-repo.ts:608、packages/server/src/store/repos/issues-repo.ts:4413。
 
-执行位置 / scope:generation：68 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：66 / 1:2。参数见相邻 JSON。
 
-### turn.complete-058 · 1 次 · 必要写入
+### turn.complete-056 · 1 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_session_lanes ( session_id, reader_id, execution_scope, cursor_seq, generation, status, created_at, updated_at ) VALUES (?, ?, ?, 0, 1, 'active', ?, ?) ON CONFLICT(session_id, reader_type, reader_id, execution_scope) DO NOTHING
@@ -723,9 +699,9 @@ INSERT INTO multiremi_session_lanes ( session_id, reader_id, execution_scope, cu
 
 来源：packages/server/src/store/repos/issue-sessions-repo.ts:789、packages/server/src/store/repos/issue-sessions-repo.ts:616。
 
-执行位置 / scope:generation：69 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：67 / 1:2。参数见相邻 JSON。
 
-### turn.complete-059 · 1 次 · 校验
+### turn.complete-057 · 1 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_agent_lane_records WHERE session_id = ? AND agent_id = ? AND execution_scope = ?
@@ -735,9 +711,9 @@ SELECT * FROM multiremi_agent_lane_records WHERE session_id = ? AND agent_id = ?
 
 来源：packages/server/src/store/repos/issue-sessions-repo.ts:798、packages/server/src/store/repos/issue-sessions-repo.ts:616。
 
-执行位置 / scope:generation：70 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：68 / 1:2。参数见相邻 JSON。
 
-### turn.complete-060 · 1 次 · 校验
+### turn.complete-058 · 1 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_session_participants WHERE session_id = ? AND participant_type = ? AND participant_id = ?
@@ -747,9 +723,9 @@ SELECT * FROM multiremi_session_participants WHERE session_id = ? AND participan
 
 来源：packages/server/src/store/repos/issue-sessions-repo.ts:620、packages/server/src/store/repos/issues-repo.ts:4413。
 
-执行位置 / scope:generation：71 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：69 / 1:2。参数见相邻 JSON。
 
-### turn.complete-061 · 1 次 · 必要写入
+### turn.complete-059 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_conversation_log SET to_type=?,to_ref=?,to_agent_id=?,to_member_id=?,message_kind=?,reply_to_id=?, wake_requested=?,wake_applied=?,wake_reason=?,dedupe_key=?,options=?,task_id=COALESCE(?,task_id) WHERE id=?
@@ -759,9 +735,9 @@ UPDATE multiremi_conversation_log SET to_type=?,to_ref=?,to_agent_id=?,to_member
 
 来源：packages/server/src/store/inbox/send-message.ts:228、packages/server/src/store/repos/issues-repo.ts:4432。
 
-执行位置 / scope:generation：80 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：78 / 1:2。参数见相邻 JSON。
 
-### turn.complete-062 · 1 次 · 必要写入
+### turn.complete-060 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_conversation_heads SET log_version = log_version + 1, updated_at = ? WHERE session_id = ?
@@ -771,9 +747,9 @@ UPDATE multiremi_conversation_heads SET log_version = log_version + 1, updated_a
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:672、packages/server/src/store/inbox/send-message.ts:232。
 
-执行位置 / scope:generation：82 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：80 / 1:2。参数见相邻 JSON。
 
-### turn.complete-063 · 1 次 · 必要写入
+### turn.complete-061 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_conversation_log SET metadata = ?, updated_at = ?, revision = revision + 1 WHERE session_id = ? AND seq = ?
@@ -783,9 +759,9 @@ UPDATE multiremi_conversation_log SET metadata = ?, updated_at = ?, revision = r
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:677、packages/server/src/store/inbox/send-message.ts:232。
 
-执行位置 / scope:generation：83 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：81 / 1:2。参数见相邻 JSON。
 
-### turn.complete-064 · 1 次 · 必要写入
+### turn.complete-062 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_conversation_log SET visibility='shown' WHERE id=?
@@ -795,9 +771,9 @@ UPDATE multiremi_conversation_log SET visibility='shown' WHERE id=?
 
 来源：packages/server/src/store/inbox/send-message.ts:233、packages/server/src/store/repos/issues-repo.ts:4432。
 
-执行位置 / scope:generation：85 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：83 / 1:2。参数见相邻 JSON。
 
-### turn.complete-065 · 2 次 · 校验
+### turn.complete-063 · 2 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_workspace_members WHERE workspace_id = ? AND archived_at IS NULL ORDER BY name ASC
@@ -807,9 +783,9 @@ SELECT * FROM multiremi_workspace_members WHERE workspace_id = ? AND archived_at
 
 来源：packages/server/src/store/repos/workspaces-repo.ts:219、packages/server/src/store/repos/issues-repo.ts:6548。
 
-执行位置 / scope:generation：93 / 1:2, 161 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：91 / 1:2, 159 / 1:4。参数见相邻 JSON。
 
-### turn.complete-066 · 1 次 · 必要写入
+### turn.complete-064 · 1 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_system_events (id, workspace_id, resource, event, resource_id, project_id, payload, status, attempt_count, available_at, created_at) VALUES (?, ?, 'issue_comment', ?, ?, ?, ?, 'pending', 0, ?, ?)
@@ -819,9 +795,9 @@ INSERT INTO multiremi_system_events (id, workspace_id, resource, event, resource
 
 来源：packages/server/src/store/repos/issues-repo.ts:4524、packages/server/src/store/repos/issues-repo.ts:4480。
 
-执行位置 / scope:generation：94 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：92 / 1:2。参数见相邻 JSON。
 
-### turn.complete-067 · 2 次 · 必要写入
+### turn.complete-065 · 2 次 · 必要写入
 
 ```sql
 UPDATE multiremi_turns SET reply_message_id=? WHERE id=? AND current_attempt_id=?
@@ -831,9 +807,9 @@ UPDATE multiremi_turns SET reply_message_id=? WHERE id=? AND current_attempt_id=
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:830、packages/server/src/store/repos/tasks-repo.ts:7222、packages/server/src/store/repos/tasks-repo.ts:6796。
 
-执行位置 / scope:generation：95 / 1:2, 105 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：93 / 1:2, 103 / 1:2。参数见相邻 JSON。
 
-### turn.complete-068 · 1 次 · 必要写入
+### turn.complete-066 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?
@@ -843,9 +819,9 @@ UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?
 
 来源：packages/server/src/store/repos/issue-sessions-repo.ts:722、packages/server/src/store/repos/tasks-repo.ts:6795。
 
-执行位置 / scope:generation：98 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：96 / 1:2。参数见相邻 JSON。
 
-### turn.complete-069 · 1 次 · 校验
+### turn.complete-067 · 1 次 · 校验
 
 ```sql
 SELECT seq FROM multiremi_conversation_log WHERE session_id = ? AND task_id = ? AND kind = 'turn' ORDER BY seq ASC LIMIT 1
@@ -855,9 +831,9 @@ SELECT seq FROM multiremi_conversation_log WHERE session_id = ? AND task_id = ? 
 
 来源：packages/server/src/store/repos/issue-sessions-repo.ts:751、packages/server/src/store/repos/issue-sessions-repo.ts:723。
 
-执行位置 / scope:generation：99 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：97 / 1:2。参数见相邻 JSON。
 
-### turn.complete-070 · 1 次 · 必要写入
+### turn.complete-068 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_turn_attempts SET failure_reason=? WHERE id=?
@@ -867,9 +843,9 @@ UPDATE multiremi_turn_attempts SET failure_reason=? WHERE id=?
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:829、packages/server/src/store/repos/tasks-repo.ts:6796。
 
-执行位置 / scope:generation：104 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：102 / 1:2。参数见相邻 JSON。
 
-### turn.complete-071 · 1 次 · 校验
+### turn.complete-069 · 1 次 · 校验
 
 ```sql
 SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?
@@ -879,9 +855,9 @@ SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_typ
 
 来源：packages/server/src/store/inbox/lane-machine.ts:93、packages/server/src/store/repos/tasks-repo.ts:7176。
 
-执行位置 / scope:generation：111 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：109 / 1:2。参数见相邻 JSON。
 
-### turn.complete-072 · 1 次 · 校验
+### turn.complete-070 · 1 次 · 校验
 
 ```sql
 SELECT id FROM multiremi_conversation_log WHERE session_id=? AND kind='message' AND to_agent_id=? AND seq>? AND wake_applied='now' AND deleted_at IS NULL AND COALESCE(json_extract(metadata,'$.execution_scope'),'')=? ORDER BY seq DESC LIMIT 1
@@ -891,9 +867,9 @@ SELECT id FROM multiremi_conversation_log WHERE session_id=? AND kind='message' 
 
 来源：packages/server/src/store/inbox/lane-machine.ts:102、packages/server/src/store/repos/tasks-repo.ts:7176。
 
-执行位置 / scope:generation：112 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：110 / 1:2。参数见相邻 JSON。
 
-### turn.complete-073 · 1 次 · 校验
+### turn.complete-071 · 1 次 · 校验
 
 ```sql
 SELECT task.*,snapshot.id AS terminal_report_id,snapshot.metadata AS terminal_report_metadata, (SELECT MAX(seq) FROM multiremi_conversation_log e WHERE e.session_id=task.issue_session_id AND e.task_id=t.id) AS terminal_event_seq FROM multiremi_turn_execution_records task JOIN multiremi_turns t ON t.id=task.turn_id AND t.current_attempt_id=task.id LEFT JOIN multiremi_conversation_log snapshot ON snapshot.session_id=? AND snapshot.dedupe_key='delegation_terminal:'||task.id WHERE COALESCE(t.delegated_from_issue_session_id,t.session_id)=? AND t.status IN ('completed','failed','cancelled') AND t.delegation_id IS NOT NULL AND t.delegated_by_agent_id IS NOT NULL AND t.agent_id<>t.delegated_by_agent_id AND t.delegation_return_turn_id IS NULL AND t.delegation_skip_reason IS NULL ORDER BY t.ended_at,t.created_at,t.id
@@ -903,9 +879,9 @@ SELECT task.*,snapshot.id AS terminal_report_id,snapshot.metadata AS terminal_re
 
 来源：packages/server/src/store/repos/tasks-repo.ts:6361、packages/server/src/store/repos/tasks-repo.ts:6191。
 
-执行位置 / scope:generation：113 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：111 / 1:2。参数见相邻 JSON。
 
-### turn.complete-074 · 1 次 · 锁
+### turn.complete-072 · 1 次 · 锁
 
 ```sql
 UPDATE multiremi_issues SET id=id WHERE id=?
@@ -915,9 +891,9 @@ UPDATE multiremi_issues SET id=id WHERE id=?
 
 来源：packages/server/src/store/inbox/issue-status.ts:9、packages/server/src/store/repos/tasks-repo.ts:6821。
 
-执行位置 / scope:generation：114 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：112 / 1:2。参数见相邻 JSON。
 
-### turn.complete-075 · 1 次 · 校验
+### turn.complete-073 · 1 次 · 校验
 
 ```sql
 SELECT t.*,m.sender_type AS trigger_sender,m.wake_reason AS trigger_reason,m.message_kind AS trigger_kind, (SELECT COUNT(*) FROM multiremi_conversation_log merged WHERE merged.kind='message' AND merged.deleted_at IS NULL AND json_extract(CASE WHEN json_valid(merged.metadata) THEN merged.metadata ELSE '{}' END,'$.delivery_turn_id')=t.id AND merged.wake_reason IN ('human_sender','agent_dispatch')) AS merged_work_triggers FROM multiremi_turns t LEFT JOIN multiremi_conversation_log m ON m.id=t.trigger_message_id LEFT JOIN multiremi_issue_sessions owned_session ON owned_session.id=t.session_id WHERE t.issue_id=? AND COALESCE(owned_session.chat_id,t.chat_session_id) IS NULL AND (owned_session.id IS NULL OR owned_session.issue_id=t.issue_id) ORDER BY t.created_at DESC,t.seq DESC,t.id DESC
@@ -927,9 +903,9 @@ SELECT t.*,m.sender_type AS trigger_sender,m.wake_reason AS trigger_reason,m.mes
 
 来源：packages/server/src/store/inbox/issue-status.ts:20、packages/server/src/store/repos/tasks-repo.ts:6821。
 
-执行位置 / scope:generation：117 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：115 / 1:2。参数见相邻 JSON。
 
-### turn.complete-076 · 1 次 · 校验
+### turn.complete-074 · 1 次 · 校验
 
 ```sql
 SELECT 1 FROM multiremi_conversation_log d JOIN multiremi_issue_sessions s ON s.id=d.session_id WHERE s.issue_id=? AND s.chat_id IS NULL AND d.kind='message' AND d.message_kind='decision' AND d.sender_type='agent' AND d.sender_id=? AND d.deleted_at IS NULL AND d.resolved_at IS NULL AND NOT EXISTS(SELECT 1 FROM multiremi_conversation_log r WHERE r.reply_to_id=d.id AND r.message_kind='reply' AND r.deleted_at IS NULL) LIMIT 1
@@ -939,9 +915,9 @@ SELECT 1 FROM multiremi_conversation_log d JOIN multiremi_issue_sessions s ON s.
 
 来源：packages/server/src/store/inbox/issue-status.ts:25、packages/server/src/store/repos/tasks-repo.ts:6821。
 
-执行位置 / scope:generation：118 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：116 / 1:2。参数见相邻 JSON。
 
-### turn.complete-077 · 1 次 · 校验
+### turn.complete-075 · 1 次 · 校验
 
 ```sql
 SELECT m.id FROM multiremi_turns t JOIN multiremi_conversation_log m ON m.task_id = t.id WHERE t.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision' AND m.deleted_at IS NULL AND m.resolved_at IS NULL UNION SELECT m.id FROM multiremi_issue_sessions s JOIN multiremi_conversation_log m ON m.session_id = s.id WHERE s.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision' AND m.deleted_at IS NULL AND m.resolved_at IS NULL
@@ -951,9 +927,9 @@ SELECT m.id FROM multiremi_turns t JOIN multiremi_conversation_log m ON m.task_i
 
 来源：packages/server/src/store/repos/issues-repo.ts:580、packages/server/src/store/inbox/issue-status.ts:29。
 
-执行位置 / scope:generation：119 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：117 / 1:2。参数见相邻 JSON。
 
-### turn.complete-078 · 1 次 · 校验
+### turn.complete-076 · 1 次 · 校验
 
 ```sql
 SELECT COUNT(*) AS open_children FROM multiremi_issues child JOIN multiremi_issues parent ON parent.id = child.parent_issue_id AND parent.workspace_id = child.workspace_id WHERE child.parent_issue_id = ? AND child.status NOT IN ('done', 'cancelled')
@@ -963,9 +939,9 @@ SELECT COUNT(*) AS open_children FROM multiremi_issues child JOIN multiremi_issu
 
 来源：packages/server/src/store/repos/issues-repo.ts:1491、packages/server/src/store/repos/issues-repo.ts:3432。
 
-执行位置 / scope:generation：120 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：118 / 1:2。参数见相邻 JSON。
 
-### turn.complete-079 · 1 次 · 必要写入
+### turn.complete-077 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_issues SET status=?,completed_at=?,archived_at=NULL,updated_at=? WHERE id=?
@@ -975,9 +951,9 @@ UPDATE multiremi_issues SET status=?,completed_at=?,archived_at=NULL,updated_at=
 
 来源：packages/server/src/store/inbox/issue-status.ts:51、packages/server/src/store/repos/tasks-repo.ts:6821。
 
-执行位置 / scope:generation：121 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：119 / 1:2。参数见相邻 JSON。
 
-### turn.complete-080 · 1 次 · 必要写入
+### turn.complete-078 · 1 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_system_events ( id, workspace_id, resource, event, resource_id, project_id, payload, status, attempt_count, available_at, lease_until, last_error, created_at, processed_at ) VALUES (?, ?, 'issue', 'status_changed', ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?, NULL)
@@ -987,9 +963,9 @@ INSERT INTO multiremi_system_events ( id, workspace_id, resource, event, resourc
 
 来源：packages/server/src/store/repos/autopilots-repo.ts:1012、packages/server/src/store/inbox/issue-status.ts:54。
 
-执行位置 / scope:generation：123 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：121 / 1:2。参数见相邻 JSON。
 
-### turn.complete-081 · 2 次 · 其他
+### turn.complete-079 · 2 次 · 其他
 
 ```sql
 SELECT * FROM multiremi_system_events WHERE id = ?
@@ -999,9 +975,9 @@ SELECT * FROM multiremi_system_events WHERE id = ?
 
 来源：packages/server/src/store/repos/autopilots-repo.ts:1042、packages/server/src/store/repos/autopilots-repo.ts:1038、packages/server/src/store/repos/issues-repo.ts:4568。
 
-执行位置 / scope:generation：124 / 1:2, 153 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：122 / 1:2, 151 / 1:4。参数见相邻 JSON。
 
-### turn.complete-082 · 1 次 · 校验
+### turn.complete-080 · 1 次 · 校验
 
 ```sql
 SELECT 1 AS present FROM multiremi_turns turns JOIN multiremi_issue_sessions sessions ON sessions.id = turns.session_id WHERE turns.issue_id = ? AND sessions.issue_id = turns.issue_id AND sessions.chat_id IS NULL AND turns.status IN ('pending', 'running', 'awaiting_human') LIMIT 1
@@ -1011,9 +987,9 @@ SELECT 1 AS present FROM multiremi_turns turns JOIN multiremi_issue_sessions ses
 
 来源：packages/server/src/store/repos/tasks-repo.ts:7344、packages/server/src/store/repos/tasks-repo.ts:7017。
 
-执行位置 / scope:generation：125 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：123 / 1:2。参数见相邻 JSON。
 
-### turn.complete-083 · 1 次 · 锁
+### turn.complete-081 · 1 次 · 锁
 
 ```sql
 UPDATE multiremi_issues SET lifecycle_state = lifecycle_state WHERE id = ?
@@ -1023,9 +999,9 @@ UPDATE multiremi_issues SET lifecycle_state = lifecycle_state WHERE id = ?
 
 来源：packages/server/src/store/context.ts:1102、packages/server/src/store/repos/issue-sessions-repo.ts:298。
 
-执行位置 / scope:generation：126 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：124 / 1:2。参数见相邻 JSON。
 
-### turn.complete-084 · 1 次 · 校验
+### turn.complete-082 · 1 次 · 校验
 
 ```sql
 SELECT s.*, ( SELECT COUNT(*) FROM multiremi_conversation_log e WHERE e.session_id = s.parent_session_id AND e.kind <> 'head' AND e.seq > 0 AND ((s.inherit_mode = 'follow' AND (s.follow_frozen_seq IS NULL OR e.seq <= s.follow_frozen_seq)) OR (s.inherit_mode <> 'follow' AND e.seq <= s.inherit_cutoff_seq)) ) AS inherited_event_count FROM multiremi_issue_sessions s WHERE s.chat_id IS NULL AND s.issue_id = ? AND s.is_default = 1 LIMIT 1
@@ -1035,9 +1011,9 @@ SELECT s.*, ( SELECT COUNT(*) FROM multiremi_conversation_log e WHERE e.session_
 
 来源：packages/server/src/store/repos/issue-sessions-repo.ts:304、packages/server/src/store/repos/tasks-repo.ts:6642。
 
-执行位置 / scope:generation：128 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：126 / 1:2。参数见相邻 JSON。
 
-### turn.complete-085 · 1 次 · 其他
+### turn.complete-083 · 1 次 · 其他
 
 ```sql
 SELECT c.id, c.agent_id, b.id AS binding_id FROM multiremi_feishu_bot_chat_bindings b JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id WHERE b.issue_id = ? AND b.workspace_id = ? AND c.workspace_id = ? AND c.status <> 'archived' ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC
@@ -1047,9 +1023,9 @@ SELECT c.id, c.agent_id, b.id AS binding_id FROM multiremi_feishu_bot_chat_bindi
 
 来源：packages/server/src/store/repos/inbox-repo.ts:156、packages/server/src/store/repos/inbox-repo.ts:43。
 
-执行位置 / scope:generation：130 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：128 / 1:2。参数见相邻 JSON。
 
-### turn.complete-086 · 1 次 · 其他
+### turn.complete-084 · 1 次 · 其他
 
 ```sql
 SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? ORDER BY created_at, bot_id
@@ -1059,9 +1035,9 @@ SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? ORDER BY creat
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:266、packages/server/src/store/store.ts:2461。
 
-执行位置 / scope:generation：132 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：130 / 1:2。参数见相邻 JSON。
 
-### turn.complete-087 · 5 次 · 其他
+### turn.complete-085 · 5 次 · 其他
 
 ```sql
 SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?
@@ -1071,9 +1047,9 @@ SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/feishu-bot-repo.ts:435、packages/server/src/store/repos/feishu-bot-repo.ts:3542。
 
-执行位置 / scope:generation：133 / 1:2, 170 / None:None, 188 / None:None, 205 / 4:0, 211 / 5:0。参数见相邻 JSON。
+执行位置 / scope:generation：131 / 1:2, 168 / None:None, 186 / None:None, 203 / 4:0, 209 / 5:0。参数见相邻 JSON。
 
-### turn.complete-088 · 1 次 · 其他
+### turn.complete-086 · 1 次 · 其他
 
 ```sql
 SELECT b.* FROM multiremi_feishu_bot_chat_bindings b JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id WHERE b.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND b.issue_id = ? AND c.status = 'active' AND b.chat_id IS NOT NULL AND b.reply_to_message_id IS NOT NULL ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC
@@ -1083,9 +1059,9 @@ SELECT b.* FROM multiremi_feishu_bot_chat_bindings b JOIN multiremi_chat_session
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:2856、packages/server/src/store/repos/tasks-repo.ts:6654。
 
-执行位置 / scope:generation：134 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：132 / 1:2。参数见相邻 JSON。
 
-### turn.complete-089 · 1 次 · 校验
+### turn.complete-087 · 1 次 · 校验
 
 ```sql
 SELECT DISTINCT sessions.issue_id FROM multiremi_conversation_log messages JOIN multiremi_issue_sessions sessions ON sessions.id = messages.session_id WHERE messages.task_id = ? AND messages.kind = 'message' AND messages.sender_type = 'agent' AND messages.sender_id = ? AND messages.message_kind IN ('request', 'reply', 'final') AND messages.deleted_at IS NULL AND sessions.chat_id IS NULL AND sessions.issue_id <> ? ORDER BY sessions.issue_id
@@ -1095,9 +1071,9 @@ SELECT DISTINCT sessions.issue_id FROM multiremi_conversation_log messages JOIN 
 
 来源：packages/server/src/store/repos/tasks-repo.ts:6841、packages/server/src/store/repos/tasks-repo.ts:5457。
 
-执行位置 / scope:generation：135 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：133 / 1:2。参数见相邻 JSON。
 
-### turn.complete-090 · 1 次 · 必要写入
+### turn.complete-088 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_conversation_log SET message_kind=? WHERE id=(SELECT reply_message_id FROM multiremi_turns WHERE id=?)
@@ -1107,9 +1083,9 @@ UPDATE multiremi_conversation_log SET message_kind=? WHERE id=(SELECT reply_mess
 
 来源：packages/server/src/store/repos/tasks-repo.ts:5459、packages/server/src/store/turn-execution-records.ts:142。
 
-执行位置 / scope:generation：136 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：134 / 1:2。参数见相邻 JSON。
 
-### turn.complete-091 · 1 次 · 校验
+### turn.complete-089 · 1 次 · 校验
 
 ```sql
 SELECT event_count, tool_call_count, type_histogram, model, context_usage, worked_ms, process_item_count, late_subagents FROM multiremi_turn_attempts WHERE id = ?
@@ -1119,9 +1095,9 @@ SELECT event_count, tool_call_count, type_histogram, model, context_usage, worke
 
 来源：packages/server/src/store/store.ts:4698、packages/server/src/store/repos/tasks-repo.ts:5460。
 
-执行位置 / scope:generation：137 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：135 / 1:2。参数见相邻 JSON。
 
-### turn.complete-092 · 1 次 · 必要写入
+### turn.complete-090 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_turn_attempts SET tool_call_count=?,event_count=?,type_histogram=?,model=?,context_usage=?,worked_ms=?,process_item_count=?,late_subagents=? WHERE id=?
@@ -1131,9 +1107,9 @@ UPDATE multiremi_turn_attempts SET tool_call_count=?,event_count=?,type_histogra
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:829、packages/server/src/store/store.ts:4730。
 
-执行位置 / scope:generation：138 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：136 / 1:2。参数见相邻 JSON。
 
-### turn.complete-093 · 1 次 · 校验
+### turn.complete-091 · 1 次 · 校验
 
 ```sql
 SELECT session_id,seq FROM multiremi_turns WHERE id=?
@@ -1143,9 +1119,9 @@ SELECT session_id,seq FROM multiremi_turns WHERE id=?
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:134、packages/server/src/store/turn-execution-records.ts:144。
 
-执行位置 / scope:generation：139 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：137 / 1:2。参数见相邻 JSON。
 
-### turn.complete-094 · 1 次 · 必要写入
+### turn.complete-092 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_conversation_log SET revision=revision+?,updated_at=? WHERE session_id=? AND seq=?
@@ -1155,9 +1131,9 @@ UPDATE multiremi_conversation_log SET revision=revision+?,updated_at=? WHERE ses
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:136、packages/server/src/store/turn-execution-records.ts:144。
 
-执行位置 / scope:generation：140 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：138 / 1:2。参数见相邻 JSON。
 
-### turn.complete-095 · 1 次 · 必要写入
+### turn.complete-093 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_conversation_heads SET log_version=log_version+?,updated_at=? WHERE session_id=?
@@ -1167,9 +1143,9 @@ UPDATE multiremi_conversation_heads SET log_version=log_version+?,updated_at=? W
 
 来源：packages/server/src/store/repos/conversation-log-repo.ts:137、packages/server/src/store/turn-execution-records.ts:144。
 
-执行位置 / scope:generation：141 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：139 / 1:2。参数见相邻 JSON。
 
-### turn.complete-096 · 1 次 · 校验
+### turn.complete-094 · 1 次 · 校验
 
 ```sql
 SELECT t.*,a.status AS attempt_status,a.attempt_no,a.failure_reason,a.progress_summary,a.event_count, a.tool_call_count,a.type_histogram,a.model,a.trace_ref,a.usage,a.started_at AS attempt_started_at,a.ended_at AS attempt_ended_at, a.context_usage,a.worked_ms,a.process_item_count,a.late_subagents FROM multiremi_turns t LEFT JOIN multiremi_turn_attempts a ON a.id=t.current_attempt_id WHERE t.id=?
@@ -1179,9 +1155,9 @@ SELECT t.*,a.status AS attempt_status,a.attempt_no,a.failure_reason,a.progress_s
 
 来源：packages/server/src/store/turn-attempts.ts:82、packages/server/src/store/repos/conversation-log-repo.ts:139。
 
-执行位置 / scope:generation：143 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：141 / 1:2。参数见相邻 JSON。
 
-### turn.complete-097 · 1 次 · 校验
+### turn.complete-095 · 1 次 · 校验
 
 ```sql
 SELECT body_md FROM multiremi_conversation_log WHERE id=?
@@ -1191,9 +1167,9 @@ SELECT body_md FROM multiremi_conversation_log WHERE id=?
 
 来源：packages/server/src/store/turn-attempts.ts:84、packages/server/src/store/repos/conversation-log-repo.ts:139。
 
-执行位置 / scope:generation：144 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：142 / 1:2。参数见相邻 JSON。
 
-### turn.complete-098 · 1 次 · 校验
+### turn.complete-096 · 1 次 · 校验
 
 ```sql
 SELECT a.turn_id AS task_id,u.provider,COALESCE(u.model,u.requested_model,'unknown') AS model, SUM(COALESCE(input_tokens,0)) AS input_tokens,SUM(COALESCE(output_tokens,0)) AS output_tokens, SUM(COALESCE(cache_read_tokens,0)) AS cache_read_tokens,SUM(COALESCE(cache_write_tokens,0)) AS cache_write_tokens, SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)+COALESCE(cache_read_tokens,0)+COALESCE(cache_write_tokens,0)+COALESCE(actual_unsplit_tokens,0)) AS total_tokens FROM multiremi_usage_units u JOIN multiremi_turn_attempts a ON a.id=u.task_id WHERE a.turn_id IN (?) AND source<>'context_snapshot' AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cache_read_tokens IS NOT NULL OR cache_write_tokens IS NOT NULL OR actual_unsplit_tokens IS NOT NULL) GROUP BY a.turn_id,u.provider,COALESCE(u.model,u.requested_model,'unknown') ORDER BY task_id,u.provider,model
@@ -1203,9 +1179,9 @@ SELECT a.turn_id AS task_id,u.provider,COALESCE(u.model,u.requested_model,'unkno
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/usage-projection.ts:21。
 
-执行位置 / scope:generation：145 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：143 / 1:2。参数见相邻 JSON。
 
-### turn.complete-099 · 1 次 · 其他
+### turn.complete-097 · 1 次 · 其他
 
 ```sql
 SELECT runtime_id FROM multiremi_turn_execution_records WHERE workspace_id=? AND runtime_id IS NOT NULL AND status IN ('dispatched','running','waiting_local_directory','awaiting_human') UNION SELECT runtime_id FROM multiremi_feishu_bot_configs WHERE workspace_id=? AND runtime_id IS NOT NULL UNION SELECT runtime_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id=? AND (state<>'stopped' OR release_pending=1) UNION SELECT runtime_id FROM multiremi_background_tasks WHERE workspace_id=? AND lane_state<>'closed' UNION SELECT r.id AS runtime_id FROM multiremi_runtimes r JOIN multiremi_daemon_drains d ON d.workspace_id=COALESCE(r.workspace_id,'local') AND d.daemon_id=COALESCE(r.daemon_id,r.id) WHERE d.workspace_id=?
@@ -1215,9 +1191,9 @@ SELECT runtime_id FROM multiremi_turn_execution_records WHERE workspace_id=? AND
 
 来源：packages/server/src/store/repos/runtimes-repo.ts:584、packages/server/src/store/request-read-cache.ts:182。
 
-执行位置 / scope:generation：147 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：145 / 1:2。参数见相邻 JSON。
 
-### turn.complete-100 · 1 次 · 其他
+### turn.complete-098 · 1 次 · 其他
 
 ```sql
 SELECT * FROM multiremi_issue_subscribers WHERE issue_id = ? ORDER BY created_at ASC
@@ -1227,9 +1203,9 @@ SELECT * FROM multiremi_issue_subscribers WHERE issue_id = ? ORDER BY created_at
 
 来源：packages/server/src/store/repos/issues-repo.ts:5251、packages/server/src/store/repos/issues-repo.ts:6337。
 
-执行位置 / scope:generation：148 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：146 / 1:2。参数见相邻 JSON。
 
-### turn.complete-101 · 1 次 · 校验
+### turn.complete-099 · 1 次 · 校验
 
 ```sql
 SELECT member.* FROM multiremi_workspace_members member JOIN multiremi_workspaces workspace ON workspace.id = member.workspace_id WHERE member.workspace_id = ? AND member.user_id = 'local' ORDER BY CASE WHEN member.id = ? THEN 0 ELSE 1 END, member.created_at, member.id LIMIT 1
@@ -1239,9 +1215,9 @@ SELECT member.* FROM multiremi_workspace_members member JOIN multiremi_workspace
 
 来源：packages/server/src/store/repos/workspaces-repo.ts:138、packages/server/src/store/repos/issues-repo.ts:5252。
 
-执行位置 / scope:generation：149 / 1:2。参数见相邻 JSON。
+执行位置 / scope:generation：147 / 1:2。参数见相邻 JSON。
 
-### turn.complete-102 · 1 次 · 其他
+### turn.complete-100 · 1 次 · 其他
 
 ```sql
 SELECT workspace_id FROM multiremi_system_events WHERE id = ?
@@ -1251,9 +1227,9 @@ SELECT workspace_id FROM multiremi_system_events WHERE id = ?
 
 来源：packages/server/src/store/repos/issues-repo.ts:4559、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：150 / 1:3。参数见相邻 JSON。
+执行位置 / scope:generation：148 / 1:3。参数见相邻 JSON。
 
-### turn.complete-103 · 1 次 · 必要写入
+### turn.complete-101 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_system_events SET status = 'processed', processed_at = ?, lease_until = NULL WHERE id = ? AND status = 'pending'
@@ -1263,9 +1239,9 @@ UPDATE multiremi_system_events SET status = 'processed', processed_at = ?, lease
 
 来源：packages/server/src/store/repos/issues-repo.ts:4565、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：152 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：150 / 1:4。参数见相邻 JSON。
 
-### turn.complete-104 · 1 次 · 校验
+### turn.complete-102 · 1 次 · 校验
 
 ```sql
 SELECT seq FROM multiremi_conversation_log WHERE id = ? AND kind IN ('message', 'system') LIMIT 1
@@ -1275,9 +1251,9 @@ SELECT seq FROM multiremi_conversation_log WHERE id = ? AND kind IN ('message', 
 
 来源：packages/server/src/store/repos/issues-repo.ts:6245、packages/server/src/store/repos/issues-repo.ts:4593。
 
-执行位置 / scope:generation：159 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：157 / 1:4。参数见相邻 JSON。
 
-### turn.complete-105 · 1 次 · 校验
+### turn.complete-103 · 1 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_turns WHERE id=? OR current_attempt_id=?
@@ -1287,9 +1263,9 @@ SELECT * FROM multiremi_turns WHERE id=? OR current_attempt_id=?
 
 来源：packages/server/src/store/repos/issues-repo.ts:6401、packages/server/src/store/repos/issues-repo.ts:4594。
 
-执行位置 / scope:generation：160 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：158 / 1:4。参数见相邻 JSON。
 
-### turn.complete-106 · 1 次 · 必要写入
+### turn.complete-104 · 1 次 · 必要写入
 
 ```sql
 UPDATE multiremi_system_events SET last_error = NULL WHERE id = ?
@@ -1299,9 +1275,9 @@ UPDATE multiremi_system_events SET last_error = NULL WHERE id = ?
 
 来源：packages/server/src/store/repos/issues-repo.ts:4599、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：162 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：160 / 1:4。参数见相邻 JSON。
 
-### turn.complete-107 · 1 次 · 其他
+### turn.complete-105 · 1 次 · 其他
 
 ```sql
 SELECT DISTINCT runtime_id FROM multiremi_turn_execution_records WHERE workspace_id = ? AND status IN ('queued', 'dispatched')
@@ -1311,9 +1287,9 @@ SELECT DISTINCT runtime_id FROM multiremi_turn_execution_records WHERE workspace
 
 来源：packages/server/src/store/repos/tasks-repo.ts:3341、packages/server/src/store/request-read-cache.ts:182。
 
-执行位置 / scope:generation：163 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：161 / 1:4。参数见相邻 JSON。
 
-### turn.complete-108 · 1 次 · 校验
+### turn.complete-106 · 1 次 · 校验
 
 ```sql
 SELECT runtime.*, profile.display_name AS daemon_display_name, drain.daemon_id AS draining_daemon_id FROM multiremi_runtimes runtime LEFT JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) LEFT JOIN multiremi_daemon_profiles profile ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local') AND profile.daemon_id = runtime.daemon_id WHERE runtime.id IN (?)
@@ -1323,9 +1299,9 @@ SELECT runtime.*, profile.display_name AS daemon_display_name, drain.daemon_id A
 
 来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/repos/runtimes-repo.ts:553。
 
-执行位置 / scope:generation：164 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：162 / 1:4。参数见相邻 JSON。
 
-### turn.complete-109 · 1 次 · 其他
+### turn.complete-107 · 1 次 · 其他
 
 ```sql
 SELECT id FROM multiremi_feishu_bot_outbound_deliveries WHERE task_id = ? AND kind = 'cot' AND delivery_mode = 'split'
@@ -1335,9 +1311,9 @@ SELECT id FROM multiremi_feishu_bot_outbound_deliveries WHERE task_id = ? AND ki
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3055、packages/server/src/store/store.ts:2477。
 
-执行位置 / scope:generation：165 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：163 / 1:4。参数见相邻 JSON。
 
-### turn.complete-110 · 1 次 · 校验
+### turn.complete-108 · 1 次 · 校验
 
 ```sql
 SELECT reply_message_id FROM multiremi_turns WHERE id=?
@@ -1347,9 +1323,9 @@ SELECT reply_message_id FROM multiremi_turns WHERE id=?
 
 来源：packages/server/src/store/inbox/daemon-turn-bridge.ts:251、packages/server/src/api/daemon-protocol/report-handlers.ts:216。
 
-执行位置 / scope:generation：167 / 1:4。参数见相邻 JSON。
+执行位置 / scope:generation：165 / 1:4。参数见相邻 JSON。
 
-### turn.complete-111 · 4 次 · 其他
+### turn.complete-109 · 4 次 · 其他
 
 ```sql
 SELECT bot_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND runtime_id = ?
@@ -1359,9 +1335,9 @@ SELECT bot_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND runti
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:277、packages/server/src/store/store.ts:2510、packages/server/src/store/store.ts:2505。
 
-执行位置 / scope:generation：169 / None:None, 186 / None:None, 203 / 4:0, 210 / 5:0。参数见相邻 JSON。
+执行位置 / scope:generation：167 / None:None, 184 / None:None, 201 / 4:0, 208 / 5:0。参数见相邻 JSON。
 
-### turn.complete-112 · 1 次 · 其他
+### turn.complete-110 · 1 次 · 其他
 
 ```sql
 SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'pending' AND available_at > ? UNION ALL SELECT leased_until AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'sending' AND leased_until > ? ) deadlines
@@ -1371,9 +1347,9 @@ SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multir
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3551、packages/server/src/api/server.ts:1235。
 
-执行位置 / scope:generation：171 / None:None。参数见相邻 JSON。
+执行位置 / scope:generation：169 / None:None。参数见相邻 JSON。
 
-### turn.complete-113 · 1 次 · 校验
+### turn.complete-111 · 1 次 · 校验
 
 ```sql
 SELECT request.created_at, request.expires_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id WHERE task.workspace_id = ? AND task.issue_id IS NOT NULL AND request.status = 'pending' AND request.reminder_sent_at IS NULL AND request.expires_at IS NOT NULL AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries delivery WHERE delivery.human_request_id = request.id AND delivery.kind = 'decision_card' AND delivery.status = 'sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL)
@@ -1383,9 +1359,9 @@ SELECT request.created_at, request.expires_at FROM multiremi_message_question_re
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3560、packages/server/src/api/server.ts:1235。
 
-执行位置 / scope:generation：172 / None:None。参数见相邻 JSON。
+执行位置 / scope:generation：170 / None:None。参数见相邻 JSON。
 
-### turn.complete-114 · 1 次 · 校验
+### turn.complete-112 · 1 次 · 校验
 
 ```sql
 SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id=request.task_id JOIN multiremi_conversation_log message ON message.id=request.id JOIN multiremi_feishu_bot_outbound_deliveries delivery ON delivery.human_request_id=request.id JOIN multiremi_feishu_bot_chat_bindings binding ON binding.id=delivery.binding_id AND binding.workspace_id=delivery.workspace_id WHERE task.workspace_id=? AND task.issue_id IS NOT NULL AND request.status='pending' AND binding.bot_id=? AND binding.app_id=? AND request.reminder_sent_at IS NULL AND request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND delivery.kind='decision_card' AND delivery.status='sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL GROUP BY request.id
@@ -1395,9 +1371,9 @@ SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records 
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3578、packages/server/src/api/server.ts:1235。
 
-执行位置 / scope:generation：173 / None:None。参数见相邻 JSON。
+执行位置 / scope:generation：171 / None:None。参数见相邻 JSON。
 
-### turn.complete-115 · 2 次 · 校验
+### turn.complete-113 · 2 次 · 校验
 
 ```sql
 SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) WHERE runtime.id = ?
@@ -1407,9 +1383,9 @@ SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drai
 
 来源：packages/server/src/store/store.ts:3507、packages/server/src/api/server.ts:1235。
 
-执行位置 / scope:generation：174 / None:None, 189 / None:None。参数见相邻 JSON。
+执行位置 / scope:generation：172 / None:None, 187 / None:None。参数见相邻 JSON。
 
-### turn.complete-116 · 2 次 · 校验
+### turn.complete-114 · 2 次 · 校验
 
 ```sql
 SELECT id, status, runtime_id, agent_id FROM multiremi_turn_execution_records WHERE status IN (?, ?, ?, ?) AND runtime_id = ? ORDER BY created_at DESC
@@ -1419,9 +1395,9 @@ SELECT id, status, runtime_id, agent_id FROM multiremi_turn_execution_records WH
 
 来源：packages/server/src/store/repos/tasks-repo.ts:3160、packages/server/src/api/daemon-protocol/task-input-snapshot.ts:9。
 
-执行位置 / scope:generation：176 / 2:0, 191 / 3:0。参数见相邻 JSON。
+执行位置 / scope:generation：174 / 2:0, 189 / 3:0。参数见相邻 JSON。
 
-### turn.complete-117 · 2 次 · 校验
+### turn.complete-115 · 2 次 · 校验
 
 ```sql
 SELECT id, workspace_id, runtime_id, status, agent_id, chat_session_id, issue_id, issue_session_id FROM multiremi_turn_execution_records WHERE id IN (SELECT value FROM json_each(?))
@@ -1431,9 +1407,9 @@ SELECT id, workspace_id, runtime_id, status, agent_id, chat_session_id, issue_id
 
 来源：packages/server/src/store/repos/tasks-repo.ts:2714、packages/server/src/api/daemon-protocol/task-input-snapshot.ts:13。
 
-执行位置 / scope:generation：177 / 2:0, 192 / 3:0。参数见相邻 JSON。
+执行位置 / scope:generation：175 / 2:0, 190 / 3:0。参数见相邻 JSON。
 
-### turn.complete-118 · 2 次 · 必要写入
+### turn.complete-116 · 2 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_session_lanes (session_id,reader_type,reader_id,execution_scope,created_at,updated_at) SELECT t.session_id,'agent',t.agent_id,t.execution_scope,?,? FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id WHERE a.id IN (SELECT value FROM json_each(?)) AND t.current_attempt_id=a.id AND t.workspace_id=? AND a.runtime_id=? AND t.status IN ('running','awaiting_human') ORDER BY t.session_id,t.agent_id,t.execution_scope ON CONFLICT(session_id,reader_type,reader_id,execution_scope) DO UPDATE SET updated_at=multiremi_session_lanes.updated_at
@@ -1443,9 +1419,9 @@ INSERT INTO multiremi_session_lanes (session_id,reader_type,reader_id,execution_
 
 来源：packages/server/src/store/inbox/daemon-turn-bridge.ts:126、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：180 / 2:2, 195 / 3:2。参数见相邻 JSON。
+执行位置 / scope:generation：178 / 2:2, 193 / 3:2。参数见相邻 JSON。
 
-### turn.complete-119 · 2 次 · 其他
+### turn.complete-117 · 2 次 · 其他
 
 ```sql
 SELECT t.*,a.id AS snapshot_attempt_id, a.input_ack_seq,a.input_read_seq,a.session_id AS provider_session_id, l.cursor_seq AS lane_cursor,COALESCE(h.head_seq,0) AS snapshot_head FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id JOIN multiremi_session_lanes l ON l.session_id=t.session_id AND l.reader_type='agent' AND l.reader_id=t.agent_id AND l.execution_scope=t.execution_scope LEFT JOIN multiremi_conversation_heads h ON h.session_id=t.session_id WHERE a.id IN (SELECT value FROM json_each(?)) AND t.current_attempt_id=a.id AND t.workspace_id=? AND a.runtime_id=? AND t.status IN ('running','awaiting_human')
@@ -1455,9 +1431,9 @@ SELECT t.*,a.id AS snapshot_attempt_id, a.input_ack_seq,a.input_read_seq,a.sessi
 
 来源：packages/server/src/store/inbox/daemon-turn-bridge.ts:140、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：181 / 2:2, 196 / 3:2。参数见相邻 JSON。
+执行位置 / scope:generation：179 / 2:2, 194 / 3:2。参数见相邻 JSON。
 
-### turn.complete-120 · 2 次 · 必要写入
+### turn.complete-118 · 2 次 · 必要写入
 
 ```sql
 UPDATE multiremi_turn_attempts SET input_ack_seq=CASE WHEN COALESCE(session_id,'')='' THEN 0 ELSE COALESCE((SELECT l.cursor_seq FROM multiremi_session_lanes l JOIN multiremi_turns t ON t.session_id=l.session_id AND t.agent_id=l.reader_id AND t.execution_scope=l.execution_scope WHERE t.id=multiremi_turn_attempts.turn_id AND l.reader_type='agent'),0) END, input_read_seq=CASE WHEN COALESCE(session_id,'')='' THEN 0 ELSE COALESCE((SELECT l.cursor_seq FROM multiremi_session_lanes l JOIN multiremi_turns t ON t.session_id=l.session_id AND t.agent_id=l.reader_id AND t.execution_scope=l.execution_scope WHERE t.id=multiremi_turn_attempts.turn_id AND l.reader_type='agent'),0) END, input_read_offset=0 WHERE id IN (SELECT value FROM json_each(?)) AND input_ack_seq IS NULL
@@ -1467,9 +1443,9 @@ UPDATE multiremi_turn_attempts SET input_ack_seq=CASE WHEN COALESCE(session_id,'
 
 来源：packages/server/src/store/inbox/daemon-turn-bridge.ts:145、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：182 / 2:2, 197 / 3:2。参数见相邻 JSON。
+执行位置 / scope:generation：180 / 2:2, 195 / 3:2。参数见相邻 JSON。
 
-### turn.complete-121 · 2 次 · 其他
+### turn.complete-119 · 2 次 · 其他
 
 ```sql
 SELECT e.*,a.id AS snapshot_attempt_id FROM multiremi_turn_attempts a JOIN multiremi_turns t ON t.id=a.turn_id JOIN multiremi_conversation_log e ON e.session_id=t.session_id WHERE a.id IN (SELECT value FROM json_each(?)) AND e.seq>a.input_ack_seq AND e.seq<=COALESCE((SELECT h.head_seq FROM multiremi_conversation_heads h WHERE h.session_id=t.session_id),0) AND e.kind='message' AND e.deleted_at IS NULL AND e.visibility='shown' ORDER BY a.id,e.seq
@@ -1479,9 +1455,9 @@ SELECT e.*,a.id AS snapshot_attempt_id FROM multiremi_turn_attempts a JOIN multi
 
 来源：packages/server/src/store/inbox/daemon-turn-bridge.ts:162、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：183 / 2:2, 198 / 3:2。参数见相邻 JSON。
+执行位置 / scope:generation：181 / 2:2, 196 / 3:2。参数见相邻 JSON。
 
-### turn.complete-122 · 2 次 · 必要写入
+### turn.complete-120 · 2 次 · 必要写入
 
 ```sql
 UPDATE multiremi_turn_attempts SET projection_to_seq=CASE WHEN COALESCE(projection_to_seq,0)<COALESCE((SELECT h.head_seq FROM multiremi_turns t JOIN multiremi_conversation_heads h ON h.session_id=t.session_id WHERE t.id=multiremi_turn_attempts.turn_id),0) THEN (SELECT h.head_seq FROM multiremi_turns t JOIN multiremi_conversation_heads h ON h.session_id=t.session_id WHERE t.id=multiremi_turn_attempts.turn_id) ELSE projection_to_seq END WHERE id IN (SELECT value FROM json_each(?))
@@ -1491,9 +1467,9 @@ UPDATE multiremi_turn_attempts SET projection_to_seq=CASE WHEN COALESCE(projecti
 
 来源：packages/server/src/store/inbox/daemon-turn-bridge.ts:175、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：184 / 2:2, 199 / 3:2。参数见相邻 JSON。
+执行位置 / scope:generation：182 / 2:2, 197 / 3:2。参数见相邻 JSON。
 
-### turn.complete-123 · 2 次 · 其他
+### turn.complete-121 · 2 次 · 其他
 
 ```sql
 SELECT bot_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ? AND (state <> 'stopped' OR release_pending = 1) ORDER BY reported_at DESC LIMIT 1
@@ -1503,21 +1479,21 @@ SELECT bot_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AN
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:285、packages/server/src/store/store.ts:2510、packages/server/src/store/store.ts:2505。
 
-执行位置 / scope:generation：187 / None:None, 204 / 4:0。参数见相邻 JSON。
+执行位置 / scope:generation：185 / None:None, 202 / 4:0。参数见相邻 JSON。
 
-### turn.complete-124 · 1 次 · 其他
+### turn.complete-122 · 1 次 · 其他
 
 ```sql
-SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:36:07.084Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:36:07.084Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:18:07.084Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:37:37.084Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:37:37.084Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.084Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.084Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.084Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:18:07.084Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.084Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.084Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.084Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.084Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.084Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.084Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:28:07.084Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:28:07.084Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:28:07.084Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.084Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.084Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:33:07.084Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.084Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.084Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.084Z'))) AS sweep, FALSE AS housekeeping
+SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.679Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.679Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping
 ```
 
 一次 union/EXISTS 读取所有 runtime 命令族的可领取状态；查询含当前时间边界，不与不同时间的快照合并。
 
 来源：packages/server/src/store/repos/runtimes-repo.ts:2750、packages/server/src/store/repos/runtimes-repo.ts:2418。
 
-执行位置 / scope:generation：201 / 4:0。参数见相邻 JSON。
+执行位置 / scope:generation：199 / 4:0。参数见相邻 JSON。
 
-### turn.complete-125 · 2 次 · 校验
+### turn.complete-123 · 2 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_platform_maintenance WHERE id = 'platform'
@@ -1527,9 +1503,9 @@ SELECT * FROM multiremi_platform_maintenance WHERE id = 'platform'
 
 来源：packages/server/src/store/repos/platform-maintenance-repo.ts:192、packages/server/src/store/repos/platform-maintenance-repo.ts:41。
 
-执行位置 / scope:generation：202 / 4:0, 209 / 5:0。参数见相邻 JSON。
+执行位置 / scope:generation：200 / 4:0, 207 / 5:0。参数见相邻 JSON。
 
-### turn.complete-126 · 2 次 · 其他
+### turn.complete-124 · 2 次 · 其他
 
 ```sql
 SELECT * FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND bot_id = ? AND runtime_id = ?
@@ -1539,21 +1515,21 @@ SELECT * FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND bot
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:4182、packages/server/src/store/repos/feishu-bot-repo.ts:3302。
 
-执行位置 / scope:generation：206 / 4:0, 212 / 5:0。参数见相邻 JSON。
+执行位置 / scope:generation：204 / 4:0, 210 / 5:0。参数见相邻 JSON。
 
-### turn.complete-127 · 1 次 · 其他
+### turn.complete-125 · 1 次 · 其他
 
 ```sql
-SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:36:07.096Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:36:07.096Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:18:07.096Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:37:37.096Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:37:37.096Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.096Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.096Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.096Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:18:07.096Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.096Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.096Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.096Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.096Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.096Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.096Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:28:07.096Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:28:07.096Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:28:07.096Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.096Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.096Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:33:07.096Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.096Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.096Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.096Z'))) AS sweep, FALSE AS housekeeping
+SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.691Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.691Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping
 ```
 
 一次 union/EXISTS 读取所有 runtime 命令族的可领取状态；查询含当前时间边界，不与不同时间的快照合并。
 
 来源：packages/server/src/store/repos/runtimes-repo.ts:2750、packages/server/src/store/repos/runtimes-repo.ts:2418。
 
-执行位置 / scope:generation：208 / 5:0。参数见相邻 JSON。
+执行位置 / scope:generation：206 / 5:0。参数见相邻 JSON。
 
-### turn.complete-128 · 1 次 · 其他
+### turn.complete-126 · 1 次 · 其他
 
 ```sql
 SELECT id, operation FROM multiremi_feishu_bot_outbound_operations WHERE workspace_id = ? AND ((status = 'pending' AND available_at <= ?) OR (status = 'processing' AND leased_until <= ?)) ORDER BY created_at, CASE kind WHEN 'topic' THEN 0 WHEN 'round' THEN 1 WHEN 'retarget' THEN 2 WHEN 'human_request' THEN 3 WHEN 'round_delivery' THEN 4 ELSE 5 END, id LIMIT 32
@@ -1563,9 +1539,9 @@ SELECT id, operation FROM multiremi_feishu_bot_outbound_operations WHERE workspa
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3123、packages/server/src/store/repos/feishu-bot-repo.ts:3309。
 
-执行位置 / scope:generation：213 / 5:0。参数见相邻 JSON。
+执行位置 / scope:generation：211 / 5:0。参数见相邻 JSON。
 
-### turn.complete-129 · 1 次 · 校验
+### turn.complete-127 · 1 次 · 校验
 
 ```sql
 SELECT decision.id, decision.issue_id FROM multiremi_message_decision_records decision JOIN multiremi_issues issue ON issue.id = decision.issue_id WHERE decision.status = 'escalated' AND decision.reminder_sent_at IS NULL AND issue.workspace_id = ? AND ( SELECT o.sent_at FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.kind = 'decision_card' AND o.decision_id = decision.id AND b.bot_id = ? AND o.status = 'sent' AND o.external_message_id IS NOT NULL AND o.degraded IS NULL AND o.sent_at IS NOT NULL ORDER BY o.created_at DESC, o.id DESC LIMIT 1 ) <= ? ORDER BY decision.id ASC
@@ -1575,9 +1551,9 @@ SELECT decision.id, decision.issue_id FROM multiremi_message_decision_records de
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3318、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：215 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：213 / 5:2。参数见相邻 JSON。
 
-### turn.complete-130 · 1 次 · 其他
+### turn.complete-128 · 1 次 · 其他
 
 ```sql
 SELECT id, kind FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND delivery_mode = 'split' AND attempt_count >= 6 AND binding_id IN (SELECT id FROM multiremi_feishu_bot_chat_bindings WHERE workspace_id = ? AND bot_id = ?) AND ((status = 'pending' AND available_at <= ?) OR (status = 'sending' AND leased_until <= ?))
@@ -1587,9 +1563,9 @@ SELECT id, kind FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3325、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：216 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：214 / 5:2。参数见相邻 JSON。
 
-### turn.complete-131 · 1 次 · 校验
+### turn.complete-129 · 1 次 · 校验
 
 ```sql
 SELECT request.id, request.task_id, request.expires_at, request.created_at, (SELECT MAX(card.sent_at) FROM multiremi_feishu_bot_outbound_deliveries card WHERE card.human_request_id=request.id AND card.kind='decision_card' AND card.status='sent' AND card.external_message_id IS NOT NULL AND card.degraded IS NULL) AS card_sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id JOIN multiremi_conversation_log message ON message.id=request.id WHERE request.status = 'pending' AND request.reminder_sent_at IS NULL -- A reminder is worth sending only while it still leaves the reader -- time to act: under a minute of lifetime left, the nudge would arrive -- as the request expires. The bound is the same expression the CAS and -- the claim use, so SQLite and Postgres agree. AND (request.expires_at >= ? OR (request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries card WHERE card.human_request_id=request.id AND card.kind='decision_card' AND card.status='sent' AND card.external_message_id IS NOT NULL AND card.degraded IS NULL AND card.sent_at<=?))) AND task.issue_id IS NOT NULL AND task.workspace_id = ? AND ( SELECT COUNT(*) FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.kind = 'decision_card' AND o.human_request_id = request.id AND b.bot_id = ? AND o.status = 'sent' AND o.external_message_id IS NOT NULL AND o.degraded IS NULL ) > 0 ORDER BY request.expires_at ASC, request.id ASC
@@ -1599,9 +1575,9 @@ SELECT request.id, request.task_id, request.expires_at, request.created_at, (SEL
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:2519、packages/server/src/store/repos/feishu-bot-repo.ts:3334。
 
-执行位置 / scope:generation：217 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：215 / 5:2。参数见相邻 JSON。
 
-### turn.complete-132 · 1 次 · 其他
+### turn.complete-130 · 1 次 · 其他
 
 ```sql
 SELECT d.*, COALESCE(d.outbound_task_id, d.task_id) AS target_task_id, b.chat_id, b.thread_id, s.open_id FROM multiremi_feishu_bot_deliveries d JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id AND b.workspace_id = d.workspace_id LEFT JOIN multiremi_feishu_bot_senders s ON s.id = d.sender_id WHERE d.workspace_id = ? AND d.outbound_requested = 1 AND b.chat_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries carrier WHERE carrier.task_id = COALESCE(d.outbound_task_id, d.task_id) AND (carrier.kind IS NULL OR carrier.kind = 'cot') AND carrier.unit_key = '') AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_deliveries earlier WHERE COALESCE(earlier.outbound_task_id, earlier.task_id) = COALESCE(d.outbound_task_id, d.task_id) AND earlier.outbound_requested = 1 AND (earlier.created_at < d.created_at OR (earlier.created_at = d.created_at AND earlier.external_message_id < d.external_message_id))) ORDER BY d.created_at, d.external_message_id LIMIT 32
@@ -1611,9 +1587,9 @@ SELECT d.*, COALESCE(d.outbound_task_id, d.task_id) AS target_task_id, b.chat_id
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3196、packages/server/src/store/repos/feishu-bot-repo.ts:3336。
 
-执行位置 / scope:generation：218 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：216 / 5:2。参数见相邻 JSON。
 
-### turn.complete-133 · 1 次 · 校验
+### turn.complete-131 · 1 次 · 校验
 
 ```sql
 SELECT o.task_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_turn_execution_records t ON t.id = o.task_id WHERE o.workspace_id = ? AND o.kind = 'cot' AND o.delivery_mode = 'split' AND (t.status NOT IN ('completed', 'failed', 'cancelled') OR NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries r WHERE r.task_id = o.task_id AND r.kind = 'result_card'))
@@ -1623,9 +1599,9 @@ SELECT o.task_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3213、packages/server/src/store/repos/feishu-bot-repo.ts:3336。
 
-执行位置 / scope:generation：219 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：217 / 5:2。参数见相邻 JSON。
 
-### turn.complete-134 · 1 次 · 其他
+### turn.complete-132 · 1 次 · 其他
 
 ```sql
 SELECT o.*, b.bot_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id=o.binding_id AND b.workspace_id=o.workspace_id WHERE o.task_id = ? AND o.kind = 'cot' AND o.delivery_mode = 'split'
@@ -1635,9 +1611,9 @@ SELECT o.*, b.bot_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multir
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3220、packages/server/src/store/repos/feishu-bot-repo.ts:3214。
 
-执行位置 / scope:generation：220 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：218 / 5:2。参数见相邻 JSON。
 
-### turn.complete-135 · 1 次 · 校验
+### turn.complete-133 · 1 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_message_question_records WHERE task_id = ? ORDER BY created_at ASC, id ASC
@@ -1647,9 +1623,9 @@ SELECT * FROM multiremi_message_question_records WHERE task_id = ? ORDER BY crea
 
 来源：packages/server/src/store/repos/tasks-repo.ts:4911、packages/server/src/store/repos/feishu-bot-repo.ts:3247。
 
-执行位置 / scope:generation：224 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：222 / 5:2。参数见相邻 JSON。
 
-### turn.complete-136 · 1 次 · 其他
+### turn.complete-134 · 1 次 · 其他
 
 ```sql
 SELECT d.external_message_id FROM multiremi_feishu_bot_deliveries d JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id AND c.bot_id = b.bot_id AND c.app_id = b.app_id WHERE d.workspace_id = ? AND COALESCE(d.outbound_task_id, d.task_id) = ? ORDER BY d.created_at, d.external_message_id
@@ -1659,9 +1635,9 @@ SELECT d.external_message_id FROM multiremi_feishu_bot_deliveries d JOIN multire
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3276、packages/server/src/store/repos/feishu-bot-repo.ts:3214。
 
-执行位置 / scope:generation：225 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：223 / 5:2。参数见相邻 JSON。
 
-### turn.complete-137 · 1 次 · 必要写入
+### turn.complete-135 · 1 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_feishu_bot_outbound_deliveries (id, workspace_id, binding_id, task_id, chat_id, thread_id, reply_to_message_id, body, kind, unit_key, cascade_failure, delivery_mode, previous_delivery_id, human_request_id, human_request_task_id, target_message_id, mention_snapshot, interaction_open_id, degraded, status, available_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'split', ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?) ON CONFLICT DO NOTHING
@@ -1671,9 +1647,9 @@ INSERT INTO multiremi_feishu_bot_outbound_deliveries (id, workspace_id, binding_
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3235、packages/server/src/store/repos/feishu-bot-repo.ts:3279。
 
-执行位置 / scope:generation：226 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：224 / 5:2。参数见相邻 JSON。
 
-### turn.complete-138 · 1 次 · 其他
+### turn.complete-136 · 1 次 · 其他
 
 ```sql
 SELECT id FROM multiremi_feishu_bot_outbound_deliveries WHERE task_id = ? AND kind = ? AND unit_key = ?
@@ -1683,9 +1659,9 @@ SELECT id FROM multiremi_feishu_bot_outbound_deliveries WHERE task_id = ? AND ki
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3279、packages/server/src/store/repos/feishu-bot-repo.ts:3214。
 
-执行位置 / scope:generation：227 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：225 / 5:2。参数见相邻 JSON。
 
-### turn.complete-139 · 1 次 · 其他
+### turn.complete-137 · 1 次 · 其他
 
 ```sql
 SELECT o.* FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND (o.kind IS NULL OR o.kind NOT IN ('decision_card', 'decision_card_patch', 'decision_reminder') OR o.degraded IS NOT NULL) AND (? = 1 OR o.delivery_mode IS NULL OR o.delivery_mode = 'legacy') AND (o.decision_id IS NULL OR EXISTS ( SELECT 1 FROM multiremi_message_decision_records decision JOIN multiremi_issues target ON target.id = decision.issue_id AND target.workspace_id = decision.workspace_id JOIN multiremi_issues source ON source.id = decision.source_issue_id AND source.workspace_id = decision.workspace_id WHERE decision.id = o.decision_id AND decision.workspace_id = o.workspace_id AND decision.issue_id = o.decision_issue_id AND b.workspace_id = o.workspace_id AND b.issue_id = decision.issue_id )) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_round_pushes r WHERE r.wake_task_id = o.task_id AND r.binding_id = b.id AND r.workspace_id = o.workspace_id AND r.delivery_mode = 'proactive' AND (b.issue_id IS NULL OR b.issue_id <> r.issue_id) ) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_human_request_pushes h WHERE h.wake_task_id = o.task_id AND h.binding_id = b.id AND h.workspace_id = o.workspace_id AND (b.issue_id IS NULL OR b.issue_id <> h.issue_id) ) AND (o.task_id IS NULL OR ? = 1 OR o.body <> '') AND (? = 1 OR o.presentation_checkpoint IS NULL) AND (? = 1 OR o.attachments IS NULL) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries received WHERE o.kind = 'receipt' AND o.unit_key <> o.target_message_id || ':received' AND received.task_id = o.task_id AND received.kind = 'receipt' AND received.unit_key = o.target_message_id || ':received' AND received.status IN ('pending', 'sending')) AND (o.previous_delivery_id IS NULL OR EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries previous WHERE previous.id = o.previous_delivery_id AND previous.workspace_id = o.workspace_id AND (previous.status = 'sent' OR (o.cascade_failure = 0 AND previous.status = 'failed')))) AND ((o.status = 'pending' AND o.available_at <= ?) OR (o.status = 'sending' AND o.leased_until IS NOT NULL AND o.leased_until <= ?)) ORDER BY o.created_at ASC, o.id ASC LIMIT 1
@@ -1695,7 +1671,7 @@ SELECT o.* FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu
 
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3409、packages/server/src/store/request-read-cache.ts:293。
 
-执行位置 / scope:generation：229 / 5:2。参数见相邻 JSON。
+执行位置 / scope:generation：227 / 5:2。参数见相邻 JSON。
 
 ## task.fail: 141 executions
 
@@ -2712,7 +2688,7 @@ UPDATE multiremi_turn_attempts SET projection_to_seq=CASE WHEN COALESCE(projecti
 ### task.fail-085 · 1 次 · 其他
 
 ```sql
-SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:36:07.265Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:36:07.265Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:18:07.265Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:37:37.265Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:37:37.265Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.265Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.265Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.265Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:18:07.265Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.265Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.265Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.265Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.265Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.265Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.265Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:28:07.265Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:28:07.265Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:28:07.265Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.265Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.265Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:33:07.265Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.265Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.265Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.265Z'))) AS sweep, FALSE AS housekeeping
+SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.849Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.849Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping
 ```
 
 一次 union/EXISTS 读取所有 runtime 命令族的可领取状态；查询含当前时间边界，不与不同时间的快照合并。
@@ -2892,7 +2868,7 @@ SELECT o.* FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu
 ### task.fail-100 · 1 次 · 其他
 
 ```sql
-SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:36:07.271Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:36:07.271Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:18:07.271Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:37:37.271Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:37:37.271Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.271Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.271Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.271Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:18:07.271Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.271Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.271Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.271Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.271Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.271Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.271Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:28:07.271Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:28:07.271Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:28:07.271Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.271Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.271Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:33:07.271Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:35:07.271Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:35:07.271Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:37:07.271Z'))) AS sweep, FALSE AS housekeeping
+SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.853Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.853Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping
 ```
 
 一次 union/EXISTS 读取所有 runtime 命令族的可领取状态；查询含当前时间边界，不与不同时间的快照合并。

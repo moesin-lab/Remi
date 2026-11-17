@@ -1,4 +1,4 @@
-import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
+import { readAttemptTurn, readTurnRow } from "@multiremi/store/execution-reads.js";
 import { memoizeRequestRead } from '../request-read-cache.js';
 import { attemptInputState } from '../inbox/attempt-input.js';
 import { lockLane } from '../inbox/lane-machine.js';
@@ -124,7 +124,7 @@ export class ConversationLogRepo {
   constructor(private ctx: StoreContext) {
     registerExecutionMessageWriter(ctx.db,(sessionId,id,senderId,body,input)=>{
       const events=createCommitEventQueue();
-      const source=input.taskId&&ctx.db.query('SELECT id FROM multiremi_turns WHERE id=?').get(input.taskId);
+      const source=input.taskId&&readTurnRow(ctx.db, input.taskId);
       const result=sendMessageWithinTransaction(ctx,{id,session_id:sessionId,sender:{type:(input.senderType??'agent') as 'agent'|'timer',id:senderId},
         source_turn_id:source?input.taskId:null,to:{type:'none'},body_md:body,message_kind:(input.messageKind??'reply') as 'reply'|'status',
         wake_requested:'inbox_only',metadata:input.metadata,visibility:input.visibility==='hidden'?'hidden':'shown'},events);

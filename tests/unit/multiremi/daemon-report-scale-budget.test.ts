@@ -11,7 +11,7 @@ const SQLITE_BUDGETS = {
   'task.progress': { total: 38, reads: 30, writes: 8 },
   'task.workspace': { total: 40, reads: 32, writes: 8 },
   'turn.input': { total: 88, reads: 73, writes: 15 },
-  'turn.complete': { total: 229, reads: 177, writes: 52 },
+  'turn.complete': { total: 227, reads: 175, writes: 52 },
   'task.fail': { total: 141, reads: 116, writes: 25 },
 };
 const fleets: Record<string, Awaited<ReturnType<typeof createReportScaleFixture>>> = {};

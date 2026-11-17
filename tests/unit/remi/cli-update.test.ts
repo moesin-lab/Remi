@@ -176,6 +176,65 @@ describe("Remi CLI updater", () => {
     expectUpdaterServiceLauncher(fixture, join(result.snapshotDir, "remi"));
   });
 
+  test("managed update through the selected launcher installs without rewriting an unrelated plist", async () => {
+    const fixture = releaseFixture(roots);
+    const mocks = join(fixture.root, "mocks");
+    mkdirSync(mocks);
+    writeExecutable(join(mocks, "systemctl"), `#!/bin/sh\nprintf '%s\\n' '{ path=${fixture.launcherPath} ; }'\n`);
+    writeExecutable(fixture.launcherPath, "#!/bin/sh\necho 0.2.80\n");
+    mkdirSync(join(fixture.homeDir, "Library", "LaunchAgents"), { recursive: true });
+    const unrelatedPlist = launchdPlist("/unrelated/version/remi");
+    writeFileSync(fixture.launchdPath, unrelatedPlist);
+    const originalPath = process.env.PATH;
+    try {
+      process.env.PATH = `${mocks}:${originalPath}`;
+      const result = await performUpdate({
+        currentVersion: "0.2.80", platform: { os: "darwin", arch: "arm64" },
+        fetchImpl: fixture.fetchImpl,
+        env: { PATH: "", MULTIREMI_BIN_DIR: join(fixture.root, "bin"), FIXTURE_EVENTS: fixture.events },
+        homeDir: fixture.homeDir, installRoot: fixture.installRoot,
+        serviceRestart: { manager: "systemd", command: ["systemctl", "--user", "restart", "--no-block", "fixture.service"] },
+      });
+      expect(result).toMatchObject({ status: "installed", launcherPath: fixture.launcherPath, launchdUpdated: false });
+      expect(readFileSync(fixture.launchdPath, "utf8")).toBe(unrelatedPlist);
+      expect(execFileSync(fixture.launcherPath, ["--version"], { encoding: "utf8" }).trim()).toBe("0.2.81");
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+  });
+
+  test("managed update fails before network, files, activation or restart when ExecStart bypasses launcher", async () => {
+    const fixture = releaseFixture(roots);
+    const mocks = join(fixture.root, "mocks");
+    mkdirSync(mocks);
+    const actual = join(fixture.root, "old-version", "remi");
+    writeExecutable(join(mocks, "systemctl"), `#!/bin/sh\ncase "$*" in\n*show*) printf '%s\\n' '{ path=${actual} ; argv[]=${actual} daemon start ; }';;\n*) exit 99;;\nesac\n`);
+    const originalPath = process.env.PATH;
+    const launcher = "#!/bin/sh\necho unchanged\n";
+    writeExecutable(fixture.launcherPath, launcher);
+    let activated = false;
+    try {
+      process.env.PATH = `${mocks}:${originalPath}`;
+      await expect(performUpdate({
+        targetVersion: "0.2.81", platform: { os: "linux", arch: "x64" },
+        fetchImpl: fixture.fetchImpl, env: { PATH: "" },
+        homeDir: fixture.homeDir, installRoot: fixture.installRoot, launcherPath: fixture.launcherPath,
+        serviceRestart: { manager: "systemd", command: ["systemctl", "--user", "restart", "--no-block", "fixture.service"] },
+        beforeActivate: () => { activated = true; },
+      })).rejects.toThrow(`actual ExecStart/ProgramArguments=${actual}`);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+    expect(fixture.requests).toEqual([]);
+    expect(activated).toBe(false);
+    expect(readFileSync(fixture.launcherPath, "utf8")).toBe(launcher);
+    expect(existsSync(fixture.installRoot)).toBe(false);
+    expect(existsSync(fixture.launchdPath)).toBe(false);
+    expect(existsSync(fixture.events)).toBe(false);
+  });
+
   test("does not replace the executable when the release checksum fails", async () => {
     const fixture = releaseFixture(roots, "0".repeat(64));
     const oldLauncher = "#!/bin/sh\necho old-remi\n";

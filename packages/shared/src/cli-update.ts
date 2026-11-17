@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { assertUpdateServiceLauncher, type UpdateServiceRestart } from "./cli-update-service.js";
 import { VERSION } from "@shared/version.js";
 
 const DEFAULT_RELEASE_REPOSITORY = "moesin-lab/Remi";
@@ -46,6 +47,7 @@ export interface UpdatePlatform {
 
 export interface UpdateOptions {
   currentVersion?: string;
+  serviceRestart?: UpdateServiceRestart;
   targetVersion?: string;
   rollbackExecutable?: string;
   beforeActivate?: (result: Extract<UpdateResult, { status: "installed" }>) => void | Promise<void>;
@@ -130,6 +132,17 @@ export async function performUpdate(options: UpdateOptions = {}): Promise<Update
   const platform = options.platform ?? detectUpdatePlatform();
   const fetchImpl = options.fetchImpl ?? fetch;
   const repository = releaseRepository(env);
+  const homeDir = options.homeDir ?? homedir();
+  const installRoot = options.installRoot
+    ?? env.MULTIREMI_INSTALL_ROOT?.trim()
+    ?? join(homeDir, ".local", "lib", "remi");
+  const launcherPath = options.launcherPath
+    ?? (env.MULTIREMI_BIN_DIR?.trim() ? join(env.MULTIREMI_BIN_DIR.trim(), "remi") : findLauncherOnPath(env.PATH))
+    ?? "/usr/local/bin/remi";
+  const launchdPath = options.launchdPath
+    ?? env.MULTIREMI_LAUNCHD_PLIST?.trim()
+    ?? join(homeDir, "Library", "LaunchAgents", "dev.remi.multiremi.daemon.plist");
+  assertUpdateServiceLauncher({ restart: options.serviceRestart, launcherPath });
   const release = await fetchLatestRelease(repository, fetchImpl, options.targetVersion);
   const latestVersion = release.tag_name.replace(/^v/, "");
   parseVersion(latestVersion);
@@ -146,16 +159,6 @@ export async function performUpdate(options: UpdateOptions = {}): Promise<Update
     throw new Error(`Release ${release.tag_name} has no ${platform.os}-${platform.arch} asset (${assetName}); available: ${available}`);
   }
   const expectedDigest = parseSha256Digest(asset.digest, assetName);
-  const homeDir = options.homeDir ?? homedir();
-  const installRoot = options.installRoot
-    ?? env.MULTIREMI_INSTALL_ROOT?.trim()
-    ?? join(homeDir, ".local", "lib", "remi");
-  const launcherPath = options.launcherPath
-    ?? (env.MULTIREMI_BIN_DIR?.trim() ? join(env.MULTIREMI_BIN_DIR.trim(), "remi") : findLauncherOnPath(env.PATH))
-    ?? "/usr/local/bin/remi";
-  const launchdPath = options.launchdPath
-    ?? env.MULTIREMI_LAUNCHD_PLIST?.trim()
-    ?? join(homeDir, "Library", "LaunchAgents", "dev.remi.multiremi.daemon.plist");
   const progress = options.onProgress ?? (() => {});
   const tempRoot = mkdtempSync(join(tmpdir(), "remi-update-"));
 
@@ -233,7 +236,7 @@ export async function performUpdate(options: UpdateOptions = {}): Promise<Update
     let launchdUpdated = false;
     let nextLaunchd: string | null = null;
     let previousLaunchd: string | null = null;
-    if (existsSync(launchdPath)) {
+    if (!options.serviceRestart?.manager && existsSync(launchdPath)) {
       previousLaunchd = readFileSync(launchdPath, "utf8");
       nextLaunchd = rewriteLaunchdExecutable(previousLaunchd, launcherPath);
       launchdUpdated = nextLaunchd !== previousLaunchd;

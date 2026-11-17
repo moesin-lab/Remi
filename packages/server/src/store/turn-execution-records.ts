@@ -46,6 +46,8 @@ export function executionClaimBaseSql(sql: string): string {
   // Restrict active-lane probes to a materialized set of active attempt IDs.
   // Include current awaiting-human turns separately: the legacy projection can
   // override ANY attempt status there, so filtering only attempt.status drifts.
+  // Unknown offers retain offered_at when requeued and still own the shared
+  // Chat directory. Keep those IDs too; each probe applies its own status filter.
   let active = false;
   sql = sql.replace(/FROM multiremi_turn_execution_records (runtime_active|running|active)\b/g, (from, alias: string) => {
     active = true;
@@ -53,6 +55,7 @@ export function executionClaimBaseSql(sql: string): string {
   });
   if (active) sql = `WITH claim_active_attempts AS MATERIALIZED (
     SELECT id FROM multiremi_turn_attempts WHERE status IN ('accepted','running','waiting_local_directory')
+    UNION SELECT id FROM multiremi_turn_attempts WHERE status = 'offered' AND offered_at IS NOT NULL
     UNION SELECT current_attempt_id AS id FROM multiremi_turns WHERE status = 'awaiting_human'
   ) ${sql}`;
   const mask = maskSqlLiterals(sql);

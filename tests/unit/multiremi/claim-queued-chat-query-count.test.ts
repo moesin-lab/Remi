@@ -20,6 +20,44 @@ function countedQuery(query: SqlDatabase["query"], sql: string[]): SqlDatabase["
 }
 
 useMigratedHotspotDatabases();
+for (const outcome of ["unknown", "rejected"] as const) {
+  it(`preserves shared Chat offer lease semantics after ${outcome} requeue`, async () => {
+    const database = await openHotspotDatabase();
+    const store = new MultiremiStore(database.db);
+    try {
+      store.ensureLocalWorkspace();
+      const runtime = store.registerRuntime({ provider: "codex", name: "Lease", workspaceId: "local",
+        maxConcurrency: 10, metadata: { parallel_agent_execution: 1 } });
+      const agent = store.createAgent({ name: "Lease owner", provider: "codex", runtimeId: runtime.id });
+      const otherAgent = store.createAgent({ name: "Lease contender", provider: "codex", runtimeId: runtime.id });
+      const chat = store.createChatSession({ agentId: agent.id, creatorId: "local" });
+      const session = store.getOrCreateDefaultChatSession(chat.id);
+      const otherSession = store.createSession(chat.id, { title: "Contender" });
+      const offered = store.createSessionTask(session.id, { agentId: agent.id, prompt: "Original", priority: 10 });
+      expect(store.claimTask(runtime.id)?.id).toBe(offered.id);
+      expect(store.recordTaskOffered(offered.id, runtime.id)).toBe(true);
+      expect(store.requeueTaskOffer(offered.id, runtime.id, outcome)).toBe(true);
+      const other = store.createSessionTask(otherSession.id, { agentId: otherAgent.id, prompt: "Higher priority", priority: 100 });
+      const authority = { runtimeId: runtime.id, workspaceId: "local", daemonId: runtime.id };
+      if (outcome === "unknown") {
+        expect(store.getTask(offered.id)?.offeredAt).not.toBeNull();
+        expect(store.claimTask(runtime.id)?.id).toBe(offered.id);
+        expect(store.requeueTaskOffer(offered.id, runtime.id, "unknown")).toBe(true);
+        expect(store.getTask(other.id)?.status).toBe("queued");
+        expect(() => store.startTaskFromDaemon(other.id, authority)).toThrow("server_error");
+        expect(store.startTaskFromDaemon(offered.id, authority)).toBe("started");
+        expect(store.claimTask(runtime.id)).toBeNull();
+        store.completeTask(offered.id, { output: "Released" });
+        expect(store.claimTask(runtime.id)?.id).toBe(other.id);
+      } else {
+        expect(store.getTask(offered.id)?.offeredAt).toBeNull();
+        expect(store.claimTask(runtime.id)?.id).toBe(other.id);
+        expect(() => store.startTaskFromDaemon(offered.id, authority)).toThrow("server_error");
+      }
+    } finally { store.stopNotificationDeliverySweeper(); await database.dispose(); }
+  }, 30_000);
+}
+
 it("empty claims batch queued Chat decision facts without usage/autopilot hydration", async () => {
   const counts: number[] = [];
   for (const sessions of [1, 10, 50]) {

@@ -4,9 +4,9 @@
 
 `claimNextTaskForRuntime` 与 stale dispatch recovery 先从 attempts/turns 基表选择 ID，PG 使用 `FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED`，随后只按 ID 进入既有规范化变更器。保留工作区生命周期锁、插件配置锁、全部资格谓词和状态守卫；SQLite 仍由写事务串行化。VIEW 的通用变更器未改动。
 
-索引候选集仍不足以避免逐候选扫描历史活跃记录。因此 `executionClaimBaseSql` 还物化一次活跃 attempt ID 集合，由 attempt 的 accepted/running/waiting_local_directory 和 awaiting_human turn 的 current_attempt_id 取并集，供 runtime 容量、Agent 并发、lane 与共享目录探针复用。保留 VIEW 对当前 awaiting_human 的覆盖，未简单地用 attempt.status 代替 VIEW.status。回归覆盖全部 8 种 attempt 状态与 awaiting_human 覆盖的组合。
+索引候选集仍不足以避免逐候选扫描历史活跃记录。因此 `executionClaimBaseSql` 还物化一次活跃/租约 attempt ID 集合，由 attempt 的 accepted/running/waiting_local_directory、offered 且 offered_at 非空，以及 awaiting_human turn 的 current_attempt_id 取并集，供 runtime 容量、Agent 并发、lane 与共享目录探针复用；各探针仍自行过滤状态。保留 VIEW 对当前 awaiting_human 的覆盖，以及 unknown offer 重排后仍持有的共享 Chat 目录租约，未简单地用 attempt.status 代替 VIEW.status。回归覆盖全部 8 种 attempt 状态与 awaiting_human 覆盖的组合。
 
-新增 expand-only 索引：attempt `(status, created_at, next_retry_at, turn_id)`、`(status, next_retry_at)`；turn `(status, current_attempt_id)`、`(chat_session_id, issue_session_id, priority, chat_queue_order)`。沿用既有 attempt `(runtime_id, status)` 和 turn `(agent_id, status)` 索引。两条启动迁移链在 Chat queue 列就绪后创建索引；不改 schema 指纹。
+新增 expand-only 索引：attempt `(status, created_at, next_retry_at, turn_id)`、`(status, next_retry_at)`；turn `(status, current_attempt_id)`、`(chat_session_id, issue_session_id, priority, chat_queue_order)`。沿用既有 attempt `(runtime_id, status)` 和 turn `(agent_id, status)` 索引。两条启动迁移链在 Chat queue 列就绪后创建索引。migrations.ts 属于平台 dataSchema 指纹输入，因此源码变更会改变指纹；普通源码 PR 不提交指纹文件，发布仍须按既有流程取得跨指纹 rollbackSafeFrom 人工审核。
 
 offer 生产默认保留 60 s 兜底扫描，防止漏接事件后任务长期排队；泵忙、等待或冷却中跳过扫描。扫描派出任务记 warn 和 `ws_minute_summary.offer_sweep_recovered`，用于定位并补齐遗漏的事件入口。ack/drain 只恢复有背压等待的泵，消除高频空认领。hello、入队、终态、容量/配置变化、冷却/重试/租约期限继续立即唤醒；测试环境默认禁用分钟扫描，可显式传入 `sweepMs`。
 
@@ -78,3 +78,23 @@ npm run docs:check
 ```
 
 此次不改变基表选择或批量变更器范围，EXPLAIN 沿用上节既有测量；线上验收仍未执行。
+
+## 合并后复核修复：unknown offer 共享目录租约
+
+审阅发现原物化集合剔除了 VIEW 中 `queued AND offered_at IS NOT NULL` 的记录，导致 unknown offer 重排后，其他 Session 的高优先级任务可能抢占同一 Chat checkout。修复将基表 `offered AND offered_at IS NOT NULL` ID 纳入集合，各调用点原状态过滤不变。已有 Session 双所有权回归修复前 1 pass / 1 fail，修复后全文件通过；另在可切换双库的 claim 回归文件加入 unknown 保留租约、rejected 释放租约、迟到启动守卫及完成后释放的业务验证。
+
+Bun 1.3.14，本轮独立 PG 18.6（127.0.0.1:55464），实际命令：
+
+```sh
+bun test --timeout 30000 tests/unit/multiremi/daemon-task-offers.test.ts tests/unit/multiremi/claim-queued-chat-query-count.test.ts tests/unit/multiremi/session-dual-owner-task.test.ts
+# SQLite：60 pass / 0 fail，505 assertions。
+MULTIREMI_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:55464/postgres bun test --timeout 30000 tests/unit/multiremi/daemon-task-offers-pg.test.ts tests/unit/multiremi/claim-queued-chat-query-count.test.ts
+# PostgreSQL：10 pass / 0 fail，87 assertions，无跳过。
+bun x tsc --noEmit
+npm run docs:test
+npm run docs:check
+# 均退出 0；docs:test 13 pass / 0 fail。
+MULTIREMI_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:55464/postgres MUL163_PLAN_OUTPUT=/tmp/MUL-163-lease-plans.txt bun tests/manual/bench-claim-base-selection.ts
+```
+
+相同 10,201 turns / 201 queued 隔离夹具重新 EXPLAIN：旧 lock 5431.145 ms / 142681 shared hits，旧 snapshot 5333.839 ms / 142671 hits，修复后 selection 3.254 ms / 1035 hits；单次暖缓存测量，不代表线上 API 延迟。SQL 执行次数仍为空 claim 22/22/22、成功 claim 78/78，候选仅一次。原始计划随本轮 Session 回复附件交付。批量变更器继续由 MUL-165 跟进，stable 验收与独立复审尚未完成。

@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { exchange, type TransportHandlers } from './http';
 
-/** Minimal RFC 6455 client: no extensions, bounded frames and write queue.
+/** Minimal RFC 6455 client: no extensions, bounded messages and drain-driven writes.
  * Bun 1.3.14's client drops the close reason; encode the close frame explicitly.
  */
 export class UpstreamSocket {
@@ -9,11 +10,18 @@ export class UpstreamSocket {
   protocol = '';
   binaryType = 'arraybuffer';
   onopen?: () => void;
+  onresponse?: (response: Response) => void;
   onoverflow?: () => void;
   onerror?: () => void;
   onclose?: (event: { code: number; reason: string }) => void;
   onmessage?: (event: { data: string | ArrayBuffer }) => void;
   private socket?: Bun.Socket<undefined>;
+  private responseHandlers?: TransportHandlers;
+  private paused = false;
+  private reading = false;
+  private options: { protocols: string[]; limit: number };
+  private url: URL;
+  private rejection?: { request: Request; stopSignal: AbortSignal; done(): void; error(): void };
   private buffer: Buffer = Buffer.alloc(0);
   private queue: Buffer[] = [];
   private fragments: Buffer[] = [];
@@ -21,12 +29,14 @@ export class UpstreamSocket {
   private fragmentOpcode = 0;
   private key = randomBytes(16).toString('base64');
   private timer?: ReturnType<typeof setTimeout>;
-  constructor(url: URL, options: { headers: Record<string, string>; protocols: string[]; limit: number }) {
+  constructor(url: URL, options: { headers: Record<string, string>; protocols: string[]; limit: number; rejection?: UpstreamSocket['rejection'] }) {
+    this.rejection = options.rejection;
+    this.options = options; this.url = new URL(url); this.url.protocol = 'http:';
     void Bun.connect<undefined>({ hostname: url.hostname, port: Number(url.port || 80), socket: {
-      data: (_socket, bytes) => { try { this.read(Buffer.from(bytes), options); } catch { this.onerror?.(); this.close(1002, 'Invalid WebSocket frame'); } },
+      data: (_socket, bytes) => { if (this.responseHandlers) { this.responseHandlers.data(_socket, bytes); return; } try { this.read(Buffer.from(bytes), options); } catch { this.onerror?.(); this.close(1002, 'Invalid WebSocket frame'); } },
       drain: () => this.flush(),
-      close: () => this.finish(1006, ''),
-      error: () => { this.onerror?.(); this.finish(1006, ''); },
+      close: socket => { if (this.responseHandlers) this.responseHandlers.close(socket); else this.finish(1006, ''); },
+      error: (socket, error) => { if (this.responseHandlers) this.responseHandlers.error(socket, error); else { this.onerror?.(); this.finish(1006, ''); } },
       connectError: () => { this.onerror?.(); this.finish(1006, ''); },
     } }).then(socket => {
       this.socket = socket;
@@ -40,14 +50,31 @@ export class UpstreamSocket {
       this.enqueue(Buffer.from(head + '\r\n'));
     }, () => { this.onerror?.(); this.finish(1006, ''); });
   }
+  pause() { this.paused = true; this.socket?.pause(); }
+  resume() { this.paused = false; if (!this.reading) this.read(Buffer.alloc(0), this.options); if (!this.paused) this.socket?.resume(); }
   private read(bytes: Buffer, options: { protocols: string[]; limit: number }) {
+    this.reading = true;
+    try { this.parse(bytes, options); } finally { this.reading = false; }
+  }
+  private parse(bytes: Buffer, options: { protocols: string[]; limit: number }) {
     this.buffer = this.buffer.length ? Buffer.concat([this.buffer, bytes]) : bytes;
     if (this.readyState === 0) {
       const end = this.buffer.indexOf('\r\n\r\n');
       if (end < 0) { if (this.buffer.length > 65536) this.terminate(); return; }
       if (end > 65536) { this.terminate(); return; }
       const lines = this.buffer.subarray(0, end).toString('latin1').split('\r\n');
-      if (!/^HTTP\/1\.[01] 101(?: |$)/.test(lines.shift()!)) { this.onerror?.(); this.terminate(); return; }
+      const statusLine = lines.shift()!;
+      if (!/^HTTP\/1\.[01] 101(?: |$)/.test(statusLine)) {
+        // The same socket and response bytes go through the HTTP stream parser:
+        // authentication/protocol rejections are responses, never health failures.
+        const initialData = this.buffer; this.buffer = Buffer.alloc(0); this.readyState = 3;
+        void exchange(this.url, this.rejection?.request ?? new Request(this.url), new Headers(), {
+          sent() {}, done: () => this.rejection?.done(), error: () => this.rejection?.error(), connectTimeoutMs: 1000,
+          stopSignal: this.rejection?.stopSignal, reportStatusErrors: false,
+          transport: { initialData, connect: async handlers => { this.responseHandlers = handlers; return this.socket!; } },
+        }).then(response => this.onresponse?.(response), () => this.onerror?.());
+        return;
+      }
       const headers = new Headers();
       for (const line of lines) { const colon = line.indexOf(':'); if (colon <= 0) throw new Error('Bad header'); headers.append(line.slice(0, colon), line.slice(colon + 1).trim()); }
       const expected = createHash('sha1').update(this.key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
@@ -59,7 +86,7 @@ export class UpstreamSocket {
       }
       this.buffer = this.buffer.subarray(end + 4); this.readyState = 1; this.onopen?.();
     }
-    while (this.buffer.length >= 2 && this.readyState !== 3) {
+    while (!this.paused && this.buffer.length >= 2 && this.readyState !== 3) {
       const first = this.buffer[0]; const opcode = first & 15; const final = Boolean(first & 128);
       if ((first & 112) || (this.buffer[1] & 128)) throw new Error('Unsupported frame flags');
       let length = this.buffer[1] & 127; let offset = 2;

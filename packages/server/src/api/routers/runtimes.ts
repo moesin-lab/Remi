@@ -313,7 +313,14 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (!isValidRuntimeUpdateReportStatus(body.status)) {
       return c.json({ error: `invalid status: ${String(body.status ?? "")}` }, 400);
     }
-    store.reportRuntimeUpdateResult(runtimeId, updateId, body);
+    try {
+      store.reportRuntimeUpdateResult(runtimeId, updateId, body);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "cli_update_not_admitted") {
+        return c.json({ error: error.message, code: error.code }, 409);
+      }
+      throw error;
+    }
     return c.json({ status: "ok" });
   });
   app.post("/api/runtimes/:id/commands", async (c) => {

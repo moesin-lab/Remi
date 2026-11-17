@@ -903,6 +903,7 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   "task_not_found",
   "authority_revoked",
   "invalid_report",
+  "cli_update_not_admitted",
   "report_shape_retired",
   "turn_input_pending",
   "input_unread",

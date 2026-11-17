@@ -112,8 +112,21 @@ provider 接单，在剩余期限内等待。到期仍繁忙时更新失败，�
 pending。有 update owner 时只有该 owner 可准入；人工/部署 drain 没有 owner 时，
 必须没有其他 running/restarting/verifying CLI 请求。所有准入均要求 drained 或
 drained_forced。HTTP claim、WebSocket 下行及其迟到 ACK、pending→running 上报共用此判定；
-未准入的请求保持 pending，下行不发送，上报明确拒绝。daemon 收到 running 上报
-拒绝后释放本地暂停并返回，不安装或切换 launcher，也不把请求改为 failed。
+未准入的请求保持 pending，下行不发送。running 上报拒绝使用稳定错误码 `cli_update_not_admitted`（HTTP 409；WS 不可重试协议错误）。
+daemon 按 code 识别后释放本地暂停、释放 WS 去重键，不安装、不切换 launcher、不上报
+failed；同 id 在 WS 或 heartbeat 后续下发时可再次执行。
+
+running 准入确认使用非持久化同步 HTTP result，兼容没有准入逻辑的旧服务端；终态仍走
+持久化 outbox。接受后才安装。超时、断线、5xx 等结果未知时，每 250ms 幂等重试，
+窗口取平台剩余 drain 期限与 30 秒的较小值（旧服务端无 deadline 时取 30 秒），每次请求
+也受该窗口的 AbortSignal 限制。30 秒限制避免无执行者长时间占用更新围栏，同时允许短暂
+网络恢复。窗口耗尽后仅投递一次带 admission confirmation deadline exceeded 原因的 failed，
+随后释放本地暂停。没有 running outbox 记录可在放弃后 replay；已到达服务端但响应丢失的
+HTTP 请求由幂等 running→running 确认，终态拒绝迟到状态回退。
+
+旧实现普通 Error 在 WS session 映射为可重试 server_error，running outbox 会持续重试；
+新实现明确拒绝为不可重试，兼容清理旧队列中该条 running 记录并拒绝其 waiter，不阻塞
+整个 rt 分区。旧 daemon 正常只收到已准入下行，running→running 继续幂等接受。
 因此 owner 终态交接只需寻找 pending sibling，可在 restarting/verifying 保护之前处理。
 
 下载或校验失败的终态立即释放本次 requestId 的 drain；重启期间 drain 保持持久化，
@@ -124,4 +137,5 @@ drained_forced。HTTP claim、WebSocket 下行及其迟到 ACK、pending→runni
 `daemon.drain` 的 `expiry_action=fail_update` 区分更新围栏和人工/部署的 `runtime_recovery`。
 
 验证入口：`tests/unit/multiremi/daemon-drain.test.ts`、
-`tests/unit/daemon/cli-update-coordinator.test.ts`、`tests/unit/daemon/cli-update-lifecycle.test.ts`。
+`tests/unit/daemon/cli-update-coordinator.test.ts`、`tests/unit/daemon/cli-update-lifecycle.test.ts`、
+`tests/unit/daemon/update-admission.test.ts`（真实 HTTP result、协议 report handler 和磁盘 outbox）。

@@ -5,7 +5,7 @@ import { afterCommit } from '../db/postgres.js';
 import type { MultiremiTaskWithAgent } from '@multiremi/contracts/types.js';
 import type { DaemonTaskCompletionFields } from '@multiremi/contracts/daemon-protocol.js';
 import type { UnifiedMessage,DecisionOption } from '@multiremi/contracts/unified-model.js';
-import { sendMessageWithinTransaction,getMessage } from './send-message.js';
+import { sendMessageWithinTransaction,getMessage,messageFromRow } from './send-message.js';
 import { InputUnreadError, lockLane,acknowledgeInput,assertOfferedInputRead } from './lane-machine.js';
 import { deriveIssueStatusWithinTransaction } from './issue-status.js';
 import { patchDecisionRecord } from './decision-records.js';
@@ -52,7 +52,7 @@ export class DaemonTurnBridge {
         &&!(sentInput&&row.status==='pending'&&row.offered_at&&['offered','accepted'].includes(row.attempt_status)))throw new Error('stale_attempt');
     lockLane(this.ctx,row.session_id,row.agent_id,row.execution_scope);return row;
   }
-  private messages(sessionId:string,from:number,to:number):UnifiedMessage[]{return this.ctx.db.query("SELECT id FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND deleted_at IS NULL AND visibility='shown' ORDER BY seq").all(sessionId,from,to).map(row=>getMessage(this.ctx,row.id)!);}
+  private messages(sessionId:string,from:number,to:number):UnifiedMessage[]{return this.ctx.db.query("SELECT * FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND deleted_at IS NULL AND visibility='shown' ORDER BY seq").all(sessionId,from,to).map(messageFromRow);}
   private inputMessages(turn:any,from:number,to:number):UnifiedMessage[] {
     const messages=this.messages(turn.session_id,from,to);
     const attempt=this.ctx.db.query('SELECT session_id,attempt_no,input_trigger_ack FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);

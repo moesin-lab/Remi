@@ -3249,6 +3249,10 @@ runMigrations(this.db);
   }
 
   /** The Runtime row without the derived usage/model/group reads. */
+  daemonInputRuntimeIds(workspaceId: string) { return this.runtimes.daemonInputRuntimeIds(workspaceId); }
+
+  getRuntimesLite(ids: readonly string[]) { return this.runtimes.getRuntimesLite(ids); }
+
   getRuntimeLite(id: string): MultiremiRuntime | null {
     return this.runtimes.getRuntimeLite(id);
   }
@@ -3821,7 +3825,8 @@ runMigrations(this.db);
 
   reportIssueWorkspace(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
     const workspace = this.issueWorkspaces.report(input);
-    this.publishDaemonDispatchConditionsChanged(workspace.workspaceId);
+    this.ctx.emitWorkspaceEvent({ type: "daemon:dispatch_conditions_changed", workspaceId: workspace.workspaceId,
+      actorType: "system", actorId: null, payload: { dispatch_only: true } });
     return workspace;
   }
 
@@ -4743,6 +4748,10 @@ runMigrations(this.db);
 
   getConversationLogEntry(sessionId: string, seq: number, query?: ConversationLogQuery | null): ConversationLogEntry | null {
     return this.conversationLog.getEntry(sessionId, seq, query);
+  }
+
+  getConversationLogEntriesByRefs(refs: readonly { sessionId: string; seq: number }[]) {
+    return this.conversationLog.getEntriesByRefs(refs);
   }
 
   getConversationLogEntryById(id: string): ConversationLogEntry | null {

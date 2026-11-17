@@ -257,11 +257,11 @@ export function deregisterDaemonRuntimes(c: Context, store: MultiremiStore, runt
 }
 
 export function isTerminalRuntimeRequestForDaemon(status: string): boolean {
-  return status === "completed" || status === "failed" || status === "timeout";
+  return status === "completed" || status === "rolled_back" || status === "failed" || status === "timeout";
 }
 
-export function isValidRuntimeUpdateReportStatus(status: unknown): status is "completed" | "failed" | "running" {
-  return status === "completed" || status === "failed" || status === "running";
+export function isValidRuntimeUpdateReportStatus(status: unknown): status is "completed" | "failed" | "running" | "restarting" | "rolled_back" {
+  return status === "completed" || status === "failed" || status === "running" || status === "restarting" || status === "rolled_back";
 }
 
 export function daemonLocalSkillListReportBody(input: ReportRuntimeLocalSkillListInput): ReportRuntimeLocalSkillListInput {

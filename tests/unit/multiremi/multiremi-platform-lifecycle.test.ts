@@ -269,8 +269,10 @@ describe("platform lifecycle", () => {
     const updateAck = store.heartbeatRuntime("rt_old_claude");
     expect(updateAck.pending_update).toMatchObject({ target_version: "0.2.58", scope: "cli" });
     expect(store.claimTask("rt_old_codex")).toBeNull();
+    store.reportRuntimeUpdateResult("rt_old_claude", updateAck.pending_update!.id, { status: "restarting" });
+    store.recordDaemonProtocol("rt_old_claude", store.getRuntime("rt_old_claude")!.daemonId ?? "", 2, "0.2.58");
     store.reportRuntimeUpdateResult("rt_old_claude", updateAck.pending_update!.id, {
-      status: "completed",
+      status: "completed", self_check: true,
       output: "updated",
     });
     expect(store.claimTask("rt_old_codex")?.id).toBe(replacement.id);

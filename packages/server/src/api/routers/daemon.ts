@@ -410,6 +410,17 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     // bot to code that cannot host it.
     const feishuConciergeProtocol = normalizeDaemonProtocolVersion(body.feishu_concierge_protocol);
     const supportsFeishuBotConfig = feishuConciergeProtocol >= FEISHU_CONCIERGE_PROTOCOL_VERSION;
+    store.reconcileDaemonDrain(runtimeId);
+    const ackGeneration = Number(body.drain_ack_generation);
+    if (Number.isSafeInteger(ackGeneration) && ackGeneration >= 0) {
+      const activeCount = Number(body.active_task_count);
+      store.recordRuntimeDrainAck(
+        runtimeId,
+        ackGeneration,
+        Number.isSafeInteger(activeCount) && activeCount >= 0 ? activeCount : null,
+        "runtime",
+      );
+    }
     const ack = store.heartbeatRuntime(runtimeId, {
       supportsBatchImport: body.supports_batch_import ?? false,
       supportsDirectoryScan: body.supports_directory_scan ?? false,
@@ -439,16 +450,6 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     // so an expired lease flips back to normal on the very next heartbeat.
     store.reconcileDaemonDrain(runtimeId);
     ack.drain = store.daemonDrainDirective(runtimeId);
-    const ackGeneration = Number(body.drain_ack_generation);
-    if (Number.isSafeInteger(ackGeneration) && ackGeneration >= 0) {
-      const activeCount = Number(body.active_task_count);
-      store.recordRuntimeDrainAck(
-        runtimeId,
-        ackGeneration,
-        Number.isSafeInteger(activeCount) && activeCount >= 0 ? activeCount : null,
-        "runtime",
-      );
-    }
     if (body.execution_profile_protocol === 1) {
       store.recordRuntimeExecutionBindingAcks(runtimeId, body.runtime_binding_acks);
     }

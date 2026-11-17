@@ -207,7 +207,7 @@ async function installVerifiedUpdate(options: UpdateOptions): Promise<UpdateResu
     try {
       response = await fetchImpl(artifact.url, {
         headers: artifact.headers,
-        redirect: artifact.source === "platform" ? "error" : "follow",
+        redirect: artifact.source === "platform" ? "manual" : "follow",
         signal: AbortSignal.timeout(30_000),
       });
     } catch {

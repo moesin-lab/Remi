@@ -118,7 +118,12 @@ export async function fetchSkillImportResponse(url: string, init: RequestInit = 
           ? await bounded(Promise.resolve(scope.githubHeaders(target)))
           : process.env.GITHUB_TOKEN?.trim()
             ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN.trim()}` } : {};
-        const authorization = new Headers(supplied).get("authorization");
+        let authorization: string | null;
+        try {
+          authorization = new Headers(supplied).get("authorization");
+        } catch {
+          throw new SkillImportError("Skill import authentication headers are invalid", 502);
+        }
         if (authorization) {
           scope.secrets.add(authorization);
           const secret = authorization.replace(/^Bearer\s+/i, "");

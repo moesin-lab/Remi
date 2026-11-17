@@ -371,6 +371,12 @@ for (const size of [2, 40]) {
     test(`${type} budget with ${size} context messages`, async () => {
       const f = await loadedFleet(size);
       const turn = f.store.getTurnForAttempt(f.task.id)!;
+      // Make every context body readable inline by this Agent. Completion must
+      // examine the whole interval, rather than exit at its first folded body.
+      if (type === "turn.complete") f.database.run(
+        "UPDATE multiremi_conversation_log SET sender_type='agent',sender_id=? WHERE session_id=? AND message_kind='status'",
+        [f.agent.id, f.issueSession.id],
+      );
       const input = f.store
         .getDaemonTurnBridge()
         .offerInput(f.store.getTaskWithAgent(f.task.id)!);

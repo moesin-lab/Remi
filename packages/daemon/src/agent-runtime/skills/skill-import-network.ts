@@ -12,6 +12,7 @@ export class SkillImportError extends Error {
 
 export type SkillImportOptions = {
   signal?: AbortSignal;
+  githubHeaders?: (url: URL) => HeadersInit | Promise<HeadersInit>;
   requestTimeoutMs?: number;
   totalTimeoutMs?: number;
 };
@@ -20,6 +21,8 @@ type ImportScope = {
   signal: AbortSignal;
   requestTimeoutMs: number;
   current: string;
+  secrets: Set<string>;
+  githubHeaders?: SkillImportOptions["githubHeaders"];
 };
 
 // Each concurrent import owns its deadline and cancellation context, including
@@ -33,6 +36,8 @@ export async function withSkillImportDeadline<T>(options: SkillImportOptions, ru
     signal: controller.signal,
     requestTimeoutMs: options.requestTimeoutMs ?? SKILL_IMPORT_REQUEST_TIMEOUT_MS,
     current: "starting import",
+    secrets: new Set(),
+    githubHeaders: options.githubHeaders,
   };
   const cancel = () => controller.abort(new SkillImportError(`Skill import cancelled during ${scope.current}`, 408));
   if (options.signal?.aborted) cancel();
@@ -47,6 +52,13 @@ export async function withSkillImportDeadline<T>(options: SkillImportOptions, ru
       scope.signal.throwIfAborted();
       return result;
     });
+  } catch (error) {
+    if (error instanceof Error) {
+      let message = error.message;
+      for (const secret of scope.secrets) message = message.replaceAll(secret, "[REDACTED]");
+      throw new SkillImportError(message, error instanceof SkillImportError ? error.status : 502);
+    }
+    throw new SkillImportError("Skill import failed", 502);
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", cancel);
@@ -93,10 +105,49 @@ export async function fetchSkillImportResponse(url: string, init: RequestInit = 
     });
   });
   try {
-    const fetched = await bounded<Response>(Promise.resolve(fetch(url, { ...init, signal: controller.signal })).then((result) => {
-      if (controller.signal.aborted) void result.body?.cancel().catch(() => {});
-      return result;
-    }));
+    let target = parsed;
+    let credentialsAllowed = true;
+    let fetched: Response;
+    for (let redirects = 0; ; redirects++) {
+      const headers = new Headers(init.headers);
+      headers.delete("Authorization");
+      const official = target.protocol === "https:" && !target.port && !target.username && !target.password
+        && ["github.com", "api.github.com", "raw.githubusercontent.com"].includes(target.hostname);
+      if (official && credentialsAllowed) {
+        const supplied = scope.githubHeaders
+          ? await bounded(Promise.resolve(scope.githubHeaders(target)))
+          : process.env.GITHUB_TOKEN?.trim()
+            ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN.trim()}` } : {};
+        const authorization = new Headers(supplied).get("authorization");
+        if (authorization) {
+          scope.secrets.add(authorization);
+          const secret = authorization.replace(/^Bearer\s+/i, "");
+          if (secret) scope.secrets.add(secret);
+          headers.set("Authorization", authorization);
+        }
+      }
+      try {
+        fetched = await bounded<Response>(Promise.resolve(fetch(target.toString(), {
+          ...init, method: "GET", headers, redirect: "manual", signal: controller.signal,
+        })).then((result) => {
+          if (controller.signal.aborted) void result.body?.cancel().catch(() => {});
+          return result;
+        }));
+      } catch (error) {
+        if (controller.signal.aborted) throw controller.signal.reason;
+        // Transport exceptions may include request headers. Do not propagate them.
+        throw new SkillImportError("Skill import upstream request failed", 502);
+      }
+      if (![301, 302, 303, 307, 308].includes(fetched.status) || !fetched.headers.has("location")) break;
+      void fetched.body?.cancel().catch(() => {});
+      if (redirects >= 5) throw new SkillImportError("Skill import upstream redirect limit exceeded", 502);
+      const next = new URL(fetched.headers.get("location")!, target);
+      if (!["http:", "https:"].includes(next.protocol) || next.username || next.password) {
+        throw new SkillImportError("Skill import upstream redirect is invalid", 502);
+      }
+      if (next.origin !== target.origin) credentialsAllowed = false;
+      target = next;
+    }
     response = fetched;
     // Error classification only needs status/headers. Never wait for an error
     // body (in particular a rate-limit response) before returning the error.
@@ -127,7 +178,9 @@ export async function fetchSkillImportResponse(url: string, init: RequestInit = 
       bytes.set(chunk, offset);
       offset += chunk.byteLength;
     }
-    return new Response(bytes, { status: fetched.status, headers: fetched.headers });
+    let text = new TextDecoder().decode(bytes);
+    for (const secret of scope.secrets) text = text.replaceAll(secret, "[REDACTED]");
+    return new Response(text, { status: fetched.status, headers: fetched.headers });
   } finally {
     clearTimeout(timer);
     scope.signal.removeEventListener("abort", cancel);

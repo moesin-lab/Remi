@@ -635,7 +635,8 @@ function upstreamHttpError(response: Response, url: string): Error {
     const reset = Number(response.headers.get("x-ratelimit-reset"));
     const resetTime = Number.isFinite(reset) && reset > 0 ? new Date(reset * 1000) : null;
     const resetHint = resetTime && !Number.isNaN(resetTime.getTime()) ? ` Resets at ${resetTime.toISOString()}.` : "";
-    const retryAfter = response.headers.get("retry-after");
+    const retryValue = response.headers.get("retry-after");
+    const retryAfter = retryValue && /^\d+$/.test(retryValue) ? retryValue : null;
     return new SkillImportError(
       `GitHub rate limit exceeded (HTTP ${response.status}) for ${url}.${resetHint}${retryAfter ? ` Retry-After: ${retryAfter}.` : ""} Configure GITHUB_TOKEN on the API server or retry later.`,
       429,
@@ -654,8 +655,6 @@ async function fetchGitHubApi(url: string, options: { accept?: string } = {}): P
   const headers = new Headers();
   headers.set("Accept", options.accept ?? "application/vnd.github+json");
   headers.set("X-GitHub-Api-Version", "2022-11-28");
-  const token = process.env.GITHUB_TOKEN?.trim();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
   return await fetchSkillImportResponse(url, { headers }, MAX_IMPORT_TOTAL_SIZE);
 }
 

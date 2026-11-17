@@ -97,3 +97,21 @@ Windows 上保留重试定时器的事件循环引用，避免 Bun 1.3.14 的无
 - `bun test tests/unit/multiremi/multiremi-platform-lifecycle.test.ts tests/unit/multiremi/multiremi-platform-drain.test.ts tests/unit/multiremi/multiremi-platform-safety.test.ts`：API 鉴权、更新源、预检、调度边界和提交后维护状态。
 - views 的 `settings/components/platform-tab.test.tsx`、`settings-page.test.tsx`，core 的 `api/schemas/platform.test.ts`：设置入口、来源表单、阻塞原因和响应边界。
 - `.github/workflows/release-build-check.yml` 的 `platform-updater` job 在 Windows/macOS/Linux 运行相关测试。配置了矩阵不等于本次三平台运行均已验证；实际结果见任务/CI。
+
+## CLI 更新的 daemon drain
+
+CLI 更新在 runtimes-repo 创建带 requestId 的持久化 daemon drain，等待期间请求
+保持 pending；`daemon.drain` 状态显示排空进度，无需新增请求状态。默认期限沿用
+MUL-68 的 5 分钟，`MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS` 可覆盖，避免引入两套期限。
+服务端排空后才下发更新，并携带原 deadline；daemon 对接受任务的竞态暂停各
+provider 接单，在剩余期限内等待。到期仍繁忙时更新失败，错误列出剩余任务，
+解除该更新持有的 drain，已有轮次继续运行，不执行 runtime recovery。
+人工和部署 drain 保持原有超时回收契约，不能被更新接管或释放。
+
+下载或校验失败的终态立即释放本次 requestId 的 drain；重启期间 drain 保持持久化，
+新进程完成版本注册和启动自检、确认 completed 后释放。恢复旧版本确认 rolled_back
+同样释放。进入 restarting/verifying 后排空期限不干扰新进程确认，仍由更新验证期限管理。
+`daemon.drain` 的 `expiry_action=fail_update` 区分更新围栏和人工/部署的 `runtime_recovery`。
+
+验证入口：`tests/unit/multiremi/daemon-drain.test.ts`、
+`tests/unit/daemon/cli-update-coordinator.test.ts`、`tests/unit/daemon/cli-update-lifecycle.test.ts`。

@@ -906,6 +906,8 @@ export interface MultiremiDaemonRuntimeInput {
   status: "ok" | "runtime_gone";
   runtime_gone?: boolean;
   pending_update?: {
+    /** Persisted drain deadline; compatibility daemons may ignore it. */
+    drain_deadline?: string;
     id: string;
     target_version: string;
     scope?: MultiremiRuntimeUpdateScope;

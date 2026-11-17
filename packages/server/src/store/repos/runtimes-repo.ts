@@ -1661,10 +1661,11 @@ export class RuntimesRepo {
             WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND scope = 'cli' AND status = 'pending'`, [nowIso(), ...ids]);
         }
         for (const id of ids) this.updateQueue.expire(id);
-        const active = this.ctx.db.query(`SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id IN (${ids.map(() => "?").join(",")})
-          AND scope = 'cli' AND status IN ('pending', 'running', 'restarting', 'verifying')`).get(...ids);
+        const active = this.ctx.db.query(`SELECT 1 FROM multiremi_runtime_update_requests WHERE id = ?
+          AND scope = 'cli' AND status IN ('pending', 'running', 'restarting', 'verifying')`).get(drain.update_request_id);
         if (!active) {
-          this.ctx.db.run(`DELETE FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ?`, [workspaceId, daemonId]);
+          this.ctx.db.run(`DELETE FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`,
+            [workspaceId, daemonId, drain.update_request_id]);
           this.notifyDaemonDrainChanged(workspaceId);
           return;
         }
@@ -1675,6 +1676,20 @@ export class RuntimesRepo {
         WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND scope = 'cli'
           AND status IN ('restarting', 'verifying')`).get(...ids)) return;
       if (Date.parse(String(drain.deadline)) > Date.now() || drain.forced_at) return;
+      if (drain.update_request_id) {
+        const remaining = this.getDaemonDrainStatus(workspaceId, daemonId).remaining_tasks;
+        if (!remaining) return;
+        const tasks = this.ctx.db.query(`SELECT id FROM multiremi_turn_execution_records
+          WHERE runtime_id IN (${ids.map(() => "?").join(",")})
+            AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`).all(...ids) as Row[];
+        this.ctx.db.run(`UPDATE multiremi_runtime_update_requests SET status = 'failed', error = ?, updated_at = ?
+          WHERE id = ? AND status IN ('pending', 'running')`,
+          [`CLI update drain deadline exceeded; remaining tasks: ${tasks.map(task => String(task.id)).join(", ") || "daemon-reported active tasks"} (${remaining})`, nowIso(), drain.update_request_id]);
+        this.ctx.db.run(`DELETE FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`,
+          [workspaceId, daemonId, drain.update_request_id]);
+        this.notifyDaemonDrainChanged(workspaceId);
+        return;
+      }
       if (!this.daemonDrainTaskCount(ids)) return;
       this.ctx.db.run(`UPDATE multiremi_daemon_drains SET forced_at = ? WHERE workspace_id = ? AND daemon_id = ?`,
         [nowIso(), workspaceId, daemonId]);
@@ -1705,7 +1720,7 @@ export class RuntimesRepo {
       status: !drain ? "normal" : remaining || awaitingAck ? "draining" : drain.forced_at ? "drained_forced" : "drained",
       started_at: drain ? String(drain.started_at) : null, deadline: drain ? String(drain.deadline) : null,
       reason: drain?.reason as DaemonDrainReason ?? null, forced_at: drain?.forced_at ? String(drain.forced_at) : null,
-      remaining_tasks: remaining, awaiting_daemon_ack: awaitingAck, expiry_action: "runtime_recovery" };
+      remaining_tasks: remaining, awaiting_daemon_ack: awaitingAck, expiry_action: drain?.update_request_id ? "fail_update" : "runtime_recovery" };
   }
 
   private daemonDrainRuntimeRows(workspaceId: string, daemonId: string): Row[] {
@@ -2450,7 +2465,12 @@ export class RuntimesRepo {
     }
     if (options.claimPending !== false) {
       const update = this.claimRuntimeUpdateRequest(runtimeId);
-      if (update) ack.pending_update = { id: update.id, target_version: update.targetVersion, scope: update.scope };
+      if (update) {
+        const drain = update.scope === "cli"
+          ? this.getDaemonDrainStatus(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id) : null;
+        ack.pending_update = { id: update.id, target_version: update.targetVersion, scope: update.scope,
+          ...(drain?.deadline ? { drain_deadline: drain.deadline } : {}) };
+      }
     }
     return ack;
   }

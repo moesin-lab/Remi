@@ -182,9 +182,11 @@ async function installVerifiedUpdate(options: UpdateOptions): Promise<UpdateResu
   parseVersion(latestVersion);
   if (options.targetVersion && latestVersion !== options.targetVersion.replace(/^v/, "")) throw new Error("Release does not match target_version");
   await options.onProgress?.(`Using ${artifact.source} update source`);
-  if (!options.targetVersion && !options.targetCommit && (artifact.commit
-    ? latestVersion === currentVersion && artifact.commit === options.currentCommit
-    : compareVersions(latestVersion, currentVersion) <= 0)) {
+  if (!options.targetVersion && !options.targetCommit && (
+    compareVersions(latestVersion, currentVersion) < 0
+    || (artifact.commit
+      ? latestVersion === currentVersion && artifact.commit === options.currentCommit
+      : compareVersions(latestVersion, currentVersion) === 0))) {
     return { status: "current", version: currentVersion, source: artifact.source, commit: artifact.commit };
   }
   const assetName = artifact.assetName;

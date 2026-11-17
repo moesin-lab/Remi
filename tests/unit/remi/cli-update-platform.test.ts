@@ -100,8 +100,37 @@ test("explicit commit selects the platform even with github-only preference and 
 test("explicit commit and version must both match the manifest", async () => {
   const f = fixture();
   await expect(performUpdate({ ...f.options, targetCommit: "b".repeat(40) })).rejects.toThrow("target_commit");
-  await expect(performUpdate({ ...f.options, targetVersion: "0.2.95-stable.other" })).rejects.toThrow("target_version");
+  await expect(performUpdate({ ...f.options, targetCommit: commit, targetVersion: "0.2.95-stable.other" })).rejects.toThrow("target_version");
   expect(f.requests.every(r => !r.url.includes("github"))).toBe(true);
+});
+for (const platformVersion of ["0.2.94", "0.2.96"]) test(`version-only target falls back when platform current is ${platformVersion}`, async () => {
+  const f = fixture(); f.manifest.version = platformVersion;
+  const result = await performUpdate({ ...f.options, targetVersion: `v${version}` });
+  expect(result).toMatchObject({ status: "installed", source: "github", version });
+  expect(f.requests[0]!.url).toEndWith("/current");
+  expect(f.requests.find(r => r.url.includes("api.github.com"))!.url).toEndWith(`/releases/tags/v${version}`);
+  expect(f.requests.some(r => r.url.startsWith("https://platform.test") && r.url.endsWith(".tar.gz"))).toBe(false);
+  expect(f.logs.join("\n")).toContain("Using github");
+});
+test("platform-only version mismatch fails before downloading or changing the launcher", async () => {
+  const f = fixture(); f.manifest.version = "0.2.94";
+  await expect(performUpdate({ ...f.options, targetVersion: version,
+    env: { MULTIREMI_UPDATE_SOURCES: "platform" } })).rejects.toThrow("target_version");
+  expect(f.requests).toHaveLength(1);
+  expect(readFileSync(f.launcherPath, "utf8")).toContain("echo previous");
+});
+test("an unpinned update skips an older platform build without changing the installation", async () => {
+  const f = fixture();
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.96", currentCommit: "b".repeat(40) }))
+    .toMatchObject({ status: "current", version: "0.2.96", source: "platform" });
+  expect(f.requests).toHaveLength(1);
+  expect(readFileSync(f.launcherPath, "utf8")).toContain("echo previous");
+  expect(existsSync(join(f.options.installRoot!, "versions"))).toBe(false);
+});
+test("an explicitly requested older version remains installable", async () => {
+  const f = fixture();
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.96", targetVersion: version }))
+    .toMatchObject({ status: "installed", version, source: "platform" });
 });
 for (const source of ["github", "platform"] as const) test(`${source}-only source selection`, async () => {
   const f = fixture();

@@ -5824,10 +5824,9 @@ export class MultiremiDaemon {
         onUsage?.(finalUsage);
         await this.client.reportTaskUsageSnapshot(task.id, finalUsage);
         try {
-          // Inline receipts still advance normally; unread bodies are handled
-          // by the recoverable completion gate instead of the receipt-resync loop.
-          await this.taskDownlinks.consumeTaskSteerMessages(task.id, [], true);
-          await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
+          // Persist the reply and its input receipts before any platform wait.
+          // The outbox delivers receipts first; unread bodies still use the completion gate.
+          await this.client.completeTurn({ ...this.taskDownlinks.completionInput(task.id), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
         } catch (err) {
           if (remindUnreadInput(err, candidate)) continue;
           if (!isTurnInputPendingConflict(err)) throw err;
@@ -5856,7 +5855,7 @@ export class MultiremiDaemon {
           // settle() is still the one rule before every completion attempt.
           this.recordTrace(task.id, () => trace.settle());
           try {
-            await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
+            await this.client.completeTurn({ ...this.taskDownlinks.completionInput(task.id), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
           } catch (error) {
             if (remindUnreadInput(error, candidate)) continue;
             throw error;

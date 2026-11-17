@@ -1677,13 +1677,17 @@ export class RuntimesRepo {
     const drain = this.ctx.db.query(`SELECT * FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ?`)
       .get(workspaceId, daemonId) as Row | null;
     const tasks = this.daemonDrainTaskCount(runtimes.map(row => String(row.id)));
-    // Counts are daemon-wide. Use the newest report, so a disabled provider's old
-    // nonzero count cannot hold a live daemon in drain forever.
+    // WebSocket reports are process-wide; compatibility HTTP reports are per
+    // runtime. An idle HTTP lane cannot acknowledge another lane's cancellation.
     const latestAck = runtimes.reduce((latest, row) => row.drain_ack_at && String(row.drain_ack_at) > latest ? String(row.drain_ack_at) : latest, "");
-    const reports = runtimes.filter(row => row.drain_ack_at === latestAck && row.drain_reported_active_tasks != null);
-    const reported = Math.max(0, ...reports.map(row => Number(row.drain_reported_active_tasks)));
+    const daemonReports = runtimes.filter(row => row.drain_ack_scope === "daemon" && row.drain_ack_at === latestAck && row.drain_reported_active_tasks != null);
+    const reports = daemonReports.length ? daemonReports : runtimes;
+    const reported = daemonReports.length
+      ? Math.max(0, ...daemonReports.map(row => Number(row.drain_reported_active_tasks)))
+      : runtimes.reduce((total, row) => total + Number(row.drain_reported_active_tasks ?? 0), 0);
     const ackAfter = drain?.forced_at;
-    const awaitingAck = !!ackAfter && (!reports.length || latestAck <= String(ackAfter));
+    const awaitingAck = !!ackAfter && (!reports.length || reports.some(row =>
+      row.drain_reported_active_tasks == null || !row.drain_ack_at || String(row.drain_ack_at) <= String(ackAfter)));
     const remaining = Math.max(tasks, reported);
     return { workspace_id: workspaceId, daemon_id: daemonId, mode: drain ? "draining" : "normal",
       status: !drain ? "normal" : remaining || awaitingAck ? "draining" : drain.forced_at ? "drained_forced" : "drained",
@@ -1693,7 +1697,7 @@ export class RuntimesRepo {
   }
 
   private daemonDrainRuntimeRows(workspaceId: string, daemonId: string): Row[] {
-    return this.ctx.db.query(`SELECT id, drain_ack_at, drain_reported_active_tasks FROM multiremi_runtimes
+    return this.ctx.db.query(`SELECT id, drain_ack_at, drain_reported_active_tasks, drain_ack_scope FROM multiremi_runtimes
       WHERE COALESCE(workspace_id, 'local') = ? AND (daemon_id = ? OR (daemon_id IS NULL AND id = ?))`)
       .all(workspaceId, daemonId, daemonId) as Row[];
   }

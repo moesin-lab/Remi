@@ -290,3 +290,11 @@ CLI 更新创建同样的排空状态，归零或到期取消并确认后再下�
 API：`GET /api/daemons/:daemonId/drain` 查询，`POST` 同路径发起
 （JSON 如 `{"deadline":"5m","reason":"manual"}`），`DELETE` 同路径解除；
 支持 `workspace_id` 查询参数。Agent 发起权限留待 MUL-29，停止服务上限与 unit 契约由 MUL-28 负责。
+
+协议拒绝后的 `upgrade_wait` 使用 HTTP 升级探测，不再有 WebSocket 取消下行。
+支持本排空协议的 daemon 会随探测报告本 runtime 的在途 attempt ID，消费服务端返回的
+终态取消后再报告零在途；HTTP 的 provider 局部计数按 runtime 汇总，不能用空闲 provider
+的零值替代全机确认。此路径的到期取消最多额外等待一次既有升级探测周期（60 秒），
+更新下发还可能等待下一次零在途探测。未安装本功能的旧 daemon 不会消费新增取消字段，
+平台无法仅靠数据库恢复终止其本地进程：这类实例需在维护窗口人工停止旧 daemon 后升级，
+不能把服务端任务归零当作已完成本地排空。

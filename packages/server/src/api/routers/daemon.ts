@@ -377,6 +377,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       ssh_mesh_status?: MultiremiDaemonSshMeshStatus;
       drain_ack_generation?: number;
       active_task_count?: number;
+      active_task_ids?: string[];
       supports_bot_menu?: boolean;
       bot_menu_protocol?: number;
       feishu_concierge_protocol?: number;
@@ -445,10 +446,21 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         runtimeId,
         ackGeneration,
         Number.isSafeInteger(activeCount) && activeCount >= 0 ? activeCount : null,
+        "runtime",
       );
     }
     if (body.execution_profile_protocol === 1) {
       store.recordRuntimeExecutionBindingAcks(runtimeId, body.runtime_binding_acks);
+    }
+    // Only report terminal attempts owned by this authenticated runtime. The
+    // daemon feeds these through the same cancellation observer as WS pushes.
+    if (Array.isArray(body.active_task_ids)) {
+      ack.cancelled_tasks = body.active_task_ids.slice(0, 1024).flatMap(id => {
+        if (typeof id !== "string") return [];
+        const task = store.getTask(id);
+        return task?.runtimeId === runtimeId && (task.status === "completed" || task.status === "failed" || task.status === "cancelled")
+          ? [{ task_id: id, status: task.status }] : [];
+      });
     }
     const response = daemonHeartbeatHttpResponse(ack);
     return c.json(response);

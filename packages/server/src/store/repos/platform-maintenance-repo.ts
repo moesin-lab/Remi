@@ -133,12 +133,12 @@ export class PlatformMaintenanceRepo {
     return this.get();
   }
 
-  recordRuntimeDrainAck(runtimeId: string, generation: number, activeTasks: number | null): void {
+  recordRuntimeDrainAck(runtimeId: string, generation: number, activeTasks: number | null, scope: "daemon" | "runtime" = "daemon"): void {
     this.db.run(
       `UPDATE multiremi_runtimes
-       SET drain_ack_generation = ?, drain_ack_at = ?, drain_reported_active_tasks = ?
+       SET drain_ack_generation = ?, drain_ack_at = ?, drain_reported_active_tasks = ?, drain_ack_scope = ?
        WHERE id = ?`,
-      [Math.max(0, Math.floor(generation)), nowIso(), activeTasks == null ? null : Math.max(0, Math.floor(activeTasks)), runtimeId],
+      [Math.max(0, Math.floor(generation)), nowIso(), activeTasks == null ? null : Math.max(0, Math.floor(activeTasks)), scope, runtimeId],
     );
   }
 

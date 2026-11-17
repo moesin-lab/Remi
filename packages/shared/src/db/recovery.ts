@@ -30,6 +30,7 @@ const log = createLogger("db-recovery");
 export class DatabaseRetryLoop {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
+  private active: Promise<unknown> | null = null;
   private generation = 0;
   private failures = 0;
   private lastWarning = -Infinity;
@@ -46,11 +47,12 @@ export class DatabaseRetryLoop {
     else this.schedule(delayMs, generation);
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     this.stopped = true;
     this.generation++;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    return this.active?.then(() => {}, () => {}) ?? Promise.resolve();
   }
 
   private schedule(delay: number, generation: number): void {
@@ -63,7 +65,8 @@ export class DatabaseRetryLoop {
     if (this.stopped || generation !== this.generation) return;
     let delay: number;
     try {
-      await withDatabaseTimeout(5_000, this.action);
+      this.active = Promise.resolve(withDatabaseTimeout(5_000, this.action));
+      await this.active;
       if (this.stopped || generation !== this.generation) return;
       // Interval lookup may itself read configuration from the database.
       delay = withDatabaseTimeout(5_000, () => typeof this.interval === "function" ? this.interval() : this.interval);

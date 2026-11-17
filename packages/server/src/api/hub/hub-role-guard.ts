@@ -69,6 +69,8 @@ export interface HubRoleGuardOptions {
   databaseUrl: string | null | undefined;
   /** The roles whose locks this process must hold. */
   locks: readonly HubLockRole[];
+  /** Slot activation reports contention without terminating its listener. */
+  throwOnFailure?: boolean;
   timeoutMs?: number;
   retryMs?: number;
   /** Injected for tests; defaults to `process.exit`. */
@@ -208,7 +210,7 @@ async function takeLocks(
         await close();
         return null;
       }
-      await new Promise<void>((resolve) => { setTimeout(resolve, timings.retryMs); });
+      await new Promise<void>((resolve) => { setTimeout(resolve, Math.min(timings.retryMs, Math.max(0, deadline - Date.now()))); });
     }
   } catch (error) {
     logger.error(`role guard could not reach the database: ${scrubErrorForLog(error)}`);
@@ -245,6 +247,7 @@ export async function startHubRoleGuard(options: HubRoleGuardOptions): Promise<H
     options.onAcquired,
   );
   if (!locked) {
+    if (options.throwOnFailure) throw new Error("hub role lock could not be acquired");
     logger.error("exiting: this deployment requires the hub role lock and it could not be taken");
     exit(1);
     return null;

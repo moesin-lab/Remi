@@ -130,6 +130,9 @@ function main(): void {
 }
 
 export function classifyRoute(route: string): CliManifestRoute {
+  if (route.includes(" /internal/slot/")) {
+    return { cli_exempt: true, category: "platform_updater_internal", reason: "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token." };
+  }
   if (route === "GET /api/chat/sessions/:sessionId/background-tasks"
     || route === "POST /api/chat/sessions/:sessionId/background-tasks/stop") return {
     cli_exempt: true, category: "pure_ui", reason: "Chat background-task panel state and stop actions are exposed in the Web UI (ADR 0022).",

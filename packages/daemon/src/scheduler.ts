@@ -93,13 +93,12 @@ export class MultiremiScheduler {
     this.startIssueArchiveSweep();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.running = false;
-    this.syncLoop?.stop();
-    this.failureLoop?.stop();
-    this.archiveLoop?.stop();
-    for (const entry of this.jobs.values()) { entry.job.stop(); entry.retry.stop(); }
+    const stopped = [this.syncLoop?.stop(), this.failureLoop?.stop(), this.archiveLoop?.stop()];
+    for (const entry of this.jobs.values()) { entry.job.stop(); stopped.push(entry.retry.stop()); }
     this.jobs.clear();
+    await Promise.all(stopped);
   }
 
   sync(): void {

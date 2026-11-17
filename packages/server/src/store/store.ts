@@ -2050,9 +2050,8 @@ runMigrations(this.db);
     this.taskCapabilityMonitor.start();
   }
 
-  stopNotificationDeliverySweeper(): void {
-    this.notificationDispatcher.stop();
-    this.taskCapabilityMonitor.stop();
+  async stopNotificationDeliverySweeper(): Promise<void> {
+    await Promise.all([this.notificationDispatcher.stop(), this.taskCapabilityMonitor.stop()]);
   }
 
   createFeedback(input: CreateFeedbackInput): MultiremiFeedback {

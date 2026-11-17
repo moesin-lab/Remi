@@ -61,6 +61,7 @@ export class OutboundNotificationDispatcher {
   private readonly publicUrl: string | null;
   private readonly inFlight = new Set<string>();
   private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private stopping = false;
   private sweepTimer: DatabaseRetryLoop | null = null;
 
   constructor(options: OutboundNotificationDispatcherOptions) {
@@ -78,17 +79,21 @@ export class OutboundNotificationDispatcher {
   }
 
   start(): void {
+    this.stopping = false;
     if (this.sweepTimer) return;
     this.sweepTimer = new DatabaseRetryLoop("notifications.sweep",
       () => withDbJob("notifications.sweep", () => this.sweep()), this.sweepIntervalMs);
     this.sweepTimer.start();
   }
 
-  stop(): void {
-    this.sweepTimer?.stop();
+  async stop(): Promise<void> {
+    this.stopping = true;
+    const stopped = this.sweepTimer?.stop();
     this.sweepTimer = null;
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
+    await stopped;
+    while (this.inFlight.size) await new Promise(resolve => setTimeout(resolve, 10));
   }
 
   async sweep(): Promise<void> {
@@ -99,7 +104,7 @@ export class OutboundNotificationDispatcher {
   }
 
   async dispatch(id: string): Promise<void> {
-    if (this.inFlight.has(id)) return;
+    if (this.stopping || this.inFlight.has(id)) return;
     this.inFlight.add(id);
     try {
       await this.dispatchClaimed(id);
@@ -196,6 +201,7 @@ export class OutboundNotificationDispatcher {
   }
 
   private scheduleRetry(id: string, delayMs: number): void {
+    if (this.stopping) return;
     const existing = this.retryTimers.get(id);
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {

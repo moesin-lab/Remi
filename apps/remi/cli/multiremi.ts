@@ -1,3 +1,4 @@
+import { resolveSlotConfiguration } from "@multiremi/api/slot-lifecycle.js";
 import { bindUpdateCandidate } from "@shared/daemon-update.js";
 /**
  * `remi multiremi` — CLI entry facade.
@@ -218,19 +219,22 @@ async function serve(options: CliOptions): Promise<void> {
   const apiRoleConfiguration = resolveStartupApiRole(process.env);
   const startupConfig = evaluateStartupEnv({ ...process.env, ...(token !== undefined ? { MULTIREMI_TOKEN: token ?? undefined } : {}) }, apiRoleConfiguration);
   if (startupConfig.missingRequired.length) throw new Error(`Missing required production environment variables: ${startupConfig.missingRequired.join(", ")}`);
-  const roleGuard = await startHubRoleGuard({
+  const slotConfiguration = resolveSlotConfiguration(process.env);
+  const roleGuard = slotConfiguration ? null : await startHubRoleGuard({
     databaseUrl: process.env.MULTIREMI_DATABASE_URL,
     locks: locksForRole(apiRoleConfiguration.role, Boolean(process.env.MULTIREMI_PEER_URL?.trim())),
   });
   let server: ReturnType<typeof startMultiremiServer>;
+  let closeDatabase: (() => void) | undefined;
   try {
     const database = openMultiremiDatabase();
+    closeDatabase = () => database.close();
     try {
       const store = new MultiremiStore(database); // Constructor releases the schema migration lock.
       await prepareUsageAccountingStartup(database, {
         onBatch: batch => log.info("usage_startup_migration", batch),
       });
-      server = startMultiremiServer({ store, port, hostname: host, authToken: token, apiRoleConfiguration });
+      server = startMultiremiServer({ store, port, hostname: host, authToken: token, apiRoleConfiguration, slotConfiguration });
     } catch (error) {
       database.close();
       throw error;
@@ -241,11 +245,13 @@ async function serve(options: CliOptions): Promise<void> {
   }
   console.log(`Bun Multiremi API listening on ${formatListenUrls(host, server.port ?? port).join(", ")}`);
   await waitForShutdown(async () => {
-    server.stop(true);
+    await server.shutdown();
     // Release the locks only after the listener is down: a second process must not
     // be able to start while this one can still answer a request.
     await roleGuard?.close();
-  });
+    closeDatabase?.();
+    log.info("api_shutdown_complete");
+  }, server.exitRequested);
 }
 
 /**
@@ -2387,16 +2393,25 @@ function localIPv4Addresses(): string[] {
   return result;
 }
 
-async function waitForShutdown(stop: () => void): Promise<void> {
+async function waitForShutdown(stop: () => void | Promise<void>, exitRequested?: Promise<void>): Promise<void> {
   let resolve!: () => void;
-  const done = new Promise<void>((r) => { resolve = r; });
-  const shutdown = () => {
-    stop();
-    resolve();
+  let reject!: (error: unknown) => void;
+  const done = new Promise<void>((r, fail) => { resolve = r; reject = fail; });
+  let stopping = false;
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
+    try { await stop(); resolve(); }
+    catch (error) { reject(error); }
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
-  await done;
+  void exitRequested?.then(shutdown);
+  try { await done; }
+  finally {
+    process.off("SIGINT", shutdown);
+    process.off("SIGTERM", shutdown);
+  }
 }
 
 export const run = runMultiremi;

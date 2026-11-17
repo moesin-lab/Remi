@@ -307,16 +307,16 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const updateId = c.req.param("updateId");
     const request = store.getRuntimeUpdateRequest(runtimeId, updateId);
     if (!request) return c.json({ error: "update not found" }, 404);
-    if (isTerminalRuntimeRequestForDaemon(request.status)) return c.json({ status: "ok" });
     const body = await readJsonStrict<ReportRuntimeUpdateInput>(c);
     if ("apiError" in body) return c.json({ error: body.apiError }, body.statusCode);
+    if (isTerminalRuntimeRequestForDaemon(request.status) && !(request.scope === "cli" && body.status === "running")) return c.json({ status: "ok" });
     if (!isValidRuntimeUpdateReportStatus(body.status)) {
       return c.json({ error: `invalid status: ${String(body.status ?? "")}` }, 400);
     }
     try {
       store.reportRuntimeUpdateResult(runtimeId, updateId, body);
     } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "cli_update_not_admitted") {
+      if (error instanceof Error && "code" in error && (error.code === "cli_update_not_admitted" || error.code === "cli_update_not_runnable")) {
         return c.json({ error: error.message, code: error.code }, 409);
       }
       throw error;

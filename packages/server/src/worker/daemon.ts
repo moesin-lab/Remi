@@ -2445,7 +2445,7 @@ export class MultiremiDaemon {
           AbortSignal.timeout(Math.max(1, admissionEnd - Date.now())));
         break;
       } catch (error) {
-        if (error instanceof Error && "code" in error && error.code === "cli_update_not_admitted") {
+        if (error instanceof Error && "code" in error && (error.code === "cli_update_not_admitted" || error.code === "cli_update_not_runnable")) {
           this.releaseUpdateClaimPause(scope);
           // Propagate so the WS downlink releases its dedupe key. Heartbeat
           // also retries the same pending id on its next poll.

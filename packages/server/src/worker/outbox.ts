@@ -591,7 +591,7 @@ export class MultiremiTaskReportOutbox {
         return;
       }
       if (record.kind === "runtime.update_result" && record.payload.status === "running"
-        && error instanceof DaemonProtocolRpcError && error.code === "cli_update_not_admitted") {
+        && error instanceof DaemonProtocolRpcError && (error.code === "cli_update_not_admitted" || error.code === "cli_update_not_runnable")) {
         // Compatibility for already queued admission reports. Rejection applies
         // only to this attempt, never to later runtime results in the partition.
         this.db.run("DELETE FROM outbox_events WHERE id = ?", [record.id]);

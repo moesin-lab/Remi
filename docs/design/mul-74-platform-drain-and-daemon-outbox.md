@@ -112,9 +112,15 @@ provider 接单，在剩余期限内等待。到期仍繁忙时更新失败，�
 pending。有 update owner 时只有该 owner 可准入；人工/部署 drain 没有 owner 时，
 必须没有其他 running/restarting/verifying CLI 请求。所有准入均要求 drained 或
 drained_forced。HTTP claim、WebSocket 下行及其迟到 ACK、pending→running 上报共用此判定；
-未准入的请求保持 pending，下行不发送。running 上报拒绝使用稳定错误码 `cli_update_not_admitted`（HTTP 409；WS 不可重试协议错误）。
+未准入的请求保持 pending，下行不发送。pending→running 准入拒绝使用稳定错误码 `cli_update_not_admitted`（HTTP 409；WS 不可重试协议错误）。
 daemon 按 code 识别后释放本地暂停、释放 WS 去重键，不安装、不切换 launcher、不上报
 failed；同 id 在 WS 或 heartbeat 后续下发时可再次执行。
+
+CLI running 回执只有 pending→running（通过上述准入）与 running→running（幂等确认）
+可以成功。lifecycle 锁内对终态、restarting、verifying 的 running 一律返回
+`cli_update_not_runnable`（HTTP 409；WS retryable=false），不把空操作的 HTTP 200 当作
+安装许可。daemon 收到此 code 立即释放暂停并抛出以释放下行去重键，不安装、不重启、
+不补报 failed，也不按未知结果重试；平台已有终态或已有执行者。终态的其它上报保持幂等成功。
 
 running 准入确认使用非持久化同步 HTTP result，兼容没有准入逻辑的旧服务端；终态仍走
 持久化 outbox。接受后才安装。超时、断线、5xx 等结果未知时，每 250ms 幂等重试，
@@ -126,7 +132,16 @@ HTTP 请求由幂等 running→running 确认，终态拒绝迟到状态回退�
 
 旧实现普通 Error 在 WS session 映射为可重试 server_error，running outbox 会持续重试；
 新实现明确拒绝为不可重试，兼容清理旧队列中该条 running 记录并拒绝其 waiter，不阻塞
-整个 rt 分区。旧 daemon 正常只收到已准入下行，running→running 继续幂等接受。
+整个 rt 分区；`cli_update_not_admitted` 和 `cli_update_not_runnable` 均只删除被拒的那条
+running 记录。旧 daemon 正常只收到已准入下行，running→running 继续幂等接受。
+N-1 边界：新服务端对旧 daemon 的迟到 running 增加 HTTP 409 或不可重试 WS 错误；
+升级后的 daemon 通过上述单条清理处理旧 outbox，避免堵塞或无限重试。
+未升级的 0bb8c3256 daemon 对 HTTP 409 会在原有最多 30 秒窗口内重试后补报 failed，
+不会安装或无限重试，平台终态仍保持幂等。更早使用 running outbox 且不识别该 code 的
+daemon 会把不可重试 WS 错误标为分区 blocked；服务端无法改变其本地分支，需升级 daemon
+才能保证迟到 running 不阻塞该旧分区。正常只收到已准入下行的路径不变。
+新 daemon 连接旧服务端仍按现有 HTTP 成功确认安装，旧端对终态返回 200 的许可缺口
+无法由新 daemon 单独消除，需服务端升级后获得本节保证。
 因此 owner 终态交接只需寻找 pending sibling，可在 restarting/verifying 保护之前处理。
 
 下载或校验失败的终态立即释放本次 requestId 的 drain；重启期间 drain 保持持久化，

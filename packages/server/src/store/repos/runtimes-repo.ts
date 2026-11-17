@@ -1,3 +1,4 @@
+import { isBuildCommit } from "@shared/daemon-artifact-manifest.js";
 import { DEFAULT_DAEMON_DRAIN_MS, type DaemonDrainStatus, type DaemonDrainReason } from "@multiremi/contracts/daemon-drain.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import { executionEndpointGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
@@ -1557,6 +1558,8 @@ export class RuntimesRepo {
       // Non-CLI requests retain the legacy sentinel; ACP reinstalls release pins.
       const targetVersion = String(input.targetVersion ?? input.target_version ?? "").trim() || (scope !== "cli" ? "latest" : "");
       if (!targetVersion) throw new Error("target_version is required");
+      const targetCommit = input.targetCommit ?? input.target_commit ?? null;
+      if (targetCommit !== null && (scope !== "cli" || typeof targetCommit !== "string" || !isBuildCommit(targetCommit))) throw new Error("target_commit must be a full CLI build commit");
       const active = this.ctx.db.query(
         `SELECT id FROM multiremi_runtime_update_requests
          WHERE runtime_id = ? AND status IN ('pending', 'running', 'restarting', 'verifying')
@@ -1567,9 +1570,9 @@ export class RuntimesRepo {
       const now = nowIso();
       this.ctx.db.run(
         `INSERT INTO multiremi_runtime_update_requests (
-          id, runtime_id, status, scope, target_version, created_at, updated_at
-        ) VALUES (?, ?, 'pending', ?, ?, ?, ?)`,
-        [id, runtimeId, scope, targetVersion, now, now],
+          id, runtime_id, status, scope, target_version, target_commit, created_at, updated_at
+        ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)`,
+        [id, runtimeId, scope, targetVersion, targetCommit, now, now],
       );
       if (scope === "cli") this.beginDaemonDrain(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id, "cli_update", undefined, id);
       return this.getRuntimeUpdateRequest(runtimeId, id)!;
@@ -1759,8 +1762,8 @@ export class RuntimesRepo {
         );
       } else {
         this.ctx.db.run(
-          "UPDATE multiremi_runtime_update_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
-          [input.error ?? "runtime update failed", now, requestId],
+          "UPDATE multiremi_runtime_update_requests SET status = 'failed', output = ?, error = ?, updated_at = ? WHERE id = ?",
+          [input.output ?? "", input.error ?? "runtime update failed", now, requestId],
         );
       }
       const result = this.getRuntimeUpdateRequest(runtimeId, requestId)!;
@@ -1770,11 +1773,11 @@ export class RuntimesRepo {
   }
 
   /**
-   * Queue one CLI update per physical daemon after a formal platform release is live.
-   * Release history is the idempotency key: the updater heartbeat may run every few
-   * seconds, but a daemon sees a given target version at most once automatically.
+   * Reconcile deployment commits by identity; retain formal-release SemVer behavior
+   * when no commit is supplied. Automatic history prevents repeated updates.
    */
-  reconcileRuntimeCliRelease(targetVersion: string): MultiremiRuntimeUpdateRequest[] {
+  reconcileRuntimeCliRelease(targetVersion: string, targetCommit?: string): MultiremiRuntimeUpdateRequest[] {
+    if (targetCommit !== undefined) return this.reconcileRuntimeCliBuild(targetVersion, targetCommit);
     const target = parseFormalReleaseVersion(targetVersion);
     if (!target) return [];
 
@@ -1817,19 +1820,127 @@ export class RuntimesRepo {
     return queued;
   }
 
-  runtimeCliReleaseReconciliationKey(targetVersion: string): string {
+  /** Repair terminal automatic requests after reports, timeout sweeps and process restarts. */
+  reconcileRuntimeUpdateFailures(): void {
+    // Configuration is per workspace; never route another tenant's failure to a global project.
+    let targets: Record<string, { projectId?: string; assigneeType?: "agent" | "squad"; assigneeId?: string }>;
+    try { targets = JSON.parse(process.env.MULTIREMI_DAEMON_UPDATE_FAILURE_TARGETS || "{}"); }
+    catch { log.warn("daemon update failure targets: invalid JSON; no issues created"); targets = {}; }
+    if (!targets || typeof targets !== "object" || Array.isArray(targets)) targets = {};
+    const active = this.ctx.db.query(`SELECT DISTINCT runtime_id FROM multiremi_runtime_update_requests
+      WHERE automatic_daemon_key IS NOT NULL AND status IN ('pending', 'running', 'restarting', 'verifying')`).all() as Row[];
+    for (const row of active) this.updateQueue.expire(String(row.runtime_id));
+    const rows = this.ctx.db.query(`SELECT u.*, COALESCE(r.workspace_id, 'local') AS workspace_id, r.daemon_id
+      FROM multiremi_runtime_update_requests u JOIN multiremi_runtimes r ON r.id = u.runtime_id
+      WHERE u.automatic_daemon_key IS NOT NULL AND u.target_commit IS NOT NULL
+        AND u.status IN ('failed', 'rolled_back', 'timeout')
+        AND NOT EXISTS (SELECT 1 FROM multiremi_runtime_update_failures f
+          WHERE f.daemon_key = u.automatic_daemon_key AND f.target_commit = u.target_commit)`)
+      .all() as Row[];
+    for (const row of rows) {
+      const events = createCommitEventQueue();
+      const changes: ChildStatusChangeCollector = [];
+      try {
+        this.ctx.db.transaction(() => {
+          this.ctx.lockWorkspaceRuntimeLifecycle(String(row.workspace_id));
+          advisoryXactLock(this.ctx.db, numberAllocationLockKey(`issue:${row.workspace_id}`));
+          const inserted = this.ctx.db.query(`INSERT INTO multiremi_runtime_update_failures
+            (daemon_key, target_commit, outcome, created_at) VALUES (?, ?, 'processing', ?)
+            ON CONFLICT (daemon_key, target_commit) DO NOTHING RETURNING daemon_key`)
+            .get(row.automatic_daemon_key, row.target_commit, nowIso());
+          if (!inserted) return;
+          const workspaceId = String(row.workspace_id);
+          const target = Object.hasOwn(targets, workspaceId) ? targets[workspaceId] : undefined;
+          const project = target?.projectId ? this.ctx.projects().getProject(target.projectId) : null;
+          if (target?.projectId && (!project || project.workspaceId !== workspaceId)) throw new Error("invalid failure project");
+          const assigneeType = target?.assigneeType ?? project?.defaultAssigneeType ?? null;
+          const assigneeId = target?.assigneeId ?? project?.defaultAssigneeId ?? null;
+          let issueId: string | null = null;
+          if (target && (project || (assigneeType && assigneeId))) {
+            // Redact before truncating, so a cut cannot expose part of a matched secret.
+            // Consume complete quoted values (including spaces and escaped quotes) before
+            // the command redactor can partially replace them and lose their boundaries.
+            const summary = (value: unknown) => redactRuntimeCommandText(String(value ?? "")
+              .replace(/(\b(?:authorization|proxy-authorization|cookie|set-cookie|api[_-]?key|secret|credential|password|token)[\w-]*["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$))/gi, "$1[REDACTED]"))
+              .replace(/(\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n]+/gi, "$1[REDACTED]")
+              .replace(/\b(?:github_pat_|gh[ousr]_)[A-Za-z0-9_]+\b/g, "[REDACTED]")
+              .replace(/((?:api[_-]?key|secret|credential|password|token)[\w-]*["']?\s*[:=]\s*["']?)[^\s"',;]+/gi, "$1[REDACTED]")
+              .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, "[REDACTED]")
+              .slice(0, 2000);
+            const issue = this.ctx.issues().createIssue({ workspaceId, projectId: project?.id ?? null,
+              assigneeType, assigneeId, status: "backlog", priority: "high",
+              title: `Daemon CLI update ${row.status}: ${row.daemon_id}`,
+              description: `Automatic daemon update failed.\nRuntime: ${row.runtime_id}\nDaemon: ${row.daemon_id}\nTarget version: ${summary(row.target_version)}\nTarget commit: ${row.target_commit}\nTerminal status: ${row.status}\nError: ${summary(row.error)}\nOutput: ${summary(row.output)}`,
+            }, { childStatusChanges: changes, deferredEvents: events });
+            issueId = issue.id;
+          }
+          this.ctx.db.run(`UPDATE multiremi_runtime_update_failures SET issue_id = ?, outcome = ?
+            WHERE daemon_key = ? AND target_commit = ?`,
+            [issueId, issueId ? "created" : "unconfigured", row.automatic_daemon_key, row.target_commit]);
+          events.workspace.push({ type: "runtime:update_failure", workspaceId, actorType: "system", actorId: null,
+            payload: { runtimeId: row.runtime_id, daemonId: row.daemon_id, targetCommit: row.target_commit,
+              status: row.status, issueId, reason: issueId ? "issue_created" : "failure_target_unconfigured" } });
+        })();
+        this.ctx.emitCommitEvents(events);
+        this.ctx.tasks().runCollectedChildStatusChanges(changes);
+      } catch {
+        // Do not leak config or daemon output in logs; rollback makes a later sweep retryable.
+        log.warn("daemon update failure issue creation failed; will retry");
+      }
+    }
+  }
+
+  private reconcileRuntimeCliBuild(version: string, commit: string): MultiremiRuntimeUpdateRequest[] {
+    if (!isBuildCommit(commit) || !version.trim()) throw new Error("invalid platform build identity");
+    const workspaces = this.ctx.db.query("SELECT DISTINCT COALESCE(workspace_id, 'local') AS id FROM multiremi_runtimes").all() as Row[];
+    const queued: MultiremiRuntimeUpdateRequest[] = [];
+    for (const workspace of workspaces) this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(String(workspace.id));
+      // Re-read under the same cross-process lock used by request creation.
+      const snapshot = this.runtimeCliReleaseSnapshot();
+      const groups = new Map<string, MultiremiRuntime[]>();
+      for (const runtime of snapshot.runtimes) {
+        if ((runtime.workspaceId ?? "local") !== workspace.id || !runtime.daemonId) continue;
+        const group = groups.get(runtime.daemonId) ?? [];
+        group.push(runtime); groups.set(runtime.daemonId, group);
+      }
+      for (const [daemon, runtimes] of groups) {
+        if (runtimes.some(runtime => runtimeLaunchOwner(runtime) === "desktop")) continue;
+        const online = runtimes.filter(runtime => runtime.status === "online" && runtime.runtimeMode === "local");
+        if (!online.length) continue;
+        if (online.some(runtime => {
+          const current = runtime.metadata.cli_commit;
+          return typeof current === "string" && current.trim() ? current === commit : runtimeCliVersion(runtime) === version;
+        })) continue;
+        const daemonKey = JSON.stringify([workspace.id, daemon]);
+        if (this.ctx.db.query("SELECT 1 FROM multiremi_runtime_update_requests WHERE automatic_daemon_key = ? AND target_commit = ?")
+          .get(daemonKey, commit)) continue;
+        const ids = runtimes.map(runtime => runtime.id);
+        if (this.ctx.db.query(`SELECT 1 FROM multiremi_runtime_update_requests
+          WHERE runtime_id IN (${ids.map(() => "?").join(",")})
+            AND status IN ('pending', 'running', 'restarting', 'verifying')`).get(...ids)) continue;
+        const runtime = online.sort((a, b) => Number(b.provider === "claude") - Number(a.provider === "claude") || a.id.localeCompare(b.id))[0]!;
+        const request = this.createRuntimeUpdateRequest(runtime.id, { scope: "cli", targetVersion: version, targetCommit: commit });
+        this.ctx.db.run("UPDATE multiremi_runtime_update_requests SET automatic_daemon_key = ? WHERE id = ?", [daemonKey, request.id]);
+        queued.push(request);
+      }
+    })();
+    return queued;
+  }
+
+  runtimeCliReleaseReconciliationKey(targetVersion: string, targetCommit?: string): string {
     const snapshot = this.runtimeCliReleaseSnapshot();
-    return JSON.stringify([targetVersion, snapshot.runtimes.map(runtime => [runtime.id, runtime.provider,
-      runtime.daemonId, runtime.status, runtime.runtimeMode, runtimeCliVersion(runtime), runtimeLaunchOwner(runtime)]),
+    return JSON.stringify([targetVersion, targetCommit, snapshot.runtimes.map(runtime => [runtime.id, runtime.provider,
+      runtime.daemonId, runtime.status, runtime.runtimeMode, runtimeCliVersion(runtime), runtime.metadata.cli_commit, runtimeLaunchOwner(runtime)]),
       snapshot.previous]);
   }
 
   private runtimeCliReleaseSnapshot() {
-    const rows = this.ctx.db.query(`SELECT id, provider, daemon_id, runtime_mode, status, metadata, last_heartbeat_at
+    const rows = this.ctx.db.query(`SELECT id, workspace_id, provider, daemon_id, runtime_mode, status, metadata, last_heartbeat_at
       FROM multiremi_runtimes ORDER BY id`).all() as Row[];
-    const previous = this.ctx.db.query(`SELECT DISTINCT runtime_id, status, target_version
+    const previous = this.ctx.db.query(`SELECT DISTINCT runtime_id, status, target_version, target_commit
       FROM multiremi_runtime_update_requests WHERE scope = 'cli'
-      ORDER BY runtime_id, status, target_version`).all() as Array<{ runtime_id: string; status: string; target_version: string | null }>;
+      ORDER BY runtime_id, status, target_version, target_commit`).all() as Array<{ runtime_id: string; status: string; target_version: string | null; target_commit: string | null }>;
     return { runtimes: rows.map(row => withRuntimeLiveness(toRuntime(row))), previous };
   }
 
@@ -2230,7 +2341,7 @@ export class RuntimesRepo {
           [nowIso(), request.id]);
         continue;
       }
-      add("update", request.id, { id: request.id, target_version: request.targetVersion, scope: request.scope });
+      add("update", request.id, { id: request.id, target_version: request.targetVersion, ...(request.targetCommit ? { target_commit: request.targetCommit } : {}), scope: request.scope });
     }
     for (const request of this.modelListQueue.pending(runtimeId)) add("model_list", request.id, { id: request.id });
     for (const request of this.localSkillListQueue.pending(runtimeId)) add("local_skills", request.id,
@@ -2453,7 +2564,7 @@ export class RuntimesRepo {
     }
     if (options.claimPending !== false) {
       const update = this.claimRuntimeUpdateRequest(runtimeId);
-      if (update) ack.pending_update = { id: update.id, target_version: update.targetVersion, scope: update.scope };
+      if (update) ack.pending_update = { id: update.id, target_version: update.targetVersion, ...(update.targetCommit ? { target_commit: update.targetCommit } : {}), scope: update.scope };
     }
     return ack;
   }
@@ -3211,6 +3322,8 @@ function toRuntimeUpdateRequest(row: Row): MultiremiRuntimeUpdateRequest {
     scope: row.scope === "acp" || row.scope === "agent" ? row.scope : "cli",
     targetVersion,
     target_version: targetVersion,
+    targetCommit: nullableString(row.target_commit),
+    target_commit: nullableString(row.target_commit),
     output: nullableString(row.output),
     error: nullableString(row.error),
     createdAt: String(row.created_at),

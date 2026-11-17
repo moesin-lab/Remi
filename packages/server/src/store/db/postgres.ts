@@ -389,6 +389,7 @@ export function resetDbReplyLimitForTest(): void {
 }
 
 class PgBridge {
+  private closed = false;
   private readonly control = new SharedArrayBuffer(16);
   private readonly data: SharedArrayBuffer;
   private readonly ctl = new Int32Array(this.control);
@@ -405,6 +406,7 @@ class PgBridge {
   }
 
   private request(msg: { init?: string; sql?: string; params?: unknown[]; timeoutMs?: number }): any {
+    if (this.closed) throw new Error("postgres bridge is closed");
     // A healthy bridge has no cooldown to check. Avoid reading the wall clock
     // for every SQL statement (including when fixtures pin a ticking clock).
     if (msg.sql && this.unavailableUntil > 0 && Date.now() < this.unavailableUntil && msg.sql.trim().toUpperCase() !== "ROLLBACK") {
@@ -502,6 +504,8 @@ class PgBridge {
   get connectionUnavailable(): boolean { return this.unavailableUntil > 0 && Date.now() < this.unavailableUntil; }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.worker.terminate();
   }
 }

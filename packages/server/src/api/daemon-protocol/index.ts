@@ -179,11 +179,11 @@ export class DaemonProtocolLayer {
         }
         for (const hooks of this.sessionHooks) hooks.hello?.(session, hello);
       },
-      onHeartbeat: heartbeat => withRequestReadCache(() => {
-        const reply = this.handleHeartbeat(heartbeat);
+      onHeartbeat: heartbeat => {
+        const reply = withRequestReadCache(() => this.handleHeartbeat(heartbeat));
         for (const hooks of this.sessionHooks) hooks.heartbeat?.(session, heartbeat);
         return reply;
-      }),
+      },
       onFrame: (sample) => this.metrics?.record(sample),
       onRpc: frame => this.dispatchRpc(frame, session),
       onEvent: frame => this.eventHandlers.get(frame.type)?.(frame, session) ?? null,

@@ -1,7 +1,7 @@
 import { startEdge, type Backend } from '../../packages/edge/src/index';
 
 const edge = startEdge({
-  hostname: process.env.EDGE_HOST ?? '0.0.0.0',
+  hostname: process.env.EDGE_HOST ?? '127.0.0.1',
   port: Number(process.env.EDGE_PORT ?? 16120),
   controlSocket: process.env.EDGE_CONTROL_SOCKET,
   backends: JSON.parse(process.env.EDGE_BACKENDS ?? '[]') as Backend[],

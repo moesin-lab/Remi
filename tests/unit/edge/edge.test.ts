@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { UpstreamSocket } from '../../../packages/edge/src/websocket';
 import { Edge } from '../../../packages/edge/src/index';
 import { connect } from 'node:net';
-import { statSync } from 'node:fs';
+import { statSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => { for (const stop of cleanups.splice(0).reverse()) await stop(); });
 function backend(handler: (req: Request) => Response | Promise<Response> = () => new Response('ok')) {
@@ -31,8 +31,8 @@ test('round robin, stripped hop headers, authoritative IP and private routes', a
   const a = backend(req => Response.json(Object.fromEntries(req.headers), { headers: { connection: 'x-secret', 'x-secret': 'hidden' } }));
   const b = backend(() => new Response('second'));
   const e = edge({ backends: [{ id: 'a', url: a.url.href, state: 'live' }, { id: 'b', url: b.url.href, state: 'live' }] });
-  const response = await fetch(e.server.url, { headers: { 'x-real-ip': 'fake', 'x-forwarded-for': 'fake', forwarded: 'fake', connection: 'x-remove', 'x-remove': 'secret' } });
-  const headers = await response.json(); expect(headers['x-real-ip']).not.toBe('fake'); expect(headers['x-forwarded-for']).toBe(headers['x-real-ip']); expect(headers.forwarded).toBeUndefined(); expect(headers['x-remove']).toBeUndefined(); expect(response.headers.get('x-secret')).toBeNull();
+  const response = await fetch(e.server.url, { headers: { 'x-real-ip': 'fake', 'x-forwarded-for': 'fake', 'x-forwarded-proto': 'https', forwarded: 'fake', connection: 'x-remove', 'x-remove': 'secret' } });
+  const headers = await response.json(); expect(headers['x-real-ip']).not.toBe('fake'); expect(headers['x-forwarded-for']).toBe(headers['x-real-ip']); expect(headers['x-forwarded-proto']).toBe('http'); expect(headers.forwarded).toBeUndefined(); expect(headers['x-remove']).toBeUndefined(); expect(response.headers.get('x-secret')).toBeNull();
   expect(await (await fetch(e.server.url)).text()).toBe('second');
   for (const path of ['/internal/test', '/internal', '/%69nternal/test', '//internal/test', '/foo/%2e%2e%2finternal/test']) expect((await fetch(e.server.url.href.replace(/\/$/, '') + path)).status).toBe(404);
 });
@@ -64,8 +64,8 @@ test('health restores standby and draining without promotion; drained waits for 
 });
 
 test('WS handshake hold recovers and close codes pass in both directions', async () => {
-  const b = wsBackend(); const unavailable = backend(() => new Response('not yet', { status: 503 }));
-  const e = edge({ holdMaxMs: 2000, backends: [{ id: 'bad', url: unavailable.url.href, state: 'live' }, { id: 'good', url: b.url.href, state: 'standby' }] });
+  const b = wsBackend(); const unavailable = backend(); const deadUrl = unavailable.url.href; await unavailable.stop(true);
+  const e = edge({ holdMaxMs: 2000, backends: [{ id: 'bad', url: deadUrl, state: 'live' }, { id: 'good', url: b.url.href, state: 'standby' }] });
   const pending = open(e.server.url.href.replace('http:', 'ws:')); await sleep(60); e.setState('good', 'live');
   const ws = await pending; expect(await echo(ws, 'hello')).toBe('hello');
   e.setState('good', 'draining'); expect(e.status().backends[1].websockets).toBe(1);
@@ -169,7 +169,7 @@ test('HTTP informational headers, fragmented chunk framing and EOF failures', as
 });
 
 test('WS binary relay and oversized frame closes with backpressure code', async () => {
-  const b = wsBackend(); const e = edge({ wsBufferLimit: 65536, backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
+  const b = wsBackend(); const e = edge({ wsMaxMessageBytes: 65536, backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
   const ws = await open(e.server.url.href.replace('http:', 'ws:')); ws.binaryType = 'arraybuffer';
   const received = new Promise<ArrayBuffer>(resolve => ws.onmessage = event => resolve(event.data)); ws.send(new Uint8Array([0, 1, 255])); expect([...new Uint8Array(await received)]).toEqual([0, 1, 255]);
   const closed = new Promise<CloseEvent>(resolve => ws.onclose = resolve); ws.send(new Uint8Array(128 * 1024)); expect((await closed).code).toBe(1013);
@@ -194,4 +194,147 @@ test('cumulative counters survive backend removal and stop cancels upstream HTTP
   const body = response.text().catch(() => '');
   e.stop(); await until(() => disconnected); await body;
   expect(e.status().backends[0].inFlight).toBe(0);
+});
+
+test('WS application rejection preserves status, headers and body without retries or health failures', async () => {
+  let attempts = 0;
+  const b = backend(req => {
+    attempts++;
+    const status = Number(new URL(req.url).pathname.slice(1));
+    return new Response(`rejected:${status}`, { status, headers: { 'www-authenticate': 'Bearer', 'x-rejection': String(status) } });
+  });
+  const e = edge({ holdMaxMs: 1000, failureThreshold: 1, backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
+  for (const status of [401, 403, 426, 421, 503]) {
+    const response = await fetch(new URL(`/${status}`, e.server.url), { headers: { connection: 'Upgrade', upgrade: 'websocket' } });
+    expect(response.status).toBe(status);
+    expect(await response.text()).toBe(`rejected:${status}`);
+    expect(response.headers.get('www-authenticate')).toBe('Bearer');
+    expect(response.headers.get('x-rejection')).toBe(String(status));
+  }
+  expect(attempts).toBe(5); expect(e.status().backends[0].state).toBe('live');
+  expect(e.status().backends[0].failures).toBe(0); expect(e.status().metrics.upstreamErrors).toBe(0);
+});
+
+test('server contract permits 2 and 4 MiB frames in both relay directions', async () => {
+  const b = Bun.serve({ port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); },
+    websocket: { maxPayloadLength: 4 * 1024 * 1024, closeOnBackpressureLimit: false,
+      message(ws, data) { ws.send(data); } },
+  });
+  cleanups.push(() => { void b.stop(true); });
+  const e = edge({ backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
+  const ws = await open(e.server.url.href.replace('http:', 'ws:')); ws.binaryType = 'arraybuffer';
+  for (const size of [2, 4]) {
+    const payload = new Uint8Array(size * 1024 * 1024).fill(size);
+    const received = new Promise<ArrayBuffer>((resolve, reject) => { ws.onmessage = event => resolve(event.data); ws.onclose = () => reject(new Error('Unexpected close')); });
+    ws.send(payload); const result = new Uint8Array(await received);
+    expect(result.byteLength).toBe(payload.byteLength); expect(result.every(v => v === size)).toBe(true);
+  }
+  ws.onclose = null; ws.close(); expect(e.status().metrics.upstreamErrors).toBe(0);
+});
+
+test('client aborts before HTTP headers and during WS handshake do not affect backend health', async () => {
+  let attempts = 0;
+  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() { attempts++; } } });
+  cleanups.push(() => raw.stop(true));
+  const e = edge({ holdMaxMs: 1000, healthTimeoutMs: 1000, backends: [{ id: 'b', url: `http://127.0.0.1:${raw.port}`, state: 'live' }] });
+  for (const upgrade of [false, true]) for (let i = 0; i < 3; i++) {
+    const before = attempts; const controller = new AbortController();
+    const pending = fetch(e.server.url, { signal: controller.signal, headers: upgrade ? { connection: 'Upgrade', upgrade: 'websocket' } : {} }).catch(() => null);
+    await until(() => attempts > before); controller.abort(); await pending;
+    await until(() => e.status().backends[0].inFlight === 0);
+  }
+  expect(attempts).toBe(6); expect(e.status().backends[0].state).toBe('live');
+  expect(e.status().backends[0].failures).toBe(0); expect(e.status().metrics.upstreamErrors).toBe(0);
+});
+
+test('successful HTTP resets consecutive passive failures and header timeout is bounded', async () => {
+  let fail = true;
+  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data(socket) {
+    if (fail) socket.end(); else socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok');
+  } } });
+  cleanups.push(() => raw.stop(true));
+  const e = edge({ backends: [{ id: 'b', url: `http://127.0.0.1:${raw.port}`, state: 'live' }] });
+  expect((await fetch(e.server.url, { method: 'POST', body: 'x' })).status).toBe(502);
+  expect(e.status().backends[0].failures).toBe(1); fail = false;
+  expect(await (await fetch(e.server.url)).text()).toBe('ok'); expect(e.status().backends[0].failures).toBe(0);
+  const silent = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
+  cleanups.push(() => silent.stop(true));
+  const timed = edge({ responseHeaderTimeoutMs: 30, backends: [{ id: 'b', url: `http://127.0.0.1:${silent.port}`, state: 'live' }] });
+  expect((await fetch(timed.server.url, { method: 'POST', body: 'x' })).status).toBe(502);
+});
+
+test('validates listener port and health interval before starting', () => {
+  for (const port of [NaN, -1, 65536, 1.5]) expect(() => edge({ port })).toThrow('Invalid port');
+  for (const healthIntervalMs of [0, -1, NaN, Infinity]) expect(() => edge({ healthIntervalMs })).toThrow('Invalid healthIntervalMs');
+});
+
+test('control socket restarts after SIGKILL but never replaces an active listener or file', async () => {
+  const path = `/tmp/remi-edge-${crypto.randomUUID()}.sock`;
+  const child = Bun.spawn([process.execPath, '-e', `import {Edge} from './packages/edge/src/index'; new Edge({port:0, controlSocket:process.argv[1]}); console.log('ready');`, path], { stdout: 'pipe', stderr: 'inherit' });
+  const reader = child.stdout.getReader(); await reader.read(); reader.releaseLock();
+  child.kill('SIGKILL'); await child.exited;
+  const e = edge({ controlSocket: path }); expect(statSync(path).mode & 0o777).toBe(0o600);
+  expect(() => edge({ controlSocket: path })).toThrow('active');
+  e.hold(); expect(e.status().held).toBe(true);
+  const file = path + '.txt'; writeFileSync(file, 'preserve'); cleanups.push(() => unlinkSync(file));
+  expect(() => edge({ controlSocket: file })).toThrow('not a socket'); expect(readFileSync(file, 'utf8')).toBe('preserve');
+});
+
+test('HTTP keep-alive reuses a fully framed upstream connection', async () => {
+  let connections = 0; let requests = 0;
+  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: {
+    open() { connections++; },
+    data(socket, bytes) { requests++; expect(bytes.toString().toLowerCase()).toContain('connection: keep-alive'); socket.write('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'); },
+  } });
+  cleanups.push(() => raw.stop(true));
+  const e = edge({ backends: [{ id: 'b', url: `http://127.0.0.1:${raw.port}`, state: 'live' }] });
+  for (let i = 0; i < 5; i++) expect(await (await fetch(e.server.url)).text()).toBe('ok');
+  expect(requests).toBe(5); expect(connections).toBe(1);
+});
+
+test('health recovery needs consecutive rise probes and a failure resets the rise count', async () => {
+  let healthy = false;
+  const b = backend(() => new Response('', { status: healthy ? 200 : 503 }));
+  const e = edge({ failureThreshold: 1, riseThreshold: 2, backends: [{ id: 'b', url: b.url.href, state: 'standby' }] });
+  // Invoke the real probe deterministically instead of racing the interval.
+  const probe = () => (e as unknown as { probe(): Promise<void> }).probe();
+  await probe(); expect(e.status().backends[0].state).toBe('down');
+  healthy = true; await probe(); expect(e.status().backends[0].state).toBe('down');
+  healthy = false; await probe(); healthy = true; await probe(); expect(e.status().backends[0].state).toBe('down');
+  await probe(); expect(e.status().backends[0].state).toBe('standby');
+});
+
+test('WS slow downstream resumes via drain without disconnecting or losing messages', async () => {
+  const count = 20; const size = 2 * 1024 * 1024;
+  const b = Bun.serve({ port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
+    maxPayloadLength: 4 * 1024 * 1024, backpressureLimit: 64 * 1024 * 1024, closeOnBackpressureLimit: false,
+    message(ws) { for (let i = 0; i < count; i++) ws.send(new Uint8Array(size).fill(i)); },
+  } });
+  cleanups.push(() => { void b.stop(true); });
+  const e = edge({ wsBufferLimit: 65536, backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
+  await new Promise<void>((resolve, reject) => {
+    const ws = new UpstreamSocket(new URL(e.server.url.href.replace('http:', 'ws:')), { headers: {}, protocols: [], limit: 4 * 1024 * 1024 });
+    cleanups.push(() => ws.terminate());
+    let received = 0;
+    ws.onopen = () => { ws.pause(); ws.send('start'); setTimeout(() => ws.resume(), 100); };
+    ws.onmessage = event => {
+      const data = new Uint8Array(event.data as ArrayBuffer);
+      expect(data.byteLength).toBe(size); expect(data[0]).toBe(received++);
+      if (received === count) { ws.onclose = undefined; ws.close(); resolve(); }
+    };
+    ws.onerror = () => reject(new Error('Relay error')); ws.onclose = () => reject(new Error('Relay closed under backpressure'));
+  });
+});
+
+test('rejected upgrade body streams and remains in flight until drained', async () => {
+  let end!: () => void;
+  const b = backend(() => new Response(new ReadableStream({ start(controller) {
+    controller.enqueue(new TextEncoder().encode('protocol:')); end = () => { controller.enqueue(new TextEncoder().encode('upgrade required')); controller.close(); };
+  } }), { status: 426, headers: { 'content-type': 'text/plain' } }));
+  const e = edge({ backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
+  const response = await fetch(e.server.url, { headers: { connection: 'Upgrade', upgrade: 'websocket' } });
+  expect(response.status).toBe(426); expect(e.status().backends[0].inFlight).toBe(1);
+  e.setState('b', 'draining'); let drained = false; e.on('drained', () => drained = true);
+  const body = response.text(); expect(drained).toBe(false); end();
+  expect(await body).toBe('protocol:upgrade required'); await until(() => drained);
 });

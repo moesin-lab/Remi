@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { assertUpdateServiceLauncher } from "@shared/cli-update-service.js";
 
 const roots: string[] = [];
@@ -91,6 +91,37 @@ test("resolves directory symlinks and systemd escaped spaces", () => {
     run: () => `{ path=${escaped} ; }`,
   })).not.toThrow();
 });
+
+for (const manager of ["systemd", "launchd"] as const) {
+  for (const scenario of ["absolute-chain", "relative-chain", "direct-binary", "cycle"] as const) {
+    test(`${manager}: symlink launcher ${scenario}`, () => {
+      const f = fixture();
+      rmSync(f.launcherPath);
+      symlinkSync(f.binary, f.launcherPath);
+      const serviceDir = join(f.root, "service");
+      mkdirSync(serviceDir);
+      const intermediate = join(serviceDir, "intermediate");
+      const entry = join(serviceDir, "remi");
+      // Both relative and absolute chains pass through a directory alias to
+      // the launcher. Direct binary paths must still fail despite realpath
+      // resolving both the binary and launcher to the same file.
+      const alias = join(f.root, "bin-alias");
+      symlinkSync(join(f.root, "bin"), alias);
+      symlinkSync(scenario === "cycle" ? entry : join(alias, "remi"), intermediate);
+      symlinkSync(scenario === "relative-chain" ? relative(serviceDir, intermediate) : intermediate, entry);
+      const executable = scenario === "direct-binary" ? f.binary : entry;
+      const check = () => assertUpdateServiceLauncher({ ...f,
+        restart: { manager, command: manager === "systemd"
+          ? ["systemctl", "fixture.service"] : ["launchctl", "gui/501/fixture"] },
+        run: cmd => cmd === "systemctl" ? `{ path=${executable} ; }`
+          : cmd === "launchctl" ? `path = ${f.launchdPath}\nprogram = ${executable}`
+          : JSON.stringify({ ProgramArguments: [executable, "daemon", "start"] }),
+      });
+      if (scenario === "direct-binary" || scenario === "cycle") expect(check).toThrow("CLI update blocked");
+      else expect(check).not.toThrow();
+    });
+  }
+}
 
 test("unmanaged updates do not query a service manager", () => {
   expect(() => assertUpdateServiceLauncher({ ...fixture(), run: () => { throw new Error("unexpected query"); } })).not.toThrow();

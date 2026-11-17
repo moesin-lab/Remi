@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 export interface UpdateServiceRestart {
@@ -72,5 +72,15 @@ function sameLauncherSlot(executable: string, launcher: string): boolean {
   // pointing directly at an old binary when launcher is a symlink to it.
   const slot = (path: string) => join(realpathSync(dirname(resolve(path))), basename(path));
   const expected = slot(launcher);
-  return slot(executable) === expected || realpathSync(executable) === expected;
+  const visited = new Set<string>();
+  let current = slot(executable);
+  // Stop at the entry that rename will replace, even when it is itself a
+  // symlink. realpath(executable) would skip that entry in a longer chain.
+  for (let links = 0; links < 40; links++) {
+    if (current === expected) return true;
+    if (visited.has(current) || !lstatSync(current).isSymbolicLink()) return false;
+    visited.add(current);
+    current = slot(resolve(dirname(current), readlinkSync(current)));
+  }
+  return false;
 }

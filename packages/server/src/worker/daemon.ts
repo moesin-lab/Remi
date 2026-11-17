@@ -3315,16 +3315,21 @@ export class MultiremiDaemon {
     return this.parkedLanesClosing.then(() => this.protocolClient?.stopLane(this.protocolLane));
   }
 
+  /** Synchronous cleanup shared by the process supervisor before any lane can exit. */
+  forceStopProcesses(): void {
+    for (const abort of this.activeTaskAborts) abort.abort();
+    this.parkedLanes?.killAllProcesses();
+    for (const [provider, chatId] of this.liveUpdateProviders) {
+      const pgid = provider.processGroupId?.(chatId);
+      if (pgid) { try { killProcessGroup(pgid); } catch { /* already exited */ } }
+    }
+    this.stopRepoCheckoutServer();
+  }
+
   stop(): void {
     if (this.runActive && !this.stopDeadlineTimer) {
       this.stopDeadlineTimer = setTimeout(() => {
-        for (const abort of this.activeTaskAborts) abort.abort();
-        this.parkedLanes?.killAllProcesses();
-        for (const [provider, chatId] of this.liveUpdateProviders) {
-          const pgid = provider.processGroupId?.(chatId);
-          if (pgid) { try { killProcessGroup(pgid); } catch { /* already exited */ } }
-        }
-        this.stopRepoCheckoutServer();
+        this.forceStopProcesses();
         log.error("Daemon graceful stop deadline exceeded; bridge process groups terminated");
         this.onStopTimeout();
       }, this.stopTimeoutMs);

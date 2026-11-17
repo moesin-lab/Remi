@@ -81,3 +81,35 @@ test("a late watchdog cannot arbitrate or roll back a later request", async () =
   expect(updateDecision(first)).toBe("completed");
   expect(updateDecision(next)).toBe("rolled_back");
 });
+
+test("default supervisor exit kills both co-resident providers' detached bridge groups", async () => {
+  const root = mkdtempSync(join(tmpdir(), "remi-multi-stop-")); roots.push(root);
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, "../../fixtures/multi-provider-stop.ts"), root], {
+    stdout: "pipe", stderr: "pipe",
+  });
+  let pgids: number[] = [];
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+    ]);
+    pgids = JSON.parse(stdout.trim().split("\n").find(line => /^\[\d/.test(line))!);
+    expect(pgids).toHaveLength(2);
+    expect(code).toBe(1); // default process.exit, no onStopTimeout mock
+    expect(stderr).toContain("graceful stop deadline exceeded");
+    // Wait for kernel delivery/reaping, then reject any live member including descendants.
+    let liveMembers: string[] = [];
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const result = Bun.spawnSync(["ps", "-eo", "pgid=,stat=,args="]);
+      liveMembers = result.stdout.toString().split("\n").filter(line => {
+        const [pgid, state] = line.trim().split(/\s+/);
+        return pgids.includes(Number(pgid)) && !state?.startsWith("Z");
+      });
+      if (!liveMembers.length) break;
+      await Bun.sleep(20);
+    }
+    expect(liveMembers).toEqual([]);
+  } finally {
+    child.kill();
+    for (const pgid of pgids) { try { process.kill(-pgid, "SIGKILL"); } catch {} }
+  }
+}, 10_000);

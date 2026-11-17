@@ -312,8 +312,8 @@ describe("daemon poll cadence", () => {
     jest.useFakeTimers();
     const probe = track(createLoopDaemon());
     await probe.stop();
-    expect(probe.daemon.runActive).toBe(false);
-    expect(probe.daemon.stopDeadlineTimer).toBeNull();
+    expect((probe.daemon as Record<string, unknown>).runActive).toBe(false);
+    expect((probe.daemon as Record<string, unknown>).stopDeadlineTimer).toBeNull();
     jest.advanceTimersByTime(DAEMON_STOP_TIMEOUT_MS + 1);
   });
 

@@ -45,6 +45,13 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 [大文件复现与验证](../../reports/performance/MUL-85-skill-files.md)记录操作者 PostgreSQL
 采样与本地 1,277 文件夹具；本地 SQLite 耗时不能代表生产 PG 同步桥或部署后的性能。
 
+## 终态完成的原子校验
+
+turn.complete 的 turn/attempt、输入范围与宿主校验在完成事务内执行，复用该事务取得的
+workspace 互斥，不再先提交一次独立预检。完成重放仍返回已提交的 reply；失败分类、
+unread-input 拒绝以及自动回复失败后的事务回滚重试保持原入口。任务初始定位读取身份列，
+完整终态与用量投影仍由规范任务变更器读取和生成。
+
 ## 活跃轮次下行快照
 
 `DaemonTurnBridge.snapshot` 在同一 workspace 生命周期锁下，按确定顺序批量取得 lane

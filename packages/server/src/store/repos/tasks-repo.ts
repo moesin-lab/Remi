@@ -5349,10 +5349,12 @@ ${placementAfter.sql}
     turnInputToSeq?:number;
     allowUnreadInput?:boolean;
     replyKind?:'reply'|'final';
+    expectedTurnId?:string;
     expectedRuntimeId?:string;
     expectedDaemonId?:string;
   }, daemonAuthority?: TaskDaemonReportAuthority): MultiremiTask {
-    const initial = this.getTask(taskId);
+    const initial = this.getTaskIdentity(taskId);
+    if (!initial && input.expectedTurnId) throw new Error('stale_attempt');
     if (!initial || (!daemonAuthority && !isActiveTaskStatus(initial.status))) throw new Error(`Task not found or terminal: ${taskId}`);
     const childStatusChanges: ChildStatusChange[] = [];
     let deferredEvents = createCommitEventQueue();
@@ -5363,6 +5365,16 @@ ${placementAfter.sql}
       unreadInput = undefined;
       if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
       const current = daemonAuthority ? this.lockTaskDaemonReport(taskId, daemonAuthority) : this.getTask(taskId);
+      const reportedTurn = input.expectedTurnId ? this.ctx.db.query(
+        'SELECT * FROM multiremi_turns WHERE current_attempt_id=?').get(taskId) : null;
+      if (input.expectedTurnId && (!reportedTurn || reportedTurn.id !== input.expectedTurnId
+        || reportedTurn.workspace_id !== daemonAuthority?.workspaceId)) throw new Error('stale_attempt');
+      if (reportedTurn && reportedTurn.status !== 'completed') {
+        if (!['running','awaiting_human'].includes(reportedTurn.status)
+          && !(reportedTurn.status === 'pending' && current?.offeredAt)) throw new Error('invalid_report');
+        if (!Number.isSafeInteger(input.turnInputToSeq) || input.turnInputToSeq! < Number(reportedTurn.input_to_seq ?? 0)
+          || input.turnInputToSeq! > Number(current?.projectionToSeq ?? 0)) throw new Error('invalid_report');
+      }
       if (current && daemonAuthority) {
         if (["completed", "failed", "cancelled"].includes(current.status)) return { task: current, followUps: null };
         if (current.status !== "running" && current.status !== "awaiting_human") {
@@ -5382,7 +5394,7 @@ ${placementAfter.sql}
       this.assertTaskRuntimeAvailableWithinWorkspaceLock(current);
       const chatExecutionKind = this.getTaskChatExecutionKind(current);
       this.lockTaskIssueSessionsWithinWorkspaceLock([current]);
-      const turn=this.ctx.db.query('SELECT * FROM multiremi_turns WHERE current_attempt_id=?').get(taskId);
+      const turn=reportedTurn??this.ctx.db.query('SELECT * FROM multiremi_turns WHERE current_attempt_id=?').get(taskId);
       if(turn){lockLane(this.ctx,turn.session_id,turn.agent_id,turn.execution_scope);
         if(input.turnInputToSeq===undefined){const to=current.projectionToSeq??turn.wake_seq??0;if(to>=Number(turn.input_to_seq??0))acknowledgeInput(this.ctx,turn.id,Number(turn.input_to_seq??0),to,false);}
         if(input.turnInputToSeq!==undefined){

@@ -6,11 +6,13 @@ useReportFleetFixtures("file");
 // Executions include queued downlinks/offers, through layer.drain(). PG runs
 // the same comparisons; its fixed totals need a real-backend capture.
 const SQLITE_BUDGETS = {
-  hb: { total: 62, reads: 43, writes: 19 },
-  'task.start': { total: 96, reads: 77, writes: 19 },
-  'task.progress': { total: 50, reads: 40, writes: 10 },
-  'task.workspace': { total: 42, reads: 33, writes: 9 },
-  'turn.input': { total: 101, reads: 81, writes: 20 },
+  hb: { total: 60, reads: 43, writes: 17 },
+  'task.start': { total: 80, reads: 63, writes: 17 },
+  'task.progress': { total: 38, reads: 30, writes: 8 },
+  'task.workspace': { total: 41, reads: 33, writes: 8 },
+  'turn.input': { total: 88, reads: 73, writes: 15 },
+  'turn.complete': { total: 249, reads: 197, writes: 52 },
+  'task.fail': { total: 166, reads: 141, writes: 25 },
 };
 const fleets: Record<string, Awaited<ReturnType<typeof createReportScaleFixture>>> = {};
 const costs: Record<string, { total: number; reads: number; writes: number; statements: Record<string, number> }> = {};
@@ -75,8 +77,11 @@ for (const type of ['hb','task.start','task.progress','task.workspace','turn.inp
       const seq = 100 + ['hb','task.start','task.progress','task.workspace','turn.input','turn.complete','task.fail'].indexOf(type);
       const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
       const unsubscribe = f.store.onWorkspaceEvent(event => events.push(event));
+      const trace = process.env.MULTIREMI_TEST_SQL_TRACE;
+      if (trace) process.env.MULTIREMI_TEST_SQL_TRACE = `${trace}-${type}-${name}`;
       const sql = await countSql(f.database, f.layer, () => type === 'hb' ? f.heartbeat(0, false, 1)
         : f.sessions[sessionIndex]!.handleMessage(JSON.stringify({ v: 2, t: type, rt: runtime, seq, id: String(seq), p })));
+      if (trace) process.env.MULTIREMI_TEST_SQL_TRACE = trace;
       unsubscribe();
       if (type !== 'hb') expect(f.frames[sessionIndex]!.find(frame => frame.t === 'res' && frame.re === String(seq))?.p.ok).toBe(true);
       const profile: Record<string, number> = {};

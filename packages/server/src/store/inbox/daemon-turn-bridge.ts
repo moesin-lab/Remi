@@ -32,6 +32,8 @@ const invalidTurnReports=new Set([
 ]);
 function turnRejectionCode(error:unknown,attemptId:string,runtimeId:string):'stale_attempt'|'input_gap'|'turn_input_pending'|'invalid_report'|null {
   if(!(error instanceof Error))return null;
+  if ('retryable' in error && error.retryable === false && 'code' in error
+    && ['authority_revoked','task_not_found'].includes(String(error.code))) return 'stale_attempt';
   if(error.message==='stale_attempt'||error.message==='input_gap'||error.message==='turn_input_pending')return error.message;
   if(invalidTurnReports.has(error.message)
     ||error.message===`Task not found or terminal: ${attemptId}`
@@ -244,14 +246,8 @@ export class DaemonTurnBridge {
   complete(input:{payload:DaemonTurnCompletePayload;completionFields:DaemonTaskCompletionFields|null;traceEventCount?:number},scope:DaemonTurnScope):Record<string,unknown> {
     const p=input.payload;
     try{
-      const prior=this.transaction(()=>{const turn=this.authorized(p.turn_id,p.attempt_id,scope,true);
-        if(turn.status==='completed')return {ok:true,turn_id:turn.id,reply_message_id:turn.reply_message_id};
-        const attempt=this.ctx.tasks().getTask(p.attempt_id);
-        if(!['running','awaiting_human'].includes(turn.status)&&!(turn.status==='pending'&&attempt?.offeredAt))throw new Error('invalid_report');
-        if(!Number.isSafeInteger(p.input_to_seq)||p.input_to_seq>Number(turn.offered_to??0)||p.input_to_seq<Number(turn.input_to_seq??0))throw new Error('invalid_report');return null;});
-      if(prior)return prior;
       this.ctx.tasks().completeTask(p.attempt_id,{output:p.reply.body_md,sessionId:p.session_id,workDir:p.work_dir,completionFields:input.completionFields,traceEventCount:input.traceEventCount,
-        turnInputToSeq:p.input_to_seq,allowUnreadInput:!scope.inputUnread||p.input_unread_fallback===true,replyKind:p.reply.message_kind,expectedRuntimeId:scope.runtimeId,expectedDaemonId:scope.daemonId},scope);
+        expectedTurnId:p.turn_id,turnInputToSeq:p.input_to_seq,allowUnreadInput:!scope.inputUnread||p.input_unread_fallback===true,replyKind:p.reply.message_kind,expectedRuntimeId:scope.runtimeId,expectedDaemonId:scope.daemonId},scope);
       const turn=this.ctx.db.query('SELECT reply_message_id FROM multiremi_turns WHERE id=?').get(p.turn_id);
       return {ok:true,turn_id:p.turn_id,reply_message_id:turn?.reply_message_id??null};
     }catch(error){

@@ -44,13 +44,13 @@ describe("buildTaskEnv", () => {
       const env = buildTaskEnv(taskWith({
         workspaceEnv: { NO_PROXY: ".workspace.test", HTTP_PROXY: "http://proxy:8080", ALL_PROXY: "socks5h://proxy:8080" },
       }), { ...OPTS, serverUrl: "http://10.36.0.223:16120" });
-      expect(env.NO_PROXY).toBe(".workspace.test,10.36.0.223,localhost,127.0.0.1,::1");
-      expect(env.no_proxy).toBe(".machine.test,10.36.0.223,localhost,127.0.0.1,::1");
+      expect(env.NO_PROXY).toBe(".workspace.test,10.36.0.223,localhost,127.0.0.1,::1,[::1]");
+      expect(env.no_proxy).toBe(".machine.test,10.36.0.223,localhost,127.0.0.1,::1,[::1]");
       expect(env.HTTP_PROXY).toBe("http://proxy:8080");
       expect(env.ALL_PROXY).toBe("socks5h://proxy:8080");
       const inherited = buildTaskEnv(taskWith({}), { ...OPTS, serverUrl: "http://[fd00::1]:6120" });
-      expect(inherited.NO_PROXY).toBe("10.0.0.0/8,fd00::1,localhost,127.0.0.1,::1");
-      expect(inherited.no_proxy).toBe(".machine.test,fd00::1,localhost,127.0.0.1,::1");
+      expect(inherited.NO_PROXY).toBe("10.0.0.0/8,fd00::1,localhost,127.0.0.1,::1,[fd00::1],[::1]");
+      expect(inherited.no_proxy).toBe(".machine.test,fd00::1,localhost,127.0.0.1,::1,[fd00::1],[::1]");
     } finally {
       for (const key of ["NO_PROXY", "no_proxy"] as const) {
         if (previous[key] === undefined) delete process.env[key];

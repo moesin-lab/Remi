@@ -10,7 +10,7 @@ export function cliFetch(input: string | URL | Request, init?: RequestInit): Pro
   // for that call only. Restore before yielding so concurrent external requests
   // keep their original proxy configuration, including port-specific rules.
   const previous = { NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
-  const host = new URL(url).hostname.replace(/^\[(.*)\]$/, "$1");
+  const host = new URL(url).hostname;
   try {
     process.env.NO_PROXY = host;
     process.env.no_proxy = host;

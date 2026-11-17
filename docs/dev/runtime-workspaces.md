@@ -145,7 +145,7 @@ Codex 的 Skill 发现与目录预算使用固定原生版本：用户 `~/.agent
 
 `env_file` 使用 dotenv 格式，不执行 shell。注入顺序：机器环境 → 团队环境 → Agent 环境 → 本地环境文件 → provider 路由/认证 → Task 坐标。本地文件不能覆盖 `MULTIREMI_*`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`OPENAI_*`、`ANTHROPIC_*`。Antigravity Agent 另外不能覆盖 `GEMINI_HOME`、`GEMINI_API_KEY`、`AGY_*`、`GOOGLE_*`、`ANTIGRAVITY_*`（home、网关路由与 Google 凭据由其环境构造器独占；其他 provider 仍可在本地文件中使用 Google 工具变量）。其他 provider 配置继续沿用现有筛选、插件和 relay 机制，不共享完整 native home。
 
-任务环境构造器将平台 URL 的主机及 daemon helper 的 `localhost`、`127.0.0.1`、`::1` 追加到 `NO_PROXY` 和 `no_proxy`，保留已有列表与其他代理变量。CLI 的平台 API、附件上传和下载支持 `NO_PROXY` / `no_proxy` 中的 IPv4/IPv6 CIDR、`*`、域名后缀和主机端口；小写变量存在时优先（含空值）。CIDR 只匹配 URL 中的 IP 字面量，不解析域名。命中时在同步调用 Bun `fetch` 期间将绕过列表替换为精确主机，并在返回 Promise 前恢复原值；该行为由固定的 Bun 1.3.14 子进程并发回归验证。未命中时继续使用 Bun 的环境代理行为，Skill 导入和 CLI 更新的外网请求保持原路径。
+任务环境构造器将平台 URL 的主机及 daemon helper 的 `localhost`、`127.0.0.1`、`::1` 追加到 `NO_PROXY` 和 `no_proxy`，IPv6 同时注入带括号形式以兼容 Bun，保留已有列表与其他代理变量。CLI 的平台 API、附件上传和下载支持 `NO_PROXY` / `no_proxy` 中的 IPv4/IPv6 CIDR、`*`、域名后缀和主机端口；小写变量存在时优先（含空值）。CIDR 只匹配 URL 中的 IP 字面量，不解析域名。命中时在同步调用 Bun `fetch` 期间将绕过列表替换为精确主机，并在返回 Promise 前恢复原值；该行为由固定的 Bun 1.3.14 子进程并发回归验证。未命中时继续使用 Bun 的环境代理行为，Skill 导入和 CLI 更新的外网请求保持原路径。
 
 这些文件无需纳入云端 Git。注册不上传文件内容，服务端 Task prompt 仅描述路径；执行 agent 及其模型服务仍可能读取文件，任务输出和会话历史仍按现有机制处理。跨 Chat 的原生历史不会自动合并；跨任务记忆可保存在工作区文件中。
 

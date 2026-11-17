@@ -131,12 +131,15 @@ export class DaemonTurnBridge {
         const replay=this.ctx.db.query('SELECT input_trigger_ack,attempt_no,session_id FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);
         if(to>from||Number(replay.attempt_no)>1&&!replay.session_id&&!replay.input_trigger_ack){
           // Range reads can deliver ordinary context that snapshots never push.
-          // Only this attempt's full-body receipt may replace an explicit ID;
-          // unread IDs, foreign IDs, duplicates and ordering still need validation.
+          // Own messages already reached this provider when it authored them,
+          // and snapshots do not push those replies back. Other omitted IDs
+          // still require this attempt's full-body receipt. Validate every
+          // supplied ID (including own messages), duplicates and ordering.
           const read=attemptInputState(this.ctx,turn).read;
           const messageIds=new Set(payload.message_ids);
           const expected=this.inputMessages(turn,from,to)
-            .filter(message=>message.seq>read||messageIds.has(message.id)).map(message=>message.id);
+            .filter(message=>messageIds.has(message.id)||message.seq>read
+              &&!(message.sender_type==='agent'&&message.sender_id===turn.agent_id)).map(message=>message.id);
           if(JSON.stringify(expected)!==JSON.stringify(payload.message_ids))throw new Error('input_gap');
           assertOfferedInputRead(this.ctx,turn,to);}
         acknowledgeInput(this.ctx,turn.id,Math.min(from,to),to);

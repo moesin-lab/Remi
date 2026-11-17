@@ -24,6 +24,7 @@ export interface ConversationVisibilityOptions {
 
 /** Related-message walks stop past this depth (see the walkers below). */
 const RELATED_MESSAGE_MAX_DEPTH = 4;
+const targetKey = (sessionId: string, seq: number) => JSON.stringify([sessionId, seq]);
 
 /** Message ids the walkers below may pass to `reply` for this entry. */
 function relatedMessageIds(entry: ConversationVisibilityEntry): string[] {
@@ -40,21 +41,31 @@ function relatedMessageIds(entry: ConversationVisibilityEntry): string[] {
  * decision itself still runs per source, lazily, in the predicate.
  */
 function prefetchConversationVisibility(store: MultiremiStore, entries: readonly ConversationVisibilityEntry[],
-  related: Map<string, ConversationVisibilityEntry | null>, subjects: Map<string, TaskVisibilitySubject | null>): void {
+  related: Map<string, ConversationVisibilityEntry | null>, targets: Map<string, ConversationVisibilityEntry | null>, subjects: Map<string, TaskVisibilitySubject | null>): void {
+  for (const entry of entries) if (entry.session_id && Number.isSafeInteger(entry.seq)) {
+    targets.set(targetKey(entry.session_id, entry.seq!), entry);
+  }
   let frontier: readonly ConversationVisibilityEntry[] = entries;
   for (let depth = 0; depth <= RELATED_MESSAGE_MAX_DEPTH && frontier.length; depth++) {
     const ids = [...new Set(frontier.flatMap(relatedMessageIds))].filter(id => !related.has(id));
-    if (!ids.length) break;
+    const refs = [...new Map(frontier.filter(entry => entry.session_id && Number.isSafeInteger(entry.metadata.target_seq))
+      .map(entry => ({ sessionId: entry.session_id!, seq: Number(entry.metadata.target_seq) }))
+      .map(ref => [targetKey(ref.sessionId, ref.seq), ref])).values()]
+      .filter(ref => !targets.has(targetKey(ref.sessionId, ref.seq)));
+    if (!ids.length && !refs.length) break;
     const found = store.getMessages(ids);
     for (const id of ids) related.set(id, found.get(id) ?? null);
-    frontier = ids.map(id => related.get(id)).filter((row): row is ConversationVisibilityEntry => !!row);
+    for (const ref of refs) targets.set(targetKey(ref.sessionId, ref.seq), null);
+    for (const entry of store.getConversationLogEntriesByRefs(refs)) targets.set(targetKey(entry.session_id, entry.seq), entry);
+    frontier = [...ids.map(id => related.get(id)), ...refs.map(ref => targets.get(targetKey(ref.sessionId, ref.seq)))]
+      .filter((row): row is ConversationVisibilityEntry => !!row);
   }
-  // Resolve candidate sources from prefetched rows only; a source reached
-  // through an unfetched row (a `target_seq` marker, or a walk deeper than the
-  // prefetch) is absent and takes the per-entry path.
+  // Resolve candidate sources from prefetched messages and target markers.
+  // Walks beyond the bounded prefetch retain the existing per-entry fallback.
   const sources = new Set<string>();
   for (const entry of entries) {
-    const source = conversationEntrySource(entry, id => related.get(id) ?? null, () => null);
+    const source = conversationEntrySource(entry, id => related.get(id) ?? null,
+      seq => entry.session_id ? targets.get(targetKey(entry.session_id, seq)) ?? null : null);
     if (source) sources.add(source);
   }
   if (sources.size) for (const [id, subject] of store.getConversationSourceSubjects([...sources])) subjects.set(id, subject);
@@ -67,12 +78,18 @@ export function conversationEntryVisibility(c: Context, store: MultiremiStore, o
   if (options.chatSession) memo.chatSessions.set(options.chatSession.id, options.chatSession);
   const related = new Map<string, ConversationVisibilityEntry | null>();
   const subjects = new Map<string, TaskVisibilitySubject | null>();
-  if (options.prefetch?.length) prefetchConversationVisibility(store, options.prefetch, related, subjects);
+  const targets = new Map<string, ConversationVisibilityEntry | null>();
+  if (options.prefetch?.length) prefetchConversationVisibility(store, options.prefetch, related, targets, subjects);
   // A prefetched id answers from the batch (null when it has no message row);
   // any other id is read exactly as before.
   const reply = (id: string): ConversationVisibilityEntry | null => related.has(id) ? related.get(id) ?? null : store.getMessage(id);
   return (entry: ConversationVisibilityEntry): boolean => {
-    const target = (seq: number) => entry.session_id ? store.getConversationLogEntry(entry.session_id, seq) : null;
+    const target = (seq: number) => {
+      if (!entry.session_id) return null;
+      const key = targetKey(entry.session_id, seq);
+      if (!targets.has(key)) targets.set(key, store.getConversationLogEntry(entry.session_id, seq));
+      return targets.get(key) ?? null;
+    };
     const notification = conversationEntryQuestionNotification(entry, reply, target);
     if (notification === null) return false;
     if (notification) {
@@ -109,6 +126,7 @@ function conversationSourceTask(store: MultiremiStore, sourceId: string): TaskVi
 }
 
 export interface ConversationVisibilityEntry {
+  seq?: number;
   id?: string;
   kind: string;
   task_id: string | null;

@@ -74,10 +74,16 @@ export async function runUpdateRecovery(output: string, systemd = false) {
     return { task_id: task.id, status: store.getTask(task.id)!.status };
   }
   const observed = new Map<string, string[]>();
+  const stateTimes = new Map<string, Record<string, number>>();
   const capture = (runtimeId: string) => {
     for (const [id, states] of observed) {
       const state = store.getRuntimeUpdateRequest(runtimeId, id)?.status;
-      if (state && states.at(-1) !== state) states.push(state);
+      if (state && states.at(-1) !== state) {
+        states.push(state);
+        let times = stateTimes.get(id);
+        if (!times) { times = {}; stateTimes.set(id, times); }
+        times[state] ??= Date.now();
+      }
     }
   };
   const hello = store.recordDaemonProtocol.bind(store);
@@ -94,6 +100,7 @@ export async function runUpdateRecovery(output: string, systemd = false) {
     await launch();
     await wait("old daemon hello", () => runtime()?.metadata.cli_version === "1.0.0");
     for (const crash of [false, true]) {
+      const fromVersion = runtime()!.metadata.cli_version;
       const previousLauncher = readFileSync(launcher, "utf8");
       const beforeUnit = manager?.state();
       const target = crash ? "1.0.2" : "1.0.1";
@@ -104,23 +111,29 @@ export async function runUpdateRecovery(output: string, systemd = false) {
       const rt = runtime()!;
       const request = store.createRuntimeUpdateRequest(rt.id, { target_version: target });
       const states: string[] = ["pending"]; observed.set(request.id, states);
-      const scenario: any = { kind: crash ? "startup-exit-rollback" : (systemd ? "normal-update-systemd" : "normal-update-without-service-manager"), states, unit_before: beforeUnit };
+      const scenario: any = { kind: crash ? "startup-exit-rollback" : (systemd ? "normal-update-systemd" : "normal-update-without-service-manager"), states, from_version: fromVersion, to_version: target, starts_from_previous_scenario: crash, unit_before: beforeUnit, unit_samples: [] };
       evidence.scenarios.push(scenario);
       await wait(`update ${target}`, () => {
         manager?.discoverWatchdogs();
+        if (manager) {
+          const unit = manager.state();
+          if (scenario.unit_samples.at(-1)?.unit !== unit) scenario.unit_samples.push({ at_ms: Date.now(), unit });
+        }
         const state = store.getRuntimeUpdateRequest(rt.id, request.id)!.status;
         if (states.at(-1) !== state) states.push(state);
+        if (state === "restarting") scenario.restarting_at_ms ??= Date.now();
         return ["completed", "rolled_back", "failed", "timeout"].includes(state);
       }, systemd ? 120_000 : 30_000);
       const result = store.getRuntimeUpdateRequest(rt.id, request.id)!;
-      Object.assign(scenario, { result, observed_version: runtime()!.metadata.cli_version, unit_after: manager?.state() });
+      Object.assign(scenario, { state_times_ms: stateTimes.get(request.id), result, observed_version: runtime()!.metadata.cli_version, unit_after: manager?.state() });
       assert.equal(result.status, crash ? "rolled_back" : "completed", result.error ?? "Unexpected result");
       assert.equal(runtime()!.metadata.cli_version, crash ? "1.0.1" : target);
       if (!crash) assert.deepEqual(states, ["pending", "running", "restarting", "verifying", "completed"]);
       else { assert(result.error?.includes("verification deadline")); assert.equal(readFileSync(launcher, "utf8"), previousLauncher); }
       if (manager) assert(manager.watchdogs.size >= (crash ? 2 : 1), "Real independent watchdog unit not observed");
       Object.assign(scenario, { watchdog_units: manager ? [...manager.watchdogs] : [],
-        task: await taskEvidence(), launcher: readFileSync(launcher, "utf8") });
+        task: await taskEvidence(), launcher: readFileSync(launcher, "utf8"),
+        final_launcher_target: readFileSync(launcher, "utf8").match(/^exec (.+) "\$@"$/m)?.[1] });
       // The fallback process writes its pid into the active journal before hello.
       const settled = readdirSync(join(root, "state/cli-updates")).filter(name => name.endsWith(".settled"));
       evidence.settled = settled;
@@ -150,6 +163,52 @@ export async function runUpdateRecovery(output: string, systemd = false) {
         logs.push(evidence.cleanup.logs.daemon.replaceAll(token.token, "<redacted>"));
         assert(evidence.cleanup.ok, "Cleanup or production snapshot comparison failed");
       } catch (error) { failure ??= error; evidence.ok = false; evidence.cleanup_error = String(error); }
+    }
+    if (manager && evidence.cleanup) {
+      const readEvents = (path: string) => { try { return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)); } catch { return []; } };
+      evidence.fixture_lifecycle = readEvents(join(root, "state/fixture-lifecycle.jsonl"));
+      evidence.process_observations = readEvents(join(root, "process-observations.jsonl"));
+      const journal = evidence.cleanup.logs.daemon as string;
+      evidence.fallback_successors = [...journal.matchAll(/^(\S+).*restarting with updated binary \(pid (\d+)\)/gm)].map(match => {
+        const pid = Number(match[2]);
+        const at = Date.parse(match[1]!);
+        const lifecycle = evidence.fixture_lifecycle.filter((event: any) => event.pid === pid);
+        const samples = evidence.process_observations.filter((event: any) => event.pid === pid);
+        const first = samples[0]?.at_ms ?? lifecycle[0]?.at_ms;
+        const disappeared = samples.find((event: any) => event.event === "disappeared")?.at_ms;
+        const zombie = samples.find((event: any) => event.state === "Z");
+        return { pid, at_ms: at, lifecycle, samples, first_seen_ms: first ?? null, disappeared_ms: disappeared ?? null,
+          observed_span_ms: first && disappeared ? disappeared - first : null,
+          spawn_log_to_disappearance_ms: disappeared ? disappeared - at : null,
+          observed_signals: lifecycle.filter((event: any) => event.event === "signal").map((event: any) => event.signal),
+          zombie_exit_status: zombie?.exit_status ?? null,
+          ready_observed: lifecycle.some((event: any) => event.event === "ready" && event.ready),
+          provider_created_observed: lifecycle.some((event: any) => event.event === "provider-created"),
+          limitation: "Only observed lifecycle signals or zombie exit_status identify termination; disappearance is not proof of a signal. Missing entry/ready/provider events cannot prove what happened before instrumentation started." };
+      });
+      for (const scenario of evidence.scenarios) {
+        const restartingAt = scenario.state_times_ms?.restarting ?? scenario.restarting_at_ms;
+        const oldPid = scenario.unit_before?.match(/^MainPID=(\d+)/m)?.[1];
+        const next = scenario.unit_samples.find((sample: any) => { const pid = sample.unit.match(/^MainPID=(\d+)/m)?.[1]; return pid && pid !== "0" && pid !== oldPid; });
+        scenario.restarting_to_new_mainpid_ms = restartingAt && next ? next.at_ms - restartingAt : null;
+        scenario.new_mainpid_observation = next ?? null;
+        const firstExec = scenario.unit_samples.find((sample: any) => { const pid = sample.unit.match(/^ExecMainPID=(\d+)/m)?.[1]; return pid && pid !== "0" && pid !== oldPid; });
+        scenario.first_new_execmain_observation = firstExec ?? null;
+        scenario.restarting_to_first_execmain_observed_ms = restartingAt && firstExec ? firstExec.at_ms - restartingAt : null;
+        scenario.timing_precision = "Observed upper bounds from 50ms polling plus command latency; a startup-exit candidate can disappear before a live MainPID sample. ExecMainPID/ExecMainStatus and start timestamps retain that candidate's execution.";
+        const from = Date.parse(scenario.result?.createdAt ?? "");
+        const to = Date.parse(scenario.result?.updatedAt ?? "");
+        const lines = journal.split("\n").map(line => ({ line, at_ms: Date.parse(line.split(" ")[0]!) }))
+          .filter(entry => entry.at_ms >= from && entry.at_ms <= to + 1000);
+        scenario.restart_journal = lines.map(entry => entry.line);
+        scenario.fallback_successor_pids = evidence.fallback_successors.filter((entry: any) => entry.at_ms >= from && entry.at_ms <= to + 1000).map((entry: any) => entry.pid);
+        scenario.stop_timeout_observed = scenario.restart_journal.some((line: string) => /stop-sigterm.*timed out|Killing process/.test(line));
+        const stopping = lines.find(entry => /Stopping /.test(entry.line));
+        const stopped = lines.find(entry => /Stopped /.test(entry.line));
+        const started = lines.find(entry => /Started /.test(entry.line));
+        scenario.stop_elapsed_ms = stopping && stopped ? stopped.at_ms - stopping.at_ms : null;
+        scenario.manager_restart_elapsed_ms = stopping && started ? started.at_ms - stopping.at_ms : null;
+      }
     }
     writeFileSync(join(output, "update-recovery.log"), logs.join("\n"));
     writeFileSync(join(output, "update-recovery.json"), JSON.stringify(evidence, null, 2).replaceAll(token.token, "<redacted>"));

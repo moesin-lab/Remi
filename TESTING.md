@@ -108,6 +108,11 @@ systemd 模式在保存证据后删除隔离根目录（包括失败/中断路�
 避免候选 exit 23 后丢失 transient 定义；finally stop/reset-failed 清理。线上快照只读获取 MainPID/ExecStart、CLI sha256、stable/drop-in 目录清单与
 6131–6134 监听进程。通过短暂的只读观察 unit 在 manager 的挂载/PID 命名空间内读取 journal、
 `ss` 和本轮进程的环境标记，避免把沙箱内不可见进程误记为已清理。
+测试侧另用 Python 3 transient monitor 以约 20ms 间隔只读采样本轮进程；fixture 写入
+entry/ready/provider-created/signal/exit 事件。JSON 按场景记录 from/to 版本、最终 launcher 目标、
+ExecMainStartTimestamp/ExecMainPID/ExecMainStatus、restart journal、停止耗时和新 MainPID 的观测耗时。
+轮询耗时是观测上界；瞬时退出可能只留下 ExecMainStatus。未采到的退出信号必须保留为未知，
+不能把进程消失推断成 SIGKILL。monitor 同样由 finally 停止并清理。
 
 MUL-71 首轮在隔离 daemon 注册前超时：本任务执行端的 `/tmp` 路径在用户 manager 中不可见。
 迁到共享目录后已实际跑通场景 1、2（含两个后续 completed 任务），线上快照一致且 unit/隔离端口无残留；

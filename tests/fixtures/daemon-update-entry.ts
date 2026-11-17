@@ -1,5 +1,5 @@
 /** Native candidate for the isolated update rehearsal; never a production CLI entry. */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
 import { multiremiVersion } from "@multiremi/version.js";
@@ -11,6 +11,13 @@ if (process.env.NODE_ENV !== "test" || process.env.MULTIREMI_UPDATE_REHEARSAL !=
 if (process.argv.includes("--version")) { console.log(multiremiVersion); process.exit(0); }
 const state = process.env.MULTIREMI_STATE_DIR!;
 const home = process.env.HOME!;
+mkdirSync(state, { recursive: true });
+function lifecycle(event: string, detail: object = {}) {
+  appendFileSync(join(state, "fixture-lifecycle.jsonl"), JSON.stringify({ at_ms: Date.now(), pid: process.pid,
+    ppid: process.ppid, version: multiremiVersion, event, ...detail }) + "\n");
+}
+lifecycle("entry");
+process.on("exit", code => lifecycle("exit", { code }));
 mkdirSync(join(home, ".codex"), { recursive: true });
 writeFileSync(join(home, ".codex", "auth.json"), JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "fixture", refresh_token: "fixture" } }), { mode: 0o600 });
 // The release is served by the isolated API, with real tar bytes, digest and version probes.
@@ -37,12 +44,13 @@ const daemon = new MultiremiDaemon({
     : { command: [spec.command, ...spec.args] }, updateVerifyTimeoutSeconds: process.env.REHEARSAL_SYSTEMD === "1" ? 60 : 5,
   sshMeshManager: { getHeartbeatStatus: () => ({ status: "disabled" }), reconcile: async () => {}, cleanupForRetirement: async () => {} },
   agentPluginProviderPreflight: async () => {},
-  providerFactory: options => new AcpProvider({ ...options, agentType: "codex", executable: process.env.REHEARSAL_BUN!,
+  onReadyChange: ready => lifecycle("ready", { ready }),
+  providerFactory: options => { lifecycle("provider-created"); return new AcpProvider({ ...options, agentType: "codex", executable: process.env.REHEARSAL_BUN!,
     args: [process.env.REHEARSAL_FAKE_ACP!], privateTmpDirectory: undefined,
     env: { ...options.env, BUN_BE_BUN: "1", FAKE_STEER_CONFIG: JSON.stringify({ advertise: "codex", prompts: [{ chunks: ["MUL28_TASK_OK"] }] }) },
-  }),
+  }); },
 });
-process.on("SIGTERM", () => daemon.stop());
-process.on("SIGINT", () => daemon.stop());
+process.on("SIGTERM", () => { lifecycle("signal", { signal: "SIGTERM" }); void daemon.stop(); });
+process.on("SIGINT", () => { lifecycle("signal", { signal: "SIGINT" }); void daemon.stop(); });
 try { await daemon.start(); } finally { lease.release(); }
 if (daemon.restartRequested()) restartForegroundDaemonProcess(cliOptions, "remi");

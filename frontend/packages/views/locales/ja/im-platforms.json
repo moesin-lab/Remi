@@ -541,7 +541,7 @@
     "name": "ボット名",
     "empty": "最初のボットを設定",
     "loading": "ボットを読み込み中…",
-    "runtimeHint": "各ボットは個別の飛書アプリと Runtime を使用します。現在、1つの Runtime が担当するボットは1つです。",
+    "runtimeHint": "各ボットは個別の飛書アプリを使用します。複数ボット対応の Runtime は複数のボットをホストできます。旧バージョンの daemon は1つに制限されます。",
     "runtimeHosted": "ホスト中: {{names}}",
     "runtimeUpgrade": "複数のボットには daemon の更新が必要です",
     "runtimeAssigned": "他のボットに割り当て済み",

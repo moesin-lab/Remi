@@ -765,7 +765,7 @@ export function controlPlaneConciergeHost(deps: {
         }
         for (const attachment of delivery.attachments) {
           options?.signal.throwIfAborted();
-          const buffer = await daemon.downloadFeishuBotOutboundAttachment(delivery.id, delivery.claimToken, attachment.id);
+          const buffer = await daemon.downloadFeishuBotOutboundAttachment(delivery.id, delivery.claimToken, attachment.id, delivery.botId ?? deps.botId);
           options?.signal.throwIfAborted();
           result = await handle.sendProactiveAttachment({ chatId: delivery.chatId, replyToMessageId,
             buffer, filename: attachment.filename, contentType: attachment.contentType, signal: options?.signal,

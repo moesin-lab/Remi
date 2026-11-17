@@ -541,7 +541,7 @@
     "name": "봇 이름",
     "empty": "첫 번째 봇 설정",
     "loading": "봇 불러오는 중…",
-    "runtimeHint": "각 봇은 별도의 Feishu 앱과 Runtime을 사용합니다. 현재 Runtime 하나는 봇 하나를 호스팅합니다.",
+    "runtimeHint": "각 봇은 별도의 Feishu 앱을 사용합니다. 여러 봇을 지원하는 Runtime은 여러 봇을 호스팅할 수 있으며, 이전 버전 daemon은 하나로 제한됩니다.",
     "runtimeHosted": "호스팅: {{names}}",
     "runtimeUpgrade": "여러 봇을 호스팅하려면 daemon을 업그레이드하세요",
     "runtimeAssigned": "다른 봇에 할당됨",

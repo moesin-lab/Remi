@@ -541,7 +541,7 @@
     "name": "机器人名称",
     "empty": "配置第一个机器人",
     "loading": "正在加载机器人…",
-    "runtimeHint": "每个机器人使用独立的飞书应用和 Runtime。当前一个 Runtime 只能承载一个机器人。",
+    "runtimeHint": "每个机器人使用独立的飞书应用。支持多机器人的 Runtime 可以托管多个机器人，旧版本 daemon 仍限一个。",
     "runtimeHosted": "已托管：{{names}}",
     "runtimeUpgrade": "请升级 daemon 后再选择此机器",
     "runtimeAssigned": "已分配给其他机器人",

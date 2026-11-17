@@ -543,7 +543,7 @@
     "name": "Bot name",
     "empty": "Set up your first bot",
     "loading": "Loading bots…",
-    "runtimeHint": "Each bot uses its own Feishu app and Runtime. A Runtime currently hosts one bot.",
+    "runtimeHint": "Each bot uses its own Feishu app. Runtimes with multi-bot support can host multiple bots; older daemons are limited to one.",
     "runtimeHosted": "Hosting: {{names}}",
     "runtimeUpgrade": "Upgrade daemon to host multiple bots",
     "runtimeAssigned": "Assigned to another bot",

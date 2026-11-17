@@ -2625,6 +2625,14 @@ runMigrations(this.db);
     input: ReportFeishuBotRuntimeStatusInput,
     botId?: string,
   ): MultiremiFeishuBotRuntimeStatus {
+    if (botId === undefined && input.state === "stopped" && !this.feishuBot.supportsMulti(workspaceId, runtimeId)) {
+      // Resolve the implicit owner under the same lock as its release and the
+      // next owner's revision, including reports arriving on another API node.
+      return this.db.transaction(() => {
+        this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+        return this.feishuBot.forRuntime(workspaceId, runtimeId).reportRuntimeStatus(workspaceId, runtimeId, input);
+      })();
+    }
     return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, true).reportRuntimeStatus(workspaceId, runtimeId, input);
   }
 

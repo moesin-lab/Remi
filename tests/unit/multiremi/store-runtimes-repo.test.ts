@@ -321,3 +321,28 @@ describe("RuntimesRepo", () => {
     expect(store!.getAgent(agent.id)?.archivedAt).not.toBeNull();
   });
 });
+
+// CLI success is an observation of the replacement process, never the installer.
+it("requires a target-version hello and self-check; keeps rollback terminal", () => {
+  const repo = createRepo();
+  repo.registerRuntime({ id: "rt_upgrade", name: "upgrade", provider: "codex", workspaceId: "local", daemonId: "daemon_upgrade" });
+  const request = repo.createRuntimeUpdateRequest("rt_upgrade", { target_version: "v9.8.7" });
+  repo.claimRuntimeUpdateRequest("rt_upgrade");
+  expect(() => repo.reportRuntimeUpdateResult("rt_upgrade", request.id, { status: "completed" })).toThrow("hello");
+  repo.reportRuntimeUpdateResult("rt_upgrade", request.id, { status: "restarting" });
+  expect(() => repo.createRuntimeUpdateRequest("rt_upgrade", { target_version: "9.8.8" })).toThrow("already in progress");
+  repo.recordDaemonProtocol("rt_upgrade", "daemon_upgrade", 2, "9.8.6");
+  expect(repo.getRuntimeUpdateRequest("rt_upgrade", request.id)?.status).toBe("restarting");
+  repo.recordDaemonProtocol("rt_upgrade", "other_daemon", 2, "9.8.7");
+  expect(repo.getRuntimeUpdateRequest("rt_upgrade", request.id)?.status).toBe("restarting");
+  repo.recordDaemonProtocol("rt_upgrade", "daemon_upgrade", 2, "9.8.7");
+  expect(repo.getRuntimeUpdateRequest("rt_upgrade", request.id)?.status).toBe("verifying");
+  expect(() => repo.reportRuntimeUpdateResult("rt_upgrade", request.id, { status: "completed" })).toThrow("self-check");
+  expect(repo.reportRuntimeUpdateResult("rt_upgrade", request.id, { status: "completed", self_check: true }).status).toBe("completed");
+  expect(repo.reportRuntimeUpdateResult("rt_upgrade", request.id, { status: "rolled_back", error: "late report" }).status).toBe("completed");
+  const rollback = repo.createRuntimeUpdateRequest("rt_upgrade", { target_version: "9.8.8" });
+  repo.claimRuntimeUpdateRequest("rt_upgrade");
+  repo.reportRuntimeUpdateResult("rt_upgrade", rollback.id, { status: "restarting" });
+  expect(repo.reportRuntimeUpdateResult("rt_upgrade", rollback.id, { status: "rolled_back", error: "startup crash" })).toMatchObject({ status: "rolled_back", error: "startup crash" });
+  expect(repo.reportRuntimeUpdateResult("rt_upgrade", rollback.id, { status: "running" }).status).toBe("rolled_back");
+});

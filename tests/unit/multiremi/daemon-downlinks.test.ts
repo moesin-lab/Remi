@@ -25,7 +25,13 @@ const rt = "rt_downlinks";
 const families: Family[] = [
   { kind: "update", create: store => store.createRuntimeUpdateRequest(rt, { targetVersion: "9.9.9" }),
     read: (store, id) => store.getRuntimeUpdateRequest(rt, id),
-    report: (store, id, status) => store.reportRuntimeUpdateResult(rt, id, { status, error: "duplicate must not win" }) },
+    report: (store, id, status) => {
+      if (status === "completed" && store.getRuntimeUpdateRequest(rt, id)?.status === "running") {
+        store.reportRuntimeUpdateResult(rt, id, { status: "restarting" });
+        store.recordDaemonProtocol(rt, store.getRuntime(rt)!.daemonId ?? "", 2, "9.9.9");
+      }
+      return store.reportRuntimeUpdateResult(rt, id, { status, self_check: true, error: "duplicate must not win" });
+    } },
   { kind: "model_list", create: store => store.createRuntimeModelListRequest(rt),
     read: (store, id) => store.getRuntimeModelListRequest(rt, id),
     report: (store, id, status) => store.reportRuntimeModelListResult(rt, id, { status, models: [], error: "duplicate must not win" }) },

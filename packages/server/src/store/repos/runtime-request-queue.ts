@@ -32,6 +32,7 @@ export interface RuntimeRequestSpec<T> {
   pendingDeadlineColumn?: "created_at" | "updated_at";
   /** How long a row may stay `running` before the daemon is presumed stuck. */
   runningTimeoutMs: number;
+  runningStatuses?: readonly string[];
   /** `error` written when `pendingTimeoutMs` elapses. */
   pendingTimeoutError: string;
   /** `error` written when `runningTimeoutMs` elapses. */
@@ -170,16 +171,17 @@ export class RuntimeRequestQueue<T> {
     const now = nowIso();
     const pendingCutoff = new Date(Date.now() - this.spec.pendingTimeoutMs).toISOString();
     const runningCutoff = new Date(Date.now() - this.spec.runningTimeoutMs).toISOString();
+    const runningStatuses = (this.spec.runningStatuses ?? ["running"]).map(s => `'${s}'`).join(", ");
     const pendingDeadlineColumn = this.spec.pendingDeadlineColumn ?? "created_at";
     this.db.run(
       `UPDATE ${this.spec.table}
        SET status = 'timeout',
-           error = CASE WHEN status = 'running' THEN ? ELSE ? END,
+           error = CASE WHEN status IN (${runningStatuses}) THEN ? ELSE ? END,
            updated_at = ?
        WHERE runtime_id = ?
          AND (
            (status = 'pending' AND ${pendingDeadlineColumn} < ?)
-           OR (status = 'running' AND run_started_at IS NOT NULL AND run_started_at < ?)
+           OR (status IN (${runningStatuses}) AND run_started_at IS NOT NULL AND run_started_at < ?)
          )`,
       [this.spec.runningTimeoutError, this.spec.pendingTimeoutError, now, runtimeId, pendingCutoff, runningCutoff],
     );

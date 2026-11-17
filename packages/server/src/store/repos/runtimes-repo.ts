@@ -250,6 +250,7 @@ const UPDATE_REQUESTS: RuntimeRequestSpec<MultiremiRuntimeUpdateRequest> = {
   pendingTimeoutMs: RUNTIME_UPDATE_PENDING_TIMEOUT_MS,
   pendingDeadlineColumn: "updated_at",
   runningTimeoutMs: RUNTIME_UPDATE_RUNNING_TIMEOUT_MS,
+  runningStatuses: ["running", "restarting", "verifying"],
   pendingTimeoutError: "daemon did not respond within 120 seconds",
   runningTimeoutError: "update did not complete within 20 minutes",
   hydrate: toRuntimeUpdateRequest,
@@ -545,6 +546,12 @@ export class RuntimesRepo {
     if (!this.readRuntimeRow(runtimeId)) return;
     this.withRuntimeLifecycleLock(runtimeId, runtime => {
       if (runtime.daemonId && runtime.daemonId !== daemonId) return;
+      if (cliVersion) this.ctx.db.run(
+        `UPDATE multiremi_runtime_update_requests SET status = 'verifying', updated_at = ?
+         WHERE runtime_id = ? AND scope = 'cli' AND status = 'restarting'
+           AND (target_version = ? OR target_version = ?)`,
+        [nowIso(), runtimeId, cliVersion.replace(/^v/, ""), `v${cliVersion.replace(/^v/, "")}`],
+      );
       const metadata = cliVersion === undefined ? runtime.metadata : { ...runtime.metadata, cli_version: cliVersion };
       this.ctx.db.run(
         "UPDATE multiremi_runtimes SET daemon_protocol_version = ?, metadata = ? WHERE id = ?",
@@ -615,7 +622,7 @@ export class RuntimesRepo {
        LEFT JOIN (
          SELECT runtime_id, status, error,
                 ROW_NUMBER() OVER (PARTITION BY runtime_id
-                  ORDER BY CASE WHEN status IN ('pending', 'running') THEN 0 ELSE 1 END,
+                  ORDER BY CASE WHEN status IN ('pending', 'running', 'restarting', 'verifying') THEN 0 ELSE 1 END,
                            created_at DESC, updated_at DESC, id DESC) AS update_rank
          FROM multiremi_runtime_update_requests
          WHERE scope = 'cli' AND runtime_id IN (
@@ -1548,7 +1555,7 @@ export class RuntimesRepo {
       if (!targetVersion) throw new Error("target_version is required");
       const active = this.ctx.db.query(
         `SELECT id FROM multiremi_runtime_update_requests
-         WHERE runtime_id = ? AND status IN ('pending', 'running')
+         WHERE runtime_id = ? AND status IN ('pending', 'running', 'restarting', 'verifying')
          LIMIT 1`,
       ).get(runtimeId) as Row | null;
       if (active) throw new Error("an update is already in progress for this runtime");
@@ -1600,7 +1607,7 @@ export class RuntimesRepo {
       `SELECT runtime_id FROM multiremi_runtime_update_requests
        WHERE runtime_id IN (${runtimeIds.map(() => "?").join(", ")})
          AND scope = 'cli'
-         AND status IN ('pending', 'running')`,
+         AND status IN ('pending', 'running', 'restarting', 'verifying')`,
     ).all(...runtimeIds) as Array<{ runtime_id?: unknown }>;
     if (!activeRows.length) return false;
     for (const id of new Set(activeRows.map((row) => String(row.runtime_id)))) {
@@ -1610,35 +1617,50 @@ export class RuntimesRepo {
       `SELECT id FROM multiremi_runtime_update_requests
        WHERE runtime_id IN (${runtimeIds.map(() => "?").join(", ")})
          AND scope = 'cli'
-         AND status IN ('pending', 'running')
+         AND status IN ('pending', 'running', 'restarting', 'verifying')
        LIMIT 1`,
     ).get(...runtimeIds) as { id?: string } | null;
     return Boolean(row?.id);
   }
 
   reportRuntimeUpdateResult(runtimeId: string, requestId: string, input: ReportRuntimeUpdateInput): MultiremiRuntimeUpdateRequest {
-    const current = this.getRuntimeUpdateRequest(runtimeId, requestId);
-    if (!current) throw new Error("update not found");
-    const status = normalizeRuntimeUpdateStatus(input.status);
-    const now = nowIso();
-    if (isTerminalRuntimeRequestStatus(current.status)) return current;
-    if (status === "completed") {
-      this.ctx.db.run(
-        "UPDATE multiremi_runtime_update_requests SET status = 'completed', output = ?, error = NULL, updated_at = ? WHERE id = ?",
-        [input.output ?? "", now, requestId],
-      );
-    } else if (status === "running") {
-      this.ctx.db.run(
-        "UPDATE multiremi_runtime_update_requests SET status = 'running', updated_at = ? WHERE id = ?",
-        [now, requestId],
-      );
-    } else {
-      this.ctx.db.run(
-        "UPDATE multiremi_runtime_update_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
-        [input.error ?? "runtime update failed", now, requestId],
-      );
-    }
-    return this.getRuntimeUpdateRequest(runtimeId, requestId)!;
+    return this.withRuntimeLifecycleLock(runtimeId, () => {
+      const current = this.getRuntimeUpdateRequest(runtimeId, requestId);
+      if (!current) throw new Error("update not found");
+      const status = normalizeRuntimeUpdateStatus(input.status);
+      const now = nowIso();
+      if (isTerminalRuntimeRequestStatus(current.status)) return current;
+      if (current.scope === "cli") {
+        if (status === "completed" && (current.status !== "verifying" || input.self_check !== true)) {
+          throw new Error("CLI completion requires target-version hello and startup self-check");
+        }
+        if (status === "restarting" && current.status !== "running" && current.status !== "restarting") throw new Error("Invalid restart transition");
+        if (status === "running" && current.status !== "pending" && current.status !== "running") return current;
+        if (status === "rolled_back" && current.status !== "restarting" && current.status !== "verifying") throw new Error("Invalid rollback transition");
+      } else if (status === "restarting" || status === "rolled_back") throw new Error("Only CLI updates restart");
+      if (status === "restarting" || status === "rolled_back") {
+        this.ctx.db.run(
+          "UPDATE multiremi_runtime_update_requests SET status = ?, output = ?, error = ?, updated_at = ? WHERE id = ?",
+          [status, input.output ?? "", input.error ?? null, now, requestId],
+        );
+      } else if (status === "completed") {
+        this.ctx.db.run(
+          "UPDATE multiremi_runtime_update_requests SET status = 'completed', output = ?, error = NULL, updated_at = ? WHERE id = ?",
+          [input.output ?? "", now, requestId],
+        );
+      } else if (status === "running") {
+        this.ctx.db.run(
+          "UPDATE multiremi_runtime_update_requests SET status = 'running', updated_at = ? WHERE id = ?",
+          [now, requestId],
+        );
+      } else {
+        this.ctx.db.run(
+          "UPDATE multiremi_runtime_update_requests SET status = 'failed', error = ?, updated_at = ? WHERE id = ?",
+          [input.error ?? "runtime update failed", now, requestId],
+        );
+      }
+      return this.getRuntimeUpdateRequest(runtimeId, requestId)!;
+    });
   }
 
   /**
@@ -1674,7 +1696,7 @@ export class RuntimesRepo {
         const version = parseReleaseVersion(request.target_version);
         return version ? compareReleaseVersionParts(version, target.parts) === 0 : false;
       })) continue;
-      if (previous.some((request) => request.status === "pending" || request.status === "running")) continue;
+      if (previous.some((request) => ["pending", "running", "restarting", "verifying"].includes(request.status))) continue;
 
       const runtime = [...runtimes].sort((left, right) => {
         const providerPriority = Number(right.provider === "claude") - Number(left.provider === "claude");
@@ -2372,6 +2394,7 @@ export class RuntimesRepo {
     const params: unknown[] = [];
     const branches = families.map(([family, spec]) => {
       const deadline = spec.pendingDeadlineColumn ?? "created_at";
+      const runningStatuses = (spec.runningStatuses ?? ["running"]).map(status => `'${status}'`).join(", ");
       const pendingCutoff = iso(spec.pendingTimeoutMs);
       const runningCutoff = iso(spec.runningTimeoutMs);
       params.push(runtimeId, runtimeId);
@@ -2393,7 +2416,7 @@ export class RuntimesRepo {
         EXISTS (SELECT 1 FROM ${spec.table}
           WHERE runtime_id = ?
             AND ((status = 'pending' AND ${deadline} < ${pendingCutoff})
-              OR (status = 'running' AND run_started_at IS NOT NULL AND run_started_at < ${runningCutoff}))) AS sweep,
+              OR (status IN (${runningStatuses}) AND run_started_at IS NOT NULL AND run_started_at < ${runningCutoff}))) AS sweep,
         ${housekeeping} AS housekeeping`;
     });
 
@@ -2562,7 +2585,7 @@ export class RuntimesRepo {
     if (latest === undefined) latest = this.ctx.db.query(
       `SELECT status, error FROM multiremi_runtime_update_requests
        WHERE runtime_id = ? AND scope = 'cli'
-       ORDER BY CASE WHEN status IN ('pending', 'running') THEN 0 ELSE 1 END,
+       ORDER BY CASE WHEN status IN ('pending', 'running', 'restarting', 'verifying') THEN 0 ELSE 1 END,
                 created_at DESC, updated_at DESC, id DESC LIMIT 1`,
     ).get(runtime.id) as { status: string; error: string | null } | null;
     return this.runtimeProtocolStatus(runtime, latest);
@@ -2573,8 +2596,8 @@ export class RuntimesRepo {
     // A successfully negotiated current daemon is healthy even if an old upgrade failed.
     const compatible = version === DAEMON_PROTOCOL_VERSION && meetsDaemonMinCliVersion(runtimeCliVersion(runtime));
     const state = compatible ? "ok"
-      : latest?.status === "pending" || latest?.status === "running" ? "upgrade_pending"
-      : latest?.status === "failed" ? "upgrade_failed" : "rejected";
+      : latest && ["pending", "running", "restarting", "verifying"].includes(latest.status) ? "upgrade_pending"
+      : latest && ["failed", "rolled_back"].includes(latest.status) ? "upgrade_failed" : "rejected";
     return { version, state, min_version: DAEMON_MIN_CLI_VERSION, last_error: state === "upgrade_failed" ? latest?.error ?? "runtime update failed" : null };
   }
 
@@ -3083,7 +3106,7 @@ function toRuntimeUpdateRequest(row: Row): MultiremiRuntimeUpdateRequest {
 
 function normalizeRuntimeUpdateStatus(value: unknown): MultiremiRuntimeUpdateRequestStatus {
   const status = String(value ?? "failed").trim();
-  if (status === "pending" || status === "running" || status === "completed" || status === "failed" || status === "timeout") return status;
+  if (["pending", "running", "restarting", "verifying", "completed", "rolled_back", "failed", "timeout"].includes(status)) return status as MultiremiRuntimeUpdateRequestStatus;
   return "failed";
 }
 
@@ -3161,7 +3184,7 @@ function normalizeRuntimeLocalSkillStatus(value: unknown): MultiremiRuntimeLocal
 }
 
 function isTerminalRuntimeRequestStatus(status: string): boolean {
-  return status === "completed" || status === "failed" || status === "timeout";
+  return status === "completed" || status === "rolled_back" || status === "failed" || status === "timeout";
 }
 
 function normalizeRuntimeLocalSkillSummaries(value: unknown): MultiremiRuntimeLocalSkillSummary[] {

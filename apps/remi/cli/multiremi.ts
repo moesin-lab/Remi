@@ -1,3 +1,4 @@
+import { bindUpdateCandidate } from "@shared/daemon-update.js";
 /**
  * `remi multiremi` — CLI entry facade.
  *
@@ -375,6 +376,7 @@ async function daemon(options: CliOptions, positional: string[], programName: st
  * is an error — e.g. the unified agent tolerates it when Feishu is configured).
  */
 export interface WorkerDaemonSupervisorOptions {
+  programName?: string;
   workspacesRoot?: string;
   workspaceRootFence?: () => void;
   onRestartRequested?: () => void;
@@ -456,6 +458,7 @@ export async function resolveWorkerDaemons(
     repoCacheRoot: stringOpt(options.repoCacheRoot ?? options["repo-cache-root"], process.env.MULTIREMI_REPO_CACHE_ROOT) ?? undefined,
     once: Boolean(options.once),
     onRestartRequested: stopAllForRestart,
+    updateRestartSpec: buildUpdateRestartSpec(options, supervisor.programName ?? "remi"),
   }));
   daemons.push(...instantiateCoResidentWorkerDaemons(daemonOptions));
   return daemons;
@@ -538,6 +541,7 @@ export function attachControlPlaneConciergeHosts(
 }
 
 async function runDaemonForeground(options: CliOptions, programName: string): Promise<void> {
+  bindUpdateCandidate(multiremiDaemonPaths().stateDir, multiremiVersion);
   if (!options.once && restartUnitIfSpawnedSuccessor()) process.exit(0);
   let workspaceSupervisor: WorkspaceSupervisorLease | null = acquireWorkspaceSupervisorLease(
     configuredMultiremiWorkspacesRoot(),
@@ -553,6 +557,7 @@ async function runDaemonForeground(options: CliOptions, programName: string): Pr
     const issueWorkspaceLifecycleLocker = new IssueWorkspaceLifecycleLocker();
     const conciergeFromControlPlane = !Boolean(options.once);
     daemons = await resolveWorkerDaemons(options, {
+      programName,
       workspacesRoot: workspaceSupervisor.workspaceRoot,
       workspaceRootFence: () => workspaceSupervisor?.assertOwner(),
       issueWorkspaceLifecycleLocker,
@@ -1964,7 +1969,17 @@ function removeMatchingPidFile(pidPath: string, expectedPid: number): void {
   }
 }
 
-function restartForegroundDaemonProcess(options: CliOptions, programName: string): void {
+function buildUpdateRestartSpec(options: CliOptions, programName: string): { command: string[]; manager?: "systemd" | "launchd" } {
+  const plan = planDaemonRestart({ platform: process.platform, env: process.env,
+    cgroup: process.platform === "linux" ? readCgroupOrNull() : null,
+    uid: typeof process.getuid === "function" ? process.getuid() : null });
+  if (plan.kind === "service-manager") return { command: [plan.command, ...plan.args],
+    manager: process.platform === "linux" ? "systemd" : "launchd" };
+  const spec = buildMultiremiDaemonLaunchSpec(options, programName, process.argv, process.execPath, true);
+  return { command: [spec.command, ...spec.args] };
+}
+
+export function restartForegroundDaemonProcess(options: CliOptions, programName: string): void {
   const plan = planDaemonRestart({
     platform: process.platform,
     env: process.env,
@@ -1983,7 +1998,7 @@ function restartForegroundDaemonProcess(options: CliOptions, programName: string
     }
     console.error(`Multiremi daemon restart via ${plan.command} failed (${result.status ?? result.signal ?? "unknown"}); falling back to a spawned successor`);
   }
-  const spec = buildMultiremiDaemonLaunchSpec(options, programName);
+  const spec = buildMultiremiDaemonLaunchSpec(options, programName, process.argv, process.execPath, true);
   const child = spawn(spec.command, spec.args, {
     detached: true,
     stdio: "inherit",

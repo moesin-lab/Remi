@@ -69,6 +69,9 @@ export const statusConfig: Record<
 > = {
   pending: { icon: Loader2, color: "text-muted-foreground" },
   running: { icon: Loader2, color: "text-info" },
+  restarting: { icon: Loader2, color: "text-info" },
+  verifying: { icon: Loader2, color: "text-info" },
+  rolled_back: { icon: XCircle, color: "text-warning" },
   completed: { icon: CheckCircle2, color: "text-success" },
   failed: { icon: XCircle, color: "text-destructive" },
   timeout: { icon: XCircle, color: "text-warning" },
@@ -140,9 +143,7 @@ function useUpdateFlow(
             if (result.status === "completed") {
               setOutput(result.output ?? completedFallback);
               clearTimers();
-              // The daemon restarts + re-registers after the update, so the new
-              // version lands a few seconds later. Refetch the runtime now and
-              // again over the next ~20s to catch it without a manual reload.
+              // Completion confirms the new daemon registration; refresh version metadata.
               onRefresh();
               [5000, 12000, 20000].forEach((ms) => schedule(onRefresh, ms));
               // Clear the completed pill after the row has had a chance to
@@ -150,6 +151,7 @@ function useUpdateFlow(
               schedule(() => setStatus(null), 6000);
             } else if (
               result.status === "failed" ||
+              result.status === "rolled_back" ||
               result.status === "timeout"
             ) {
               setError(result.error ?? t(($) => $.update.unknown_error));
@@ -168,7 +170,7 @@ function useUpdateFlow(
     [runtimeId, completedFallback, cancel, clearTimers, schedule, t, onRefresh],
   );
 
-  const active = status === "pending" || status === "running";
+  const active = status === "pending" || status === "running" || status === "restarting" || status === "verifying";
   return { status, error, output, active, run };
 }
 
@@ -231,7 +233,7 @@ function UpdateRow({
         </div>
       )}
 
-      {(flow.status === "failed" || flow.status === "timeout") && flow.error && (
+      {(flow.status === "failed" || flow.status === "timeout" || flow.status === "rolled_back") && flow.error && (
         <div className="rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2">
           <p className="text-xs text-destructive">{flow.error}</p>
           {flow.status === "failed" && (
@@ -411,7 +413,7 @@ export function MachineCliUpdate({
             {t(($) => $.update.managed_by_desktop_title)}
           </TooltipContent>
         </Tooltip>
-      ) : flow.status === "failed" || flow.status === "timeout" ? (
+      ) : flow.status === "failed" || flow.status === "timeout" || flow.status === "rolled_back" ? (
         <Popover>
           <PopoverTrigger
             render={

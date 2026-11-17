@@ -432,7 +432,10 @@
       "running": "更新中...",
       "completed": "更新完成。守护进程正在重启...",
       "failed": "更新失败",
-      "timeout": "超时"
+      "timeout": "超时",
+      "restarting": "正在重启…",
+      "verifying": "正在验证新进程…",
+      "rolled_back": "已回滚"
     }
   },
   "charts": {

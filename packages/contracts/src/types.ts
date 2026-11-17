@@ -614,7 +614,7 @@ export type MultiremiRuntimeModelListRequestStatus = "pending" | "running" | "co
 
 export type MultiremiRuntimeDirectoryScanRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
 
-export type MultiremiRuntimeUpdateRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
+export type MultiremiRuntimeUpdateRequestStatus = "pending" | "running" | "restarting" | "verifying" | "completed" | "rolled_back" | "failed" | "timeout";
 
 export type MultiremiRuntimeCommandRequestStatus = "pending" | "running" | "completed" | "failed" | "timeout";
 
@@ -1220,6 +1220,7 @@ export interface CreateRuntimeUpdateInput {
 }
 
 export interface ReportRuntimeUpdateInput {
+  self_check?: boolean;
   status?: string;
   output?: string;
   error?: string;

@@ -119,10 +119,14 @@ export function compareVersions(a: string, b: string): number {
   return left.localeCompare(right, "en", { numeric: true }) || (left < right ? -1 : 1);
 }
 
-function versionWithoutBuildHash(version: string): string {
-  // Platform versions append a commit hash (e.g. -stable.ab12cd34).
-  // Hashes identify builds but cannot establish their chronological order.
-  return version.split("+")[0]!.replace(/(-.+)\.[0-9a-f]{8,40}$/, "$1");
+function versionWithoutBuildHash(version: string, commit: string | null | undefined): string {
+  // Only a suffix attested by this build's commit is an unordered build hash.
+  // Numeric prerelease identifiers and unknown/mismatched identities retain their order.
+  const withoutMetadata = version.split("+")[0]!;
+  const suffix = withoutMetadata.match(/(-.+)\.([0-9a-f]{8,40})$/);
+  return suffix && commit?.startsWith(suffix[2]!)
+    ? withoutMetadata.slice(0, -suffix[2]!.length - 1)
+    : withoutMetadata;
 }
 
 export async function fetchLatestRelease(
@@ -189,7 +193,7 @@ async function installVerifiedUpdate(options: UpdateOptions): Promise<UpdateResu
   if (options.targetVersion && latestVersion !== options.targetVersion.replace(/^v/, "")) throw new Error("Release does not match target_version");
   await options.onProgress?.(`Using ${artifact.source} update source`);
   const versionOrder = artifact.commit
-    ? compareVersions(versionWithoutBuildHash(latestVersion), versionWithoutBuildHash(currentVersion))
+    ? compareVersions(versionWithoutBuildHash(latestVersion, artifact.commit), versionWithoutBuildHash(currentVersion, options.currentCommit))
     : compareVersions(latestVersion, currentVersion);
   if (!options.targetVersion && !options.targetCommit && (
     versionOrder < 0

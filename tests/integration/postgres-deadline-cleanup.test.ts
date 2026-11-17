@@ -16,8 +16,9 @@ for (const mode of ["worker timeout", "between statements"] as const) {
       const pid = Number(db.query("SELECT pg_backend_pid() AS pid").get().pid);
       let wrote = false;
       await expect(withDatabaseDeadline(performance.now() + 1_000, () => db.transaction(() => {
-        db.run("UPDATE deadline_probe SET value = 1 WHERE id = 1");
+        // Match activation's N → D order; keep the whole-suite sentinel enabled.
         db.advisoryXactLock("deadline-cleanup");
+        db.run("UPDATE deadline_probe SET value = 1 WHERE id = 1");
         wrote = true;
         if (mode === "worker timeout") db.query("SELECT pg_sleep(2)").get();
         else {

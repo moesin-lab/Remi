@@ -377,6 +377,9 @@ pendingTurnBackendTests("MUL-492 periodic re-ring", (fixture, backend) => {
 
 
 unifiedModelBackendTests('MUL-492 historical sweep migration',fixture=>{
+  // MUL-198: isolated main/PG17 runs take 8.5–10.8 s for these full historical
+  // schema upgrades; use an integration timeout, keeping every data assertion.
+  const migrationTimeoutMs = 30_000;
   function seed(){
     const f=fixture(),agent=f.store.createAgent({name:'Historical recipient',provider:'codex'});
     const issue=f.store.createIssue({title:'Historical report',assigneeType:'agent',assigneeId:agent.id});
@@ -401,7 +404,7 @@ unifiedModelBackendTests('MUL-492 historical sweep migration',fixture=>{
     expect(store.getMessage(unread.entry.id)?.wake_applied).toBe('now');
     expect(store.sweepIdleIssueLanes(Date.now()+61_000).rang).toBe(1);
     expect(store.sweepIdleIssueLanes(Date.now()+121_000).rang).toBe(0);
-  });
+  }, migrationTimeoutMs);
   it('07: does not backfill permanently unavailable history into the pending index',()=>{
     const archivedAgent=seed(),archivedSession=seed(),relay=seed(),inactive=seed(),foreign=seed(),f=fixture();
     f.db.run("UPDATE multiremi_agents SET archived_at='2026-10-01' WHERE id=?",[archivedAgent.agent.id]);
@@ -414,7 +417,7 @@ unifiedModelBackendTests('MUL-492 historical sweep migration',fixture=>{
     // Restore the deliberately mismatched historical owner before the unified FK preflight.
     f.db.run("UPDATE multiremi_agents SET workspace_id='local' WHERE id=?",[foreign.agent.id]);
     runMigrations(f.db);expect(new MultiremiStore(f.db).sweepIdleIssueLanes(Date.now()+61_000).rang).toBe(0);
-  });
+  }, migrationTimeoutMs);
   it('07: upgrades old lanes additively and repeated migration preserves data and constraints',()=>{
     const f=seed();removeHint(f.db);
     f.db.exec("ALTER TABLE multiremi_session_agent_lanes DROP COLUMN swept_to_seq; ALTER TABLE multiremi_session_agent_lanes DROP COLUMN swept_at; DELETE FROM multiremi_schema_migrations WHERE id='20261001_lane_rering_sweep'");
@@ -426,5 +429,5 @@ unifiedModelBackendTests('MUL-492 historical sweep migration',fixture=>{
     expect(store.getSessionAgentLane(f.session.id,f.agent.id)?.cursorSeq).toBe(0);
     expect(f.db.query("SELECT id FROM multiremi_schema_migrations WHERE id='20261004_unified_message_turn_lane'").all()).toHaveLength(1);
     expect(store.sweepIdleIssueLanes(Date.now()+61_000).rang).toBe(1);
-  });
+  }, migrationTimeoutMs);
 });

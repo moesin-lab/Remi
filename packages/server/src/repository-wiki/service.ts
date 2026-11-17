@@ -130,7 +130,7 @@ export interface RepositoryWikiServiceContract {
   /** Reads whose OpenViking calls all share one deadline; use one per API request. */
   withRequestDeadline(budgetMs?: number): RepositoryWikiRequestReader;
   startStorageWorker?(): void;
-  stopStorageWorker?(): void;
+  stopStorageWorker?(): void | Promise<void>;
 }
 
 /** Read-only on purpose: writes must stay on the service that owns the per-repository write lane. */
@@ -252,11 +252,13 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     this.storageTimer.start();
   }
 
-  stopStorageWorker(): void {
+  async stopStorageWorker(): Promise<void> {
     this.storageAbort?.abort();
     this.storageAbort = null;
-    this.storageTimer?.stop();
+    const stopped = this.storageTimer?.stop();
     this.storageTimer = null;
+    await stopped;
+    await this.storageRun;
   }
 
   runStorageJobs(signal?: AbortSignal, now = Date.now()): Promise<void> {

@@ -1,8 +1,10 @@
 "use client";
 
+import { formatCoAuthoredByTrailer, validateCoAuthoredByName, validateCoAuthoredByEmail } from "@multiremi/contracts/co-authored-by";
+import { Input } from "@multiremi/ui/components/ui/input";
 import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2,
@@ -44,25 +46,33 @@ export function SourceControlTab() {
   const currentMember = members.find((member) => member.user_id === user?.id) ?? null;
   const canManage = currentMember?.role === "owner" || currentMember?.role === "admin";
   const settings = deriveScmSettings(workspace);
-  const [savingKey, setSavingKey] = useState<SettingsKey | null>(null);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
 
-  async function persistSetting(key: SettingsKey, next: boolean) {
-    if (!workspace || savingKey) return;
-    setSavingKey(key);
+  async function updateSettings(patch: Record<string, unknown>): Promise<boolean> {
+    if (!workspace || !canManage || savingRef.current) return false;
+    savingRef.current = true;
+    setSaving(true);
     try {
-      const merged = {
-        ...((workspace.settings as Record<string, unknown>) ?? {}),
-        [key]: next,
-      };
+      const cached = queryClient.getQueryData<Workspace[]>(workspaceKeys.list())
+        ?.find((candidate) => candidate.id === workspace.id);
+      const merged = { ...(cached?.settings ?? workspace.settings ?? {}), ...patch };
       const updated = await api.updateWorkspace(workspace.id, { settings: merged });
       queryClient.setQueryData(workspaceKeys.list(), (old: Workspace[] | undefined) =>
         old?.map((candidate) => (candidate.id === updated.id ? updated : candidate)),
       );
+      return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : t(($) => $.source_control.toast_failed));
+      return false;
     } finally {
-      setSavingKey(null);
+      savingRef.current = false;
+      setSaving(false);
     }
+  }
+
+  function persistSetting(key: SettingsKey, next: boolean) {
+    return updateSettings({ [key]: next });
   }
 
   if (!workspace) return null;
@@ -90,7 +100,7 @@ export function SourceControlTab() {
               label={t(($) => $.source_control.feature_change_sidebar_label)}
               description={t(($) => $.source_control.feature_change_sidebar_description)}
               checked={settings.changeSidebar}
-              disabled={!canManage || savingKey === "scm_change_sidebar_enabled"}
+              disabled={!canManage || saving}
               onCheckedChange={(value) => persistSetting("scm_change_sidebar_enabled", value)}
             />
             <FeatureRow
@@ -99,7 +109,7 @@ export function SourceControlTab() {
               label={t(($) => $.source_control.feature_auto_link_label)}
               description={t(($) => $.source_control.feature_auto_link_description)}
               checked={settings.autoLink}
-              disabled={!canManage || savingKey === "scm_auto_link_enabled"}
+              disabled={!canManage || saving}
               onCheckedChange={(value) => persistSetting("scm_auto_link_enabled", value)}
             />
             <FeatureRow
@@ -108,7 +118,7 @@ export function SourceControlTab() {
               label={t(($) => $.source_control.feature_complete_on_merge_label)}
               description={t(($) => $.source_control.feature_complete_on_merge_description)}
               checked={settings.completeIssueOnMerge}
-              disabled={!canManage || savingKey === "scm_complete_issue_on_merge_enabled"}
+              disabled={!canManage || saving}
               onCheckedChange={(value) =>
                 persistSetting("scm_complete_issue_on_merge_enabled", value)
               }
@@ -130,19 +140,12 @@ export function SourceControlTab() {
               id="scm-coauthor"
               icon={<GitCommitHorizontal className="size-4" />}
               label={t(($) => $.source_control.feature_co_author_label)}
-              description={
-                <span>
-                  {t(($) => $.source_control.feature_co_author_description_prefix)}{" "}
-                  <code className="rounded bg-muted px-1 py-0.5 text-xs">
-                    {"Co-authored-by: Remi <remi@openremi.fun>"}
-                  </code>{" "}
-                  {t(($) => $.source_control.feature_co_author_description_suffix)}
-                </span>
-              }
+              description={t(($) => $.source_control.co_author_description)}
               checked={settings.coAuthor}
-              disabled={!canManage || savingKey === "co_authored_by_enabled"}
+              disabled={!canManage || saving}
               onCheckedChange={(value) => persistSetting("co_authored_by_enabled", value)}
             />
+            <CoAuthorForm key={workspace.id} workspace={workspace} canManage={canManage} enabled={settings.coAuthor} saving={saving} updateSettings={updateSettings} />
           </CardContent>
         </Card>
       </section>
@@ -205,4 +208,44 @@ function FeatureRow({
       />
     </div>
   );
+}
+
+function CoAuthorForm({ workspace, canManage, enabled, saving, updateSettings }: {
+  workspace: Workspace;
+  canManage: boolean;
+  enabled: boolean;
+  saving: boolean;
+  updateSettings: (patch: Record<string, unknown>) => Promise<boolean>;
+}) {
+  const { t } = useT("settings");
+  const identity = deriveScmSettings(workspace);
+  const [draft, setDraft] = useState<{ name: string; email: string } | null>(null);
+  const name = draft?.name ?? identity.coAuthorName;
+  const email = draft?.email ?? identity.coAuthorEmail;
+  const validName = validateCoAuthoredByName(name);
+  const validEmail = validateCoAuthoredByEmail(email);
+  const dirty = name !== identity.coAuthorName || email !== identity.coAuthorEmail;
+  async function save(reset: boolean) {
+    if (!canManage || saving || (!reset && (!validName.ok || !validEmail.ok))) return;
+    const saved = await updateSettings({
+      co_authored_by_name: reset ? null : validName.ok ? validName.value : name,
+      co_authored_by_email: reset ? null : validEmail.ok ? validEmail.value : email,
+    });
+    if (saved) setDraft(null);
+  }
+
+  return <div className="mt-4 space-y-3">
+    <Label htmlFor="coauthor-name">{t(($) => $.source_control.co_author_name)}</Label>
+    <Input id="coauthor-name" value={name} readOnly={!canManage} disabled={saving} aria-invalid={!validName.ok} onChange={(event) => setDraft({ name: event.target.value, email })} />
+    {!validName.ok && <p role="alert" className="text-sm text-destructive">{t(($) => $.source_control.co_author_invalid_name)}</p>}
+    <Label htmlFor="coauthor-email">{t(($) => $.source_control.co_author_email)}</Label>
+    <Input id="coauthor-email" value={email} readOnly={!canManage} disabled={saving} aria-invalid={!validEmail.ok} onChange={(event) => setDraft({ name, email: event.target.value })} />
+    {!validEmail.ok && <p role="alert" className="text-sm text-destructive">{t(($) => $.source_control.co_author_invalid_email)}</p>}
+    <code className={`block break-all text-xs ${enabled ? "" : "text-muted-foreground opacity-50"}`}>{formatCoAuthoredByTrailer({ name: validName.ok ? validName.value : name, email: validEmail.ok ? validEmail.value : email })}</code>
+    {!enabled && <p className="text-xs text-muted-foreground">{t(($) => $.source_control.co_author_disabled)}</p>}
+    <div className="flex gap-2">
+      <Button disabled={!canManage || saving || !dirty || !validName.ok || !validEmail.ok} onClick={() => save(false)}>{t(($) => $.source_control.co_author_save)}</Button>
+      <Button variant="outline" disabled={!canManage || saving} onClick={() => save(true)}>{t(($) => $.source_control.co_author_reset)}</Button>
+    </div>
+  </div>;
 }

@@ -288,7 +288,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const body = await readJsonStrict<CreateRuntimeUpdateInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    const result = safeCreateRuntimeUpdateRequest(store, loaded.runtime.id, { target_version: body.target_version, scope: body.scope });
+    const result = safeCreateRuntimeUpdateRequest(store, loaded.runtime.id, { target_version: body.target_version, target_commit: body.target_commit, scope: body.scope });
     if ("apiError" in result) return c.json({ error: result.apiError }, result.statusCode);
     return c.json(runtimeUpdateRequestCompatibilityResponse(result));
   });
@@ -307,13 +307,20 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     const updateId = c.req.param("updateId");
     const request = store.getRuntimeUpdateRequest(runtimeId, updateId);
     if (!request) return c.json({ error: "update not found" }, 404);
-    if (isTerminalRuntimeRequestForDaemon(request.status)) return c.json({ status: "ok" });
     const body = await readJsonStrict<ReportRuntimeUpdateInput>(c);
     if ("apiError" in body) return c.json({ error: body.apiError }, body.statusCode);
+    if (isTerminalRuntimeRequestForDaemon(request.status) && !(request.scope === "cli" && body.status === "running")) return c.json({ status: "ok" });
     if (!isValidRuntimeUpdateReportStatus(body.status)) {
       return c.json({ error: `invalid status: ${String(body.status ?? "")}` }, 400);
     }
-    store.reportRuntimeUpdateResult(runtimeId, updateId, body);
+    try {
+      store.reportRuntimeUpdateResult(runtimeId, updateId, body);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error.code === "cli_update_not_admitted" || error.code === "cli_update_not_runnable")) {
+        return c.json({ error: error.message, code: error.code }, 409);
+      }
+      throw error;
+    }
     return c.json({ status: "ok" });
   });
   app.post("/api/runtimes/:id/commands", async (c) => {

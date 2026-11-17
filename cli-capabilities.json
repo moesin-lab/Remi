@@ -12920,6 +12920,11 @@
       "category": "daemon_internal_protocol",
       "reason": "Cross-process API peer channel is machine-to-server traffic; it has no user-facing CLI workflow."
     },
+    "GET /internal/slot/status": {
+      "cli_exempt": true,
+      "category": "platform_updater_internal",
+      "reason": "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token."
+    },
     "GET /readyz": {
       "command": "platform.ready"
     },
@@ -14145,6 +14150,21 @@
       "cli_exempt": true,
       "category": "daemon_internal_protocol",
       "reason": "Cross-process API peer channel is machine-to-server traffic; it has no user-facing CLI workflow."
+    },
+    "POST /internal/slot/activate": {
+      "cli_exempt": true,
+      "category": "platform_updater_internal",
+      "reason": "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token."
+    },
+    "POST /internal/slot/exit": {
+      "cli_exempt": true,
+      "category": "platform_updater_internal",
+      "reason": "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token."
+    },
+    "POST /internal/slot/release": {
+      "cli_exempt": true,
+      "category": "platform_updater_internal",
+      "reason": "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token."
     },
     "PUT /api/agents/:id": {
       "command": "agent.update"

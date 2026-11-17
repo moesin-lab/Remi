@@ -1,3 +1,4 @@
+import { BUILD_COMMIT } from "@shared/version.js";
 import { runtimeModelCompatibilityResponse } from "@multiremi/store/runtime-model-catalog.js";
 export { MULTIREMI_DAEMON_PROVIDERS, fleetModelsResponse, runtimeModelCompatibilityResponse } from "@multiremi/store/runtime-model-catalog.js";
 export type { FleetModelThinkingLevelResponse, FleetModelThinkingResponse, FleetModelResponse, FleetProviderModelsResponse } from "@multiremi/store/runtime-model-catalog.js";
@@ -50,6 +51,8 @@ export function runtimeCompatibilityResponse(runtime: MultiremiRuntime): Record<
     status: runtime.status,
     device_info: runtime.deviceInfo,
     metadata: runtime.metadata,
+    cli_commit: runtime.metadata.cli_commit ?? null,
+    cli_commit_matches_platform: BUILD_COMMIT ? runtime.metadata.cli_commit === BUILD_COMMIT : null,
     ...(runtime.protocol ? { protocol: runtime.protocol } : {}),
     owner_id: runtime.ownerId,
     visibility: runtime.visibility,
@@ -80,6 +83,7 @@ export function runtimeUpdateRequestCompatibilityResponse(request: MultiremiRunt
     status: request.status,
     scope: request.scope,
     target_version: request.targetVersion,
+    target_commit: request.targetCommit ?? null,
     created_at: request.createdAt,
     updated_at: request.updatedAt,
   };

@@ -37,6 +37,14 @@ store 的四路实时事件由 [realtime-fanout](../packages/server/src/api/real
 两个 API 进程之间用 [peer channel](../packages/server/src/api/peer/peer-channel.ts)（`POST /internal/peer/events`）互转，`MULTIREMI_PEER_URL` 不设即完全关闭。
 协议、消息引用、字节预算与角色解析链见 [Realtime peer channel](dev/realtime-peer.md)。
 
+**服务端 Skill 导入**：API 路由与 Agent 模板导入通过
+[GitHub 只读鉴权](../packages/server/src/scm/github-read-auth.ts)按当前工作区和目标仓库解析凭据：
+已启用的显式仓库绑定优先，其次为同源的全部仓库默认连接，再回退到 API 进程的 `GITHUB_TOKEN`，最后匿名。
+连接解密失败时继续回退，不记录凭据或异常内容。凭据提供者只注入
+[Skill 导入网络层](../packages/daemon/src/agent-runtime/skills/skill-import-network.ts)，不进入任务环境或 daemon 配置。
+仅 GitHub 官方 HTTPS 主机的 GET 请求可携带鉴权；跨源重定向及其后续请求均不携带鉴权，导入期限覆盖整个跳转链。
+响应文本和错误中的已用凭据被脱敏，provider 错误正文不透传；daemon CLI 更新不使用工作区连接。
+
 **任务执行**：issue/chat/autopilot 经[统一消息入口](../packages/server/src/store/inbox/send-message.ts)写 Message →
 [lane 状态机](../packages/server/src/store/inbox/lane-machine.ts)创建或合并 Turn → current attempt →
 [服务端 offer 泵](../packages/server/src/api/daemon-protocol/task-offers.ts) 推送 →

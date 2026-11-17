@@ -149,3 +149,14 @@ RSS sampling in an isolated edge subprocess. The memory source yields every MiB
 to let native I/O progress; upload and download share one peak and the unchanged
 80 MiB growth ceiling, with no GC during measurement. These tests are local transport
 evidence; they do not establish behavior for a deployed supervisor/Compose stack.
+
+Transport fixtures bind explicitly to a dedicated loopback address on Linux
+(`127.0.0.2`), including raw TCP peers and isolated edge subprocesses. This keeps
+host port discovery on `127.0.0.1` from injecting unrelated requests into exact
+backend-hit and hold-waiter counters. Other platforms use `127.0.0.1`; these
+Linux stability results do not establish isolation on those hosts. The helper
+adds only this local address to the HTTP proxy bypass. No incoming
+request is filtered out of the counters. Held-upload tests wait for the real
+child process's 4 MiB byte reservation before sending the 6 MiB overflow, and
+include delayed body delivery. Assertion cleanup aborts and awaits the pending
+upload; unexpected transport errors remain test failures.

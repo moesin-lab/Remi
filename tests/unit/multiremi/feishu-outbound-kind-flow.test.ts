@@ -83,7 +83,7 @@ function flow() {
       return async () => {};
     },
     getFeishuBotTaskSnapshot: async () => terminal.kind === "snapshot" ? terminal.snapshot : null,
-    feishuConcierge: host, client: {
+    feishuConcierge: { get: () => host }, client: {
       prepareFeishuBotOutboundMention: async (_rt: string, id: string, token: string, openId: string | null) =>
         f.store.prepareFeishuBotOutboundMention("local", f.runtimeId, id, token, openId)?.openId ?? null,
       reportFeishuBotOutboundResult: async (_rt: string, id: string, input: any) => {

@@ -48,16 +48,17 @@ function execute(command, args, options = {}) {
   }
   const { preserveWhitespace = false, environmentOverrides = {}, redact = [], ...spawnOptions } = options;
   Object.assign(environment, environmentOverrides);
-  const result = spawnSync(command, args, { cwd: repository, env: environment, stdio: 'inherit', windowsHide: true, ...spawnOptions });
+  let result;
   if (redact.length) {
     const secrets = [...redact, ...['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'].map((key) => process.env[key]).filter(Boolean)];
     for (const value of [...secrets]) {
       try { const url = new URL(value); secrets.push(url.username, url.password, decodeURIComponent(url.username), decodeURIComponent(url.password)); } catch {}
     }
-    const clean = (value) => secrets.filter(Boolean).sort((a, b) => b.length - a.length).reduce((text, secret) => text.replaceAll(secret, '[REDACTED]'), value || '');
-    process.stdout.write(clean(result.stdout));
-    process.stderr.write(clean(result.stderr));
-  }
+    result = spawnSync(process.execPath, [join(repository, 'scripts/proxy-command.mjs'), '--run'], {
+      cwd: repository, env: environment, windowsHide: true, stdio: ['pipe', 'inherit', 'inherit'],
+      input: JSON.stringify({ command, args, input: spawnOptions.input, secrets, cwd: repository }),
+    });
+  } else result = spawnSync(command, args, { cwd: repository, env: environment, stdio: 'inherit', windowsHide: true, ...spawnOptions });
   if (result.error) throw new Error(redact.length ? 'Docker runtime proxy command could not start' : result.error.message);
   if (result.status !== 0) throw new Error(`${command} ${args[0] || ''} failed (${result.status})`);
   return typeof result.stdout === 'string' && !preserveWhitespace ? result.stdout.trim() : result.stdout;
@@ -165,7 +166,7 @@ function runtimeProxyEnvironment(environment) {
 function compose(root, ...args) {
   const command = composeArgs(root, ...args);
   const builds = args[0] === 'build' || args[0] === 'watch' || (args[0] === 'up' && args.includes('--build'));
-  const runtime = runtimeProxy && ['up', 'config'].includes(args[0]);
+  const runtime = runtimeProxy && ['up', 'config', 'watch'].includes(args[0]);
   const override = runtime ? { services: { api: {
     environment: Object.fromEntries(Object.keys(runtimeProxy).map((key) => [key, '${REMI_RUNTIME_' + key.toUpperCase() + '}'])),
     extra_hosts: ['host.docker.internal:host-gateway'],
@@ -176,10 +177,8 @@ function compose(root, ...args) {
     const options = { input: JSON.stringify(override), stdio: ['pipe', 'inherit', 'inherit'] };
     if (runtime) options.environmentOverrides = Object.fromEntries(Object.entries(runtimeProxy).map(([key, value]) => ['REMI_RUNTIME_' + key.toUpperCase(), value]));
     if (runtimeProxy) {
-      // Compose diagnostics can echo resolved environment values. Buffer and
-      // redact them before writing either stream, including on failure.
-      options.encoding = 'utf8';
-      options.stdio = ['pipe', 'pipe', 'pipe'];
+      // Stream diagnostics through a separate redactor without a finite
+      // spawnSync output buffer, including for long-running watch sessions.
       options.redact = Object.values(runtimeProxy);
     }
     return execute('docker', command, options);

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { redactor } from './proxy-command.mjs';
 import { createHash, createHmac } from 'node:crypto';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -29,6 +31,12 @@ const succeed = (stdout = '') => ({ status: 0, stdout, stderr: '' });
 const fail = () => ({ status: 1, stdout: '', stderr: 'Injected test failure' });
 const imageId = (tag) => 'sha256:' + createHash('sha256').update(tag).digest('hex');
 childProcess.spawnSync = (command, args, options = {}) => {
+  let streamingSecrets = null;
+  if (args[0]?.endsWith('proxy-command.mjs')) {
+    const request = JSON.parse(options.input);
+    command = request.command; args = request.args; streamingSecrets = request.secrets;
+    options = { ...options, input: request.input };
+  }
   const metadataPath = join(process.env.TEST_PROFILE_ROOT, 'deployment.json');
   const selection = existsSync(metadataPath) ? JSON.parse(readFileSync(metadataPath, 'utf8')) : null;
   appendFileSync(process.env.TEST_COMMAND_LOG, JSON.stringify({
@@ -80,7 +88,11 @@ childProcess.spawnSync = (command, args, options = {}) => {
     }
     return succeed(JSON.stringify({ Running: true, Health: { Status: 'healthy' } }));
   }
-  if (process.env.TEST_FAIL === 'runtime_diagnostic' && args.includes('up')) return { status: 1, stdout: options.env.REMI_RUNTIME_HTTPS_PROXY, stderr: 'sentinel-user sentinel-password ' + process.env.HTTPS_PROXY };
+  if (process.env.TEST_FAIL === 'runtime_diagnostic' && args.includes('up')) {
+    const diagnostic = options.env.REMI_RUNTIME_HTTPS_PROXY + ' sentinel-user sentinel-password ' + process.env.HTTPS_PROXY;
+    writeSync(2, streamingSecrets.filter(Boolean).sort((a,b) => b.length-a.length).reduce((text, secret) => text.replaceAll(secret, '[REDACTED]'), diagnostic));
+    return fail();
+  }
   if (process.env.TEST_FAIL === 'config' && args.includes('config')) return fail();
   if (process.env.TEST_FAIL === 'build' && args.includes('build')) return fail();
   if (process.env.TEST_FAIL === 'pull' && args.includes('pull')) return fail();
@@ -138,6 +150,7 @@ function fixture(t) {
   copyFileSync(join(repository, 'packages/platform-updater/src/data-schema-inputs.json'), join(source, 'packages/platform-updater/src/data-schema-inputs.json'));
   writeFileSync(script, scriptSource);
   copyFileSync(join(repository, 'scripts/ci-images.mjs'), join(source, 'scripts/ci-images.mjs'));
+  copyFileSync(join(repository, 'scripts/proxy-command.mjs'), join(source, 'scripts/proxy-command.mjs'));
   writeFileSync(join(source, 'package.json'), '{"version":"0.2.60"}\n');
   writeFileSync(join(source, 'deploy/docker/host-write-fence.ts'), '// Runtime fence is validated independently.\n');
   for (const name of ['compose.local.yml', 'compose.local-dev.yml']) {
@@ -1186,5 +1199,43 @@ test('watch combines ephemeral runtime and build overlays without persisting pro
   assert.ok(up.buildOverride.services.api.build);
   assert.ok(up.buildOverride.services.web.build);
   const watch = result.calls.find(isAction('watch'));
-  assert.equal(watch.buildOverride.services.api.environment, undefined);
+  assert.deepEqual(watch.buildOverride.services.api.environment, up.buildOverride.services.api.environment);
+  assert.deepEqual(watch.buildOverride.services.api.extra_hosts, up.buildOverride.services.api.extra_hosts);
+  assert.deepEqual(watch.runtimeEnvironment, up.runtimeEnvironment);
+});
+
+
+test('streaming redactor protects secrets across chunks, overlaps and UTF-8 boundaries', async () => {
+  const stream = redactor(['abc', 'abcdef', 'bcdef', '密码']);
+  let output = '';
+  stream.on('data', (chunk) => { output += chunk.toString(); });
+  const done = once(stream, 'end');
+  for (const byte of Buffer.from('start abcdef abc 密码 end')) stream.write(Buffer.from([byte]));
+  stream.end();
+  await done;
+  assert.equal(output, 'start [REDACTED] [REDACTED] [REDACTED] end');
+});
+
+test('real streaming runner handles more than spawnSync default output without leaking credentials', () => {
+  const request = { command: process.execPath, args: ['-e', `for(let i=0;i<100;i++){process.stdout.write('x'.repeat(32768)+'sentinel-secret');process.stderr.write('y'.repeat(32768)+'sentinel-secret')}`], secrets: ['sentinel-secret'], cwd: repository };
+  const result = spawnSync(process.execPath, [join(repository, 'scripts/proxy-command.mjs'), '--run'], { input: JSON.stringify(request), encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, timeout: 15000 });
+  assert.ifError(result.error);
+  succeeds(result);
+  assert.ok(result.stdout.length > 1024 * 1024);
+  assert.ok(result.stderr.length > 1024 * 1024);
+  assert.doesNotMatch(result.stdout + result.stderr, /sentinel-secret/);
+  assert.equal((result.stdout.match(/REDACTED/g) || []).length, 100);
+});
+
+test('real runner streams before child exit and forwards termination', { skip: process.platform === 'win32', timeout: 10000 }, async (t) => {
+  const child = spawn(process.execPath, [join(repository, 'scripts/proxy-command.mjs'), '--run'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => { if (child.exitCode === null) child.kill('SIGTERM'); });
+  const closed = once(child, 'close');
+  const data = once(child.stdout, 'data');
+  child.stdin.end(JSON.stringify({ command: process.execPath, args: ['-e', `process.stdout.write('ready\\n');setInterval(()=>{},1000)`], secrets: ['secret'], cwd: repository }));
+  await data;
+  assert.equal(child.exitCode, null);
+  child.kill('SIGTERM');
+  const [code] = await closed;
+  assert.notEqual(code, 0);
 });

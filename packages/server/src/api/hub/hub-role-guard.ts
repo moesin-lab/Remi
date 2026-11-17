@@ -72,6 +72,8 @@ export interface HubRoleGuardOptions {
   /** Slot activation reports contention without terminating its listener. */
   throwOnFailure?: boolean;
   timeoutMs?: number;
+  /** Slot-only deadline cancellation, including connect and SQL. */
+  signal?: AbortSignal;
   retryMs?: number;
   /** Injected for tests; defaults to `process.exit`. */
   exit?: (code: number) => void;
@@ -149,11 +151,13 @@ async function takeLocks(
   logger: HubRoleGuardLogger,
   exit: (code: number) => void,
   onAcquired?: (pid: number) => void,
+  signal?: AbortSignal,
 ): Promise<LockingConnection | null> {
   let closed = false;
   let exitOnClose = false;
   const sql = new Bun.SQL(url, {
     max: 1,
+    ...(signal ? { connectionTimeout: Math.max(0.001, timings.timeoutMs / 1000) } : {}),
     // A dropped lock connection is terminal: see the file header.
     onclose: (error) => {
       if (closed || !exitOnClose) return;
@@ -167,30 +171,45 @@ async function takeLocks(
   const close = async (): Promise<void> => {
     if (closed) return;
     closed = true;
+    signal?.removeEventListener("abort", abort);
     try {
-      await sql.end({ timeout: 1 });
+      // Bun treats timeout:0 as unbounded for an active query. A positive
+      // millisecond forces socket disposal even if SQL never replies.
+      await sql.end({ timeout: signal ? 0.001 : 1 });
     } catch {
       // The process is going away; a close failure changes nothing.
     }
   };
 
+  let pending: { cancel(): unknown } | undefined;
+  const abort = () => { pending?.cancel(); void close(); };
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) { await close(); return null; }
   try {
-    const rows = await sql.unsafe<{ pid: number }[]>("SELECT pg_backend_pid() AS pid");
+    const query = sql.unsafe<{ pid: number }[]>("SELECT pg_backend_pid() AS pid");
+    pending = query;
+    const rows = await query;
     const pid = Number(rows[0]?.pid ?? 0);
     const deadline = Date.now() + timings.timeoutMs;
     let attempt = 0;
     for (;;) {
+      if (signal?.aborted) { await close(); return null; }
       attempt += 1;
       const taken: HubLockRole[] = [];
       for (const role of roles) {
-        const result = await sql.unsafe<{ locked: boolean }[]>(
+        const query = sql.unsafe<{ locked: boolean }[]>(
           "SELECT pg_try_advisory_lock(hashtext($1)) AS locked",
           [hubLockKey(role)],
         );
+        pending = query;
+        const result = await query;
         if (result[0]?.locked !== true) break;
         taken.push(role);
       }
+      if (signal?.aborted) { await close(); return null; }
       if (taken.length === roles.length) {
+        signal?.removeEventListener("abort", abort);
+        pending = undefined;
         exitOnClose = true;
         onAcquired?.(pid);
         logger.info(`acquired ${roles.map(hubLockKey).join(", ")} on backend pid ${pid}`);
@@ -245,6 +264,7 @@ export async function startHubRoleGuard(options: HubRoleGuardOptions): Promise<H
     logger,
     exit,
     options.onAcquired,
+    options.signal,
   );
   if (!locked) {
     if (options.throwOnFailure) throw new Error("hub role lock could not be acquired");

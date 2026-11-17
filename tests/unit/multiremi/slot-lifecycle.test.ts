@@ -7,10 +7,10 @@ import { connect } from "node:net";
 
 afterEach(resetMultiremiTestEnv);
 
-const config = { id: "blue", start: "standby" as const, controlToken: "test-secret", lockTimeoutMs: 10, drainTimeoutMs: 1000 };
+const config = { id: "blue", start: "standby" as const, controlToken: "test-secret", lockTimeoutMs: 1000, drainTimeoutMs: 1000 };
 function fixture(overrides: Partial<SlotHooks> = {}) {
   const events: string[] = [];
-  const slot = new SlotLifecycle(config, "test-version", {
+  const slot = new SlotLifecycle({ ...config }, "test-version", {
     acquire: async () => { events.push("lock"); return { close: async () => { events.push("unlock"); } }; },
     fence: async () => { events.push("fence"); return 42; },
     start: () => { events.push("start"); }, disconnect: () => { events.push("disconnect"); },
@@ -53,11 +53,45 @@ describe("API slot lifecycle", () => {
     const { slot, events } = fixture({ fence: async () => { if (fails) throw new Error("fenced"); return 2; } });
     await expect(slot.activate()).rejects.toThrow("fenced");
     expect(slot.state).toBe("failed");
-    expect(events).toEqual(["lock", "stop", "unlock"]);
+    expect(events).toEqual(["lock", "unlock"]);
     fails = false;
     await slot.activate();
     expect(slot.state).toBe("active");
     await slot.release();
+  });
+
+  test("timed-out asynchronous startup retains ownership until startup and cleanup settle", async () => {
+    let finish!: () => void;
+    const starting = new Promise<void>(resolve => { finish = resolve; });
+    const { slot, events } = fixture({ start: () => starting });
+    slot.config.lockTimeoutMs = 30;
+    await expect(slot.activate()).rejects.toThrow("activation_timeout");
+    expect(slot.state).toBe("failed");
+    expect(events).not.toContain("unlock");
+    await expect(slot.release()).rejects.toThrow("activation cleanup pending");
+    finish();
+    await Bun.sleep(5);
+    expect(events.slice(-2)).toEqual(["stop", "unlock"]);
+    expect(slot.state).toBe("failed");
+    await slot.release();
+    expect(slot.state).toBe("released");
+    slot.config.lockTimeoutMs = 1000;
+  });
+
+  test("HTTP timeout retains the intact activation even after requests finish until rollback or exit", async () => {
+    let pending = 1;
+    const { slot, events } = fixture({ pendingRequests: () => pending });
+    slot.config.drainTimeoutMs = 20;
+    await slot.activate();
+    await expect(slot.release()).rejects.toThrow("drain_timeout");
+    pending = 0;
+    await expect(slot.release()).rejects.toThrow("drain_timeout");
+    expect(events).toEqual(["lock", "fence", "start"]);
+    await slot.activate();
+    expect(slot.status()).toMatchObject({ state: "active", term: 42 });
+    expect(events).toEqual(["lock", "fence", "start"]);
+    await slot.exit();
+    expect(events.slice(-3)).toEqual(["disconnect", "stop", "unlock"]);
   });
 
   test("only accepts the control token from an actual loopback socket", () => {
@@ -303,8 +337,10 @@ describe("API slot lifecycle", () => {
     });
     await bounded.activate();
     const ordinary = await bounded.request(new Request("http://localhost/slow"), () => new Response(new ReadableStream()));
-    await bounded.release();
-    expect(bounded.state).toBe("released");
+    await expect(bounded.release()).rejects.toThrow("drain_timeout");
+    expect(bounded.state).toBe("draining");
+    await bounded.activate();
+    expect(bounded.state).toBe("active");
     await ordinary.body?.cancel();
   });
 

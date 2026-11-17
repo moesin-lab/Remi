@@ -83,6 +83,12 @@ for (const status of [400, 401, 403, 500]) test(`HTTP ${status} is a hard failur
   await expect(performUpdate(f.options)).rejects.toThrow(`HTTP ${status}`);
   expect(f.requests).toHaveLength(1);
 });
+for (const status of [500, 502, 503]) test(`tarball HTTP ${status} never falls back or replaces launcher`, async () => {
+  const f = fixture(); f.setDownloadStatus(status);
+  await expect(performUpdate(f.options)).rejects.toThrow(`Release download failed: ${status}`);
+  expect(f.requests.some(r => r.url.includes("github"))).toBe(false);
+  expect(readFileSync(f.launcherPath, "utf8")).toContain("echo previous");
+});
 test("explicit commit selects the platform even with github-only preference and never falls back", async () => {
   const f = fixture();
   expect(await performUpdate({ ...f.options, targetCommit: commit, env: { MULTIREMI_UPDATE_SOURCES: "github" } })).toMatchObject({ commit });

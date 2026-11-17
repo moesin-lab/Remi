@@ -2436,8 +2436,9 @@ export class MultiremiDaemon {
     }
     // Admission is deliberately non-durable: a timed-out running report must
     // never replay after this executor has given up and queued failed.
+    const platformDeadline = drainDeadline === undefined ? Infinity : Date.parse(drainDeadline);
     const admissionEnd = Math.min(Date.now() + 30_000,
-      drainDeadline === undefined ? Infinity : Date.parse(drainDeadline));
+      Number.isNaN(platformDeadline) ? Date.now() : platformDeadline);
     while (true) {
       try {
         await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "running" },

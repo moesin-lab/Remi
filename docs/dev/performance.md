@@ -57,7 +57,7 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 插件心跳只协调当前 Runtime 的 desired 状态；绑定、版本和任务快照等业务变更仍协调工作区。
 心跳仍读取工作区插件绑定和活跃任务的版本需求，不能认为所有工作区读取已消除。
 Daemon 报告的 Runtime 身份校验使用 `getRuntimeLite`，不附带历史用量、模型和执行组。
-`task:usage` 继续向浏览器更新统计，但不唤醒 daemon 下行；账本仅按本帧 unit_id 批量预取修订事实、回执与冲突水位，不读取整个 run 的历史单位；无累计 meter/增量金额 coverage 的快照将事实和接受回执各用一条 JSON 展开 INSERT 写入，避免 10,000 unit 帧触及 bind 上限。provider request 所有权仍逐项校验；累计 meter 与增量 coverage 保持原序列化路径。
+`task:usage` 继续向浏览器更新统计，但不唤醒 daemon 下行；账本仅按本帧 unit_id 批量预取修订事实、回执与冲突水位，不读取整个 run 的历史单位；无累计 meter/增量金额 coverage 的多单位快照将事实和接受回执各用一条 JSON 展开 INSERT 写入，避免 10,000 unit 帧触及 bind 上限；单单位增量各用一次参数化 VALUES 写入。provider request 所有权仍逐项校验；累计 meter 与增量 coverage 保持原序列化路径。
 `task.activity` 的子代理计数只在变化时写库，`task:subagents` 同样只推浏览器、不唤醒 daemon 下行。
 PR 6 的后台任务计数随同一帧、按同一规则写库。后台任务快照（`lane.background_tasks`）内容不变时只更新 revision、不推事件；
 `chat:background_tasks` 只推 Chat 创建者、不唤醒 daemon 下行或 offer，引起它的快照或停止请求只重算相关 runtime 的下行。

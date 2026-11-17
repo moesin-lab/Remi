@@ -129,3 +129,9 @@ bun test tests/unit/daemon/task-report-outbox.test.ts -t 'replays over 3000'
 本修订保留 complete 406/406、fail 240/240 的小预算缺口，PR保持draft。旧完整工作流44112454810的Windows超时为真实失败；8个PG后端分片的最终结论和新head完整Release build check见PR描述，未完成不得写成通过。
 
 本修订用量回归：`bun run test --timeout 30000 tests/unit/multiremi/store-usage-accounting.test.ts tests/unit/multiremi/usage-superseded-receipts.test.ts tests/unit/multiremi/daemon-report-query-budget.test.ts tests/unit/acp/usage-request-ownership.test.ts` → 72 pass / 1 skip / 0 fail，402 assertions，70.67s，HOME residual paths=[]。skip 为未配置真实PG的superseded receipts用例，不算PG通过。新行数守卫包含已有单位更新和全新单位追加，两种规模均通过。
+
+旧PG分片2（44112454810 / job134146816292）暴露本PR的真实方言缺陷：`jsonb_array_elements(CAST(? AS JSONB))` 在Bun.SQL推断参数为JSONB时将已序列化字符串编码成JSON scalar，`native-usage-backfill-postgres.test.ts`报 `cannot extract elements from a scalar`。修订为先 `CAST(? AS TEXT)` 再转 JSONB，明确传输文本类型后解析数组；写入和本帧ID读取共用这一修正。真实PG结论仍以修订后完整CI为准。
+
+新增行数守卫沿用同文件fleet测试的60s夹具期限；既有3500单位outbox回放测试仍为90s，无任何放宽。
+
+JSON TEXT 绑定修正后，同上四文件回归再次72 pass / 1 skip / 0 fail，402 assertions，62.01s，HOME residual paths=[]；SQLite通过不能替代真实PG验证。

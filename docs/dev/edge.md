@@ -20,7 +20,7 @@ EDGE_CONTROL_SOCKET=/tmp/remi-edge.sock bun apps/edge/main.ts
 `EDGE_HOST` defaults to `127.0.0.1` for both the process entry and library
 (set it explicitly for a public listener), `EDGE_PORT` to 16120, `EDGE_HOLD_MAX_MS` to 60000 and `EDGE_MAX_WAITING`
 to 4096. An explicitly empty `EDGE_PORT` is rejected; `0` may be used to request an ephemeral port.
-No TLS or third-party runtime dependency is added.
+No TLS or third-party package is added. On Linux/macOS the upstream WS receive window uses Bun's built-in FFI and the system libc; Linux tries glibc and musl library names. Windows skips the Unix receive-window workaround.
 
 For embedding, import `startEdge` or `Edge` from
 `packages/edge/src/index.ts`. Pass `backends`, `hostname`, `port`, `controlSocket`,
@@ -106,10 +106,15 @@ on a subsequent event-loop turn: resuming synchronously (or in a microtask) insi
 Bun 1.3.14's native writable callback can lose writable-event registration after
 a partial large-frame write. A 25 ms timer fallback runs only while congested
 because Bun may also miss drain notifications. The upstream TCP connection uses
-Node's built-in stream adapter (provided by Bun), so pause suspends application
-`data` delivery even for chunks delivered in the current native read turn. This
-avoids repeatedly concatenating an unread buffer and starving downstream I/O and
-timers. Close/stop cancels that timer. Upstream writes resume on TCP drain;
+Node's built-in stream adapter (provided by Bun). The Unix native recv loop in
+Bun 1.3.14 can continue full-size reads after pause. Edge requests a 64 KiB
+`SO_RCVBUF` (Linux reports 128 KiB), verifies it, and caps the adapter's Readable
+queue at 1 MiB before accepting another chunk. Socket-option failures fail the
+WS connection; they never silently disable the bound. The parser allocates each
+validated frame payload once and copies TCP chunks into it, retaining one reusable
+binary payload only after downstream `send()` accepts/copies the message. This
+avoids repeated whole-frame concatenation and prevents an unread native burst
+from buffering the entire producer stream. Close/stop cancels that timer. Upstream writes resume on TCP drain;
 reaching the downstream high-water mark pauses the relay. If buffered bytes make
 no progress for `wsStallTimeoutMs`, edge closes both sides with 1013
 (`Downstream stalled`) and terminates the downstream socket after 100 ms, so a
@@ -145,7 +150,21 @@ recovery, close codes, forwarding headers, private paths, health/draining, Unix
 control, 64 × 4 MiB, 64 × 1 MiB and 192 × 512 KiB messages to a slow TCP reader
 with per-frame content checks, bounded closure for a stalled reader and cleared
 congestion timers (all using a real Bun backend and isolated edge process), and 100 MiB streaming with
-RSS sampling in an isolated edge subprocess. The memory source yields every MiB
+RSS sampling in an isolated edge subprocess. The WS slow/stalled reader runs in
+a separate Node process so Bun cannot bypass its read suspension. An additional
+384 × 4 MiB case checks a 1.5 GiB stream with a 96 MiB RSS-growth regression budget,
+1 MiB Readable queue, 9 MiB parser storage and 5 MiB + 14 bytes downstream bounds.
+These are regression budgets, not a process memory/cgroup limit; client-to-upstream
+writes still have their independent 64 MiB queue budget. See the
+[MUL-189 memory investigation](../../reports/performance/MUL-189-edge-ws.md) for
+the baseline, repeated streams, platform limitations and capacity planning. The memory source yields every MiB
 to let native I/O progress; upload and download share one peak and the unchanged
 80 MiB growth ceiling, with no GC during measurement. These tests are local transport
 evidence; they do not establish behavior for a deployed supervisor/Compose stack.
+
+For repeated streams on the same process (no GC between connections):
+
+```bash
+bun tests/manual/edge-ws-memory.ts > edge-after.json
+bun tests/manual/edge-ws-memory.ts /absolute/baseline/packages/edge/src/index.ts > edge-before.json
+```

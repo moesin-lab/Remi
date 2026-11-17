@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { connect } from 'node:net';
+import { limitReceiveWindow, WS_READ_QUEUE_BYTES } from './receive-window';
 import { exchange, type TransportHandlers, type TransportSocket } from './http';
 
 /** Minimal RFC 6455 client: no extensions, bounded messages and drain-driven writes.
@@ -9,6 +10,7 @@ export class UpstreamSocket {
   readyState = 0;
   private queuedBytes = 0;
   private networkBytes = () => 0;
+  private networkReadBytes = () => 0;
   get bufferedAmount() { return this.queuedBytes + this.networkBytes(); }
   protocol = '';
   binaryType = 'arraybuffer';
@@ -17,7 +19,7 @@ export class UpstreamSocket {
   onoverflow?: () => void;
   onerror?: () => void;
   onclose?: (event: { code: number; reason: string }) => void;
-  onmessage?: (event: { data: string | ArrayBuffer }) => void;
+  onmessage?: (event: { data: string | Buffer }) => void;
   private socket?: TransportSocket;
   private responseHandlers?: TransportHandlers;
   private paused = false;
@@ -28,6 +30,9 @@ export class UpstreamSocket {
   private buffer: Buffer = Buffer.alloc(0);
   private queue: Buffer[] = [];
   private fragments: Buffer[] = [];
+  private framePayload?: Buffer;
+  private frameReceived = 0;
+  private sparePayload?: Buffer;
   private fragmentBytes = 0;
   private fragmentOpcode = 0;
   private key = randomBytes(16).toString('base64');
@@ -44,7 +49,16 @@ export class UpstreamSocket {
       pause() { raw.pause(); }, resume() { raw.resume(); },
       end() { raw.end(); }, terminate() { raw.destroy(); },
     };
-    this.socket = socket; this.networkBytes = () => raw.writableLength;
+    this.socket = socket; this.networkBytes = () => raw.writableLength; this.networkReadBytes = () => raw.readableLength;
+    // A hard ceiling also covers unexpected native callback bursts and future
+    // runtime changes. Reject before Readable retains another chunk.
+    const push = raw.push.bind(raw);
+    raw.push = (chunk: Buffer | null, encoding?: BufferEncoding) => {
+      if (chunk && raw.readableLength + chunk.length > WS_READ_QUEUE_BYTES) {
+        this.onoverflow?.(); this.close(1013, 'Input queue exhausted'); raw.destroy(); return false;
+      }
+      return push(chunk, encoding);
+    };
     raw.on('data', chunk => {
       const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
       if (this.responseHandlers) { this.responseHandlers.data(socket, bytes); return; }
@@ -59,6 +73,7 @@ export class UpstreamSocket {
     });
     raw.once('connect', () => {
       if (this.readyState === 3) { socket.terminate(); return; }
+      try { limitReceiveWindow(raw); } catch { this.onerror?.(); this.terminate(); return; }
       const headers = new Headers(options.headers);
       headers.set('host', url.host); headers.set('connection', 'Upgrade'); headers.set('upgrade', 'websocket');
       headers.set('sec-websocket-key', this.key); headers.set('sec-websocket-version', '13');
@@ -74,8 +89,18 @@ export class UpstreamSocket {
     this.reading = true;
     try { this.parse(bytes, options); } finally { this.reading = false; }
   }
+  /** The relay calls this only after send() accepts/copies a binary message. */
+  releaseMessage(data: Buffer) {
+    if (this.readyState === 1 && (!this.sparePayload || data.length > this.sparePayload.length)) this.sparePayload = data;
+  }
   private parse(bytes: Buffer, options: { protocols: string[]; limit: number }) {
-    this.buffer = this.buffer.length ? Buffer.concat([this.buffer, bytes]) : bytes;
+    if (this.framePayload) {
+      const take = Math.min(this.framePayload.length - this.frameReceived, bytes.length);
+      bytes.copy(this.framePayload, this.frameReceived, 0, take); this.frameReceived += take;
+      if (this.frameReceived < this.framePayload.length) return;
+      bytes = bytes.subarray(take);
+    }
+    if (bytes.length) this.buffer = this.buffer.length ? Buffer.concat([this.buffer, bytes]) : bytes;
     if (this.readyState === 0) {
       const end = this.buffer.indexOf('\r\n\r\n');
       if (end < 0) { if (this.buffer.length > 65536) this.terminate(); return; }
@@ -111,8 +136,22 @@ export class UpstreamSocket {
       if (length === 126) { if (this.buffer.length < 4) return; length = this.buffer.readUInt16BE(2); offset = 4; }
       if (length === 127) { if (this.buffer.length < 10) return; const big = this.buffer.readBigUInt64BE(2); if (big > BigInt(options.limit)) { this.onoverflow?.(); this.close(1013, 'Backpressure limit'); return; } length = Number(big); offset = 10; }
       if (length > options.limit || (opcode >= 8 && (!final || length > 125))) { this.onoverflow?.(); this.close(1013, 'Backpressure limit'); return; }
-      if (this.buffer.length < offset + length) return;
-      const payload = this.buffer.subarray(offset, offset + length); this.buffer = this.buffer.subarray(offset + length);
+      // Keep the small header until the payload is complete. Allocate once only
+      // after validating its length; TCP segmentation must not cause repeated
+      // copies of the entire accumulated frame.
+      if (!this.framePayload) {
+        if (length + this.fragmentBytes > options.limit && opcode < 8) { this.onoverflow?.(); this.close(1013, 'Backpressure limit'); return; }
+        this.framePayload = opcode < 8 && this.sparePayload && this.sparePayload.length >= length ? this.sparePayload.subarray(0, length) : Buffer.allocUnsafe(length);
+        if (opcode < 8) this.sparePayload = undefined; this.frameReceived = 0;
+      }
+      const take = Math.min(length - this.frameReceived, this.buffer.length - offset);
+      this.buffer.copy(this.framePayload, this.frameReceived, offset, offset + take);
+      this.frameReceived += take;
+      if (this.frameReceived < length) {
+        this.buffer = Buffer.from(this.buffer.subarray(0, offset)); return;
+      }
+      const payload = this.framePayload; this.framePayload = undefined; this.frameReceived = 0;
+      this.buffer = this.buffer.subarray(offset + take);
       if (opcode === 8) {
         if (payload.length === 1) throw new Error('Invalid close frame');
         const code = payload.length >= 2 ? payload.readUInt16BE(0) : 1000;
@@ -125,13 +164,18 @@ export class UpstreamSocket {
       if (opcode === 10) continue;
       if (![0, 1, 2].includes(opcode) || (opcode === 0 ? !this.fragmentOpcode : this.fragmentOpcode !== 0)) throw new Error('Invalid continuation');
       if (opcode !== 0) this.fragmentOpcode = opcode;
-      this.fragments.push(payload); this.fragmentBytes += payload.length;
+      if (payload.length) this.fragments.push(payload); this.fragmentBytes += payload.length;
       if (this.fragmentBytes > options.limit) { this.onoverflow?.(); this.close(1013, 'Backpressure limit'); return; }
       if (final) {
-        const message = Buffer.concat(this.fragments, this.fragmentBytes);
+        const message = this.fragments.length === 1 ? this.fragments[0] : Buffer.concat(this.fragments, this.fragmentBytes);
         const text = this.fragmentOpcode === 1;
         this.fragments = []; this.fragmentBytes = 0; this.fragmentOpcode = 0;
-        this.onmessage?.({ data: text ? new TextDecoder('utf-8', { fatal: true }).decode(message) : new Uint8Array(message).buffer });
+        if (text) {
+          const data = new TextDecoder('utf-8', { fatal: true }).decode(message);
+          this.releaseMessage(message); this.onmessage?.({ data });
+        } else {
+          this.onmessage?.({ data: message });
+        }
       }
     }
   }
@@ -168,6 +212,7 @@ export class UpstreamSocket {
     if (this.readyState === 3) return;
     this.readyState = 3; clearTimeout(this.timer); this.socket?.end();
     this.queue = []; this.buffer = Buffer.alloc(0); this.fragments = []; this.queuedBytes = 0;
+    this.framePayload = undefined; this.sparePayload = undefined; this.frameReceived = 0; this.fragmentBytes = 0;
     this.onclose?.({ code, reason });
   }
   terminate() { this.socket?.terminate(); this.finish(1006, ''); }

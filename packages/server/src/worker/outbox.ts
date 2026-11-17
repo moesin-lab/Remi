@@ -180,6 +180,18 @@ export class MultiremiTaskReportOutbox {
       this.purgeTask(taskId, { keepUsage: true });
       this.db.run("UPDATE outbox_events SET status='pending',last_error=NULL,next_attempt_at=NULL WHERE task_id=? AND kind='usage'", [taskId]);
     }
+    // Old daemons persistently blocked the whole runtime partition on these
+    // admission rejections. Recover once at startup; never replay their running
+    // reports as admission now that their original executor is gone.
+    const rejectedUpdates = this.db.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked-code:%' AND value IN ('cli_update_not_admitted','cli_update_not_runnable')").all() as Array<{ key: string }>;
+    this.db.transaction(() => {
+      for (const row of rejectedUpdates) {
+        const taskId = row.key.slice("blocked-code:".length);
+        this.db.run("DELETE FROM outbox_events WHERE task_id=? AND status='blocked' AND kind='runtime.update_result' AND json_extract(payload,'$.status')='running'", [taskId]);
+        this.db.run("UPDATE outbox_events SET status='pending',last_error=NULL,next_attempt_at=NULL WHERE task_id=? AND status='blocked'", [taskId]);
+        this.db.run("DELETE FROM outbox_meta WHERE key IN (?,?)", [`blocked:${taskId}`, `blocked-code:${taskId}`]);
+      }
+    })();
     const invalid = this.db.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked-code:%' AND value='invalid_report'").all() as Array<{ key: string }>;
     for (const row of invalid) {
       const taskId = row.key.slice("blocked-code:".length);

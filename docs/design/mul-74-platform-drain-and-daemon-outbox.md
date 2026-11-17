@@ -135,11 +135,17 @@ HTTP 请求由幂等 running→running 确认，终态拒绝迟到状态回退�
 整个 rt 分区；`cli_update_not_admitted` 和 `cli_update_not_runnable` 均只删除被拒的那条
 running 记录。旧 daemon 正常只收到已准入下行，running→running 继续幂等接受。
 N-1 边界：新服务端对旧 daemon 的迟到 running 增加 HTTP 409 或不可重试 WS 错误；
-升级后的 daemon 通过上述单条清理处理旧 outbox，避免堵塞或无限重试。
+升级后的 daemon 除上述投递时单条清理外，在打开 outbox DB 时做一次有界启动恢复：
+仅处理 blocked-code 为 `cli_update_not_admitted` 或 `cli_update_not_runnable` 的分区；
+事务内先删除其中 blocked 的 `runtime.update_result` running 记录（旧执行者已退出，
+不能重放为准入），再将其余 blocked 行恢复 pending、清空 last_error/next_attempt_at，
+删除该分区的 blocked/blocked-code 元数据，让后续报告重新接受服务端校验。
+其它永久错误码（如 `protocol_violation`）保持 blocked，不扩大恢复范围。
 未升级的 0bb8c3256 daemon 对 HTTP 409 会在原有最多 30 秒窗口内重试后补报 failed，
 不会安装或无限重试，平台终态仍保持幂等。更早使用 running outbox 且不识别该 code 的
-daemon 会把不可重试 WS 错误标为分区 blocked；服务端无法改变其本地分支，需升级 daemon
-才能保证迟到 running 不阻塞该旧分区。正常只收到已准入下行的路径不变。
+daemon 会把不可重试 WS 错误持久化为分区 blocked；平台升级后、daemon 升级前该分区
+仍会阻塞。服务端无法改变其本地分支，这段窗口以 daemon 升级为界：升级后打开同一 DB
+即按上述规则自愈，遗留 running 不会再次投递。正常只收到已准入下行的路径不变。
 新 daemon 连接旧服务端仍按现有 HTTP 成功确认安装，旧端对终态返回 200 的许可缺口
 无法由新 daemon 单独消除，需服务端升级后获得本节保证。
 因此 owner 终态交接只需寻找 pending sibling，可在 restarting/verifying 保护之前处理。

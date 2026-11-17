@@ -1,4 +1,5 @@
 import { afterEach, expect, it } from "bun:test";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -69,7 +70,7 @@ async function fixture(mode: "lost" | "lost-terminal" | "outage" | "reject") {
   state.client = client;
   let installs = 0;
   state.updateRunner = () => { installs++; return "installed"; };
-  return { httpClient: new MultiremiDaemonClient(`http://127.0.0.1:${server.port}`, token.token), store, a, b, state, outbox, delivered, updateStatuses, installs: () => installs, calls: () => runningCalls };
+  return { outboxPath: join(root, "outbox.db"), httpClient: new MultiremiDaemonClient(`http://127.0.0.1:${server.port}`, token.token), store, a, b, state, outbox, delivered, updateStatuses, installs: () => installs, calls: () => runningCalls };
 }
 
 it("confirms a committed running after losing the HTTP reply without a replayable running record", async () => {
@@ -209,4 +210,50 @@ it("discards a legacy terminal running rejection without blocking the rt partiti
   expect(f.store.getRuntimeUpdateRequest("rt", f.b.id)?.status).toBe("failed");
   expect(f.store.getRuntimeCommandRequest("rt", command.id)?.status).toBe("completed");
   expect(f.outbox.stats()).toMatchObject({ pending: 0, blocked: 0 });
+});
+
+
+for (const code of ["cli_update_not_admitted", "cli_update_not_runnable", "protocol_violation"]) it(`recovers persisted legacy admission blocks only for the two admission codes: ${code}`, async () => {
+  const f = await fixture("reject");
+  await f.outbox.close();
+  const command = f.store.createRuntimeCommandRequest("rt", { command: "pwd" });
+  // Construct the exact disk state left by a pre-upgrade daemon, then close
+  // SQLite before starting the upgraded outbox against the same file.
+  const db = openSqliteDatabase(f.outboxPath);
+  const insert = db.query(`INSERT INTO outbox_events
+    (idempotency_key,task_id,kind,payload,seq,status,last_error,next_attempt_at,created_at)
+    VALUES (?, 'rt:rt', ?, ?, ?, 'blocked', 'legacy rejection', 9999999999999, ?)`);
+  insert.run("legacy-running", "runtime.update_result", JSON.stringify({ runtime_id: "rt", request_id: f.b.id, status: "running" }), 1, new Date().toISOString());
+  insert.run("legacy-command", "runtime.command_result", JSON.stringify({ runtime_id: "rt", request_id: command.id,
+    status: "completed", exit_code: 0, stdout: "recovered", stderr: "", duration_ms: 1 }), 2, new Date().toISOString());
+  db.run("INSERT INTO outbox_meta (key,value) VALUES (?,?),(?,?)", ["blocked:rt:rt", "legacy rejection", "blocked-code:rt:rt", code]);
+  db.close();
+  const delivered: string[] = [];
+  const recovered = new MultiremiTaskReportOutbox({ path: f.outboxPath, deliver: async record => {
+    delivered.push(record.kind);
+    const reply = await reportFrame(f.store, record.kind, record.payload, { runtimeId: "rt" });
+    if (!reply.ok) throw new DaemonProtocolRpcError(reply.code, reply.retryable);
+    return {};
+  } });
+  cleanup.push(() => recovered.close());
+  const inspect = openSqliteDatabase(f.outboxPath);
+  cleanup.push(() => inspect.close());
+  const admission = code !== "protocol_violation";
+  expect(inspect.query("SELECT status,last_error,next_attempt_at FROM outbox_events WHERE idempotency_key='legacy-command'").get())
+    .toEqual(admission ? { status: "pending", last_error: null, next_attempt_at: null }
+      : { status: "blocked", last_error: "legacy rejection", next_attempt_at: 9999999999999 });
+  expect(inspect.query("SELECT id FROM outbox_events WHERE idempotency_key='legacy-running'").get() === null).toBe(admission);
+  expect(inspect.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked%'").all()).toHaveLength(admission ? 0 : 2);
+  await recovered.flushAll();
+  expect(delivered).toEqual(admission ? ["runtime.command_result"] : []);
+  expect(f.store.getRuntimeCommandRequest("rt", command.id)?.status).toBe(admission ? "completed" : "pending");
+  const next = f.store.createRuntimeCommandRequest("rt", { command: "pwd" });
+  recovered.enqueue("rt:rt", "runtime.command_result", { runtime_id: "rt", request_id: next.id,
+    status: "completed", exit_code: 0, stdout: "new", stderr: "", duration_ms: 1 });
+  await recovered.flushAll();
+  expect(f.store.getRuntimeCommandRequest("rt", next.id)?.status).toBe(admission ? "completed" : "pending");
+  expect(recovered.stats()).toMatchObject({ pending: 0, blocked: admission ? 0 : 3 });
+  expect(f.store.getRuntimeUpdateRequest("rt", f.b.id)?.status).toBe("pending");
+  expect(f.installs()).toBe(0);
+  expect(f.state.restartRequestedFlag).toBe(false);
 });

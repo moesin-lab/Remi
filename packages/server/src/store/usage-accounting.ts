@@ -328,6 +328,20 @@ export function lockUsageIdentities(db: SqlDatabase, workspaceId: string, units:
   for (const key of [...identityLocks].sort()) advisoryXactLock(db, `usage-request:${workspaceId}:${key}`);
 }
 
+/** One JSON parameter avoids both drivers' bind limits for a 10,000-unit frame. */
+function usageRowsSelect(db: SqlDatabase, columns: readonly string[], rows: unknown[][]): { sql: string; params: unknown[] } {
+  const integers = new Set(["revision", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+    "actual_unsplit_tokens", "reported_total_tokens", "context_tokens", "context_window", "cost_coverage_expected_count",
+    "cost_coverage_complete", "cost_coverage_received_count"]);
+  const fields = columns.map((column, index) => {
+    const value = db.dialect === "postgres" ? `batch.value->>${index}` : `json_extract(batch.value,'$[${index}]')`;
+    const type = column === "cost_amount" ? "DOUBLE PRECISION" : integers.has(column) ? "BIGINT" : "TEXT";
+    return `CAST(${value} AS ${type})`;
+  });
+  return { sql: `SELECT ${fields.join(",")} FROM ${db.dialect === "postgres"
+    ? "jsonb_array_elements(CAST(? AS JSONB)) AS batch(value)" : "json_each(?) AS batch"} WHERE 1=1`, params: [JSON.stringify(rows)] };
+}
+
 /** One transaction serializes snapshot revisions; only newer unit revisions replace facts. */
 export function writeUsageSnapshot(db: SqlDatabase, taskId: string, input: TaskUsageSnapshot, options: UsageWriteOptions = {}): boolean {
   const s = validateUsageSnapshot(input);
@@ -378,6 +392,29 @@ export function writeUsageSnapshot(db: SqlDatabase, taskId: string, input: TaskU
     // an older frame may contain a distinct unit that must still be accepted.
     db.run("UPDATE multiremi_usage_runs SET revision=revision WHERE task_id=? AND run_id=?", [taskId, s.runId]);
     const run = db.query("SELECT revision,complete FROM multiremi_usage_runs WHERE task_id=? AND run_id=?").get(taskId, s.runId) as Row;
+    // Read revision floors once under the run lock. A snapshot can contain
+    // thousands of units; the number of reads must not depend on that count.
+    const previousUnits = new Map((db.query("SELECT * FROM multiremi_usage_units WHERE task_id=? AND run_id=?").all(taskId, s.runId) as Row[]).map(row => [String(row.unit_id), row]));
+    const receipts = new Map((db.query("SELECT * FROM multiremi_usage_unit_receipts WHERE task_id=? AND run_id=?").all(taskId, s.runId) as Row[]).map(row => [String(row.unit_id), row]));
+    const parkedUnits = new Map<string, Row>();
+    for (const row of db.query("SELECT unit_id,revision,unit_json FROM multiremi_usage_identity_conflicts WHERE task_id=? AND run_id=? ORDER BY revision DESC").all(taskId, s.runId) as Row[]) {
+      if (!parkedUnits.has(String(row.unit_id))) parkedUnits.set(String(row.unit_id), row);
+    }
+    // Identity claims and incremental monetary coverage retain their existing
+    // serialization. Ordinary token snapshots can persist their facts/receipts
+    // in one statement per table after all revision checks have succeeded.
+    const batchable = s.units.every(unit => !unit.meterEvidence
+      && unit.coveredUnitIds === undefined && unit.coverageExpectedCount === undefined)
+      && [...previousUnits.values()].every(row => row.cost_source !== "provider_reported");
+    const unitRows: unknown[][] = [], receiptRows: unknown[][] = [];
+    const columns = ["task_id", "run_id", "unit_id", "revision", "workspace_id", "agent_id", "runtime_id", "project_id", "runtime_provenance", "project_provenance", ...UNIT_FIELDS, "cost_coverage_complete", "cost_coverage_received_count"];
+    const persistUnits = (rows: unknown[][]) => {
+      if (!rows.length) return;
+      const batch = usageRowsSelect(db, columns, rows);
+      db.run(`INSERT INTO multiremi_usage_units(${columns.join(",")}) ${batch.sql}
+        ON CONFLICT(task_id,run_id,unit_id) DO UPDATE SET revision=excluded.revision, ${UNIT_FIELDS.map(f => `${f}=excluded.${f}`).join(",")},cost_coverage_complete=excluded.cost_coverage_complete,cost_coverage_received_count=0
+        WHERE multiremi_usage_units.revision<excluded.revision`, batch.params);
+    };
     let changed = false;
     let hasCurrentUnit = s.units.length === 0;
     for (const u of s.units) {
@@ -385,13 +422,12 @@ export function writeUsageSnapshot(db: SqlDatabase, taskId: string, input: TaskU
       const coverageSha256 = u.coverageSha256 ?? (u.coveredUnitIds === undefined ? null : coverageHash(u.coveredUnitIds));
       const values = unitValues(u);
       const normalized = JSON.stringify(values);
-      const columns = ["task_id", "run_id", "unit_id", "revision", "workspace_id", "agent_id", "runtime_id", "project_id", "runtime_provenance", "project_provenance", ...UNIT_FIELDS, "cost_coverage_complete", "cost_coverage_received_count"];
-      const previous = db.query(`SELECT revision,cost_coverage_received_count,cost_coverage_complete,${UNIT_FIELDS.join(",")} FROM multiremi_usage_units WHERE task_id=? AND run_id=? AND unit_id=?`).get(taskId, s.runId, u.unitId) as Row | null;
-      let receipt = db.query("SELECT revision,disposition,normalized_json FROM multiremi_usage_unit_receipts WHERE task_id=? AND run_id=? AND unit_id=?").get(taskId, s.runId, u.unitId) as Row | null;
+      const previous = previousUnits.get(u.unitId) ?? null;
+      let receipt = receipts.get(u.unitId) ?? null;
       if (!receipt) {
         // Preserve revision floors from conflicts recorded before this schema
         // upgrade; a missing canonical row must never make a parked unit new.
-        const parked = db.query("SELECT revision,unit_json FROM multiremi_usage_identity_conflicts WHERE task_id=? AND run_id=? AND unit_id=? ORDER BY revision DESC LIMIT 1").get(taskId, s.runId, u.unitId) as Row | null;
+        const parked = parkedUnits.get(u.unitId);
         if (parked && (!previous || Number(parked.revision) > Number(previous.revision))) {
           receipt = { revision: Number(parked.revision), disposition: "parked", normalized_json: JSON.stringify(unitValues(JSON.parse(String(parked.unit_json)) as TaskUsageUnit)) };
           db.run("INSERT INTO multiremi_usage_unit_receipts(task_id,run_id,unit_id,revision,disposition,normalized_json) VALUES(?,?,?,?,?,?)", [taskId, s.runId, u.unitId, receipt.revision, receipt.disposition, receipt.normalized_json]);
@@ -447,10 +483,9 @@ export function writeUsageSnapshot(db: SqlDatabase, taskId: string, input: TaskU
       }
       if (!previous || Number(previous.revision) !== u.revision) {
         changed = true;
-        db.run(`INSERT INTO multiremi_usage_units(${columns.join(",")}) VALUES(${columns.map(() => "?").join(",")})
-          ON CONFLICT(task_id,run_id,unit_id) DO UPDATE SET revision=excluded.revision, ${UNIT_FIELDS.map((f) => `${f}=excluded.${f}`).join(",")},cost_coverage_complete=excluded.cost_coverage_complete,cost_coverage_received_count=0
-          WHERE multiremi_usage_units.revision<excluded.revision`,
-        [taskId, s.runId, u.unitId, u.revision, String(scope.workspace_id), String(scope.agent_id), scope.runtime_id ?? null, scope.project_id ?? null, scope.runtime_provenance, scope.project_provenance, ...values, coverageExpectedCount === null ? 1 : 0, 0]);
+        const row = [taskId, s.runId, u.unitId, u.revision, String(scope.workspace_id), String(scope.agent_id), scope.runtime_id ?? null, scope.project_id ?? null, scope.runtime_provenance, scope.project_provenance, ...values, coverageExpectedCount === null ? 1 : 0, 0];
+        if (batchable) unitRows.push(row);
+        else persistUnits([row]);
         if (u.coveredUnitIds !== undefined || previous?.cost_source === "provider_reported") db.run("DELETE FROM multiremi_usage_cost_coverage WHERE task_id=? AND run_id=? AND monetary_unit_id=?", [taskId, s.runId, u.unitId]);
       }
       if (coverageExpectedCount !== null) {
@@ -467,8 +502,16 @@ export function writeUsageSnapshot(db: SqlDatabase, taskId: string, input: TaskU
         db.run("UPDATE multiremi_usage_units SET cost_coverage_expected_count=?,cost_coverage_sha256=?,cost_coverage_complete=?,cost_coverage_received_count=? WHERE task_id=? AND run_id=? AND unit_id=?",
           [coverageExpectedCount, coverageSha256, receivedCount === coverageExpectedCount ? 1 : 0, receivedCount, taskId, s.runId, u.unitId]);
       }
-      db.run(`INSERT INTO multiremi_usage_unit_receipts(task_id,run_id,unit_id,revision,disposition,normalized_json) VALUES(?,?,?,?,?,?)
-        ON CONFLICT(task_id,run_id,unit_id) DO UPDATE SET revision=excluded.revision,disposition=excluded.disposition,normalized_json=excluded.normalized_json`, [taskId, s.runId, u.unitId, u.revision, "accepted", normalized]);
+      const receiptRow = [taskId, s.runId, u.unitId, u.revision, "accepted", normalized];
+      if (batchable) receiptRows.push(receiptRow);
+      else db.run(`INSERT INTO multiremi_usage_unit_receipts(task_id,run_id,unit_id,revision,disposition,normalized_json) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(task_id,run_id,unit_id) DO UPDATE SET revision=excluded.revision,disposition=excluded.disposition,normalized_json=excluded.normalized_json`, receiptRow);
+    }
+    persistUnits(unitRows);
+    if (receiptRows.length) {
+      const batch = usageRowsSelect(db, ["task_id", "run_id", "unit_id", "revision", "disposition", "normalized_json"], receiptRows);
+      db.run(`INSERT INTO multiremi_usage_unit_receipts(task_id,run_id,unit_id,revision,disposition,normalized_json) ${batch.sql}
+        ON CONFLICT(task_id,run_id,unit_id) DO UPDATE SET revision=excluded.revision,disposition=excluded.disposition,normalized_json=excluded.normalized_json`, batch.params);
     }
     // An old frame containing only retired observations must not invalidate the
     // repaired run's finality either. Empty completion markers remain valid.

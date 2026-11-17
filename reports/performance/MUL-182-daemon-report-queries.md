@@ -109,3 +109,23 @@ bun test tests/unit/multiremi/daemon-report-query-budget.test.ts -t 'turn.comple
 # 当前修改：52 pass / 21 skip / 0 fail，310 assertions；HOME residual paths=[]。
 bun run test tests/unit/multiremi/daemon-report-query-budget.test.ts tests/unit/multiremi/turn-input-complete.test.ts tests/unit/multiremi/inbox-daemon-turn-bridge.test.ts tests/unit/multiremi/inbox-attempt-input-regressions.test.ts
 ```
+
+## 增量 usage 的读取行数回归修复
+
+23fdc4cc9 的三处批量预读遗漏 unit_id 过滤，单个增量帧会读取整个 run 的事实、回执和冲突历史，造成 O(run 单元数) 回包，连续上报形成 O(n²)。这属于本 PR 引入的性能回退；先前 Linux 空闲时 84.69s 通过不能排除它。
+
+现用 usageRowsSelect 的单 JSON 参数生成本帧 unit_id 集合，三处读取均在 `(task_id,run_id,unit_id)` 上过滤。batchable 的 previousUnits 判断随之只检查本帧单位，其他单位的 provider_reported 金额不再迫使当前普通 token 帧退回逐行写入。仍在原 run 锁下验证 receipt/revision；未改变 90s 超时。
+
+新增真实 task.usage 帧行数守卫：分别预置 100/3000 个事实、回执和冲突审计行，然后仅更新一个已有单位。红测 0 pass/2 fail：三个查询分别返回 100/3000 行；绿测 2 pass/0 fail：三个查询均只返回 1 行，帧 SQL 均 30 次，并验证 ACK 及总 token 从 12*N 增加到 12*N+1。补充全新单元帧，三处均返回0行，新增12个token。读取行数只涉及本帧单位；这不是生产 PG 延迟测量。
+
+```sh
+bun test tests/unit/multiremi/daemon-report-query-budget.test.ts -t 'incremental prefetch'
+# 同机独立 worktree，并行运行相同命令；基线为 merge-base 87fd55c0f。
+bun test tests/unit/daemon/task-report-outbox.test.ts -t 'replays over 3000'
+```
+
+第一轮：基线测试 40.251s（文件41.25s），修复版44.390s（文件45.73s），各1 pass/0 fail、3515 assertions。评审者此前测量的23fdc4cc9为105.26s失败，基线49.59s；不同机器/负载的数字不混作同轮对比。第二轮反转启动顺序后，基线39.406s（文件40.30s），修复版42.614s（文件43.44s），同样各1 pass/0 fail。修复版比基线多3.2–4.1s（8–10%），如实保留这部分开销，不声称完全等速；相比原PR的超时回退已消除，仍需新head的Windows实际验证。
+
+本修订保留 complete 406/406、fail 240/240 的小预算缺口，PR保持draft。旧完整工作流44112454810的Windows超时为真实失败；8个PG后端分片的最终结论和新head完整Release build check见PR描述，未完成不得写成通过。
+
+本修订用量回归：`bun run test --timeout 30000 tests/unit/multiremi/store-usage-accounting.test.ts tests/unit/multiremi/usage-superseded-receipts.test.ts tests/unit/multiremi/daemon-report-query-budget.test.ts tests/unit/acp/usage-request-ownership.test.ts` → 72 pass / 1 skip / 0 fail，402 assertions，70.67s，HOME residual paths=[]。skip 为未配置真实PG的superseded receipts用例，不算PG通过。新行数守卫包含已有单位更新和全新单位追加，两种规模均通过。

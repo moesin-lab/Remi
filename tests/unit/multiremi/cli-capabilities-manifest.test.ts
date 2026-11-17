@@ -261,10 +261,14 @@ describe("CLI capabilities manifest", () => {
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(cliCoverageReport(manifest)).toEqual({
       mapped: 658,
-      exempt: 180,
+      exempt: 184,
       missing: 0,
-      total: 838,
+      total: 842,
     });
+    for (const route of ["GET /internal/slot/status", "POST /internal/slot/activate",
+      "POST /internal/slot/release", "POST /internal/slot/exit"]) {
+      expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "platform_updater_internal" });
+    }
     // ADR 0025: the Chat composer's slash-command menu is Web state; a CLI sender types the command.
     expect(manifest.routes["GET /api/chat/slash-commands"]).toMatchObject({ cli_exempt: true, category: "pure_ui" });
     // PR 6: the session background-task panel and its stop are creator-only Web state with no CLI.

@@ -11,7 +11,7 @@
 | 路径 | 基线：小 / 大 | 修复：小 / 大 | 固定上限 |
 |---|---:|---:|---:|
 | task.workspace | 467 / 544 | 38 / 38 | 48 |
-| turn.complete | 789 / 828 | 402 / 402 | 416 |
+| turn.complete，完整 inline 输入区间 | 旧草稿 409 / 447 | 406 / 406 | 416（仍超出小预算目标） |
 | task.fail | 599 / 638 | 240 / 240 | 256 |
 | feishu.outbound_result | 435 / 512 | 64 / 64 | 64 |
 | task.usage，2 / 40 个 native usage units | 38 / 228 | 31 / 31 | 40 |
@@ -99,3 +99,13 @@ git diff --check
 ```
 
 skip 均保留为未跑的测试，不能视为真实 PG 通过。类型检查通过；docs:test 13 pass，docs:check 与空白检查通过。完整 Release build check 的后端分片/PG 状态需另看本修订 PR 的精确 SHA 结果。
+
+
+补充终态逐行修复：`assertOfferedInputRead` 原先先 SELECT id，再逐条 `getMessage`；旧夹具第一次 input_gap 就退出，未能反映完整区间成本。加强夹具令 2/40 条上下文均为当前 Agent 自己的消息，d74aa2b73 红测 409/447，修复单条列投影读取后 406/406。预算显式比较两种规模相等，但 406 仍未满足小预算。新的全区间逐语句清单附在终态 SQL 诊断末尾；旧 402 指折叠正文 fallback 路径，不能与新路径混作同夹具前后对照。
+
+```sh
+# d74aa2b73 的完整 inline 夹具：1 pass / 1 fail（大夹具增长 409→447）
+bun test tests/unit/multiremi/daemon-report-query-budget.test.ts -t 'turn.complete budget'
+# 当前修改：52 pass / 21 skip / 0 fail，310 assertions；HOME residual paths=[]。
+bun run test tests/unit/multiremi/daemon-report-query-budget.test.ts tests/unit/multiremi/turn-input-complete.test.ts tests/unit/multiremi/inbox-daemon-turn-bridge.test.ts tests/unit/multiremi/inbox-attempt-input-regressions.test.ts
+```

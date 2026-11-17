@@ -483,6 +483,51 @@ test('isolated edge rejects nested encoded private paths for HTTP and WS', async
   expect(attempts).toBe(0);
 });
 
+test('isolated edge covers Hono private routing beside malformed escapes', async () => {
+  let attempts = 0;
+  const app = new Hono();
+  app.all('/internal/*', c => c.text('private route'));
+  const b = backend(req => { attempts++; return app.fetch(req); });
+  const child = await regressionProcess(b.url.href);
+  for (const path of ['/%69nternal/peer/health%', '/%69nternal/peer/health/%zz',
+    '/%69nternal/peer/health/%FF', '/%69nternal/%2e%2e%2fapi%']) {
+    for (const upgrade of [false, true]) {
+      const headers: HeadersInit = upgrade ? { connection: 'Upgrade', upgrade: 'websocket',
+        'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } : {};
+      const direct = await fetch(b.url.origin + path, { headers });
+      expect(direct.status).toBe(200); expect(await direct.text()).toBe('private route');
+      attempts = 0;
+      const proxied = await fetch(new URL(child.url).origin + path, { headers });
+      expect(proxied.status).toBe(404); expect(attempts).toBe(0);
+    }
+  }
+});
+
+// Malformed escapes must not hide valid escapes elsewhere in the pathname.
+for (const path of [
+  '/%69nternal/peer/health%', '/%69nternal/peer/health/%zz',
+  '/%2569nternal%252Fpeer%252fhealth%25',
+  '/%2569nternal%252fpeer%255Chealth/%zz',
+  '/api%255c%252e%252E%252Finternal%255cpeer/health%',
+  '/%2finternal%5Cpeer%2fhealth/%zZ',
+  '/%69nternal/peer/health/%FF',
+]) {
+  for (const upgrade of [false, true]) {
+    test(`isolated edge rejects malformed private path ${path} (${upgrade ? 'Upgrade' : 'HTTP'})`, async () => {
+      let attempts = 0;
+      const b = backend(() => { attempts++; return new Response('must not reach backend'); });
+      const child = await regressionProcess(b.url.href);
+      const response = await fetch(new URL(child.url).origin + path, { headers: upgrade ? {
+        connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13',
+        'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+      } : {} });
+      expect(response.status).toBe(404);
+      expect(attempts).toBe(0);
+      expect((await child.query('report')).status.metrics.requests).toBe(0);
+    });
+  }
+}
+
 test('isolated edge preserves public encoded paths and literal percent signs for HTTP and Upgrade', async () => {
   const traffic = testTraffic();
   let attempts = 0;
@@ -493,7 +538,7 @@ test('isolated edge preserves public encoded paths and literal percent signs for
   expect((await fetch(b.url)).status).toBe(404);
   expect((await fetch(child.url)).status).toBe(404);
   for (const path of ['/api/name%2Etxt', '/api/a%2Fb', '/api/100%25', '/api/a%5Cb',
-    '/api/%ZZ', '/api/a%252Fb', '/api/' + '%'.concat('25'.repeat(20), '2Etxt')]) {
+    '/api/%ZZ', '/api/a%252Fb', '/api/%2561%2Fname%zz', '/api/%FF%69%', '/INTERNAL/peer/health%', '/api/' + '%'.concat('25'.repeat(20), '2Etxt')]) {
     for (const upgrade of [false, true]) {
       const headers: HeadersInit = upgrade ? { ...traffic.headers, connection: 'Upgrade', upgrade: 'websocket',
         'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } : traffic.headers;
@@ -506,7 +551,7 @@ test('isolated edge preserves public encoded paths and literal percent signs for
       expect(await proxied.json(), `edge ${context}`).toEqual(expected);
     }
   }
-  expect(attempts).toBe(28);
+  expect(attempts).toBe(40);
 });
 
 test('isolated edge relays an immediate Bun backend WS close after 101', async () => {

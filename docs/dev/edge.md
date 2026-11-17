@@ -63,9 +63,22 @@ Each line receives `{ok:true,result:…}` or `{ok:false,error:…}`. On startup,
 an unchanged socket inode is removed. Active listeners and non-socket files are preserved. There is no public control route. Public
 `/internal` and `/internal/*` return 404. Before HTTP forwarding or WebSocket
 upgrade, edge checks the original pathname and each successive percent-decoded
-layer: replace backslashes with slashes, collapse repeated slashes and resolve
-dot segments. If any normalized layer has the private prefix, return 404.
-Malformed percent encoding stops decoding at that layer and is treated literally.
+layer, checking both the literal private prefix and its normalized form:
+replace backslashes with slashes, collapse repeated slashes and resolve dot segments.
+The literal check covers Hono routes where decoded dot segments remain literal. If any normalized layer has the private prefix, return 404.
+Each valid `%XX` byte is decoded independently (hex digits are case insensitive);
+malformed escapes remain literal and do not stop other escapes from decoding.
+Changed layers strictly shorten the pathname, so decoding stops at a fixed point.
+The API uses Hono's default, case-sensitive routing (`createMultiremiApp` in
+[server.ts](../../packages/server/src/api/server.ts)): its tolerant `getPath`
+decodes valid URI runs even beside malformed escapes, preserves reserved escapes
+such as `%2F` and protects `%25` from recursive decoding. Peer routes are registered
+under `/internal/peer/`, and the Bun handler separately recognizes literal
+`/internal/slot/` paths before Hono. Edge checks the literal path plus every
+successive byte-decoded layer before either HTTP or Upgrade admission. Thus any
+path the server matches under `/internal/` is rejected with 404; edge additionally
+blocks nested encodings, encoded separators and normalized dot/backslash variants.
+`/INTERNAL/` remains public because the server's private prefix is case sensitive.
 Public encoded names, dots, slashes and percent signs remain valid; the pathname
 forwarded to the slot is unchanged by this check. Forwarding headers are overwritten from
 the accepted client connection; `Forwarded` is removed. The API must explicitly

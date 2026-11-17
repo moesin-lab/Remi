@@ -26,7 +26,8 @@ async function probePostgres(): Promise<boolean> {
     await admin`SELECT 1`;
     await admin.end();
     return true;
-  } catch {
+  } catch (error) {
+    if (process.env.MULTIREMI_TEST_POSTGRES_URL) throw error;
     return false;
   }
 }
@@ -104,7 +105,14 @@ describe.skipIf(!pgAvailable)("Postgres bridge across a dropped connection (MUL-
     expect(probeIds()).toEqual([]);
   });
 
-  it("runs the next transaction normally on the new connection", () => {
+  it("runs the next transaction normally on the new connection after the outage cooldown", async () => {
+    // #87 rate-limits retry attempts for one second after a lost transaction.
+    // Wait for that boundary, then execute the next transaction exactly once.
+    const deadline = Date.now() + 2_000;
+    while (db.connectionUnavailable) {
+      if (Date.now() >= deadline) throw new Error("connection cooldown did not expire");
+      await Bun.sleep(10);
+    }
     db.run("DELETE FROM reconnect_probe");
     const insert = db.query("INSERT INTO reconnect_probe (id) VALUES (?)");
     db.transaction(() => {

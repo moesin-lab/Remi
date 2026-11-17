@@ -1,3 +1,4 @@
+import { acquireTransactionLock } from '../request-read-cache.js';
 import type { MessageHeader, SendMessageInput, SendMessageResult, UnifiedMessage } from '@multiremi/contracts/unified-model.js';
 import { isHistoricalIssueQuestionRecord } from '@multiremi/contracts';
 import type { CreateTaskInput } from '@multiremi/contracts/types.js';
@@ -148,7 +149,8 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
   authorizeConversation?.(sessionId,targetAgent);
   // Serializing before dedupe makes a repeated message an idempotent result across PG instances.
   const table=originalSession||sessionId.startsWith('ises_')?'multiremi_issue_sessions':originalChat?'multiremi_chat_sessions':null;
-  if(table)ctx.db.run(`UPDATE ${table} SET updated_at=updated_at WHERE id=?`,[sessionId]);
+  if(table)acquireTransactionLock(ctx.db, `${table==='multiremi_issue_sessions'?'session':'chat'}:${sessionId}`,
+    () => { ctx.db.run(`UPDATE ${table} SET updated_at=updated_at WHERE id=?`,[sessionId]); });
   if(!ctx.conversationLog().getConversationLogHead(sessionId))ctx.conversationLog().ensureConversationLogHead(sessionId,{bodyMd:''});
   ctx.db.run('UPDATE multiremi_conversation_heads SET workspace_id=COALESCE(workspace_id,?),updated_at=updated_at WHERE session_id=?',[workspaceId,sessionId]);
   const duplicate=input.dedupe_key?ctx.db.query('SELECT id FROM multiremi_conversation_log WHERE session_id=? AND dedupe_key=?').get(sessionId,input.dedupe_key):null;

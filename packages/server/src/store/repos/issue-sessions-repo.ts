@@ -1,4 +1,4 @@
-import { memoizeRequestRead } from "../request-read-cache.js";
+import { acquireTransactionLock, memoizeRequestRead } from "../request-read-cache.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Issue sessions domain (sessions, participants, session events, agent lanes and published
 // results), extracted verbatim from MultiremiStore (the facade delegates every public method here).
@@ -1103,7 +1103,9 @@ export class IssueSessionsRepo {
     if (!initial) throw new Error(`Session not found: ${sessionId}`);
     if (lockWorkspace) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
 
-    this.ctx.db.run("UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?", [sessionId]);
+    acquireTransactionLock(this.ctx.db, `session:${sessionId}`, () => {
+      this.ctx.db.run("UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?", [sessionId]);
+    });
     const current = this.getIssueSession(sessionId);
     if (!current) throw new Error(`Session not found: ${sessionId}`);
     if (current.ownerType !== initial.ownerType || current.ownerId !== initial.ownerId

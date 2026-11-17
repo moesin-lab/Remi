@@ -25,7 +25,7 @@ import { chatAttachmentValidationError } from "@multiremi/contracts/attachments.
 import { createId, nowIso } from "@multiremi/ids.js";
 import { advancesFeishuPresentation, parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
 import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
-import { activeRequestReadCache, cacheKey } from "@multiremi/store/request-read-cache.js";
+import { memoizeRequestRead, activeRequestReadCache, cacheKey } from "@multiremi/store/request-read-cache.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
 import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
 import { advisoryXactLock, afterCommit } from "@multiremi/store/db/postgres.js";
@@ -431,9 +431,9 @@ export class FeishuBotRepo {
   }
 
   getConfig(workspaceId: string): MultiremiFeishuBotConfig | null {
-    const row = this.ctx.db
-      .query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?")
-      .get(workspaceId, this.botId) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_feishu_bot_configs'], `bot-config:${workspaceId}:${this.botId}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?")
+        .get(workspaceId, this.botId) as Row | null);
     return row ? mapConfig(row) : null;
   }
 
@@ -4473,9 +4473,9 @@ export class FeishuBotRepo {
     const key = cacheKey("multiremi_feishu_bot_configs", "workspace", workspaceId, this.botId);
     const cached = cache?.get<Row | null>(key);
     if (cached !== undefined) return cached;
-    const row = this.ctx.db
-      .query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?")
-      .get(workspaceId, this.botId) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_feishu_bot_configs'], `bot-config:${workspaceId}:${this.botId}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?")
+        .get(workspaceId, this.botId) as Row | null);
     cache?.set(key, row);
     return row;
   }

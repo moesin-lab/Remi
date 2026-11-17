@@ -10,6 +10,7 @@ export function taskInputSnapshot(store: MultiremiStore, runtimeId: string, daem
     statuses: ["dispatched", "running", "waiting_local_directory", "awaiting_human"] })) ids.add(task.id);
   const host = store.getRuntimeLite(runtimeId);
   const entities: DaemonDownlinkEntity[] = [];
+  const liveIds = new Set<string>();
   for (const id of ids) {
     const task = store.getTaskIdentity(id);
     if (!task || task.runtimeId !== runtimeId) { forget(id); continue; }
@@ -18,9 +19,12 @@ export function taskInputSnapshot(store: MultiremiStore, runtimeId: string, daem
         payload: { task_id: id, status: task.status }, claimed: () => forget(id), discard: () => forget(id) });
       continue;
     }
+    liveIds.add(id);
   }
-  if (host) {
-    const snapshot = turns.snapshot({ runtimeId, daemonId, workspaceId: host.workspaceId ?? "local" }, ids);
+  // Terminal attempts already have their cancellation downlink. They cannot
+  // contribute unread input, and must not be authorized again as live turns.
+  if (host && liveIds.size) {
+    const snapshot = turns.snapshot({ runtimeId, daemonId, workspaceId: host.workspaceId ?? "local" }, liveIds);
     const messageIds=snapshot.messages.map(input=>input.message.id);
     const attachments = store.listAttachmentsForComments(messageIds);
     const chatAttachments=store.listAttachmentsForChatMessages(messageIds);

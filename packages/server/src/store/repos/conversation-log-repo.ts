@@ -1,3 +1,4 @@
+import { memoizeRequestRead } from '../request-read-cache.js';
 import { attemptInputState } from '../inbox/attempt-input.js';
 import { lockLane } from '../inbox/lane-machine.js';
 import { sendMessageWithinTransaction } from '../inbox/send-message.js';
@@ -340,14 +341,6 @@ export class ConversationLogRepo {
   static readonly HEAD_SEQ = 0;
 
   private ensureCounterWithinTransaction(sessionId: string, at: string, seq = 0): void {
-    // Acquire the writer lock before reading legacy rows. SQLite's deferred
-    // transaction otherwise cannot upgrade a concurrent read to a write.
-    this.ctx.db.run(
-      `INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, updated_at)
-       VALUES (?, 0, 0, ?)
-       ON CONFLICT(session_id) DO NOTHING`,
-      [sessionId, at],
-    );
     const initialSeq = Math.max(seq, 0);
     this.ctx.db.run(
       `INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, updated_at)
@@ -548,14 +541,15 @@ export class ConversationLogRepo {
    * processes on both backends; the row is created if the session is new.
    */
   nextSeqWithinTransaction(sessionId: string): number {
-    this.ensureCounterWithinTransaction(sessionId, nowIso());
-    const row = this.ctx.db.query(
-      `UPDATE multiremi_conversation_heads
-       SET head_seq = head_seq + 1, log_version = log_version + 1, updated_at = ?
-       WHERE session_id = ?
-       RETURNING head_seq`,
-    ).get(nowIso(), sessionId) as { head_seq?: number } | null;
-    if (!row) throw new Error(`Conversation head not found: ${sessionId}`);
+    // The upsert both creates the counter and serializes its increment. Preserve
+    // one log-version bump for each append, including a brand-new conversation.
+    const row = this.ctx.db.query(`INSERT INTO multiremi_conversation_heads
+      (session_id, head_seq, log_version, updated_at) VALUES (?, 1, 1, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        head_seq = multiremi_conversation_heads.head_seq + 1,
+        log_version = multiremi_conversation_heads.log_version + 1,
+        updated_at = excluded.updated_at
+      RETURNING head_seq`).get(sessionId, nowIso()) as { head_seq: number };
     return Number(row.head_seq);
   }
 
@@ -576,7 +570,9 @@ export class ConversationLogRepo {
     logVersion: number;
     updatedAt: string;
   } | null {
-    const row = this.runQuery(query, CONVERSATION_LOG_HEAD_SQL, [sessionId]).get() as Row | null;
+    const row = query ? this.runQuery(query, CONVERSATION_LOG_HEAD_SQL, [sessionId]).get() as Row | null
+      : memoizeRequestRead(this.ctx.db, ['multiremi_conversation_heads'], `log-head:${sessionId}`,
+        () => this.ctx.db.query(CONVERSATION_LOG_HEAD_SQL).get(sessionId) as Row | null);
     if (!row) return null;
     return {
       sessionId: String(row.session_id),

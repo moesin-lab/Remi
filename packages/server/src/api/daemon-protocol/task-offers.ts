@@ -86,20 +86,13 @@ export class DaemonTaskOffers {
     prepare(task: MultiremiTaskWithAgent, supportsWikiFetch?: boolean): Promise<Record<string, unknown> | null>;
     clock?: DaemonProtocolClock;
     sweepMs?: number;
+    autostart?: boolean;
     onRuntimeReady?(runtimeId: string, activeTaskIds: string[]): void;
   }) {
     this.clock = options.clock ?? systemClock;
+    this.stopped = options.autostart === false;
     options.layer.registerSessionHooks({
-      stop: () => {
-        this.stopped = true;
-        if (this.sweepTimer !== null) this.clock.clearTimeout(this.sweepTimer);
-        for (const timer of this.retryTimers.values()) this.clock.clearTimeout(timer);
-        this.retryTimers.clear();
-        for (const pump of this.pumps.values()) {
-          if (pump.cooldownTimer !== null) this.clock.clearTimeout(pump.cooldownTimer);
-          if (pump.pending) this.clock.clearTimeout(pump.pending.timer);
-        }
-      },
+      stop: () => { void this.stop(); },
       hello: (session, hello) => {
         for (const rt of session.runtimeIds) {
           options.store.reconcileQuestionWaits(rt, hello.runtimes.find(r => r.runtimeId === rt)?.activeQuestionWaits ?? []);
@@ -132,10 +125,16 @@ export class DaemonTaskOffers {
     options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.ready(frame, session));
     // Dispatch is driven by queue/capacity/configuration events and explicit deadlines.
     // Keep a low-frequency safety net for missed events; recoveries expose missing wiring.
-    const sweepMs = options.sweepMs ?? (process.env.NODE_ENV === "test" ? 2_147_483_647 : DAEMON_OFFER_SWEEP_MS);
+    if (options.autostart !== false) this.start();
+  }
+
+  start(): void {
+    if (this.sweepTimer !== null) return;
+    this.stopped = false;
+    const sweepMs = this.options.sweepMs ?? (process.env.NODE_ENV === "test" ? 2_147_483_647 : DAEMON_OFFER_SWEEP_MS);
     const sweep = () => {
       if (this.stopped) return;
-      for (const session of options.layer.registry.listSessions()) {
+      for (const session of this.options.layer.registry.listSessions()) {
         for (const rt of session.runtimeIds) this.kick(rt, true);
       }
       this.sweepTimer = this.clock.setTimeout(sweep, sweepMs);
@@ -143,6 +142,22 @@ export class DaemonTaskOffers {
     };
     this.sweepTimer = this.clock.setTimeout(sweep, sweepMs);
     (this.sweepTimer as ReturnType<typeof setTimeout>).unref?.();
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    if (this.sweepTimer !== null) this.clock.clearTimeout(this.sweepTimer);
+    this.sweepTimer = null;
+    for (const timer of this.retryTimers.values()) this.clock.clearTimeout(timer);
+    this.retryTimers.clear();
+    const pumps = [...this.pumps.values()];
+    for (const pump of pumps) {
+      if (pump.cooldownTimer !== null) this.clock.clearTimeout(pump.cooldownTimer);
+      if (pump.pending) this.clock.clearTimeout(pump.pending.timer);
+    }
+    await Promise.all(pumps.map(pump => pump.running));
+    this.pumps.clear();
+    this.heartbeatCounts.clear();
   }
 
   kick(runtimeId?: string | null, sweep = false): void {
@@ -165,7 +180,7 @@ export class DaemonTaskOffers {
         await withDatabaseTimeout(5_000, () => withDbJob("daemon.offer", () => this.run(runtimeId, pump, fromSweep)));
         pump.databaseFailures = 0;
         pump.databaseWarningAt = undefined;
-      } while (pump.dirty && !pump.waiting && !pump.pending && this.clock.now() >= pump.cooldownUntil);
+      } while (!this.stopped && pump.dirty && !pump.waiting && !pump.pending && this.clock.now() >= pump.cooldownUntil);
     }).catch(error => {
       if (!isDatabaseConnectionError(error)) {
         console.error("daemon offer failed", error);

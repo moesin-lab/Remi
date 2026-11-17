@@ -31,7 +31,7 @@ async function until(predicate: () => boolean) {
     await Bun.sleep(5);
   }
 }
-async function setup({ store }: PendingTurnTestFixture, delegated = false, underParentLeader = false) {
+async function setup({ store, db }: PendingTurnTestFixture, delegated = false, underParentLeader = false) {
   const rt = "rt_decision_callback", daemonId = "daemon_decision_callback";
   store.registerRuntime({ id: rt, daemonId, name: rt, provider: "claude", workspaceId: "local", metadata: { parallel_agent_execution: 1 } });
   const agent = store.createAgent({ name: "Callback", provider: "claude", runtimeId: rt });
@@ -61,7 +61,7 @@ async function setup({ store }: PendingTurnTestFixture, delegated = false, under
   const attempt = store.getTaskWithAgent(claimed.id)!;
   const offer = store.getDaemonTurnBridge().offerInput(attempt);
   store.recordSessionAgentRangeRead(session.id, agent.id, { seq: 1, offset: 0 }, { seq: offer.input_to_seq + 1, offset: 0 }, attempt.id);
-  const server = startMultiremiServer({ store, hostname: "127.0.0.1", port: 0, authToken: "callback-fixture" });
+  let server = startMultiremiServer({ store, hostname: "127.0.0.1", port: 0, authToken: "callback-fixture" });
   const frames: Array<Record<string, any>> = [];
   const client = new DaemonProtocolClient({ serverUrl: `http://127.0.0.1:${server.port}`, token: "callback-fixture",
     daemonId, cliVersion: DAEMON_MIN_CLI_VERSION, onFrame: f => { frames.push(f.raw); } });
@@ -91,7 +91,7 @@ async function setup({ store }: PendingTurnTestFixture, delegated = false, under
   await inbox.consumeTaskSteerMessages(attempt.id, offer.input_messages.map(m => m.id));
   expect(store.getTurn(offer.turn_id)?.input_to_seq).toBe(offer.input_to_seq);
   const { token } = await store.createTaskAccessToken(attempt, "local");
-  return { store, rt, agent, parentLeader, issue, session, attempt, offer, dispatch, send, frames, inbox, feed, permission, question, client, lane,
+  return { store, db, rt, agent, parentLeader, issue, session, attempt, offer, dispatch, send, frames, inbox, feed, permission, question, client, lane,
     serverUrl: `http://127.0.0.1:${server.port}`,
     /** Expire the pending decision, then end the daemon's local wait as task cancellation
      * does instead of sleeping out humanRequestTimeoutMs. The real timeout path is covered
@@ -111,6 +111,22 @@ async function setup({ store }: PendingTurnTestFixture, delegated = false, under
     async decision() {
       await until(() => store.getTurn(offer.turn_id)?.status === "awaiting_human");
       return store.getMessage(store.getTurn(offer.turn_id)!.waiting_on_message_id!)!;
+    },
+    async replyFromTask(body_md: string) {
+      const response = await fetch(`http://127.0.0.1:${server.port}/api/sessions/${session.id}/messages`, {
+        method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ body_md, message_kind: "reply", wake_requested: "inbox_only", to: { type: "none" } }),
+      });
+      expect(response.status).toBe(200);
+      return await response.json() as { message: { id: string; seq: number } };
+    },
+    async restartApi(whileDisconnected?: () => void) {
+      const port = server.port;
+      server.stop(true);
+      await until(() => client.connectionState() !== "connected");
+      whileDisconnected?.();
+      server = startMultiremiServer({ store, hostname: "127.0.0.1", port, authToken: "callback-fixture" });
+      await until(() => client.connectionState() === "connected");
     },
     async close() { feed.stop(); client.stopLane(lane); await client.drain(); server.stop(true); },
   };
@@ -140,6 +156,53 @@ pendingTurnBackendTests("decision callbacks over Store and native WS", fixture =
       expect(h.inbox.pendingTaskSteerMessages(h.attempt.id)).toEqual([]);
     } finally { await h.close(); }
   });
+  for (const readFirst of [false, true]) it(`MUL-178 reconciles steer input after the API socket layer restarts (read first: ${readFirst})`, async () => {
+    const h = await setup(fixture());
+    try {
+      const before = h.send("Steer before the API restart");
+      await until(() => h.inbox.pendingTaskSteerMessages(h.attempt.id).some(m => m.id === before.message.id));
+      // Inline steer is acknowledged before reconnect. Its read receipt must
+      // also cover this input so the next range can start at the offered cursor.
+      await h.inbox.consumeTaskSteerMessages(h.attempt.id, [before.message.id]);
+      await h.restartApi();
+      h.send("Ordinary context while the turn runs", "next_turn");
+      const after = h.send("Steer after reconnect");
+      await until(() => h.inbox.pendingTaskSteerMessages(h.attempt.id).some(m => m.id === after.message.id));
+      if (readFirst) await h.readRange(before.message.seq, after.message.seq);
+      await h.inbox.consumeTaskSteerMessages(h.attempt.id, [after.message.id]);
+      if (!readFirst) {
+        const hints = h.inbox.pendingTaskSteerMessages(h.attempt.id);
+        expect(hints.some(m => m.id.startsWith("input_resync:"))).toBe(true);
+        await h.readRange(before.message.seq, after.message.seq);
+        await h.inbox.consumeTaskSteerMessages(h.attempt.id, hints.map(m => m.id));
+      }
+      expect(h.store.getTurn(h.offer.turn_id)).toMatchObject({ status: "running", current_attempt_id: h.attempt.id, input_to_seq: after.message.seq });
+      expect(h.inbox.pendingTaskSteerMessages(h.attempt.id)).toEqual([]);
+    } finally { await h.close(); }
+  }, 30_000);
+  for (const restart of [false, true]) it(`MUL-178 consumes a later steer after a task-authored reply without resync (restart: ${restart})`, async () => {
+    const h = await setup(fixture());
+    try {
+      const before = h.send("Steer before the task's reply");
+      await until(() => h.inbox.pendingTaskSteerMessages(h.attempt.id).some(m => m.id === before.message.id));
+      const own = await h.replyFromTask("Work result before completion");
+      await h.inbox.consumeTaskSteerMessages(h.attempt.id, [before.message.id]);
+      let late: ReturnType<typeof h.send> | undefined;
+      const sendLate = () => { late = h.send("A late steer blocks completion"); };
+      if (restart) await h.restartApi(sendLate);
+      else sendLate();
+      const after = late!;
+      await until(() => h.inbox.pendingTaskSteerMessages(h.attempt.id).some(m => m.id === after.message.id));
+      await expect(h.inbox.rpc("turn.complete", { ...h.inbox.turnInput(h.attempt.id),
+        reply: { body_md: "Final result", message_kind: "final" } })).rejects.toMatchObject({ code: "turn_input_pending" });
+      await h.inbox.consumeTaskSteerMessages(h.attempt.id, [after.message.id]);
+      expect(h.inbox.pendingTaskSteerMessages(h.attempt.id)).toEqual([]);
+      expect(h.db.query('SELECT input_ack_seq,input_read_seq,input_read_offset,projection_to_seq FROM multiremi_turn_attempts WHERE id=?').get(h.attempt.id))
+        .toMatchObject({ input_ack_seq: after.message.seq, input_read_seq: after.message.seq, input_read_offset: 0, projection_to_seq: after.message.seq });
+      expect(own.message.seq).toBeGreaterThan(before.message.seq);
+      expect(h.store.getTurn(h.offer.turn_id)).toMatchObject({ status: "running", input_to_seq: after.message.seq });
+    } finally { await h.close(); }
+  }, 30_000);
   it('MUL-40 keeps a running provider alive when a delegated child returns', async () => {
     const h = await setup(fixture());
     try {

@@ -71,6 +71,8 @@ function scaffold(db: SqlDatabase) {
   const receiptReads = () => reads.filter((read) => read.sql.startsWith(
     "SELECT 1 AS present FROM multiremi_turns"));
   const request = async (query: string) => {
+    // Measure business reads with a warm readiness cache (cold cost has its own regression).
+    store.checkDatabaseReady(true);
     reads.length = 0;
     return app.request(`/api/sessions/${session.id}/log/entry?${query}`,
       { headers: { Authorization: `Bearer ${AUTH_TOKEN}` } });

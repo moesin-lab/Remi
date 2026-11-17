@@ -46,21 +46,25 @@ function execute(command, args, options = {}) {
     const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === 'path') || 'Path';
     environment[pathKey] = `${helpers}${delimiter}${environment[pathKey] || ''}`;
   }
-  const { preserveWhitespace = false, environmentOverrides = {}, redact = [], ...spawnOptions } = options;
+  const { preserveWhitespace = false, environmentOverrides = {}, redact = [], detectPortBinding = false, ...spawnOptions } = options;
   Object.assign(environment, environmentOverrides);
   let result;
-  if (redact.length) {
+  if (redact.length || detectPortBinding) {
     const secrets = [...redact, ...['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'].map((key) => process.env[key]).filter(Boolean)];
     for (const value of [...secrets]) {
       try { const url = new URL(value); secrets.push(url.username, url.password, decodeURIComponent(url.username), decodeURIComponent(url.password)); } catch {}
     }
     result = spawnSync(process.execPath, [join(repository, 'scripts/proxy-command.mjs'), '--run'], {
       cwd: repository, env: environment, windowsHide: true, stdio: ['pipe', 'inherit', 'inherit'],
-      input: JSON.stringify({ command, args, input: spawnOptions.input, secrets, cwd: repository }),
+      input: JSON.stringify({ command, args, input: spawnOptions.input, secrets, cwd: repository, detectPortBinding }),
     });
   } else result = spawnSync(command, args, { cwd: repository, env: environment, stdio: 'inherit', windowsHide: true, ...spawnOptions });
   if (result.error) throw new Error(redact.length ? 'Docker runtime proxy command could not start' : result.error.message);
-  if (result.status !== 0) throw new Error(`${command} ${args[0] || ''} failed (${result.status})`);
+  if (result.status !== 0) {
+    const error = new Error(`${command} ${args[0] || ''} failed (${result.status})`);
+    error.portBinding = detectPortBinding && result.status === 98;
+    throw error;
+  }
   return typeof result.stdout === 'string' && !preserveWhitespace ? result.stdout.trim() : result.stdout;
 }
 
@@ -172,18 +176,34 @@ function compose(root, ...args) {
     extra_hosts: ['host.docker.internal:host-gateway'],
   } } } : { services: {} };
   const invoke = () => {
-    if (!Object.keys(override.services).length) return execute('docker', command);
-    command.splice(command.indexOf(args[0]), 0, '-f', '-');
-    const options = { input: JSON.stringify(override), stdio: ['pipe', 'inherit', 'inherit'] };
+    const hasOverride = Object.keys(override.services).length > 0;
+    const invocation = [...command];
+    if (hasOverride) invocation.splice(invocation.indexOf(args[0]), 0, '-f', '-');
+    const options = { detectPortBinding: args[0] === 'up' };
+    if (hasOverride) Object.assign(options, { input: JSON.stringify(override), stdio: ['pipe', 'inherit', 'inherit'] });
     if (runtime) options.environmentOverrides = Object.fromEntries(Object.entries(runtimeProxy).map(([key, value]) => ['REMI_RUNTIME_' + key.toUpperCase(), value]));
     if (runtimeProxy) {
       // Stream diagnostics through a separate redactor without a finite
       // spawnSync output buffer, including for long-running watch sessions.
       options.redact = Object.values(runtimeProxy);
     }
-    return execute('docker', command, options);
+    return execute('docker', invocation, options);
   };
-  if (!builds) return invoke();
+  const start = () => {
+    const delays = [1000, 2000, 4000];
+    for (let attempt = 0; ; attempt++) {
+      try { return invoke(); }
+      catch (error) {
+        if (!error.portBinding) throw error;
+        if (attempt === delays.length) {
+          throw new Error('Compose up failed: port binding conflict persisted after 3 retries; check the port owner and retry. Data volumes were retained.');
+        }
+        console.error(`Compose up hit a port binding conflict; retrying in ${delays[attempt] / 1000}s (${attempt + 1}/${delays.length}).`);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delays[attempt]);
+      }
+    }
+  };
+  if (!builds) return start();
 
   // Null Compose build args inherit the environment without putting credentials
   // in argv, profile files, or the override. Keep Docker's predefined proxy args
@@ -205,11 +225,11 @@ function compose(root, ...args) {
     } catch { throw new Error(`Invalid proxy URL in ${key}`); }
   });
   if (!network && loopback && process.platform === 'linux') network = 'host';
-  if (!keys.length && !network) return invoke();
+  if (!keys.length && !network) return start();
   const build = { ...(keys.length ? { args: Object.fromEntries(keys.map((key) => [key, null])) } : {}), ...(network ? { network } : {}) };
   override.services.api = { ...override.services.api, build };
   override.services.web = { build };
-  return invoke();
+  return start();
 }
 
 function writeComposeEnvironment(root, deployment) {
@@ -1117,7 +1137,8 @@ async function main() {
     }
     try { compose(root, 'up', '-d', '--wait', '--wait-timeout', '240'); }
     catch (error) {
-      console.error(saved ? `Restore the matching data and configuration from ${saved} before rolling code back.` : 'Start failed; data volumes were retained.');
+      console.error('Start failed; data volumes were retained. Check API migration logs before deciding how to roll back.');
+      if (saved) console.error(`Pre-deploy backup: ${saved}. Startup failure alone does not establish that migrations ran.`);
       throw error;
     }
     saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));

@@ -2,6 +2,10 @@
 
 基线：`87fd55c0f`。测试数据库为本地 SQLite；这些数字是 SQL 执行次数，不是生产 PostgreSQL 延迟或线上验收结论。
 
+## 本轮范围与后续
+
+按 MUL-182 本轮范围调整，turn.complete 406/406 与 task.fail 240/240 的终态小预算缺口由 **MUL-191** 跟进，基于本分支叠加开发。本 PR 保留现有预算断言，不将这两个数字作为小预算已达标的证据。MUL-182 的本轮交付聚焦 workspace、outbound_result、usage 与消息读取；stable 现场验收由负责人在合并、部署后安排。
+
 ## 复现和结果
 
 同一份 `tests/unit/multiremi/daemon-report-query-budget.test.ts` 分别在隔离的基线 worktree 和修复工作树实跑。统计 query/prepare/run/exec 的实际执行，包括 WITH 与写语句，并等待 `DaemonProtocolLayer.drain()`，计入排队的下行和 offer。SQLite 的 query 内部调用 prepare，探针去重，避免重复计数。

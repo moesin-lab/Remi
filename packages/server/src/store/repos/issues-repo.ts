@@ -6643,7 +6643,7 @@ function assigneeCommentPrompt(_comment: MultiremiIssueComment): string {
 /**
  * MUL-400 E2 system comment. The old body told the parent owner to read every
  * sibling description and promote backlog items by hand; dependency-declared
- * children start themselves (S2), so this notification only asks for a review.
+ * children start themselves (S2). Closure follows the session instructions.
  */
 function childStatusSystemCommentBody(input: {
   mentionPrefix: string;
@@ -6660,7 +6660,7 @@ function childStatusSystemCommentBody(input: {
   return [
     `${input.mentionPrefix}Sub-issue [${input.childKey}](mention://issue/${input.childId}) - "${title}" - ${verb}.`,
     `Its status is now ${input.childStatus}; a platform round was queued for the owner of this issue.`,
-    "Children whose dependencies are declared as `blocked_by` are promoted automatically, so this report only needs a review of the outcome.",
+    "Children whose dependencies are declared as `blocked_by` are promoted automatically. Review this report and follow the Issue Execution and Escalation rules in your session instructions before closing the child.",
     ...(input.readinessLines?.length
       ? [`Dependencies satisfied: ${input.readinessLines.join(" ")}`]
       : []),

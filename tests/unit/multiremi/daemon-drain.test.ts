@@ -214,6 +214,29 @@ describe("daemon drain", () => {
     expect(store.heartbeatRuntime("rt_a").pending_update).toMatchObject({ id: update.id, drain_deadline: "2026-11-17T02:05:00.000Z" });
   });
 
+  for (const reason of ["manual", "deploy"] as const) it(`omits an expired ${reason} deadline from an HTTP upgrade claim`, async () => {
+    const { store } = fixture();
+    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION })]);
+    ack(store, 0);
+    const original = store.beginDaemonDrain("local", "machine-a", reason, 60_000);
+    advance(600_000);
+    ack(store, 0);
+    const update = store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" });
+    const snapshot = runtimeInputSnapshot(store, "rt_a").find(input => input.type === "runtime.update")!;
+    expect(snapshot.payload.id).toBe(update.id);
+    expect(snapshot.payload).not.toHaveProperty("drain_deadline");
+    const app = createMultiremiApp({ store, authToken: "test-root" });
+    const response = await app.request("/api/daemon/heartbeat", { method: "POST",
+      headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" },
+      body: JSON.stringify({ runtime_id: "rt_a", drain_ack_generation: 0, active_task_count: 0 }) });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.pending_update).toMatchObject({ id: update.id, scope: "cli", target_version: "0.2.96" });
+    expect(body.pending_update).not.toHaveProperty("drain_deadline");
+    expect(store.getRuntimeUpdateRequest("rt_a", update.id)?.status).toBe("running");
+    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ reason, deadline: original.deadline });
+  });
+
   for (const reason of ["manual", "deploy"] as const) it(`preserves an existing ${reason} drain after a failed update`, () => {
     const { store } = fixture();
     const original = store.beginDaemonDrain("local", "machine-a", reason);

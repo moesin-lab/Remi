@@ -1,5 +1,6 @@
-import { afterEach, expect, spyOn, test } from 'bun:test';
+import { afterEach, expect, test } from 'bun:test';
 import { UpstreamSocket } from '../../../packages/edge/src/websocket';
+import { Hono } from 'hono';
 import { Edge } from '../../../packages/edge/src/index';
 import { connect } from 'node:net';
 import { statSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
@@ -346,10 +347,10 @@ test('rejected upgrade body streams and remains in flight until drained', async 
   expect(await body).toBe('protocol:upgrade required'); await until(() => drained);
 });
 
-async function regressionProcess(url: string) {
-  type Report = { baseline: number; peak: number; status: ReturnType<Edge['status']> };
+async function regressionProcess(url: string, wsStallTimeoutMs = 30000) {
+  type Report = { baseline: number; peak: number; closeCalls: { code: number; reason: string }[]; relayTimers: number; activeRelays: number; status: ReturnType<Edge['status']> };
   let receive: ((data: Report) => void) | undefined;
-  const child = Bun.spawn([process.execPath, 'tests/helpers/edge/regression-process.ts', url], {
+  const child = Bun.spawn([process.execPath, 'tests/helpers/edge/regression-process.ts', url, String(wsStallTimeoutMs)], {
     stdout: 'pipe', stderr: 'inherit', ipc(data) { receive?.(data as Report); },
   });
   cleanups.push(async () => { child.send('stop'); await child.exited; });
@@ -396,7 +397,14 @@ test('isolated edge rejects nested encoded private paths for HTTP and WS', async
   let attempts = 0;
   const b = backend(() => { attempts++; return new Response('must not reach backend'); });
   const child = await regressionProcess(b.url.href);
-  for (const path of ['/internal/%252e%252e/api', '/internal/%2e%2e%2fapi', '/internal/%25252E%25252e%255capi', '/internal/%25%32%65%25%32%65%252fapi']) {
+  for (const path of [
+    '/internal', '/internal/x', '/internal/%252e%252e/api', '/internal/%2e%2e%2fapi',
+    '/internal/%25252E%25252e%255capi', '/internal/%25%32%65%25%32%65%252fapi',
+    '/%69nternal/x', '/%2569nternal/x', '/internal%2Fx', '/internal%5Cx',
+    '/%2Finternal//x', '/%255Cinternal%255Cx', '/api/%2e%2e%2finternal/x',
+    '/api/%252e%252E%255Cinternal/x', '/api%2f.%2f..%2finternal/x',
+    '/' + '%'.concat('25'.repeat(20), '69nternal/x'),
+  ]) {
     for (const upgrade of [false, true]) {
       const response = await fetch(child.url.replace(/\/$/, '') + path, { headers: upgrade ? {
         connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
@@ -405,6 +413,26 @@ test('isolated edge rejects nested encoded private paths for HTTP and WS', async
     }
   }
   expect(attempts).toBe(0);
+});
+
+test('isolated edge preserves public encoded paths and literal percent signs for HTTP and Upgrade', async () => {
+  let attempts = 0;
+  const app = new Hono();
+  app.all('*', c => { attempts++; return c.json({ path: new URL(c.req.url).pathname, query: new URL(c.req.url).search }); });
+  const b = backend(req => app.fetch(req));
+  const child = await regressionProcess(b.url.href);
+  for (const path of ['/api/name%2Etxt', '/api/a%2Fb', '/api/100%25', '/api/a%5Cb',
+    '/api/%ZZ', '/api/a%252Fb', '/api/' + '%'.concat('25'.repeat(20), '2Etxt')]) {
+    for (const upgrade of [false, true]) {
+      const headers: HeadersInit = upgrade ? { connection: 'Upgrade', upgrade: 'websocket',
+        'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } : {};
+      const direct = await fetch(b.url.origin + path + '?keep=%2F', { headers });
+      const proxied = await fetch(new URL(child.url).origin + path + '?keep=%2F', { headers });
+      expect(direct.status).toBe(200); expect(proxied.status).toBe(200);
+      expect(await proxied.text()).toBe(await direct.text());
+    }
+  }
+  expect(attempts).toBe(28);
 });
 
 test('isolated edge relays an immediate Bun backend WS close after 101', async () => {
@@ -427,8 +455,8 @@ test('isolated edge relays an immediate Bun backend WS close after 101', async (
   expect(status.metrics.wsRelays).toBe(2);
 });
 
-test('WS streams 64 x 1 MiB to a slow steady TCP reader without hanging', async () => {
-  const count = 64; const size = 1024 * 1024;
+test.each([[64, 4 * 1024 * 1024], [64, 1024 * 1024], [192, 512 * 1024]])(
+  'isolated WS streams %i x %i bytes to a slow steady TCP reader without hanging', async (count, size) => {
   const b = Bun.serve({ port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
     maxPayloadLength: 4 * 1024 * 1024, backpressureLimit: 4 * 1024 * 1024, closeOnBackpressureLimit: false,
     message(ws) {
@@ -441,9 +469,9 @@ test('WS streams 64 x 1 MiB to a slow steady TCP reader without hanging', async 
     },
   } });
   cleanups.push(() => { void b.stop(true); });
-  const e = edge({ wsStallTimeoutMs: 500, backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
+  const child = await regressionProcess(b.url.href, 1500);
   await new Promise<void>((resolve, reject) => {
-    const socket = connect(Number(e.server.port), '127.0.0.1'); cleanups.push(() => socket.destroy());
+    const socket = connect(Number(new URL(child.url).port), '127.0.0.1'); cleanups.push(() => socket.destroy());
     let head = Buffer.alloc(0); let upgraded = false; let frameHeader = Buffer.alloc(0);
     let remaining = 0; let received = 0; let resume: ReturnType<typeof setTimeout>;
     cleanups.push(() => clearTimeout(resume));
@@ -478,8 +506,16 @@ test('WS streams 64 x 1 MiB to a slow steady TCP reader without hanging', async 
       } catch (error) { reject(error); }
     });
   });
-  expect(e.status().metrics.upstreamErrors).toBe(0);
-}, 20000);
+  for (let i = 0; i < 200; i++) {
+    const report = await child.query('report');
+    if (!report.activeRelays) {
+      expect(report.relayTimers).toBe(0); expect(report.status.metrics.upstreamErrors).toBe(0);
+      return;
+    }
+    await sleep(5);
+  }
+  throw new Error('Relay or congestion timer leaked after client close');
+}, 30000);
 
 test('standalone edge rejects an empty EDGE_PORT instead of binding an ephemeral port', async () => {
   for (const port of ['', '   ']) {
@@ -509,7 +545,7 @@ test('bodyless POST uses a fresh upstream connection and avoids stale keep-alive
   expect(e.status().backends[0].failures).toBe(0); expect(e.status().metrics.upstreamErrors).toBe(0);
 });
 
-test('WS stalled TCP reader closes with 1013 within a bounded time and queue', async () => {
+test('isolated WS stalled TCP reader closes with 1013 within a bounded time and clears timers', async () => {
   const size = 1024 * 1024;
   let sent = 0; let backendClose: { code: number; reason: string } | undefined;
   let producer: ReturnType<typeof setInterval> | undefined;
@@ -523,8 +559,8 @@ test('WS stalled TCP reader closes with 1013 within a bounded time and queue', a
     close(_ws, code, reason) { clearInterval(producer); backendClose = { code, reason }; },
   } });
   cleanups.push(() => { clearInterval(producer); void b.stop(true); });
-  const e = edge({ wsStallTimeoutMs: 250, backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
-  const socket = connect(Number(e.server.port), '127.0.0.1'); cleanups.push(() => socket.destroy());
+  const child = await regressionProcess(b.url.href, 250);
+  const socket = connect(Number(new URL(child.url).port), '127.0.0.1'); cleanups.push(() => socket.destroy());
   await new Promise<void>((resolve, reject) => {
     let head = '';
     socket.on('error', reject);
@@ -538,20 +574,16 @@ test('WS stalled TCP reader closes with 1013 within a bounded time and queue', a
       resolve();
     });
   });
-  // Observe the real Bun close call without replacing it: a peer that refuses
-  // all reads cannot be guaranteed delivery of the close frame before teardown.
-  const client = [...(e as unknown as { clients: Set<import('bun').ServerWebSocket<unknown>> }).clients][0];
-  const close = spyOn(client, 'close');
-  try {
-    await until(() => e.status().backends[0].websockets === 0);
-    expect(close).toHaveBeenCalledWith(1013, 'Downstream stalled');
-    await until(() => backendClose !== undefined);
-    socket.removeAllListeners('data');
-    const ended = new Promise<void>((resolve, reject) => { socket.once('end', resolve); socket.once('error', reject); });
-    socket.resume(); await ended;
-    // Bound admitted data even though the backend continuously produces messages.
-    expect(sent).toBeLessThan(64);
-    await sleep(100); const finalSent = sent; await sleep(100); expect(sent).toBe(finalSent);
-  } finally { close.mockRestore(); }
+  await until(() => backendClose !== undefined);
+  const report = await child.query('report');
+  expect(report.closeCalls).toContainEqual({ code: 1013, reason: 'Downstream stalled' });
+  expect(report.status.backends[0].websockets).toBe(0);
+  expect(report.activeRelays).toBe(0); expect(report.relayTimers).toBe(0);
+  socket.removeAllListeners('data');
+  const ended = new Promise<void>((resolve, reject) => { socket.once('end', resolve); socket.once('error', reject); });
+  socket.resume(); await ended;
+  // Close stops the producer even when it has buffered outgoing messages.
+  await sleep(100); const finalSent = sent; await sleep(100); expect(sent).toBe(finalSent);
+  expect((await child.query('report')).relayTimers).toBe(0);
 
 }, 5000);

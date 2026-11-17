@@ -1,12 +1,15 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { exchange, type TransportHandlers } from './http';
+import { connect } from 'node:net';
+import { exchange, type TransportHandlers, type TransportSocket } from './http';
 
 /** Minimal RFC 6455 client: no extensions, bounded messages and drain-driven writes.
  * Bun 1.3.14's client drops the close reason; encode the close frame explicitly.
  */
 export class UpstreamSocket {
   readyState = 0;
-  bufferedAmount = 0;
+  private queuedBytes = 0;
+  private networkBytes = () => 0;
+  get bufferedAmount() { return this.queuedBytes + this.networkBytes(); }
   protocol = '';
   binaryType = 'arraybuffer';
   onopen?: () => void;
@@ -15,7 +18,7 @@ export class UpstreamSocket {
   onerror?: () => void;
   onclose?: (event: { code: number; reason: string }) => void;
   onmessage?: (event: { data: string | ArrayBuffer }) => void;
-  private socket?: Bun.Socket<undefined>;
+  private socket?: TransportSocket;
   private responseHandlers?: TransportHandlers;
   private paused = false;
   private reading = false;
@@ -32,14 +35,29 @@ export class UpstreamSocket {
   constructor(url: URL, options: { headers: Record<string, string>; protocols: string[]; limit: number; rejection?: UpstreamSocket['rejection'] }) {
     this.rejection = options.rejection;
     this.options = options; this.url = new URL(url); this.url.protocol = 'http:';
-    void Bun.connect<undefined>({ hostname: url.hostname, port: Number(url.port || 80), socket: {
-      data: (_socket, bytes) => { if (this.responseHandlers) { this.responseHandlers.data(_socket, bytes); return; } try { this.read(Buffer.from(bytes), options); } catch { this.onerror?.(); this.close(1002, 'Invalid WebSocket frame'); } },
-      drain: () => this.flush(),
-      close: socket => { if (this.responseHandlers) this.responseHandlers.close(socket); else this.finish(1006, ''); },
-      error: (socket, error) => { if (this.responseHandlers) this.responseHandlers.error(socket, error); else { this.onerror?.(); this.finish(1006, ''); } },
-      connectError: () => { this.onerror?.(); this.finish(1006, ''); },
-    } }).then(socket => {
-      this.socket = socket;
+    // Node's stream adapter enforces read suspension even for data delivered in
+    // the same native read turn after pause(), unlike raw Bun.Socket callbacks.
+    const raw = connect({ host: url.hostname, port: Number(url.port || 80) });
+    let blocked = false;
+    const socket: TransportSocket = {
+      write(bytes) { if (blocked) return 0; blocked = !raw.write(bytes); return bytes.byteLength; },
+      pause() { raw.pause(); }, resume() { raw.resume(); },
+      end() { raw.end(); }, terminate() { raw.destroy(); },
+    };
+    this.socket = socket; this.networkBytes = () => raw.writableLength;
+    raw.on('data', chunk => {
+      const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+      if (this.responseHandlers) { this.responseHandlers.data(socket, bytes); return; }
+      try { this.read(bytes, options); } catch { this.onerror?.(); this.close(1002, 'Invalid WebSocket frame'); }
+    });
+    raw.on('drain', () => { blocked = false; this.flush(); this.responseHandlers?.drain(socket); });
+    raw.on('end', () => { if (this.responseHandlers) this.responseHandlers.close(socket); else this.finish(1006, ''); });
+    raw.on('close', () => { if (this.responseHandlers) this.responseHandlers.close(socket); else this.finish(1006, ''); });
+    raw.on('error', error => {
+      if (this.responseHandlers) this.responseHandlers.error(socket, error);
+      else { this.onerror?.(); this.finish(1006, ''); }
+    });
+    raw.once('connect', () => {
       if (this.readyState === 3) { socket.terminate(); return; }
       const headers = new Headers(options.headers);
       headers.set('host', url.host); headers.set('connection', 'Upgrade'); headers.set('upgrade', 'websocket');
@@ -48,7 +66,7 @@ export class UpstreamSocket {
       let head = `GET ${url.pathname}${url.search} HTTP/1.1\r\n`;
       for (const [name, value] of headers) head += `${name}: ${value}\r\n`;
       this.enqueue(Buffer.from(head + '\r\n'));
-    }, () => { this.onerror?.(); this.finish(1006, ''); });
+    });
   }
   pause() { this.paused = true; this.socket?.pause(); }
   resume() { this.paused = false; if (!this.reading) this.read(Buffer.alloc(0), this.options); if (!this.paused) this.socket?.resume(); }
@@ -127,13 +145,13 @@ export class UpstreamSocket {
     for (let i = 0; i < size; i++) frame[prefix + 4 + i] = payload[i] ^ mask[i % 4];
     this.enqueue(frame);
   }
-  private enqueue(frame: Buffer) { this.queue.push(frame); this.bufferedAmount += frame.length; this.flush(); }
+  private enqueue(frame: Buffer) { this.queue.push(frame); this.queuedBytes += frame.length; this.flush(); }
   private flush() {
     if (!this.socket || this.readyState === 3) return;
     while (this.queue.length) {
       const frame = this.queue[0]; const written = this.socket.write(frame);
       if (written < 0) { this.terminate(); return; }
-      this.bufferedAmount -= written;
+      this.queuedBytes -= written;
       if (written < frame.length) { this.queue[0] = frame.subarray(written); return; }
       this.queue.shift();
     }
@@ -149,7 +167,7 @@ export class UpstreamSocket {
   private finish(code: number, reason: string) {
     if (this.readyState === 3) return;
     this.readyState = 3; clearTimeout(this.timer); this.socket?.end();
-    this.queue = []; this.buffer = Buffer.alloc(0); this.fragments = []; this.bufferedAmount = 0;
+    this.queue = []; this.buffer = Buffer.alloc(0); this.fragments = []; this.queuedBytes = 0;
     this.onclose?.({ code, reason });
   }
   terminate() { this.socket?.terminate(); this.finish(1006, ''); }

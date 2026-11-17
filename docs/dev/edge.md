@@ -26,7 +26,7 @@ For embedding, import `startEdge` or `Edge` from
 `packages/edge/src/index.ts`. Pass `backends`, `hostname`, `port`, `controlSocket`,
 `holdMaxMs`, `maxWaiting`, `healthIntervalMs` (1000), `healthTimeoutMs` (1000),
 `failureThreshold` (3), `riseThreshold` (2), `responseHeaderTimeoutMs` (30000),
-`wsMaxMessageBytes` (4 MiB), `wsQueueLimit` (64 MiB upstream queue ceiling), `wsBufferLimit` (1 MiB downstream high-water mark),
+`wsMaxMessageBytes` (4 MiB), `wsQueueLimit` (64 MiB upstream write queue ceiling), `wsBufferLimit` (1 MiB downstream high-water mark),
 `wsStallTimeoutMs` (30000), and an optional `log`. Port and positive numeric limits are validated before listening.
 The HTTP listener has a 120-second idle timeout and a 128 MiB request body limit,
 matching the slot's Bun default. While awaiting admission, upload prefixes share
@@ -61,9 +61,13 @@ The optional Unix socket is created under umask 0177 (mode 0600 from creation). 
 
 Each line receives `{ok:true,result:…}` or `{ok:false,error:…}`. On startup, an existing socket is probed: only a refused/missing endpoint with
 an unchanged socket inode is removed. Active listeners and non-socket files are preserved. There is no public control route. Public
-`/internal` and `/internal/*` return 404. Paths containing encoded dots or
-separators (`%2e`, `%2f`, `%5c`, case insensitive, including nested `%25`
-encoding) also return 404 for both HTTP and WebSocket upgrades. Forwarding headers are overwritten from
+`/internal` and `/internal/*` return 404. Before HTTP forwarding or WebSocket
+upgrade, edge checks the original pathname and each successive percent-decoded
+layer: replace backslashes with slashes, collapse repeated slashes and resolve
+dot segments. If any normalized layer has the private prefix, return 404.
+Malformed percent encoding stops decoding at that layer and is treated literally.
+Public encoded names, dots, slashes and percent signs remain valid; the pathname
+forwarded to the slot is unchanged by this check. Forwarding headers are overwritten from
 the accepted client connection; `Forwarded` is removed. The API must explicitly
 trust the edge's IP before using `X-Real-IP` for rate limiting.
 
@@ -91,12 +95,21 @@ WebSocket forwards cookie, authorization, query and offered subprotocols. Only a
 successful upstream handshake permits client upgrade. Transport failures and invalid handshakes retry within
 the hold budget. Application rejection responses (including 401/403/421/426) pass
 through with their status, end-to-end headers and streaming body, without retry
-or health penalties. Message size is limited separately from backpressure:
-2–4 MiB messages are accepted by default. Downstream backpressure pauses upstream
-TCP reads when `getBufferedAmount()` reaches the high-water mark. A queued
-`send()` result of -1 is accepted, not replayed. Client drain resumes reads, with
-a 25 ms timer fallback only while congested because Bun 1.3.14 may miss drain
-notifications. Close/stop cancels that timer. Upstream writes resume on TCP drain;
+or health penalties. Message size is limited separately from backpressure.
+The slot's `DAEMON_WS_MAX_PAYLOAD_BYTES` and Bun `maxPayloadLength` are 4 MiB
+(see [protocol constants](../../packages/contracts/src/daemon-protocol.ts) and
+[server configuration](../../packages/server/src/api/server.ts)). Edge's default
+4 MiB message limit covers that slot limit in both directions, including continuous
+64 × 4 MiB downstream messages. Downstream backpressure pauses upstream TCP reads when `getBufferedAmount()` reaches the high-water mark. A queued
+`send()` result of -1 is accepted, not replayed. Client drain schedules recovery
+on a subsequent event-loop turn: resuming synchronously (or in a microtask) inside
+Bun 1.3.14's native writable callback can lose writable-event registration after
+a partial large-frame write. A 25 ms timer fallback runs only while congested
+because Bun may also miss drain notifications. The upstream TCP connection uses
+Node's built-in stream adapter (provided by Bun), so pause suspends application
+`data` delivery even for chunks delivered in the current native read turn. This
+avoids repeatedly concatenating an unread buffer and starving downstream I/O and
+timers. Close/stop cancels that timer. Upstream writes resume on TCP drain;
 reaching the downstream high-water mark pauses the relay. If buffered bytes make
 no progress for `wsStallTimeoutMs`, edge closes both sides with 1013
 (`Downstream stalled`) and terminates the downstream socket after 100 ms, so a
@@ -129,7 +142,9 @@ npm run docs:check
 
 The suite includes 20 handovers under concurrent HTTP/SSE/WS, hold limits, handshake
 recovery, close codes, forwarding headers, private paths, health/draining, Unix
-control, 64 × 1 MiB frames to a slow TCP reader, bounded closure for a stalled reader, and 100 MiB streaming with
+control, 64 × 4 MiB, 64 × 1 MiB and 192 × 512 KiB messages to a slow TCP reader
+with per-frame content checks, bounded closure for a stalled reader and cleared
+congestion timers (all using a real Bun backend and isolated edge process), and 100 MiB streaming with
 RSS sampling in an isolated edge subprocess. The memory source yields every MiB
 to let native I/O progress; upload and download share one peak and the unchanged
 80 MiB growth ceiling, with no GC during measurement. These tests are local transport

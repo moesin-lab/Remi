@@ -308,6 +308,15 @@ function track(probe: LoopProbe): LoopProbe {
 }
 
 describe("daemon poll cadence", () => {
+  it("clears the stop deadline when stopped before startup reaches the poll loop", async () => {
+    jest.useFakeTimers();
+    const probe = track(createLoopDaemon());
+    await probe.stop();
+    expect(probe.daemon.runActive).toBe(false);
+    expect(probe.daemon.stopDeadlineTimer).toBeNull();
+    jest.advanceTimersByTime(DAEMON_STOP_TIMEOUT_MS + 1);
+  });
+
   it("skips the desired RPC snapshot while the pushed revision is unchanged", async () => {
     jest.useFakeTimers();
     const probe = track(createLoopDaemon({ startLoop: false }));

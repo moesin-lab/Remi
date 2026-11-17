@@ -1934,6 +1934,18 @@ export class MultiremiDaemon {
 
   async start(): Promise<void> {
     this.runActive = true;
+    try {
+      await this.runUntilStopped();
+    } finally {
+      // Startup may stop during the layout sweep, before the poll-loop cleanup.
+      // No stop deadline may outlive the start() invocation that armed it.
+      if (this.stopDeadlineTimer) clearTimeout(this.stopDeadlineTimer);
+      this.stopDeadlineTimer = null;
+      this.runActive = false;
+    }
+  }
+
+  private async runUntilStopped(): Promise<void> {
     this.ensureTrace();
     this.startedAt = new Date();
     this.ready = false;
@@ -2087,9 +2099,6 @@ export class MultiremiDaemon {
           log.warn(`outbox close failed: ${error instanceof Error ? error.message : String(error)}`);
         });
       }
-      if (this.stopDeadlineTimer) clearTimeout(this.stopDeadlineTimer);
-      this.stopDeadlineTimer = null;
-      this.runActive = false;
     }
   }
 

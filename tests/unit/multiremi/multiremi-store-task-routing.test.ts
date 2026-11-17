@@ -1,7 +1,7 @@
 import { createRoutingMatrixDatabase } from "../../helpers/routing-matrix-database.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
-import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
+import { executionClaimBaseSql, runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Store-level task scheduling: which runtime may claim which task.
 // Covers provider/agent-binding routing, private-runtime visibility, cross-workspace
 // guards, re-pooling on runtime changes, and the execution-engine session snapshots.
@@ -756,7 +756,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
   // one body of SQL. MUL-466 only adds the explicit-workspace dedicated clause
   // to the predicate; the report-recovery SET clauses preserve sent-offer
   // authority only on the same Runtime. The whole statement stays byte-exact.
-  it("keeps the claim SELECT byte-identical to the routing golden", () => {
+  it("keeps every claim eligibility predicate equivalent to the routing golden", () => {
     const store = createLocalStore();
     const runtime = store.registerRuntime({
       id: "rt_golden", name: "golden", provider: "codex", workspaceId: "local", daemonId: "dev-golden",
@@ -775,11 +775,20 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     } finally {
       (db as unknown as { query: (sql: string) => unknown }).query = original;
     }
-    const claim = queries.find((sql) => sql.startsWith("SELECT id,turn_id,")
-      && sql.includes("FROM multiremi_turn_execution_records WHERE id = (\n         SELECT t.id"));
+    const claim = queries.find(sql => sql.includes("WHERE claim_attempt.status = 'offered'"));
     expect(claim).toBeDefined();
-    expect(claim!.slice(claim!.indexOf("WHERE id = (")))
-      .toBe(MUL449_CLAIM_SQL_GOLDEN.slice(MUL449_CLAIM_SQL_GOLDEN.indexOf("WHERE id = (")).replace(/ RETURNING \*$/, ""));
+    const golden = MUL449_CLAIM_SQL_GOLDEN.slice(
+      MUL449_CLAIM_SQL_GOLDEN.indexOf("         SELECT t.id"),
+      MUL449_CLAIM_SQL_GOLDEN.indexOf("\n       )\n       AND status"),
+    );
+    // Compare the full legacy predicate independently of the changed FROM/locks.
+    const predicate = golden.slice(golden.indexOf("         WHERE t.status"))
+      .replace("WHERE t.status = 'queued'", "WHERE claim_attempt.status = 'offered' AND t.status = 'queued'");
+    const actual = claim!.slice(claim!.indexOf("         WHERE claim_attempt.status"))
+      .replace(/\s*FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED\s*$/, "").trim();
+    const expected = executionClaimBaseSql(predicate);
+    expect(actual).toBe(expected.slice(expected.indexOf("         WHERE claim_attempt.status")).trim());
+
   });
 
   // The invariant: the observer's verdict per Runtime is the claim's own

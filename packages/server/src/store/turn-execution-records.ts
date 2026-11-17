@@ -33,6 +33,37 @@ const EXTRA_FIELDS: Record<string,string> = {
     WHEN a.status='offered' THEN 'queued' WHEN a.status='accepted' THEN 'dispatched' WHEN a.status='lost' THEN 'failed' ELSE a.status END`,
 };
 
+/** Resolve the legacy read shape directly to base columns for indexed queue selection.
+ * Only qualified references are rewritten; literals/comments are left intact.
+ */
+export function executionClaimBaseSql(sql: string): string {
+  const columns: Record<string, string> = {
+    ...Object.fromEntries(TURN_FIELDS.map(key => [key, `claim_turn.${key}`])),
+    ...Object.fromEntries(ATTEMPT_FIELDS.map(key => [key, `claim_attempt.${key}`])),
+    ...Object.fromEntries(Object.entries(EXTRA_FIELDS).map(([key, value]) => [key,
+      value.replace(/\bt\./g, "claim_turn.").replace(/\ba\./g, "claim_attempt.")])),
+  };
+  // Restrict active-lane probes to a materialized set of active attempt IDs.
+  // Include current awaiting-human turns separately: the legacy projection can
+  // override ANY attempt status there, so filtering only attempt.status drifts.
+  let active = false;
+  sql = sql.replace(/FROM multiremi_turn_execution_records (runtime_active|running|active)\b/g, (from, alias: string) => {
+    active = true;
+    return `${from} JOIN claim_active_attempts ${alias}_claim ON ${alias}_claim.id = ${alias}.id`;
+  });
+  if (active) sql = `WITH claim_active_attempts AS MATERIALIZED (
+    SELECT id FROM multiremi_turn_attempts WHERE status IN ('accepted','running','waiting_local_directory')
+    UNION SELECT current_attempt_id AS id FROM multiremi_turns WHERE status = 'awaiting_human'
+  ) ${sql}`;
+  const mask = maskSqlLiterals(sql);
+  return sql.replace(/\bt\.(\w+)/g, (reference, key: string, offset: number) => {
+    if (mask.slice(offset, offset + reference.length) !== reference) return reference;
+    const column = columns[key];
+    if (!column) throw new Error(`Unknown execution claim column: ${key}`);
+    return `(${column})`;
+  });
+}
+
 const EXECUTION_READ_PROJECTION_MIGRATION = "20261114_execution_endpoint_read_projection";
 
 export function createTurnExecutionReadProjection(db: SqlDatabase): void {

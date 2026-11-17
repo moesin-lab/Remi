@@ -10,9 +10,9 @@ export class HttpPool {
   private idle = new Map<string, Bun.Socket<undefined>[]>();
   private handlers = new WeakMap<Bun.Socket<undefined>, TransportHandlers>();
   private timers = new Map<Bun.Socket<undefined>, ReturnType<typeof setTimeout>>();
-  async connect(url: URL, handlers: TransportHandlers) {
+  async connect(url: URL, handlers: TransportHandlers, reuse = true) {
     const key = url.origin;
-    const socket = this.idle.get(key)?.pop();
+    const socket = reuse ? this.idle.get(key)?.pop() : undefined;
     if (socket) { clearTimeout(this.timers.get(socket)); this.timers.delete(socket); this.handlers.set(socket, handlers); socket.resume(); return socket; }
     const connected = await Bun.connect<undefined>({ hostname: url.hostname, port: Number(url.port || 80), socket: {
       data: (socket, bytes) => { const active = this.handlers.get(socket); if (active) active.data(socket, bytes); else this.discard(socket); },
@@ -150,7 +150,9 @@ export async function exchange(url: URL, request: Request, headers: Headers, hoo
       error(_socket, error) { fail(error); },
       connectError(_socket, error) { fail(error); },
     };
-    const connecting = hooks.transport ? hooks.transport.connect(handlers) : hooks.pool ? hooks.pool.connect(url, handlers) : Bun.connect<undefined>({ hostname: url.hostname, port: Number(url.port || 80), socket: handlers });
+    // Unsafe methods need a fresh socket: a peer can close a pooled connection
+    // at any time, and a partially sent POST cannot safely be replayed.
+    const connecting = hooks.transport ? hooks.transport.connect(handlers) : hooks.pool ? hooks.pool.connect(url, handlers, ['GET', 'HEAD', 'OPTIONS'].includes(request.method)) : Bun.connect<undefined>({ hostname: url.hostname, port: Number(url.port || 80), socket: handlers });
     void connecting.then(async connected => {
       clearTimeout(connectTimer); socket = connected;
       if (ended) { socket.terminate(); return; }
@@ -160,6 +162,7 @@ export async function exchange(url: URL, request: Request, headers: Headers, hoo
         while (offset < bytes.length && !ended) {
           const written = socket!.write(bytes.subarray(offset));
           if (written < 0) throw new Error('Upstream closed during upload');
+          if (written > 0) hooks.sent();
           offset += written;
           if (offset < bytes.length) await new Promise<void>(resolve => { drain = resolve; });
         }
@@ -173,7 +176,7 @@ export async function exchange(url: URL, request: Request, headers: Headers, hoo
         let head = `${request.method} ${url.pathname}${url.search} HTTP/1.1\r\n`;
         for (const [key, value] of headers) head += `${key}: ${value}\r\n`;
         headerTimer = setTimeout(() => fail(new Error('Upstream response header timeout')), hooks.responseHeaderTimeoutMs ?? 30_000);
-        hooks.sent(); await write(Buffer.from(head + '\r\n'));
+        await write(Buffer.from(head + '\r\n'));
         if (hasBody) {
           const reader = request.body!.getReader();
           try {

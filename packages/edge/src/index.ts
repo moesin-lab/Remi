@@ -18,7 +18,7 @@ export interface EdgeOptions {
   healthTimeoutMs?: number; failureThreshold?: number; riseThreshold?: number; wsBufferLimit?: number; wsMaxMessageBytes?: number; wsQueueLimit?: number; responseHeaderTimeoutMs?: number;
   log?: (line: string) => void;
 }
-interface Relay { upstream: UpstreamSocket; client?: ServerWebSocket<Relay>; slot: Slot; pending: (string | Buffer)[]; bytes: number; ended: boolean; earlyClose?: { code: number; reason: string }; blocked?: boolean }
+interface Relay { upstream: UpstreamSocket; client?: ServerWebSocket<Relay>; slot: Slot; pending: (string | Buffer)[]; bytes: number; ended: boolean; earlyClose?: { code: number; reason: string }; blocked?: boolean; retryTimer?: ReturnType<typeof setTimeout> }
 const hop = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'];
 export function cleanHeaders(input: Headers): Headers {
   const headers = new Headers(input);
@@ -72,7 +72,7 @@ export class Edge extends EventEmitter {
           if (r.upstream.bufferedAmount + Buffer.byteLength(data) > this.options.wsQueueLimit) { this.closeRelay(r, 1013, 'Upstream queue exhausted'); return; }
           r.upstream.send(data);
         },
-        drain: client => { client.data.blocked = false; this.flush(client.data); },
+        drain: client => this.flush(client.data),
         close: (client, code, reason) => this.closeRelay(client.data, code, reason),
         backpressureLimit: this.options.wsBufferLimit, closeOnBackpressureLimit: false, maxPayloadLength: Math.max(16 * 1024 * 1024, this.options.wsMaxMessageBytes),
       },
@@ -334,17 +334,32 @@ export class Edge extends EventEmitter {
     return this.error(503);
   }
   private flush(relay: Relay) {
-    if (!relay.client || relay.ended || relay.blocked) return;
+    clearTimeout(relay.retryTimer); relay.retryTimer = undefined;
+    if (!relay.client || relay.ended) return;
+    relay.blocked = false;
+    const pause = () => {
+      relay.blocked = true; relay.upstream.pause();
+      // Bun 1.3.14 can miss drain after send() returns -1 (accepted/queued).
+      // Poll only congested relays, and use actual buffered bytes for admission.
+      relay.retryTimer = setTimeout(() => this.flush(relay), 10);
+      relay.retryTimer.unref();
+    };
     while (relay.pending.length) {
+      if (relay.client.getBufferedAmount() >= this.options.wsBufferLimit) { pause(); return; }
       const data = relay.pending.shift()!; relay.bytes -= Buffer.byteLength(data);
       const sent = relay.client.send(data);
-      if (sent === 0) { relay.pending.unshift(data); relay.bytes += Buffer.byteLength(data); }
-      if (sent <= 0) { relay.blocked = true; relay.upstream.pause(); return; }
+      if (sent === 0) {
+        relay.pending.unshift(data); relay.bytes += Buffer.byteLength(data);
+        pause(); return;
+      }
+      // Positive and -1 both accept the entire message. Never enqueue it twice.
     }
+    if (relay.client.getBufferedAmount() >= this.options.wsBufferLimit) { pause(); return; }
     relay.upstream.resume();
   }
   private closeRelay(relay: Relay, code: number, reason: string) {
     if (relay.ended) return; relay.ended = true;
+    clearTimeout(relay.retryTimer); relay.retryTimer = undefined;
     relay.pending = []; relay.bytes = 0;
     // Reserved transport codes cannot appear in a close frame.
     const wireCode = code === 1005 ? 1000 : [1006, 1015].includes(code) ? 1011 : code;

@@ -19,7 +19,8 @@ EDGE_CONTROL_SOCKET=/tmp/remi-edge.sock bun apps/edge/main.ts
 
 `EDGE_HOST` defaults to `127.0.0.1` for both the process entry and library
 (set it explicitly for a public listener), `EDGE_PORT` to 16120, `EDGE_HOLD_MAX_MS` to 60000 and `EDGE_MAX_WAITING`
-to 4096. No TLS or third-party runtime dependency is added.
+to 4096. An explicitly empty `EDGE_PORT` is rejected; `0` may be used to request an ephemeral port.
+No TLS or third-party runtime dependency is added.
 
 For embedding, import `startEdge` or `Edge` from
 `packages/edge/src/index.ts`. Pass `backends`, `hostname`, `port`, `controlSocket`,
@@ -69,7 +70,9 @@ trust the edge's IP before using `X-Real-IP` for rate limiting.
 HTTP uses streaming body transfer, chunk decoding, bounded header parsing and
 response backpressure. Bodyless requests reuse fully framed HTTP/1.1 connections
 with Content-Length when the upstream allows keep-alive (up to 8 idle connections
-per origin, expired after 1 second). Uploads, chunked and EOF-delimited responses
+per origin, expired after 1 second). Only GET/HEAD/OPTIONS lease pooled sockets;
+other methods connect afresh to avoid stale-connection failures on requests that
+cannot safely be replayed. Uploads, chunked and EOF-delimited responses
 close their upstream connections. Response headers must arrive within
 `responseHeaderTimeoutMs`; the timer does not limit SSE or response body duration. Client
 HTTP keep-alive is independent of slot connections. Connection failure before any
@@ -90,8 +93,11 @@ the hold budget. Application rejection responses (including 401/403/421/426) pas
 through with their status, end-to-end headers and streaming body, without retry
 or health penalties. Message size is limited separately from backpressure:
 2–4 MiB messages are accepted by default. Downstream backpressure pauses upstream
-TCP reads and resumes on the client drain event; upstream writes resume on TCP
-drain, without per-relay polling or disconnecting at the high-water mark.
+TCP reads when `getBufferedAmount()` reaches the high-water mark. A queued
+`send()` result of -1 is accepted, not replayed. Client drain resumes reads, with
+a 10 ms timer fallback only while congested because Bun 1.3.14 may miss drain
+notifications. Close/stop cancels that timer. Upstream writes resume on TCP drain;
+reaching the downstream high-water mark does not disconnect the relay.
 Bun ServerWebSocket exposes no input pause API: a client that produces faster
 than its upstream consumes accumulates an outgoing write queue. A separate
 `wsQueueLimit` hard safety ceiling closes with 1013 on sustained upstream overload;
@@ -118,5 +124,8 @@ npm run docs:check
 
 The suite includes 20 handovers under concurrent HTTP/SSE/WS, hold limits, handshake
 recovery, close codes, forwarding headers, private paths, health/draining, Unix
-control and 100 MiB streaming with RSS sampling in an isolated edge subprocess. These tests are local transport
+control, 64 × 1 MiB frames to a slow TCP reader, and 100 MiB streaming with
+RSS sampling in an isolated edge subprocess. The memory source yields every MiB
+to let native I/O progress; upload and download share one peak and the unchanged
+80 MiB growth ceiling, with no GC during measurement. These tests are local transport
 evidence; they do not establish behavior for a deployed supervisor/Compose stack.

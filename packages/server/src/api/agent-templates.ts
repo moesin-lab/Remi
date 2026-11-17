@@ -24,6 +24,7 @@ import uxCopywriter from "./agent-templates/ux-copywriter.json";
 import webappTester from "./agent-templates/webapp-tester.json";
 import writingCritic from "./agent-templates/writing-critic.json";
 import atlasLlmWiki from "./agent-templates/atlas-llm-wiki.json";
+import { createGitHubReadHeaders } from "../scm/github-read-auth.js";
 import { buildImportedSkillInput } from "@daemon/agent-runtime/skills/skill-import.js";
 import { MultiremiStore } from "@multiremi/store/store.js";
 import type {
@@ -138,7 +139,7 @@ export async function createAgentFromTemplate(
         url: sourceUrl,
         workspaceId,
         createdBy,
-      });
+      }, { githubHeaders: createGitHubReadHeaders(store, workspaceId) });
       const importedName = String(imported.skillInput.name ?? "").trim();
       const existingByImportedName = importedName ? findSkillByName(store, workspaceId, importedName) : null;
       if (existingByImportedName?.id) {

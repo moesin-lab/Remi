@@ -94,7 +94,7 @@ describe("URL skill bundle import", () => {
     { name: "download failure", url: `${raw}/references/guide.md`, response: () => new Response("Failed", { status: 404 }), status: 502, error: "references/guide.md" },
     { name: "malformed listing", url: `${contents}?ref=main`, response: () => new Response("not JSON"), status: 502, error: "failed to list" },
     { name: "non-array listing", url: `${contents}/references?ref=main`, response: () => jsonResponse({ message: "Invalid" }), status: 502, error: "expected a directory listing" },
-    { name: "network failure", url: `${contents}/references?ref=main`, response: (): Response => { throw new Error("Connection reset"); }, status: 502, error: "Connection reset" },
+    { name: "network failure", url: `${contents}/references?ref=main`, response: (): Response => { throw new Error("Connection reset"); }, status: 502, error: "upstream request failed" },
     { name: "missing download URL", url: `${contents}?ref=main`, response: () => jsonResponse([{ name: "notes.md", path: "demo/notes.md", type: "file" }]), status: 502, error: "missing download URL" },
   ];
   for (const url of [sourceUrl, "https://skills.sh/example/skills/demo"]) {

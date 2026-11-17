@@ -1,3 +1,4 @@
+import { withDbJob } from "@shared/observability/db-sources.js";
 import { createLogger } from "@shared/logger.js";
 import type { RelayHttpRequest } from "@multiremi/relay/http.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
@@ -65,7 +66,7 @@ export class IssueTitleScheduler {
 
   runOnce(now: Date = this.now()): Promise<IssueTitleRunResult> {
     if (this.tickPromise) return this.tickPromise;
-    this.tickPromise = this.runOnceInternal(now)
+    this.tickPromise = withDbJob("issue-title.poll", () => this.runOnceInternal(now))
       .catch((error) => {
         log.warn(`Issue title scan failed: ${errorMessage(error)}`);
         return { attempted: 0, applied: 0, skipped: 0, failed: 1 };

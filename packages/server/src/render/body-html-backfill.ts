@@ -1,3 +1,4 @@
+import { withDbJob } from "@shared/observability/db-sources.js";
 /**
  * Idle backfill for `multiremi_conversation_log.body_html`.
  *
@@ -136,7 +137,7 @@ export class BodyHtmlBackfillTask {
       return false;
     }
     this.stopped = false;
-    this.timer = setTimeout(() => void this.tick(), 0);
+    this.timer = setTimeout(() => void withDbJob("body-html.backfill", () => this.tick()), 0);
     this.timer.unref?.();
     return true;
   }
@@ -166,7 +167,7 @@ export class BodyHtmlBackfillTask {
     // short one means the queue is drained and the pause applies. The pause is
     // the timer itself, so `stop()` cancels it rather than waiting it out.
     const delay = processed >= this.batchSize ? 0 : this.intervalMs;
-    this.timer = setTimeout(() => void this.tick(), delay);
+    this.timer = setTimeout(() => void withDbJob("body-html.backfill", () => this.tick()), delay);
     this.timer.unref?.();
   }
 

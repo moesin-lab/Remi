@@ -18,13 +18,13 @@ describe("Skill file encoding", () => {
     const skill = store.createSkill({ name: "binary skill", content: "# Skill", files: [pngFile, textFile] });
     const agent = store.createAgent({ name: "Skilled", provider: "codex" });
     store.setAgentSkills(agent.id, [skill.id!]);
-    for (const files of [store.getSkill(skill.id!)!.files!, store.listSkillFiles(skill.id!), store.listAgentSkills(agent.id)[0]!.files!]) {
+    for (const files of [store.getSkill(skill.id!, { includeFiles: true })!.files!, store.listSkillFiles(skill.id!), store.listAgentSkills(agent.id, { includeFiles: true })[0]!.files!]) {
       expect(files[0]).toMatchObject(pngFile);
       expect(Buffer.from(files[0]!.content, "base64")).toEqual(pngBytes);
       expect(files[1]).toMatchObject(textFile);
       expect(files[1]!.encoding).toBeUndefined();
     }
-    expect(daemonClaimSkillResponse(store.getSkill(skill.id!)!).files).toEqual([pngFile, textFile]);
+    expect(daemonClaimSkillResponse(store.getSkill(skill.id!, { includeFiles: true })!).files).toEqual([pngFile, textFile]);
   });
 
   it("preserves unknown inline file encodings for the daemon to reject instead of treating them as text", () => {
@@ -35,7 +35,7 @@ describe("Skill file encoding", () => {
         name: `Inline ${String(encoding)}`, provider: "codex",
         skills: [{ name: "inline", content: "# Skill", files: [file] }],
       });
-      const stored = store.listAgentSkills(agent.id)[0]!;
+      const stored = store.listAgentSkills(agent.id, { includeFiles: true })[0]!;
       expect(daemonClaimSkillResponse(stored).files).toEqual([{ path: file.path, content: file.content, encoding }]);
       expect(skillFileCompatibilityResponse(stored.files![0]!)).toHaveProperty("encoding", encoding);
     }
@@ -48,7 +48,7 @@ describe("Skill file encoding", () => {
     const binary = { ...pngFile, path: textFile.path };
     expect(store.upsertSkillFile(skill.id!, binary)).toMatchObject(binary);
     expect(store.upsertSkillFile(skill.id!, { ...textFile, encoding: "utf8" }).encoding).toBeUndefined();
-    expect(store.getSkill(skill.id!)!.files![0]).toMatchObject(textFile);
+    expect(store.getSkill(skill.id!, { includeFiles: true })!.files![0]).toMatchObject(textFile);
     expect(store.updateSkill(skill.id!, { files: [pngFile] }).files![0]).toMatchObject(pngFile);
     expect(store.upsertSkill({ id: skill.id!, name: skill.name, content: skill.content, files: [textFile] }).files![0]!.encoding).toBeUndefined();
     expect(store.upsertSkill({ id: skill.id!, name: skill.name, content: skill.content, files: [pngFile] }).files![0]).toMatchObject(pngFile);
@@ -65,7 +65,7 @@ describe("Skill file encoding", () => {
       expect(() => store.createSkill({ name: "invalid", content: "# Skill", files: [file] })).toThrow(/Invalid (skill file encoding|base64 skill file content)/);
       expect(() => store.updateSkill(skill.id!, { content: "Do not commit this", files: [file] })).toThrow(/Invalid/);
       expect(() => store.upsertSkillFile(skill.id!, { ...file, path: textFile.path })).toThrow(/Invalid/);
-      expect(store.getSkill(skill.id!)!.content).toBe("Keep this");
+      expect(store.getSkill(skill.id!, { includeFiles: true })!.content).toBe("Keep this");
       expect(store.listSkillFiles(skill.id!)[0]).toMatchObject(textFile);
     }
     expect(store.listSkills()).toHaveLength(1);
@@ -136,7 +136,7 @@ describe("Skill file encoding", () => {
     expect(response.status).toBe("completed");
     expect(response.skill.files[0]).toMatchObject(pngFile);
     expect(response.skill.files[1].encoding).toBeUndefined();
-    expect(store.getSkill(response.skill.id)!.files![0]).toMatchObject(pngFile);
+    expect(store.getSkill(response.skill.id, { includeFiles: true })!.files![0]).toMatchObject(pngFile);
     const reopened = new MultiremiStore(db!);
     expect(reopened.getRuntimeLocalSkillImportRequest(runtime.id, imported.id)!.skill!.files![0]).toMatchObject(pngFile);
   });

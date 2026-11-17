@@ -328,6 +328,8 @@ export interface MultiremiApiOptions {
    * starts a server that daemons treat as older, for mixed-version tests.
    */
   daemonWelcomeCaps?: readonly DaemonProtocolCap[];
+  /** Explicit timer seam for mixed-load integration profiles; production keeps its default. */
+  daemonOfferSweepMs?: number;
   store?: MultiremiStore;
   scheduler?: MultiremiScheduler | null;
   /** Undefined reads the opt-in env config; null explicitly disables it. */
@@ -1184,7 +1186,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   });
   const daemonTurnBridge = options.daemonTurnBridge ?? store.getDaemonTurnBridge();
   const offerProjectKnowledge = options.projectKnowledge ?? createProjectKnowledgeServiceFromEnv(store);
-  const offers = new DaemonTaskOffers({ store, layer: daemonProtocol,
+  const offers = new DaemonTaskOffers({ store, layer: daemonProtocol, sweepMs: options.daemonOfferSweepMs,
     prepare: (task, supportsWikiFetch) => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki,
       supportsWikiFetch, daemonTurnBridge.offerInput(task)),
     onRuntimeReady: (rt, ids) => downlinks.runtimeReady(rt, ids) });

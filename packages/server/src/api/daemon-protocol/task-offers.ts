@@ -1,3 +1,4 @@
+import { withDbJob } from "@shared/observability/db-sources.js";
 import { DAEMON_OFFER_COOLDOWN_MS, DAEMON_OFFER_TIMEOUT_MS, type DaemonTurnInput } from "@multiremi/contracts/daemon-protocol.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import type { MultiremiTask, MultiremiTaskWithAgent } from "@multiremi/contracts/types.js";
@@ -156,7 +157,7 @@ export class DaemonTaskOffers {
         pump.dirty = false;
         const fromSweep = pump.sweep;
         pump.sweep = false;
-        await this.run(runtimeId, pump, fromSweep);
+        await withDbJob("daemon.offer", () => this.run(runtimeId, pump, fromSweep));
       } while (pump.dirty && !pump.waiting && !pump.pending && this.clock.now() >= pump.cooldownUntil);
     }).catch(error => {
       console.warn(JSON.stringify({ event: "daemon_offer_failed", runtime_id: runtimeId,

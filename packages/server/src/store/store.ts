@@ -1176,7 +1176,7 @@ runMigrations(this.db);
     return this.agents.listSkills(workspaceId, options);
   }
 
-  getSkill(id: string, options: { includeArchived?: boolean; includeFiles?: boolean } = { includeFiles: true }): MultiremiSkill | null {
+  getSkill(id: string, options: { includeArchived?: boolean; includeFiles?: boolean } = {}): MultiremiSkill | null {
     return this.agents.getSkill(id, options);
   }
 
@@ -1192,7 +1192,7 @@ runMigrations(this.db);
     return this.agents.deleteSkillFile(skillId, fileId);
   }
 
-  listAgentSkills(agentId: string, options: { includeFiles?: boolean } = { includeFiles: true }): MultiremiSkill[] {
+  listAgentSkills(agentId: string, options: { includeFiles?: boolean } = {}): MultiremiSkill[] {
     return this.agents.listAgentSkills(agentId, options);
   }
 
@@ -1373,8 +1373,8 @@ runMigrations(this.db);
     return this.agents.getDefaultAgent(workspaceId, provider, ownerId);
   }
 
-  getAgent(id: string): MultiremiAgent | null {
-    return this.agents.getAgent(id);
+  getAgent(id: string, options: { includeFiles?: boolean } = {}): MultiremiAgent | null {
+    return this.agents.getAgent(id, options);
   }
 
   /** The Agent row without its Skills or Skill files — for eligibility decisions only. */
@@ -5537,6 +5537,10 @@ runMigrations(this.db);
 
   archiveIdleChats(now?: number): string[] {
     return this.chat.archiveIdleChats(now);
+  }
+
+  listChatSessionsByIds(ids: readonly string[]): MultiremiChatSession[] {
+    return this.chat.listChatSessionsByIds(ids);
   }
 
   getChatSession(id: string): MultiremiChatSession | null {

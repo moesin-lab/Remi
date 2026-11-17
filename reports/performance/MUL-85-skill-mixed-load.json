@@ -1,0 +1,760 @@
+{
+  "before": {
+    "revision": "f54ab7453",
+    "dialect": "sqlite",
+    "simulated_sql_delay_ms": 2.5,
+    "seconds": 60,
+    "runtimes": 8,
+    "pollers": 10,
+    "agents": 8,
+    "chatSessions": 60,
+    "activeProviderLanes": 0,
+    "daemonSockets": 1,
+    "sharedSkillFiles": 1277,
+    "sharedSkillBytes": 13076480,
+    "connections": "real WS + HTTP; synthetic scale; no external model",
+    "elapsed_ms": 65912.368606,
+    "sql_per_minute": 17094.73811980336,
+    "statements": [
+      [
+        "SELECT token.* FROM multiremi_access_tokens token\n      WHERE token.token_hash = ? AND (token.type != 'daemon' OR EXISTS (\n        SELECT 1 FROM multiremi_workspaces workspace WHERE workspace.id = token.workspace_id\n      ))",
+        3000
+      ],
+      [
+        "SELECT id FROM multiremi_workspaces WHERE id = ?",
+        3000
+      ],
+      [
+        "SELECT * FROM multiremi_agents WHERE id IN (?, ?, ?, ?, ?, ?, ?, ?)",
+        616
+      ],
+      [
+        "SELECT multiremi_turns.id,multiremi_turns.session_id,multiremi_turns.seq,multiremi_turns.agent_id,multiremi_turns.execution_scope,multiremi_turns.status,multiremi_turns.wake_source,multiremi_turns.wake_seq,multiremi_turns.trigger_message_id,multiremi_turns.input_from_seq,multiremi_turns.input_to_seq,multiremi_turns.waiting_on_message_id,multiremi_turns.reply_message_id,multiremi_turns.wrap_up_requested_at,multiremi_turns.current_attempt_id,multiremi_turns.chat_session_id,multiremi_turns.delegation_id,multiremi_turns.delegated_by_agent_id,multiremi_turns.delegation_return_turn_id,multiremi_turns.delegated_from_issue_session_id,multiremi_turns.delegation_skip_reason,multiremi_turns.continued_from_turn_id,multiremi_turns.holds_workspace,multiremi_turns.priority,multiremi_turns.requesting_user_name,multiremi_turns.requesting_user_profile_description,multiremi_turns.issue_id,multiremi_turns.workspace_id,multiremi_turns.created_at,multiremi_turns.started_at,multiremi_turns.ended_at,multiremi_turns.ended_reason,NULL AS legacy_prompt,\n      current_attempt.id AS attempt_id,current_attempt.status AS attempt_status,current_attempt.runtime_id AS attempt_runtime_id,current_attempt.provider AS attempt_provider,current_attempt.error AS attempt_error,current_attempt.failure_reason AS attempt_failure_reason,current_attempt.progress_summary AS attempt_progress_summary,current_attempt.progress_step AS attempt_progress_step,current_attempt.progress_total AS attempt_progress_total,\n      CASE WHEN current_attempt.status IN ('accepted','running') THEN current_attempt.running_subagents END AS running_subagents,\n      CASE WHEN current_attempt.status IN ('accepted','running') THEN current_attempt.running_background_tasks END AS running_background_tasks,\n      CASE WHEN current_attempt.status='waiting_local_directory' THEN COALESCE(current_attempt.wait_reason,'') END AS local_directory_wait_reason\n      FROM multiremi_turns LEFT JOIN multiremi_turn_attempts current_attempt ON current_attempt.id=multiremi_turns.current_attempt_id\n      WHERE multiremi_turns.workspace_id=? AND (COALESCE((SELECT s.chat_id FROM multiremi_issue_sessions s WHERE s.id=multiremi_turns.session_id),\n        multiremi_turns.chat_session_id,(SELECT c.id FROM multiremi_chat_sessions c WHERE c.id=multiremi_turns.session_id)) IS NULL OR EXISTS (SELECT 1 FROM multiremi_chat_sessions c\n        WHERE c.id=COALESCE((SELECT s.chat_id FROM multiremi_issue_sessions s WHERE s.id=multiremi_turns.session_id),\n        multiremi_turns.chat_session_id,(SELECT c.id FROM multiremi_chat_sessions c WHERE c.id=multiremi_turns.session_id)) AND c.workspace_id=multiremi_turns.workspace_id AND 1=1)) ORDER BY multiremi_turns.created_at DESC,multiremi_turns.id DESC LIMIT ?",
+        600
+      ],
+      [
+        "SELECT member.* FROM multiremi_workspace_members member\n      JOIN multiremi_workspaces workspace ON workspace.id = member.workspace_id\n      WHERE member.workspace_id = ? AND member.user_id = 'local'\n      ORDER BY CASE WHEN member.id = ? THEN 0 ELSE 1 END, member.created_at, member.id LIMIT 1",
+        600
+      ],
+      [
+        "WITH RECURSIVE ancestors AS (\n    SELECT m.id AS root_id,m.id,m.session_id,m.task_id,m.kind,m.reply_to_id,m.to_agent_id,m.metadata,0 AS depth,1 AS source_inherited\n    FROM multiremi_conversation_log m\n      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id\n      LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=?\n      LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id=m.session_id AND legacy.reader_type='member' AND legacy.reader_id=m.to_member_id AND legacy.execution_scope=''\n      LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)\n      LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id\n      WHERE m.to_member_id IS NOT NULL AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'\n        AND m.seq>COALESCE(l.cursor_seq,0) AND m.seq>COALESCE(legacy.cursor_seq,0) AND m.visibility='shown' AND m.deleted_at IS NULL\n    UNION ALL\n    SELECT d.root_id,n.id,n.session_id,n.task_id,n.kind,n.reply_to_id,n.to_agent_id,n.metadata,d.depth+1,\n      CASE WHEN d.source_inherited=1 AND (json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1')) THEN 1 ELSE 0 END\n    FROM ancestors d JOIN multiremi_conversation_log n ON ((n.session_id=d.session_id AND (\n    n.id=COALESCE(d.reply_to_id,json_extract(d.metadata,'$.message_id')) OR\n    CAST(n.seq AS TEXT)=CAST(json_extract(d.metadata,'$.target_seq') AS TEXT))) OR\n    CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND n.id=json_extract(d.metadata,'$.root_question_id'))\n    WHERE d.depth<4 AND ((json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1')) OR d.reply_to_id IS NOT NULL)\n  ) SELECT COUNT(*) AS unread_count,COALESCE(SUM(CASE WHEN m.resolved_at IS NULL AND m.wake_applied<>'inbox_only' AND (\n      m.message_kind='decision' OR m.message_kind='request' AND m.sender_type='member'\n      OR m.message_kind='status' AND json_extract(m.metadata,'$.lifecycle_event') IN ('task_failed','task_cancelled')\n      OR m.message_kind IN ('report','final') AND json_extract(m.metadata,'$.message_outcome') IN ('failed','blocked','cancelled')) THEN 1 ELSE 0 END),0) AS attention_count FROM multiremi_conversation_log m\n      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id\n      LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=?\n      LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id=m.session_id AND legacy.reader_type='member' AND legacy.reader_id=m.to_member_id AND legacy.execution_scope=''\n      LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)\n      LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id\n      WHERE m.to_member_id IS NOT NULL AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'\n        AND m.seq>COALESCE(l.cursor_seq,0) AND m.seq>COALESCE(legacy.cursor_seq,0) AND m.visibility='shown' AND m.deleted_at IS NULL AND 1=1 AND ((s.id IS NOT NULL AND s.chat_id IS NULL OR a.id IS NOT NULL OR m.session_id='auto_orphan_inbox_'||COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n    OR c.id IS NOT NULL AND c.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND 1=1) AND NOT EXISTS (\n    SELECT 1 FROM ancestors d\n    LEFT JOIN multiremi_turns t ON t.id=d.task_id OR t.current_attempt_id=d.task_id\n    LEFT JOIN multiremi_agents ag ON ag.id=t.agent_id\n    LEFT JOIN multiremi_issue_sessions ts ON ts.id=t.session_id\n    LEFT JOIN multiremi_chat_sessions sc ON sc.id=COALESCE(ts.chat_id,t.chat_session_id,t.session_id)\n    LEFT JOIN multiremi_issue_sessions ds ON ds.id=d.session_id\n    LEFT JOIN multiremi_issues di ON di.id=ds.issue_id\n    LEFT JOIN multiremi_issues si ON si.id=COALESCE(json_extract(d.metadata,'$.decision_record.source_issue_id'),json_extract(d.metadata,'$.source_issue_id'))\n    WHERE d.root_id=m.id AND d.source_inherited=1 AND (\n      (d.kind='turn' OR json_extract(d.metadata,'$.human_request') IS NOT NULL\n    OR json_extract(d.metadata,'$.human_response') IS NOT NULL AND d.task_id IS NOT NULL) AND (t.id IS NULL OR t.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)\n        OR (COALESCE(ts.chat_id,t.chat_session_id) IS NOT NULL OR sc.id IS NOT NULL) AND (sc.id IS NULL OR sc.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) OR NOT (1=1))\n        OR COALESCE(ts.chat_id,t.chat_session_id,sc.id) IS NULL AND NOT (1=1))\n      OR json_extract(d.metadata,'$.human_response') IS NOT NULL AND d.task_id IS NULL AND NOT EXISTS (\n        SELECT 1 FROM multiremi_conversation_log n WHERE ((n.session_id=d.session_id AND (\n    n.id=COALESCE(d.reply_to_id,json_extract(d.metadata,'$.message_id')) OR\n    CAST(n.seq AS TEXT)=CAST(json_extract(d.metadata,'$.target_seq') AS TEXT))) OR\n    CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND n.id=json_extract(d.metadata,'$.root_question_id')))\n      OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND NOT EXISTS (\n        SELECT 1 FROM multiremi_conversation_log n WHERE n.id=json_extract(d.metadata,'$.root_question_id'))\n      OR COALESCE(json_extract(d.metadata,'$.decision_record.source_issue_id'),json_extract(d.metadata,'$.source_issue_id')) IS NOT NULL AND (di.id IS NULL OR si.id IS NULL OR di.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) OR si.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n      OR d.depth=4 AND (json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1'))\n    )) AND 1=1 AND NOT EXISTS (SELECT 1 FROM ancestors notification\n    WHERE notification.root_id=m.id AND NOT ((CASE WHEN COALESCE((CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_notification') AS TEXT) IN ('true','1') OR CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_present_request') AS TEXT) IN ('true','1')),FALSE) THEN EXISTS (\n    SELECT 1 FROM multiremi_conversation_log q\n    JOIN multiremi_conversation_heads qh ON qh.session_id=q.session_id\n    LEFT JOIN multiremi_workspace_members human ON json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NULL AND human.id=json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].handler.id')\n      AND human.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND human.archived_at IS NULL\n    LEFT JOIN multiremi_issues source ON source.id=json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id')\n    WHERE q.id=json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.root_question_id') AND q.kind='message' AND q.visibility='shown' AND q.deleted_at IS NULL\n      AND CAST(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1'\n      AND json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.workspace_id')=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND qh.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)\n      AND (json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NULL OR source.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n      AND json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].stage')='human' AND (json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NOT NULL OR json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].handler.type')='member' AND human.id IS NOT NULL)\n      AND CAST(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route_revision') AS TEXT)=CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_route_revision') AS TEXT)\n      AND 1=1) ELSE TRUE END)))",
+        600
+      ],
+      [
+        "WITH RECURSIVE ancestors AS (\n    SELECT m.id AS root_id,m.id,m.session_id,m.task_id,m.kind,m.reply_to_id,m.to_agent_id,m.metadata,0 AS depth,1 AS source_inherited\n    FROM multiremi_conversation_log m\n      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id\n      LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=?\n      LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id=m.session_id AND legacy.reader_type='member' AND legacy.reader_id=m.to_member_id AND legacy.execution_scope=''\n      LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)\n      LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id\n      WHERE m.to_member_id IS NOT NULL AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'\n        AND m.seq>COALESCE(l.cursor_seq,0) AND m.seq>COALESCE(legacy.cursor_seq,0) AND m.visibility='shown' AND m.deleted_at IS NULL\n    UNION ALL\n    SELECT d.root_id,n.id,n.session_id,n.task_id,n.kind,n.reply_to_id,n.to_agent_id,n.metadata,d.depth+1,\n      CASE WHEN d.source_inherited=1 AND (json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1')) THEN 1 ELSE 0 END\n    FROM ancestors d JOIN multiremi_conversation_log n ON ((n.session_id=d.session_id AND (\n    n.id=COALESCE(d.reply_to_id,json_extract(d.metadata,'$.message_id')) OR\n    CAST(n.seq AS TEXT)=CAST(json_extract(d.metadata,'$.target_seq') AS TEXT))) OR\n    CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND n.id=json_extract(d.metadata,'$.root_question_id'))\n    WHERE d.depth<4 AND ((json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1')) OR d.reply_to_id IS NOT NULL)\n  ) SELECT m.* FROM multiremi_conversation_log m\n      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id\n      LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=?\n      LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id=m.session_id AND legacy.reader_type='member' AND legacy.reader_id=m.to_member_id AND legacy.execution_scope=''\n      LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)\n      LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id\n      WHERE m.to_member_id IS NOT NULL AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'\n        AND m.seq>COALESCE(l.cursor_seq,0) AND m.seq>COALESCE(legacy.cursor_seq,0) AND m.visibility='shown' AND m.deleted_at IS NULL AND 1=1 AND ((s.id IS NOT NULL AND s.chat_id IS NULL OR a.id IS NOT NULL OR m.session_id='auto_orphan_inbox_'||COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n    OR c.id IS NOT NULL AND c.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND 1=1) AND NOT EXISTS (\n    SELECT 1 FROM ancestors d\n    LEFT JOIN multiremi_turns t ON t.id=d.task_id OR t.current_attempt_id=d.task_id\n    LEFT JOIN multiremi_agents ag ON ag.id=t.agent_id\n    LEFT JOIN multiremi_issue_sessions ts ON ts.id=t.session_id\n    LEFT JOIN multiremi_chat_sessions sc ON sc.id=COALESCE(ts.chat_id,t.chat_session_id,t.session_id)\n    LEFT JOIN multiremi_issue_sessions ds ON ds.id=d.session_id\n    LEFT JOIN multiremi_issues di ON di.id=ds.issue_id\n    LEFT JOIN multiremi_issues si ON si.id=COALESCE(json_extract(d.metadata,'$.decision_record.source_issue_id'),json_extract(d.metadata,'$.source_issue_id'))\n    WHERE d.root_id=m.id AND d.source_inherited=1 AND (\n      (d.kind='turn' OR json_extract(d.metadata,'$.human_request') IS NOT NULL\n    OR json_extract(d.metadata,'$.human_response') IS NOT NULL AND d.task_id IS NOT NULL) AND (t.id IS NULL OR t.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)\n        OR (COALESCE(ts.chat_id,t.chat_session_id) IS NOT NULL OR sc.id IS NOT NULL) AND (sc.id IS NULL OR sc.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) OR NOT (1=1))\n        OR COALESCE(ts.chat_id,t.chat_session_id,sc.id) IS NULL AND NOT (1=1))\n      OR json_extract(d.metadata,'$.human_response') IS NOT NULL AND d.task_id IS NULL AND NOT EXISTS (\n        SELECT 1 FROM multiremi_conversation_log n WHERE ((n.session_id=d.session_id AND (\n    n.id=COALESCE(d.reply_to_id,json_extract(d.metadata,'$.message_id')) OR\n    CAST(n.seq AS TEXT)=CAST(json_extract(d.metadata,'$.target_seq') AS TEXT))) OR\n    CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND n.id=json_extract(d.metadata,'$.root_question_id')))\n      OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND NOT EXISTS (\n        SELECT 1 FROM multiremi_conversation_log n WHERE n.id=json_extract(d.metadata,'$.root_question_id'))\n      OR COALESCE(json_extract(d.metadata,'$.decision_record.source_issue_id'),json_extract(d.metadata,'$.source_issue_id')) IS NOT NULL AND (di.id IS NULL OR si.id IS NULL OR di.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) OR si.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n      OR d.depth=4 AND (json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1'))\n    )) AND 1=1 AND NOT EXISTS (SELECT 1 FROM ancestors notification\n    WHERE notification.root_id=m.id AND NOT ((CASE WHEN COALESCE((CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_notification') AS TEXT) IN ('true','1') OR CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_present_request') AS TEXT) IN ('true','1')),FALSE) THEN EXISTS (\n    SELECT 1 FROM multiremi_conversation_log q\n    JOIN multiremi_conversation_heads qh ON qh.session_id=q.session_id\n    LEFT JOIN multiremi_workspace_members human ON json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NULL AND human.id=json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].handler.id')\n      AND human.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND human.archived_at IS NULL\n    LEFT JOIN multiremi_issues source ON source.id=json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id')\n    WHERE q.id=json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.root_question_id') AND q.kind='message' AND q.visibility='shown' AND q.deleted_at IS NULL\n      AND CAST(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1'\n      AND json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.workspace_id')=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND qh.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)\n      AND (json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NULL OR source.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n      AND json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].stage')='human' AND (json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NOT NULL OR json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].handler.type')='member' AND human.id IS NOT NULL)\n      AND CAST(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route_revision') AS TEXT)=CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_route_revision') AS TEXT)\n      AND 1=1) ELSE TRUE END))) ORDER BY m.created_at DESC,m.id DESC LIMIT ?",
+        600
+      ],
+      [
+        "SELECT * FROM multiremi_attachments\n      WHERE comment_id IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) OR chat_message_id IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n      ORDER BY created_at ASC",
+        600
+      ],
+      [
+        "SELECT * FROM multiremi_comment_reactions\n       WHERE comment_id IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n       ORDER BY created_at ASC",
+        600
+      ],
+      [
+        "SELECT chat.id, chat.workspace_id, chat.creator_id, chat.agent_id,\n  chat.runtime_workspace_id, chat.project_id, chat.title, chat.status, chat.session_id,\n  chat.work_dir, chat.session_runtime_id, chat.session_provider, chat.session_execution_fingerprint,\n  chat.latest_task_id, chat.pinned, chat.origin_autopilot_id, chat.origin_run_id, chat.created_at, chat.updated_at,\n  (SELECT COUNT(*) FROM multiremi_conversation_log m\n  LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id\n    AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = ''\n  LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id\n    AND shared.workspace_id = chat.workspace_id\n  WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown'\n    AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL\n    AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS unread_count,\n  (SELECT MIN(m.created_at) FROM multiremi_conversation_log m\n  LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id\n    AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = ''\n  LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id\n    AND shared.workspace_id = chat.workspace_id\n  WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown'\n    AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL\n    AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS reader_unread_since,\n  (SELECT SUBSTR(m.body, 1, 240) FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id\n    ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_content,\n  (SELECT m.role FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id\n    ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_role,\n  (SELECT m.created_at FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id\n    ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_created_at\n  FROM multiremi_chat_sessions chat WHERE workspace_id = ? AND origin_autopilot_id IS NULL AND status != 'archived' AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_chat_bindings binding\n        WHERE binding.chat_session_id = chat.id) ORDER BY pinned DESC, updated_at DESC",
+        600
+      ],
+      [
+        "SELECT session_id, CAST(COUNT(*) AS INTEGER) AS n FROM multiremi_background_tasks\n        WHERE session_id IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) AND status IN ('running','paused') GROUP BY session_id",
+        600
+      ],
+      [
+        "SELECT * FROM multiremi_issues WHERE archived_at IS NULL AND workspace_id = ? ORDER BY updated_at DESC",
+        600
+      ],
+      [
+        "SELECT il.issue_id AS __issue_id, l.*\n       FROM multiremi_issue_labels l\n       JOIN multiremi_issue_to_labels il ON il.label_id = l.id\n       WHERE il.issue_id IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n       ORDER BY lower(l.name) ASC",
+        600
+      ],
+      [
+        "SELECT COUNT(*) AS total FROM multiremi_issues WHERE archived_at IS NULL AND workspace_id = ?",
+        600
+      ],
+      [
+        "SELECT runtime.*, profile.display_name AS daemon_display_name,\n              upgrade.status AS protocol_upgrade_status, upgrade.error AS protocol_upgrade_error\n       FROM multiremi_runtimes runtime\n       LEFT JOIN multiremi_daemon_profiles profile\n         ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local')\n        AND profile.daemon_id = runtime.daemon_id\n       LEFT JOIN (\n         SELECT runtime_id, status, error,\n                ROW_NUMBER() OVER (PARTITION BY runtime_id\n                  ORDER BY CASE WHEN status IN ('pending', 'running', 'restarting', 'verifying') THEN 0 ELSE 1 END,\n                           created_at DESC, updated_at DESC, id DESC) AS update_rank\n         FROM multiremi_runtime_update_requests\n         WHERE scope = 'cli' AND runtime_id IN (\n           SELECT id FROM multiremi_runtimes WHERE COALESCE(workspace_id, 'local') = ?\n         )\n       ) upgrade ON upgrade.runtime_id = runtime.id AND upgrade.update_rank = 1\n       WHERE COALESCE(runtime.workspace_id, 'local') = ?\n       ORDER BY runtime.updated_at DESC, runtime.id DESC",
+        600
+      ],
+      [
+        "WITH selected AS (SELECT id FROM multiremi_runtimes WHERE COALESCE(workspace_id, 'local') = ?), owners AS (\n      SELECT t.runtime_id,t.turn_id AS task_id FROM multiremi_turn_execution_records t WHERE t.runtime_id IN (SELECT id FROM selected)\n      UNION SELECT u.runtime_id,t.turn_id AS task_id FROM multiremi_usage_units u JOIN multiremi_turn_execution_records t ON t.id=u.task_id WHERE u.runtime_id IN (SELECT id FROM selected)\n    ), counts AS (SELECT runtime_id,COUNT(*) AS task_count FROM owners GROUP BY runtime_id), lifecycle AS (\n      SELECT runtime_id,SUM(CASE WHEN status IN (?,?,?,?) THEN 1 ELSE 0 END) AS active_task_count,\n      SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_task_count,\n      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_task_count\n      FROM multiremi_turn_execution_records t WHERE t.id=(SELECT current_attempt_id FROM multiremi_turns WHERE id=t.turn_id) AND runtime_id IN (SELECT id FROM selected) GROUP BY runtime_id\n    ), tokens AS (SELECT u.runtime_id,SUM(COALESCE(u.input_tokens,0)) AS input_tokens,SUM(COALESCE(u.output_tokens,0)) AS output_tokens,\n      SUM(COALESCE(u.cache_read_tokens,0)) AS cache_read_tokens,SUM(COALESCE(u.cache_write_tokens,0)) AS cache_write_tokens\n      FROM multiremi_usage_units u JOIN multiremi_turn_execution_records t ON t.id=u.task_id WHERE u.runtime_id IN (SELECT id FROM selected) GROUP BY u.runtime_id)\n    SELECT selected.id,counts.task_count,lifecycle.active_task_count,lifecycle.completed_task_count,lifecycle.failed_task_count,\n      tokens.input_tokens,tokens.output_tokens,tokens.cache_read_tokens,tokens.cache_write_tokens\n    FROM selected LEFT JOIN counts ON counts.runtime_id=selected.id LEFT JOIN lifecycle ON lifecycle.runtime_id=selected.id\n    LEFT JOIN tokens ON tokens.runtime_id=selected.id",
+        600
+      ],
+      [
+        "SELECT runtime_id, group_id FROM multiremi_execution_group_members\n       WHERE runtime_id IN (SELECT id FROM multiremi_runtimes WHERE COALESCE(workspace_id, 'local') = ?)\n       ORDER BY provider",
+        600
+      ],
+      [
+        "SELECT * FROM multiremi_runtime_models\n       WHERE runtime_id IN (SELECT id FROM multiremi_runtimes WHERE COALESCE(workspace_id, 'local') = ?)\n       ORDER BY is_default DESC, label ASC",
+        600
+      ],
+      [
+        "SELECT runtime.*, profile.display_name AS daemon_display_name\n       FROM multiremi_runtimes runtime\n       LEFT JOIN multiremi_daemon_profiles profile\n         ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local')\n        AND profile.daemon_id = runtime.daemon_id\n       WHERE runtime.id = ?",
+        472
+      ],
+      [
+        "SELECT * FROM multiremi_agents WHERE id = ? AND archived_at IS NULL",
+        256
+      ]
+    ],
+    "client": {
+      "batches": 60,
+      "elapsed_ms": 64951.175712,
+      "errors": {},
+      "routes": [
+        {
+          "path": "/api/turns",
+          "requests": 600,
+          "p50_ms": 2438.2438839999995,
+          "p95_ms": 5218.013782
+        },
+        {
+          "path": "/api/inbox",
+          "requests": 600,
+          "p50_ms": 2449.3544159999983,
+          "p95_ms": 5237.505096000001
+        },
+        {
+          "path": "/api/chat/sessions",
+          "requests": 600,
+          "p50_ms": 2436.8591430000015,
+          "p95_ms": 5225.9221050000015
+        },
+        {
+          "path": "/api/issues",
+          "requests": 600,
+          "p50_ms": 2436.681466000002,
+          "p95_ms": 5225.884165000003
+        },
+        {
+          "path": "/api/multiremi/runtimes",
+          "requests": 600,
+          "p50_ms": 2452.485687999999,
+          "p95_ms": 5223.314035999996
+        }
+      ]
+    },
+    "summary": {
+      "event": "api_minute_summary",
+      "ts": "2026-11-17T05:01:51.001Z",
+      "pid": 635543,
+      "window_ms": 65908,
+      "requests": 3000,
+      "status_5xx": 0,
+      "slow": 0,
+      "dropped": 0,
+      "db_busy_pct": 85.8,
+      "db_queries": 18778,
+      "event_loop_lag_max_ms": 4864.5,
+      "role": "all",
+      "routes": [
+        {
+          "method": "GET",
+          "route": "/api/multiremi/runtimes",
+          "count": 600,
+          "p50_ms": 1189.5,
+          "p95_ms": 3259.5,
+          "sum_ms": 808276.9
+        },
+        {
+          "method": "GET",
+          "route": "/api/issues",
+          "count": 600,
+          "p50_ms": 1175.7,
+          "p95_ms": 3240.9,
+          "sum_ms": 803207.3
+        },
+        {
+          "method": "GET",
+          "route": "/api/chat/sessions",
+          "count": 600,
+          "p50_ms": 1165.4,
+          "p95_ms": 3225.8,
+          "sum_ms": 800013.2
+        },
+        {
+          "method": "GET",
+          "route": "/api/inbox",
+          "count": 600,
+          "p50_ms": 1170.1,
+          "p95_ms": 3208.7,
+          "sum_ms": 799395.8
+        },
+        {
+          "method": "GET",
+          "route": "/api/turns",
+          "count": 600,
+          "p50_ms": 1161.5,
+          "p95_ms": 3180.2,
+          "sum_ms": 794594.7
+        }
+      ],
+      "db_routes": [
+        {
+          "method": "GET",
+          "route": "/api/inbox",
+          "count": 600,
+          "p50_ms": 1170.1,
+          "p95_ms": 3208.7,
+          "sum_ms": 799395.8,
+          "db_queries": 3600,
+          "queries_per_request": 6,
+          "db_ms": 13001.1
+        },
+        {
+          "method": "GET",
+          "route": "/api/multiremi/runtimes",
+          "count": 600,
+          "p50_ms": 1189.5,
+          "p95_ms": 3259.5,
+          "sum_ms": 808276.9,
+          "db_queries": 3600,
+          "queries_per_request": 6,
+          "db_ms": 9790.4
+        },
+        {
+          "method": "GET",
+          "route": "/api/chat/sessions",
+          "count": 600,
+          "p50_ms": 1165.4,
+          "p95_ms": 3225.8,
+          "sum_ms": 800013.2,
+          "db_queries": 3000,
+          "queries_per_request": 5,
+          "db_ms": 9192.1
+        },
+        {
+          "method": "GET",
+          "route": "/api/issues",
+          "count": 600,
+          "p50_ms": 1175.7,
+          "p95_ms": 3240.9,
+          "sum_ms": 803207.3,
+          "db_queries": 3000,
+          "queries_per_request": 5,
+          "db_ms": 8125.8
+        },
+        {
+          "method": "GET",
+          "route": "/api/turns",
+          "count": 600,
+          "p50_ms": 1161.5,
+          "p95_ms": 3180.2,
+          "sum_ms": 794594.7,
+          "db_queries": 2402,
+          "queries_per_request": 4,
+          "db_ms": 6734.1
+        }
+      ],
+      "peer": {
+        "sent": 0,
+        "batches": 0,
+        "dropped": 0,
+        "failed": 0,
+        "rtt_p95_ms": 0,
+        "oversize_dropped": 0,
+        "degraded": 0,
+        "duplicates": 0
+      },
+      "db_sources": [
+        {
+          "kind": "http",
+          "name": "GET /api/inbox",
+          "count": 600,
+          "db_queries": 3600,
+          "db_ms": 13001.1,
+          "queries_per_invocation": 6
+        },
+        {
+          "kind": "http",
+          "name": "GET /api/multiremi/runtimes",
+          "count": 600,
+          "db_queries": 3600,
+          "db_ms": 9790.4,
+          "queries_per_invocation": 6
+        },
+        {
+          "kind": "http",
+          "name": "GET /api/chat/sessions",
+          "count": 600,
+          "db_queries": 3000,
+          "db_ms": 9192.1,
+          "queries_per_invocation": 5
+        },
+        {
+          "kind": "http",
+          "name": "GET /api/issues",
+          "count": 600,
+          "db_queries": 3000,
+          "db_ms": 8125.8,
+          "queries_per_invocation": 5
+        },
+        {
+          "kind": "http",
+          "name": "GET /api/turns",
+          "count": 600,
+          "db_queries": 2402,
+          "db_ms": 6734.1,
+          "queries_per_invocation": 4
+        },
+        {
+          "kind": "ws",
+          "name": "hb",
+          "count": 6,
+          "db_queries": 1528,
+          "db_ms": 4201.6,
+          "queries_per_invocation": 254.67
+        },
+        {
+          "kind": "job",
+          "name": "daemon.offer",
+          "count": 16,
+          "db_queries": 864,
+          "db_ms": 2347.4,
+          "queries_per_invocation": 54
+        },
+        {
+          "kind": "job",
+          "name": "capability.sweep",
+          "count": 1,
+          "db_queries": 751,
+          "db_ms": 3056.5,
+          "queries_per_invocation": 751
+        },
+        {
+          "kind": "job",
+          "name": "scheduler.sync",
+          "count": 2,
+          "db_queries": 12,
+          "db_ms": 43.3,
+          "queries_per_invocation": 6
+        },
+        {
+          "kind": "job",
+          "name": "messaging.sync",
+          "count": 5,
+          "db_queries": 10,
+          "db_ms": 26.2,
+          "queries_per_invocation": 2
+        },
+        {
+          "kind": "job",
+          "name": "scm.poll",
+          "count": 5,
+          "db_queries": 5,
+          "db_ms": 13.4,
+          "queries_per_invocation": 1
+        },
+        {
+          "kind": "job",
+          "name": "notifications.sweep",
+          "count": 2,
+          "db_queries": 2,
+          "db_ms": 5.4,
+          "queries_per_invocation": 1
+        },
+        {
+          "kind": "job",
+          "name": "scheduler.issue-archive",
+          "count": 1,
+          "db_queries": 2,
+          "db_ms": 5.2,
+          "queries_per_invocation": 2
+        },
+        {
+          "kind": "job",
+          "name": "scheduler.failure-monitor",
+          "count": 1,
+          "db_queries": 1,
+          "db_ms": 2.7,
+          "queries_per_invocation": 1
+        }
+      ],
+      "db_attributed": {
+        "http": 15602,
+        "ws": 1528,
+        "job": 1647
+      },
+      "db_unattributed": 1
+    }
+  },
+  "after": {
+    "revision": "working-tree",
+    "dialect": "sqlite",
+    "simulated_sql_delay_ms": 2.5,
+    "seconds": 60,
+    "runtimes": 8,
+    "pollers": 10,
+    "agents": 8,
+    "chatSessions": 60,
+    "activeProviderLanes": 0,
+    "daemonSockets": 1,
+    "sharedSkillFiles": 1277,
+    "sharedSkillBytes": 13076480,
+    "connections": "real WS + HTTP; synthetic scale; no external model",
+    "elapsed_ms": 64990.190127,
+    "sql_per_minute": 17034.438186686366,
+    "statements": [
+      [
+        "SELECT token.* FROM multiremi_access_tokens token\n      WHERE token.token_hash = ? AND (token.type != 'daemon' OR EXISTS (\n        SELECT 1 FROM multiremi_workspaces workspace WHERE workspace.id = token.workspace_id\n      ))",
+        3000
+      ],
+      [
+        "SELECT id FROM multiremi_workspaces WHERE id = ?",
+        3000
+      ],
+      [
+        "SELECT * FROM multiremi_agents WHERE id IN (?, ?, ?, ?, ?, ?, ?, ?)",
+        616
+      ],
+      [
+        "SELECT multiremi_turns.id,multiremi_turns.session_id,multiremi_turns.seq,multiremi_turns.agent_id,multiremi_turns.execution_scope,multiremi_turns.status,multiremi_turns.wake_source,multiremi_turns.wake_seq,multiremi_turns.trigger_message_id,multiremi_turns.input_from_seq,multiremi_turns.input_to_seq,multiremi_turns.waiting_on_message_id,multiremi_turns.reply_message_id,multiremi_turns.wrap_up_requested_at,multiremi_turns.current_attempt_id,multiremi_turns.chat_session_id,multiremi_turns.delegation_id,multiremi_turns.delegated_by_agent_id,multiremi_turns.delegation_return_turn_id,multiremi_turns.delegated_from_issue_session_id,multiremi_turns.delegation_skip_reason,multiremi_turns.continued_from_turn_id,multiremi_turns.holds_workspace,multiremi_turns.priority,multiremi_turns.requesting_user_name,multiremi_turns.requesting_user_profile_description,multiremi_turns.issue_id,multiremi_turns.workspace_id,multiremi_turns.created_at,multiremi_turns.started_at,multiremi_turns.ended_at,multiremi_turns.ended_reason,NULL AS legacy_prompt,\n      current_attempt.id AS attempt_id,current_attempt.status AS attempt_status,current_attempt.runtime_id AS attempt_runtime_id,current_attempt.provider AS attempt_provider,current_attempt.error AS attempt_error,current_attempt.failure_reason AS attempt_failure_reason,current_attempt.progress_summary AS attempt_progress_summary,current_attempt.progress_step AS attempt_progress_step,current_attempt.progress_total AS attempt_progress_total,\n      CASE WHEN current_attempt.status IN ('accepted','running') THEN current_attempt.running_subagents END AS running_subagents,\n      CASE WHEN current_attempt.status IN ('accepted','running') THEN current_attempt.running_background_tasks END AS running_background_tasks,\n      CASE WHEN current_attempt.status='waiting_local_directory' THEN COALESCE(current_attempt.wait_reason,'') END AS local_directory_wait_reason\n      FROM multiremi_turns LEFT JOIN multiremi_turn_attempts current_attempt ON current_attempt.id=multiremi_turns.current_attempt_id\n      WHERE multiremi_turns.workspace_id=? AND (COALESCE((SELECT s.chat_id FROM multiremi_issue_sessions s WHERE s.id=multiremi_turns.session_id),\n        multiremi_turns.chat_session_id,(SELECT c.id FROM multiremi_chat_sessions c WHERE c.id=multiremi_turns.session_id)) IS NULL OR EXISTS (SELECT 1 FROM multiremi_chat_sessions c\n        WHERE c.id=COALESCE((SELECT s.chat_id FROM multiremi_issue_sessions s WHERE s.id=multiremi_turns.session_id),\n        multiremi_turns.chat_session_id,(SELECT c.id FROM multiremi_chat_sessions c WHERE c.id=multiremi_turns.session_id)) AND c.workspace_id=multiremi_turns.workspace_id AND 1=1)) ORDER BY multiremi_turns.created_at DESC,multiremi_turns.id DESC LIMIT ?",
+        600
+      ],
+      [
+        "SELECT member.* FROM multiremi_workspace_members member\n      JOIN multiremi_workspaces workspace ON workspace.id = member.workspace_id\n      WHERE member.workspace_id = ? AND member.user_id = 'local'\n      ORDER BY CASE WHEN member.id = ? THEN 0 ELSE 1 END, member.created_at, member.id LIMIT 1",
+        600
+      ],
+      [
+        "WITH RECURSIVE ancestors AS (\n    SELECT m.id AS root_id,m.id,m.session_id,m.task_id,m.kind,m.reply_to_id,m.to_agent_id,m.metadata,0 AS depth,1 AS source_inherited\n    FROM multiremi_conversation_log m\n      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id\n      LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=?\n      LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id=m.session_id AND legacy.reader_type='member' AND legacy.reader_id=m.to_member_id AND legacy.execution_scope=''\n      LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)\n      LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id\n      WHERE m.to_member_id IS NOT NULL AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'\n        AND m.seq>COALESCE(l.cursor_seq,0) AND m.seq>COALESCE(legacy.cursor_seq,0) AND m.visibility='shown' AND m.deleted_at IS NULL\n    UNION ALL\n    SELECT d.root_id,n.id,n.session_id,n.task_id,n.kind,n.reply_to_id,n.to_agent_id,n.metadata,d.depth+1,\n      CASE WHEN d.source_inherited=1 AND (json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1')) THEN 1 ELSE 0 END\n    FROM ancestors d JOIN multiremi_conversation_log n ON ((n.session_id=d.session_id AND (\n    n.id=COALESCE(d.reply_to_id,json_extract(d.metadata,'$.message_id')) OR\n    CAST(n.seq AS TEXT)=CAST(json_extract(d.metadata,'$.target_seq') AS TEXT))) OR\n    CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND n.id=json_extract(d.metadata,'$.root_question_id'))\n    WHERE d.depth<4 AND ((json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1')) OR d.reply_to_id IS NOT NULL)\n  ) SELECT COUNT(*) AS unread_count,COALESCE(SUM(CASE WHEN m.resolved_at IS NULL AND m.wake_applied<>'inbox_only' AND (\n      m.message_kind='decision' OR m.message_kind='request' AND m.sender_type='member'\n      OR m.message_kind='status' AND json_extract(m.metadata,'$.lifecycle_event') IN ('task_failed','task_cancelled')\n      OR m.message_kind IN ('report','final') AND json_extract(m.metadata,'$.message_outcome') IN ('failed','blocked','cancelled')) THEN 1 ELSE 0 END),0) AS attention_count FROM multiremi_conversation_log m\n      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id\n      LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=?\n      LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id=m.session_id AND legacy.reader_type='member' AND legacy.reader_id=m.to_member_id AND legacy.execution_scope=''\n      LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)\n      LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id\n      WHERE m.to_member_id IS NOT NULL AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'\n        AND m.seq>COALESCE(l.cursor_seq,0) AND m.seq>COALESCE(legacy.cursor_seq,0) AND m.visibility='shown' AND m.deleted_at IS NULL AND 1=1 AND ((s.id IS NOT NULL AND s.chat_id IS NULL OR a.id IS NOT NULL OR m.session_id='auto_orphan_inbox_'||COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n    OR c.id IS NOT NULL AND c.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND 1=1) AND NOT EXISTS (\n    SELECT 1 FROM ancestors d\n    LEFT JOIN multiremi_turns t ON t.id=d.task_id OR t.current_attempt_id=d.task_id\n    LEFT JOIN multiremi_agents ag ON ag.id=t.agent_id\n    LEFT JOIN multiremi_issue_sessions ts ON ts.id=t.session_id\n    LEFT JOIN multiremi_chat_sessions sc ON sc.id=COALESCE(ts.chat_id,t.chat_session_id,t.session_id)\n    LEFT JOIN multiremi_issue_sessions ds ON ds.id=d.session_id\n    LEFT JOIN multiremi_issues di ON di.id=ds.issue_id\n    LEFT JOIN multiremi_issues si ON si.id=COALESCE(json_extract(d.metadata,'$.decision_record.source_issue_id'),json_extract(d.metadata,'$.source_issue_id'))\n    WHERE d.root_id=m.id AND d.source_inherited=1 AND (\n      (d.kind='turn' OR json_extract(d.metadata,'$.human_request') IS NOT NULL\n    OR json_extract(d.metadata,'$.human_response') IS NOT NULL AND d.task_id IS NOT NULL) AND (t.id IS NULL OR t.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)\n        OR (COALESCE(ts.chat_id,t.chat_session_id) IS NOT NULL OR sc.id IS NOT NULL) AND (sc.id IS NULL OR sc.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) OR NOT (1=1))\n        OR COALESCE(ts.chat_id,t.chat_session_id,sc.id) IS NULL AND NOT (1=1))\n      OR json_extract(d.metadata,'$.human_response') IS NOT NULL AND d.task_id IS NULL AND NOT EXISTS (\n        SELECT 1 FROM multiremi_conversation_log n WHERE ((n.session_id=d.session_id AND (\n    n.id=COALESCE(d.reply_to_id,json_extract(d.metadata,'$.message_id')) OR\n    CAST(n.seq AS TEXT)=CAST(json_extract(d.metadata,'$.target_seq') AS TEXT))) OR\n    CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND n.id=json_extract(d.metadata,'$.root_question_id')))\n      OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND NOT EXISTS (\n        SELECT 1 FROM multiremi_conversation_log n WHERE n.id=json_extract(d.metadata,'$.root_question_id'))\n      OR COALESCE(json_extract(d.metadata,'$.decision_record.source_issue_id'),json_extract(d.metadata,'$.source_issue_id')) IS NOT NULL AND (di.id IS NULL OR si.id IS NULL OR di.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) OR si.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n      OR d.depth=4 AND (json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1'))\n    )) AND 1=1 AND NOT EXISTS (SELECT 1 FROM ancestors notification\n    WHERE notification.root_id=m.id AND NOT ((CASE WHEN COALESCE((CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_notification') AS TEXT) IN ('true','1') OR CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_present_request') AS TEXT) IN ('true','1')),FALSE) THEN EXISTS (\n    SELECT 1 FROM multiremi_conversation_log q\n    JOIN multiremi_conversation_heads qh ON qh.session_id=q.session_id\n    LEFT JOIN multiremi_workspace_members human ON json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NULL AND human.id=json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].handler.id')\n      AND human.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND human.archived_at IS NULL\n    LEFT JOIN multiremi_issues source ON source.id=json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id')\n    WHERE q.id=json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.root_question_id') AND q.kind='message' AND q.visibility='shown' AND q.deleted_at IS NULL\n      AND CAST(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1'\n      AND json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.workspace_id')=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND qh.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)\n      AND (json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NULL OR source.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n      AND json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].stage')='human' AND (json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NOT NULL OR json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].handler.type')='member' AND human.id IS NOT NULL)\n      AND CAST(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route_revision') AS TEXT)=CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_route_revision') AS TEXT)\n      AND 1=1) ELSE TRUE END)))",
+        600
+      ],
+      [
+        "WITH RECURSIVE ancestors AS (\n    SELECT m.id AS root_id,m.id,m.session_id,m.task_id,m.kind,m.reply_to_id,m.to_agent_id,m.metadata,0 AS depth,1 AS source_inherited\n    FROM multiremi_conversation_log m\n      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id\n      LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=?\n      LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id=m.session_id AND legacy.reader_type='member' AND legacy.reader_id=m.to_member_id AND legacy.execution_scope=''\n      LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)\n      LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id\n      WHERE m.to_member_id IS NOT NULL AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'\n        AND m.seq>COALESCE(l.cursor_seq,0) AND m.seq>COALESCE(legacy.cursor_seq,0) AND m.visibility='shown' AND m.deleted_at IS NULL\n    UNION ALL\n    SELECT d.root_id,n.id,n.session_id,n.task_id,n.kind,n.reply_to_id,n.to_agent_id,n.metadata,d.depth+1,\n      CASE WHEN d.source_inherited=1 AND (json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1')) THEN 1 ELSE 0 END\n    FROM ancestors d JOIN multiremi_conversation_log n ON ((n.session_id=d.session_id AND (\n    n.id=COALESCE(d.reply_to_id,json_extract(d.metadata,'$.message_id')) OR\n    CAST(n.seq AS TEXT)=CAST(json_extract(d.metadata,'$.target_seq') AS TEXT))) OR\n    CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND n.id=json_extract(d.metadata,'$.root_question_id'))\n    WHERE d.depth<4 AND ((json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1')) OR d.reply_to_id IS NOT NULL)\n  ) SELECT m.* FROM multiremi_conversation_log m\n      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id\n      LEFT JOIN multiremi_workspace_read_cursors l ON l.session_id=m.session_id AND l.workspace_id=?\n      LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id=m.session_id AND legacy.reader_type='member' AND legacy.reader_id=m.to_member_id AND legacy.execution_scope=''\n      LEFT JOIN multiremi_issue_sessions s ON s.id=m.session_id LEFT JOIN multiremi_chat_sessions c ON c.id=COALESCE(s.chat_id,m.session_id)\n      LEFT JOIN multiremi_autopilots a ON a.session_id=m.session_id\n      WHERE m.to_member_id IS NOT NULL AND COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)=? AND m.kind='message'\n        AND m.seq>COALESCE(l.cursor_seq,0) AND m.seq>COALESCE(legacy.cursor_seq,0) AND m.visibility='shown' AND m.deleted_at IS NULL AND 1=1 AND ((s.id IS NOT NULL AND s.chat_id IS NULL OR a.id IS NOT NULL OR m.session_id='auto_orphan_inbox_'||COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n    OR c.id IS NOT NULL AND c.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND 1=1) AND NOT EXISTS (\n    SELECT 1 FROM ancestors d\n    LEFT JOIN multiremi_turns t ON t.id=d.task_id OR t.current_attempt_id=d.task_id\n    LEFT JOIN multiremi_agents ag ON ag.id=t.agent_id\n    LEFT JOIN multiremi_issue_sessions ts ON ts.id=t.session_id\n    LEFT JOIN multiremi_chat_sessions sc ON sc.id=COALESCE(ts.chat_id,t.chat_session_id,t.session_id)\n    LEFT JOIN multiremi_issue_sessions ds ON ds.id=d.session_id\n    LEFT JOIN multiremi_issues di ON di.id=ds.issue_id\n    LEFT JOIN multiremi_issues si ON si.id=COALESCE(json_extract(d.metadata,'$.decision_record.source_issue_id'),json_extract(d.metadata,'$.source_issue_id'))\n    WHERE d.root_id=m.id AND d.source_inherited=1 AND (\n      (d.kind='turn' OR json_extract(d.metadata,'$.human_request') IS NOT NULL\n    OR json_extract(d.metadata,'$.human_response') IS NOT NULL AND d.task_id IS NOT NULL) AND (t.id IS NULL OR t.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)\n        OR (COALESCE(ts.chat_id,t.chat_session_id) IS NOT NULL OR sc.id IS NOT NULL) AND (sc.id IS NULL OR sc.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) OR NOT (1=1))\n        OR COALESCE(ts.chat_id,t.chat_session_id,sc.id) IS NULL AND NOT (1=1))\n      OR json_extract(d.metadata,'$.human_response') IS NOT NULL AND d.task_id IS NULL AND NOT EXISTS (\n        SELECT 1 FROM multiremi_conversation_log n WHERE ((n.session_id=d.session_id AND (\n    n.id=COALESCE(d.reply_to_id,json_extract(d.metadata,'$.message_id')) OR\n    CAST(n.seq AS TEXT)=CAST(json_extract(d.metadata,'$.target_seq') AS TEXT))) OR\n    CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND n.id=json_extract(d.metadata,'$.root_question_id')))\n      OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1') AND NOT EXISTS (\n        SELECT 1 FROM multiremi_conversation_log n WHERE n.id=json_extract(d.metadata,'$.root_question_id'))\n      OR COALESCE(json_extract(d.metadata,'$.decision_record.source_issue_id'),json_extract(d.metadata,'$.source_issue_id')) IS NOT NULL AND (di.id IS NULL OR si.id IS NULL OR di.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) OR si.workspace_id<>COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n      OR d.depth=4 AND (json_extract(d.metadata,'$.human_response') IS NOT NULL OR json_extract(d.metadata,'$.target_seq') IS NOT NULL OR json_extract(d.metadata,'$.message_id') IS NOT NULL OR CAST(json_extract(d.metadata,'$.question_source_notification') AS TEXT) IN ('true','1'))\n    )) AND 1=1 AND NOT EXISTS (SELECT 1 FROM ancestors notification\n    WHERE notification.root_id=m.id AND NOT ((CASE WHEN COALESCE((CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_notification') AS TEXT) IN ('true','1') OR CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_present_request') AS TEXT) IN ('true','1')),FALSE) THEN EXISTS (\n    SELECT 1 FROM multiremi_conversation_log q\n    JOIN multiremi_conversation_heads qh ON qh.session_id=q.session_id\n    LEFT JOIN multiremi_workspace_members human ON json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NULL AND human.id=json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].handler.id')\n      AND human.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND human.archived_at IS NULL\n    LEFT JOIN multiremi_issues source ON source.id=json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id')\n    WHERE q.id=json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.root_question_id') AND q.kind='message' AND q.visibility='shown' AND q.deleted_at IS NULL\n      AND CAST(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1'\n      AND json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.workspace_id')=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id) AND qh.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id)\n      AND (json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NULL OR source.workspace_id=COALESCE(s.workspace_id,c.workspace_id,a.workspace_id,h.workspace_id))\n      AND json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].stage')='human' AND (json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.source_issue_id') IS NOT NULL OR json_extract((CASE WHEN json_valid(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route')) THEN json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route') ELSE '[]' END),'$[#-1].handler.type')='member' AND human.id IS NOT NULL)\n      AND CAST(json_extract(CASE WHEN json_valid(q.metadata) THEN q.metadata ELSE '{}' END,'$.question.route_revision') AS TEXT)=CAST(json_extract(CASE WHEN json_valid(notification.metadata) THEN notification.metadata ELSE '{}' END,'$.question_route_revision') AS TEXT)\n      AND 1=1) ELSE TRUE END))) ORDER BY m.created_at DESC,m.id DESC LIMIT ?",
+        600
+      ],
+      [
+        "SELECT * FROM multiremi_attachments\n      WHERE comment_id IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) OR chat_message_id IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n      ORDER BY created_at ASC",
+        600
+      ],
+      [
+        "SELECT * FROM multiremi_comment_reactions\n       WHERE comment_id IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n       ORDER BY created_at ASC",
+        600
+      ],
+      [
+        "SELECT chat.id, chat.workspace_id, chat.creator_id, chat.agent_id,\n  chat.runtime_workspace_id, chat.project_id, chat.title, chat.status, chat.session_id,\n  chat.work_dir, chat.session_runtime_id, chat.session_provider, chat.session_execution_fingerprint,\n  chat.latest_task_id, chat.pinned, chat.origin_autopilot_id, chat.origin_run_id, chat.created_at, chat.updated_at,\n  (SELECT COUNT(*) FROM multiremi_conversation_log m\n  LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id\n    AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = ''\n  LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id\n    AND shared.workspace_id = chat.workspace_id\n  WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown'\n    AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL\n    AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS unread_count,\n  (SELECT MIN(m.created_at) FROM multiremi_conversation_log m\n  LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id\n    AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = ''\n  LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id\n    AND shared.workspace_id = chat.workspace_id\n  WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown'\n    AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL\n    AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS reader_unread_since,\n  (SELECT SUBSTR(m.body, 1, 240) FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id\n    ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_content,\n  (SELECT m.role FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id\n    ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_role,\n  (SELECT m.created_at FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id\n    ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_created_at\n  FROM multiremi_chat_sessions chat WHERE workspace_id = ? AND origin_autopilot_id IS NULL AND status != 'archived' AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_chat_bindings binding\n        WHERE binding.chat_session_id = chat.id) ORDER BY pinned DESC, updated_at DESC",
+        600
+      ],
+      [
+        "SELECT session_id, CAST(COUNT(*) AS INTEGER) AS n FROM multiremi_background_tasks\n        WHERE session_id IN (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) AND status IN ('running','paused') GROUP BY session_id",
+        600
+      ],
+      [
+        "SELECT * FROM multiremi_issues WHERE archived_at IS NULL AND workspace_id = ? ORDER BY updated_at DESC",
+        600
+      ],
+      [
+        "SELECT il.issue_id AS __issue_id, l.*\n       FROM multiremi_issue_labels l\n       JOIN multiremi_issue_to_labels il ON il.label_id = l.id\n       WHERE il.issue_id IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n       ORDER BY lower(l.name) ASC",
+        600
+      ],
+      [
+        "SELECT COUNT(*) AS total FROM multiremi_issues WHERE archived_at IS NULL AND workspace_id = ?",
+        600
+      ],
+      [
+        "SELECT runtime.*, profile.display_name AS daemon_display_name,\n              upgrade.status AS protocol_upgrade_status, upgrade.error AS protocol_upgrade_error\n       FROM multiremi_runtimes runtime\n       LEFT JOIN multiremi_daemon_profiles profile\n         ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local')\n        AND profile.daemon_id = runtime.daemon_id\n       LEFT JOIN (\n         SELECT runtime_id, status, error,\n                ROW_NUMBER() OVER (PARTITION BY runtime_id\n                  ORDER BY CASE WHEN status IN ('pending', 'running', 'restarting', 'verifying') THEN 0 ELSE 1 END,\n                           created_at DESC, updated_at DESC, id DESC) AS update_rank\n         FROM multiremi_runtime_update_requests\n         WHERE scope = 'cli' AND runtime_id IN (\n           SELECT id FROM multiremi_runtimes WHERE COALESCE(workspace_id, 'local') = ?\n         )\n       ) upgrade ON upgrade.runtime_id = runtime.id AND upgrade.update_rank = 1\n       WHERE COALESCE(runtime.workspace_id, 'local') = ?\n       ORDER BY runtime.updated_at DESC, runtime.id DESC",
+        600
+      ],
+      [
+        "WITH selected AS (SELECT id FROM multiremi_runtimes WHERE COALESCE(workspace_id, 'local') = ?), owners AS (\n      SELECT t.runtime_id,t.turn_id AS task_id FROM multiremi_turn_execution_records t WHERE t.runtime_id IN (SELECT id FROM selected)\n      UNION SELECT u.runtime_id,t.turn_id AS task_id FROM multiremi_usage_units u JOIN multiremi_turn_execution_records t ON t.id=u.task_id WHERE u.runtime_id IN (SELECT id FROM selected)\n    ), counts AS (SELECT runtime_id,COUNT(*) AS task_count FROM owners GROUP BY runtime_id), lifecycle AS (\n      SELECT runtime_id,SUM(CASE WHEN status IN (?,?,?,?) THEN 1 ELSE 0 END) AS active_task_count,\n      SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_task_count,\n      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_task_count\n      FROM multiremi_turn_execution_records t WHERE t.id=(SELECT current_attempt_id FROM multiremi_turns WHERE id=t.turn_id) AND runtime_id IN (SELECT id FROM selected) GROUP BY runtime_id\n    ), tokens AS (SELECT u.runtime_id,SUM(COALESCE(u.input_tokens,0)) AS input_tokens,SUM(COALESCE(u.output_tokens,0)) AS output_tokens,\n      SUM(COALESCE(u.cache_read_tokens,0)) AS cache_read_tokens,SUM(COALESCE(u.cache_write_tokens,0)) AS cache_write_tokens\n      FROM multiremi_usage_units u JOIN multiremi_turn_execution_records t ON t.id=u.task_id WHERE u.runtime_id IN (SELECT id FROM selected) GROUP BY u.runtime_id)\n    SELECT selected.id,counts.task_count,lifecycle.active_task_count,lifecycle.completed_task_count,lifecycle.failed_task_count,\n      tokens.input_tokens,tokens.output_tokens,tokens.cache_read_tokens,tokens.cache_write_tokens\n    FROM selected LEFT JOIN counts ON counts.runtime_id=selected.id LEFT JOIN lifecycle ON lifecycle.runtime_id=selected.id\n    LEFT JOIN tokens ON tokens.runtime_id=selected.id",
+        600
+      ],
+      [
+        "SELECT runtime_id, group_id FROM multiremi_execution_group_members\n       WHERE runtime_id IN (SELECT id FROM multiremi_runtimes WHERE COALESCE(workspace_id, 'local') = ?)\n       ORDER BY provider",
+        600
+      ],
+      [
+        "SELECT * FROM multiremi_runtime_models\n       WHERE runtime_id IN (SELECT id FROM multiremi_runtimes WHERE COALESCE(workspace_id, 'local') = ?)\n       ORDER BY is_default DESC, label ASC",
+        600
+      ],
+      [
+        "SELECT runtime.*, profile.display_name AS daemon_display_name\n       FROM multiremi_runtimes runtime\n       LEFT JOIN multiremi_daemon_profiles profile\n         ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local')\n        AND profile.daemon_id = runtime.daemon_id\n       WHERE runtime.id = ?",
+        416
+      ],
+      [
+        "SELECT * FROM multiremi_agents WHERE id = ? AND archived_at IS NULL",
+        256
+      ]
+    ],
+    "client": {
+      "batches": 60,
+      "elapsed_ms": 64665.132489999996,
+      "errors": {},
+      "routes": [
+        {
+          "path": "/api/turns",
+          "requests": 600,
+          "p50_ms": 2772.0891980000015,
+          "p95_ms": 5104.378424
+        },
+        {
+          "path": "/api/inbox",
+          "requests": 600,
+          "p50_ms": 2755.446177,
+          "p95_ms": 5131.959944999999
+        },
+        {
+          "path": "/api/chat/sessions",
+          "requests": 600,
+          "p50_ms": 2747.4889570000014,
+          "p95_ms": 5127.632334999998
+        },
+        {
+          "path": "/api/issues",
+          "requests": 600,
+          "p50_ms": 2717.7707870000013,
+          "p95_ms": 5118.678773999998
+        },
+        {
+          "path": "/api/multiremi/runtimes",
+          "requests": 600,
+          "p50_ms": 2716.5549659999997,
+          "p95_ms": 5125.167882000002
+        }
+      ]
+    },
+    "summary": {
+      "event": "api_minute_summary",
+      "ts": "2026-11-17T05:03:19.620Z",
+      "pid": 639765,
+      "window_ms": 64986,
+      "requests": 3000,
+      "status_5xx": 0,
+      "slow": 0,
+      "dropped": 0,
+      "db_busy_pct": 84.76,
+      "db_queries": 18450,
+      "event_loop_lag_max_ms": 3612.8,
+      "role": "all",
+      "routes": [
+        {
+          "method": "GET",
+          "route": "/api/multiremi/runtimes",
+          "count": 600,
+          "p50_ms": 1372.1,
+          "p95_ms": 2798.5,
+          "sum_ms": 853271.3
+        },
+        {
+          "method": "GET",
+          "route": "/api/issues",
+          "count": 600,
+          "p50_ms": 1359.2,
+          "p95_ms": 2779.8,
+          "sum_ms": 846969.4
+        },
+        {
+          "method": "GET",
+          "route": "/api/chat/sessions",
+          "count": 600,
+          "p50_ms": 1345.6,
+          "p95_ms": 2764.9,
+          "sum_ms": 843125.3
+        },
+        {
+          "method": "GET",
+          "route": "/api/inbox",
+          "count": 600,
+          "p50_ms": 1348.3,
+          "p95_ms": 2747.8,
+          "sum_ms": 840170.6
+        },
+        {
+          "method": "GET",
+          "route": "/api/turns",
+          "count": 600,
+          "p50_ms": 1330.4,
+          "p95_ms": 2747.7,
+          "sum_ms": 829831.5
+        }
+      ],
+      "db_routes": [
+        {
+          "method": "GET",
+          "route": "/api/inbox",
+          "count": 600,
+          "p50_ms": 1348.3,
+          "p95_ms": 2747.8,
+          "sum_ms": 840170.6,
+          "db_queries": 3600,
+          "queries_per_request": 6,
+          "db_ms": 13169.6
+        },
+        {
+          "method": "GET",
+          "route": "/api/multiremi/runtimes",
+          "count": 600,
+          "p50_ms": 1372.1,
+          "p95_ms": 2798.5,
+          "sum_ms": 853271.3,
+          "db_queries": 3600,
+          "queries_per_request": 6,
+          "db_ms": 9836.2
+        },
+        {
+          "method": "GET",
+          "route": "/api/chat/sessions",
+          "count": 600,
+          "p50_ms": 1345.6,
+          "p95_ms": 2764.9,
+          "sum_ms": 843125.3,
+          "db_queries": 3000,
+          "queries_per_request": 5,
+          "db_ms": 9258.4
+        },
+        {
+          "method": "GET",
+          "route": "/api/issues",
+          "count": 600,
+          "p50_ms": 1359.2,
+          "p95_ms": 2779.8,
+          "sum_ms": 846969.4,
+          "db_queries": 3000,
+          "queries_per_request": 5,
+          "db_ms": 8142.4
+        },
+        {
+          "method": "GET",
+          "route": "/api/turns",
+          "count": 600,
+          "p50_ms": 1330.4,
+          "p95_ms": 2747.7,
+          "sum_ms": 829831.5,
+          "db_queries": 2402,
+          "queries_per_request": 4,
+          "db_ms": 6790.9
+        }
+      ],
+      "peer": {
+        "sent": 0,
+        "batches": 0,
+        "dropped": 0,
+        "failed": 0,
+        "rtt_p95_ms": 0,
+        "oversize_dropped": 0,
+        "degraded": 0,
+        "duplicates": 0
+      },
+      "db_sources": [
+        {
+          "kind": "http",
+          "name": "GET /api/inbox",
+          "count": 600,
+          "db_queries": 3600,
+          "db_ms": 13169.6,
+          "queries_per_invocation": 6
+        },
+        {
+          "kind": "http",
+          "name": "GET /api/multiremi/runtimes",
+          "count": 600,
+          "db_queries": 3600,
+          "db_ms": 9836.2,
+          "queries_per_invocation": 6
+        },
+        {
+          "kind": "http",
+          "name": "GET /api/chat/sessions",
+          "count": 600,
+          "db_queries": 3000,
+          "db_ms": 9258.4,
+          "queries_per_invocation": 5
+        },
+        {
+          "kind": "http",
+          "name": "GET /api/issues",
+          "count": 600,
+          "db_queries": 3000,
+          "db_ms": 8142.4,
+          "queries_per_invocation": 5
+        },
+        {
+          "kind": "http",
+          "name": "GET /api/turns",
+          "count": 600,
+          "db_queries": 2402,
+          "db_ms": 6790.9,
+          "queries_per_invocation": 4
+        },
+        {
+          "kind": "ws",
+          "name": "hb",
+          "count": 5,
+          "db_queries": 1316,
+          "db_ms": 3613,
+          "queries_per_invocation": 263.2
+        },
+        {
+          "kind": "job",
+          "name": "daemon.offer",
+          "count": 16,
+          "db_queries": 864,
+          "db_ms": 2412.9,
+          "queries_per_invocation": 54
+        },
+        {
+          "kind": "job",
+          "name": "capability.sweep",
+          "count": 1,
+          "db_queries": 635,
+          "db_ms": 1770,
+          "queries_per_invocation": 635
+        },
+        {
+          "kind": "job",
+          "name": "scheduler.sync",
+          "count": 2,
+          "db_queries": 12,
+          "db_ms": 32.6,
+          "queries_per_invocation": 6
+        },
+        {
+          "kind": "job",
+          "name": "messaging.sync",
+          "count": 5,
+          "db_queries": 10,
+          "db_ms": 26.4,
+          "queries_per_invocation": 2
+        },
+        {
+          "kind": "job",
+          "name": "scm.poll",
+          "count": 5,
+          "db_queries": 5,
+          "db_ms": 13.5,
+          "queries_per_invocation": 1
+        },
+        {
+          "kind": "job",
+          "name": "notifications.sweep",
+          "count": 2,
+          "db_queries": 2,
+          "db_ms": 5.5,
+          "queries_per_invocation": 1
+        },
+        {
+          "kind": "job",
+          "name": "scheduler.issue-archive",
+          "count": 1,
+          "db_queries": 2,
+          "db_ms": 5.3,
+          "queries_per_invocation": 2
+        },
+        {
+          "kind": "job",
+          "name": "scheduler.failure-monitor",
+          "count": 1,
+          "db_queries": 1,
+          "db_ms": 2.7,
+          "queries_per_invocation": 1
+        }
+      ],
+      "db_attributed": {
+        "http": 15602,
+        "ws": 1316,
+        "job": 1531
+      },
+      "db_unattributed": 1
+    }
+  }
+}

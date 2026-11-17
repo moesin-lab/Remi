@@ -45,6 +45,16 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 [大文件复现与验证](../../reports/performance/MUL-85-skill-files.md)记录操作者 PostgreSQL
 采样与本地 1,277 文件夹具；本地 SQLite 耗时不能代表生产 PG 同步桥或部署后的性能。
 
+## 活跃轮次下行快照
+
+`DaemonTurnBridge.snapshot` 在同一 workspace 生命周期锁下，按确定顺序批量取得 lane
+互斥，再批量读取当前 attempt、宿主、输入回执、会话 head 与日志窗口。输入回执的首次
+初始化和 projection 水位各用一条集合写入；跨宿主、旧 attempt 和终态 turn 仍不产生输入。
+按 lane 投影时复用已锁定的 read 水位，不逐 task 再读 attempt。查询往返数不随同宿主活跃
+轮次数增长；返回行数和序列化成本仍随实际输入量增长。
+共享规模夹具另有 12 个并发活跃 attempt、8 个未答 AUQ/权限请求、20 条待发送飞书记录和
+12 个 runtime；具体测量与未验证项见 MUL-199 的 performance 报告。
+
 ## Daemon 保活与事件唤醒边界
 
 保活写入与业务变化通知分开：机器人相同状态报告仍更新 `reported_at`，SSH 相同状态心跳

@@ -5884,6 +5884,8 @@ runMigrations(this.db);
   }
 
   taskOfferRetryDeadlines(runtimeId: string) { return this.tasks.taskOfferRetryDeadlines(runtimeId); }
+  pendingTaskOfferRuntimeIds(workspaceId: string) { return this.tasks.pendingTaskOfferRuntimeIds(workspaceId); }
+
   hasPendingTaskOffers(workspaceId: string) { return this.tasks.hasPendingTaskOffers(workspaceId); }
 
   private publishDaemonDispatchConditionsChanged(workspaceId: string, runtimeId?: string): void {

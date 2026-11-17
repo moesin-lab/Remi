@@ -1,3 +1,4 @@
+import { SchemaContractRefusedError } from './schema-contract.js';
 import type { MultiremiPlatformOperation, MultiremiPlatformRelease } from "@multiremi/contracts";
 import type { PlatformUpdaterClient } from "./client.js";
 import { DrainCancelledError, PlatformDrainCoordinator } from "./drain.js";
@@ -102,6 +103,7 @@ export class PlatformUpdateWorker {
         await finish({
           status: error instanceof DrainCancelledError ? "cancelled" : "failed",
           error: error instanceof Error ? error.message : String(error),
+          ...(error instanceof SchemaContractRefusedError ? { progress: { failure: error.failure } } : {}),
         });
         releaseDrain = true;
         return;

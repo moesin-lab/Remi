@@ -1,3 +1,4 @@
+import { isPlatformSchemaContractFailure } from '@multiremi/contracts/platform-failure';
 import type { Context, Hono } from "hono";
 import { runtimeProtocolSummary } from "@multiremi/contracts/runtime-protocol";
 import type {
@@ -258,6 +259,7 @@ export function registerPlatformRoutes(app: Hono, deps: RouterDeps): void {
     const denied = denyUpdater(c, deps);
     if (denied) return denied;
     const body = await readJson<ReportPlatformOperationInput>(c);
+    if (body.progress && Object.prototype.hasOwnProperty.call(body.progress, "failure") && !isPlatformSchemaContractFailure(body.progress.failure)) return c.json({ error: "invalid platform operation failure" }, 400);
     if (!OPERATION_STATUSES.has(body.status)) return c.json({ error: "invalid platform operation status" }, 400);
     // This synchronous check + transition is the commit point. Cancellation and
     // lease loss must be resolved before the host touches any running service.

@@ -183,6 +183,7 @@ main 后端变红时应定位相应合并并修复或回滚；测试问题由 QA
 `node --test scripts/local-profile.test.mjs scripts/platform-updater-runner.test.mjs`；Windows 验证宿主互斥并编译 updater，
 Windows 互斥夹具允许 PowerShell 冷启动用时 30 秒，完整生命周期仍有 90 秒上限；
 对创建、迁移并删除独立 PostgreSQL 数据库的会话日志用例，使用 30 秒集成测试上限，保留全部事务与数据断言。
+历史 sweep schema 升级的 3 个 `07` 用例同样使用 30 秒迁移集成测试上限：MUL-198 在 main 基线上单独运行 PostgreSQL 17，重复测得约 8.5–10.8 秒，超过默认 5 秒；全部回填、幂等与约束断言保留。
 发版快照门禁用例创建真实 Git 仓库并执行多个子进程，使用 30 秒夹具期限，保留未准备依赖时阻止发版的全部断言。
 Linux 设置 `MULTIREMI_TEST_DOCKER_RECOVERY=1` 运行隔离的 PostgreSQL 17 恢复和回执对账测试，
 并运行 `bun run tests/integration/platform-application-smoke.ts`：从 Web 代理调用真实鉴权 API、

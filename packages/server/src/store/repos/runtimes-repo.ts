@@ -544,6 +544,44 @@ export class RuntimesRepo {
     return row ? withRuntimeLiveness(toRuntime(row)) : null;
   }
 
+  /** Identity and drain fence for a fanout; no historical usage or model hydration. */
+  getRuntimesLite(ids: readonly string[]): MultiremiRuntime[] {
+    const unique = [...new Set(ids)];
+    const rows: Row[] = [];
+    for (let offset = 0; offset < unique.length; offset += 400) {
+      const batch = unique.slice(offset, offset + 400);
+      rows.push(...this.ctx.db.query(`SELECT runtime.*, profile.display_name AS daemon_display_name,
+          drain.daemon_id AS draining_daemon_id
+        FROM multiremi_runtimes runtime
+        LEFT JOIN multiremi_daemon_drains drain
+          ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local')
+         AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id)
+        LEFT JOIN multiremi_daemon_profiles profile
+          ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local')
+         AND profile.daemon_id = runtime.daemon_id
+        WHERE runtime.id IN (${batch.map(() => '?').join(',')})`).all(...batch) as Row[]);
+    }
+    const cache = activeRequestReadCache();
+    for (const row of rows) cache?.set(cacheKey("multiremi_runtimes", "row", String(row.id)), row);
+    return rows.map(row => withRuntimeLiveness(toRuntime(row)));
+  }
+
+  /** Consumers of message/terminal changes. Idle hosts have no input to refresh;
+   * maintenance/configuration events still use the complete workspace fanout. */
+  daemonInputRuntimeIds(workspaceId: string): string[] {
+    return (this.ctx.db.query(`SELECT runtime_id FROM multiremi_turn_execution_records
+        WHERE workspace_id=? AND runtime_id IS NOT NULL
+          AND status IN ('dispatched','running','waiting_local_directory','awaiting_human')
+      UNION SELECT runtime_id FROM multiremi_feishu_bot_configs WHERE workspace_id=? AND runtime_id IS NOT NULL
+      UNION SELECT runtime_id FROM multiremi_feishu_bot_runtime_states
+        WHERE workspace_id=? AND (state<>'stopped' OR release_pending=1)
+      UNION SELECT runtime_id FROM multiremi_background_tasks WHERE workspace_id=? AND lane_state<>'closed'
+      UNION SELECT r.id AS runtime_id FROM multiremi_runtimes r JOIN multiremi_daemon_drains d
+        ON d.workspace_id=COALESCE(r.workspace_id,'local') AND d.daemon_id=COALESCE(r.daemon_id,r.id)
+        WHERE d.workspace_id=?`).all(workspaceId,workspaceId,workspaceId,workspaceId,workspaceId) as Row[])
+      .map(row => String(row.runtime_id));
+  }
+
   recordDaemonProtocol(runtimeId: string, daemonId: string, version: number, cliVersion?: string): void {
     if (!this.readRuntimeRow(runtimeId)) return;
     this.withRuntimeLifecycleLock(runtimeId, runtime => {

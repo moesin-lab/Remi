@@ -186,7 +186,7 @@ export class DaemonProtocolLayer {
       },
       onFrame: (sample) => this.metrics?.record(sample),
       onRpc: frame => this.dispatchRpc(frame, session),
-      onEvent: frame => this.eventHandlers.get(frame.type)?.(frame, session) ?? null,
+      onEvent: frame => withSynchronousRequestReadCache(() => this.eventHandlers.get(frame.type)?.(frame, session) ?? null),
       onBestEffort: frame => this.bestEffortHandlers.get(frame.type)?.(frame, session) ?? null,
       traceHeads: () => this.traceHeads(session),
       onReply: frame => {

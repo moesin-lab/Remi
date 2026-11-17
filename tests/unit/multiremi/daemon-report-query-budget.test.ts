@@ -1,0 +1,692 @@
+import { withSynchronousRequestReadCache } from "@multiremi/store/request-read-cache.js";
+import { createMultiremiApp } from "@multiremi/api.js";
+import { createResponsibleTestIssue } from "./helpers.js";
+import {
+  afterEach,
+  beforeAll,
+  expect,
+  setSystemTime,
+  spyOn,
+  test,
+} from "bun:test";
+import { MultiremiStore } from "@multiremi/store.js";
+import type {
+  SqlDatabase,
+  SqlStatement,
+} from "@multiremi/store/db/postgres.js";
+import { FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
+import type { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
+import { startMultiremiServer } from "../../fixtures/daemon-protocol.js";
+import {
+  openHotspotDatabase,
+  useMigratedHotspotDatabases,
+} from "../../fixtures/multiremi/first-screen-hotspots-database.js";
+import { resetMultiremiTestEnv } from "./helpers.js";
+
+// Every fleet opens its database with this bot key set; warm the migrated
+// template under the same environment (registered first, so it runs first).
+const FLEET_KEY = Buffer.alloc(32, 52).toString("base64");
+beforeAll(() => {
+  process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = FLEET_KEY;
+});
+useMigratedHotspotDatabases();
+
+const cleanups: Array<() => Promise<void>> = [];
+const previousEncryptionKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  setSystemTime();
+  if (previousEncryptionKey === undefined)
+    delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
+  else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousEncryptionKey;
+  resetMultiremiTestEnv();
+});
+
+// Count executions, including WITH queries, until queued downlinks/offers finish.
+// Counting only inside handleHeartbeat hides the work it schedules afterwards.
+async function countSql(
+  database: SqlDatabase,
+  layer: DaemonProtocolLayer,
+  action: () => unknown,
+  onResult?: (sql: string, value: unknown) => void,
+) {
+  const statements: string[] = [];
+  const query = database.query.bind(database);
+  const prepare = database.prepare.bind(database);
+  const run = database.run.bind(database);
+  const exec = database.exec.bind(database);
+  // SQLite query() delegates to prepare(); count that execution once.
+  const wrapped = new WeakSet<object>();
+  const wrap = (statement: SqlStatement, sql: string): SqlStatement => {
+    if (wrapped.has(statement)) return statement;
+    const proxy = new Proxy(statement, {
+      get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if (["get", "all", "run", "values"].includes(String(key)))
+          return (...args: unknown[]) => {
+            statements.push(sql);
+            const result = value.apply(target, args);
+            onResult?.(sql, result);
+            return result;
+          };
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    wrapped.add(proxy);
+    return proxy;
+  };
+  const querySpy = spyOn(database, "query").mockImplementation(((sql: string) =>
+    wrap(query(sql), sql)) as typeof database.query);
+  const prepareSpy = spyOn(database, "prepare").mockImplementation(((
+    sql: string,
+  ) => wrap(prepare(sql), sql)) as typeof database.prepare);
+  const runSpy = spyOn(database, "run").mockImplementation(
+    (...args: Parameters<SqlDatabase["run"]>) => {
+      statements.push(args[0]);
+      return run(...args);
+    },
+  );
+  const execSpy = spyOn(database, "exec").mockImplementation((sql) => {
+    statements.push(sql);
+    exec(sql);
+  });
+  try {
+    await action();
+    await layer.drain();
+    return statements;
+  } finally {
+    querySpy.mockRestore();
+    prepareSpy.mockRestore();
+    runSpy.mockRestore();
+    execSpy.mockRestore();
+  }
+}
+
+async function openFleetDatabase() {
+  process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = FLEET_KEY;
+  const database = await openHotspotDatabase();
+  cleanups.push(() => database.dispose());
+  return database;
+}
+
+async function fleet(opened?: Awaited<ReturnType<typeof openFleetDatabase>>) {
+  const database = opened ?? (await openFleetDatabase());
+  const store = new MultiremiStore(database.db);
+  store.ensureLocalWorkspace();
+  const runtimeIds = Array.from(
+    { length: 8 },
+    (_, index) => `rt_cost_${index}`,
+  );
+  for (const [index, id] of runtimeIds.entries()) {
+    store.registerRuntime({
+      id,
+      name: id,
+      provider: index % 2 ? "codex" : "claude",
+      workspaceId: "local",
+      ownerId: "local",
+      daemonId: `dm_cost_${Math.floor(index / 2)}`,
+      maxConcurrency: 4,
+      metadata: {
+        parallel_agent_execution: 1,
+        agent_plugin_protocol: 1,
+        codex_profiles: 1,
+        claude_profiles: 1,
+      },
+    });
+    store.heartbeatRuntime(id, { supportsFeishuBotConfig: true });
+    store.recordSshMeshHeartbeat(id, 1, { status: "disabled" });
+  }
+  const agent = store.createAgent({
+    name: "Cost fixture",
+    provider: "claude",
+    runtimeId: runtimeIds[0],
+  });
+  const config = store.upsertFeishuBotConfig("local", {
+    agentId: agent.id,
+    runtimeId: runtimeIds[0],
+    appId: "cli_fixture_cost",
+    senderAccessPolicy: "agent",
+    appSecret: "fixture-secret",
+    appSecretOp: "set",
+    domain: "feishu",
+    enabled: true,
+  });
+  const status = (index: number) => ({
+    appliedRevision: config.revision,
+    state: index === 0 ? ("online" as const) : ("stopped" as const),
+    botName: index === 0 ? "Fixture" : null,
+    botOpenId: null,
+    errorCode: null,
+    errorMessage: null,
+  });
+  runtimeIds.forEach((id, index) =>
+    store.reportFeishuBotRuntimeStatus("local", id, status(index)),
+  );
+  let layer!: DaemonProtocolLayer;
+  const server = startMultiremiServer({
+    store,
+    peerChannel: null,
+    apiRole: "runtime",
+    authToken: "fixture-cost",
+    hostname: "127.0.0.1",
+    port: 0,
+    onDaemonProtocol: (value) => {
+      layer = value;
+    },
+  });
+  cleanups.push(async () => {
+    layer.closeAll();
+    await layer.drain();
+    server.stop(true);
+  });
+  const sessions: Array<ReturnType<DaemonProtocolLayer["openSession"]>> = [];
+  const frames: Array<Array<Record<string, any>>> = [];
+  const capabilities = {
+    parallel_agent_execution: 1,
+    agent_plugin_protocol: 1,
+    feishu_concierge_protocol: FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION,
+  };
+  const heartbeat = (index: number, mesh = false, activeTaskCount = 0) =>
+    sessions[index]!.handleMessage(
+      JSON.stringify({
+        v: 2,
+        t: "hb",
+        p: {
+          active_task_count: activeTaskCount,
+          drain_ack_generation: 0,
+          runtimes: runtimeIds
+            .slice(index * 2, index * 2 + 2)
+            .map((runtime_id) => ({
+              runtime_id,
+              capabilities,
+              ...(mesh
+                ? {
+                    ssh_mesh_protocol: 1,
+                    ssh_mesh_status: { status: "disabled" },
+                  }
+                : {}),
+            })),
+        },
+      }),
+    );
+  for (let index = 0; index < 4; index++) {
+    const received: Array<Record<string, any>> = [];
+    frames.push(received);
+    const session = layer.openSession(
+      {
+        send(text) {
+          received.push(JSON.parse(text));
+          return text.length;
+        },
+        close() {},
+      },
+      { accessToken: null, masterToken: true },
+    );
+    sessions.push(session);
+    await session.handleMessage(
+      JSON.stringify({
+        v: 2,
+        t: "hello",
+        p: {
+          protocol: 2,
+          daemon_id: `dm_cost_${index}`,
+          cli_version: "0.2.95",
+          caps: [],
+          runtimes: runtimeIds
+            .slice(index * 2, index * 2 + 2)
+            .map((runtime_id, position) => ({
+              runtime_id,
+              provider: position ? "codex" : "claude",
+              max_concurrency: 4,
+              active_task_ids: [],
+              capabilities,
+            })),
+        },
+      }),
+    );
+    await layer.drain();
+    await heartbeat(index, true);
+    await layer.drain();
+    await session.handleMessage(
+      JSON.stringify({ v: 2, t: "ack", ack: session.lastSentSeq, p: {} }),
+    );
+    await layer.drain();
+  }
+  return {
+    store,
+    layer,
+    sessions,
+    runtimeIds,
+    frames,
+    status,
+    heartbeat,
+    agent,
+    config,
+    database: database.db,
+  };
+}
+
+async function loadedFleet(size: number) {
+  const f = await fleet();
+  const issue = createResponsibleTestIssue(f.store, {
+    title: "Report cost",
+    workspaceId: "local",
+    status: "in_progress",
+    assigneeType: "agent",
+    assigneeId: f.agent.id,
+  });
+  const session = f.store.getOrCreateDefaultIssueSession(issue.id);
+  let task = f.store.createTask({
+    agentId: f.agent.id,
+    issueId: issue.id,
+    issueSessionId: session.id,
+    prompt: "work",
+  });
+  await f.layer.drain();
+  if (f.store.getTask(task.id)?.status === "queued")
+    f.store.claimTask(f.runtimeIds[0]!);
+  f.store.startTask(task.id);
+  for (let attempt = 1; attempt < (size === 40 ? 8 : 1); attempt++) {
+    const turn = f.store.getTurnForAttempt(task.id)!;
+    f.store.failTask(task.id, { error: "retry fixture" });
+    const retried = f.store.retryTurn(turn.id);
+    await f.layer.drain();
+    task = f.store.getTask(retried.current_attempt_id!)!;
+    if (task.status === "queued") f.store.claimTask(f.runtimeIds[0]!);
+    f.store.startTask(task.id);
+    await f.sessions[0]!.handleMessage(
+      JSON.stringify({ v: 2, t: "ack", ack: f.sessions[0]!.lastSentSeq, p: {} }),
+    );
+    await f.layer.drain();
+  }
+  expect(f.store.getTask(task.id)!.attempt).toBe(size === 40 ? 8 : 1);
+  for (let i = 0; i < size; i++)
+    f.store.sendMessage({
+      session_id: session.id,
+      sender: { type: "platform", id: null },
+      to: { type: "none" },
+      message_kind: "status",
+      body_md: `context ${i}`,
+      wake_requested: "inbox_only",
+    });
+  const peerAgent = f.store.createAgent({
+    name: "Ongoing peer",
+    provider: "claude",
+    runtimeId: f.runtimeIds[2],
+  });
+  const chat = f.store.createChatSession({ agentId: peerAgent.id });
+  let peer = f.store.sendChatMessage(chat.id, { body: "keep working" }).task;
+  await f.layer.drain();
+  if (f.store.getTask(peer.id)?.status === "queued")
+    f.store.claimTask(f.runtimeIds[2]!);
+  f.store.startTask(peer.id);
+  for (let attempt = 1; attempt < (size === 40 ? 8 : 1); attempt++) {
+    const turn = f.store.getTurnForAttempt(peer.id)!;
+    f.store.failTask(peer.id, { error: "retry fixture" });
+    const retried = f.store.retryTurn(turn.id);
+    await f.layer.drain();
+    peer = f.store.getTask(retried.current_attempt_id!)!;
+    if (peer.status === "queued") f.store.claimTask(f.runtimeIds[2]!);
+    f.store.startTask(peer.id);
+    await f.sessions[1]!.handleMessage(
+      JSON.stringify({
+        v: 2,
+        t: "ack",
+        ack: f.sessions[1]!.lastSentSeq,
+        p: {},
+      }),
+    );
+    await f.layer.drain();
+  }
+  expect(f.store.getTask(peer.id)!.attempt).toBe(size === 40 ? 8 : 1);
+  for (let i = 0; i < size; i++)
+    f.store.sendMessage({
+      session_id: chat.id,
+      sender: { type: "platform", id: null },
+      to: { type: "none" },
+      body_md: `peer ${i}`,
+      message_kind: "status",
+      wake_requested: "inbox_only",
+    });
+  await f.layer.drain();
+  return { ...f, issue, issueSession: session, task, peer };
+}
+
+for (const size of [2, 40]) {
+  for (const type of [
+    "task.workspace",
+    "turn.complete",
+    "task.fail",
+    "task.usage",
+  ])
+    test(`${type} budget with ${size} context messages`, async () => {
+      const f = await loadedFleet(size);
+      const turn = f.store.getTurnForAttempt(f.task.id)!;
+      const input = f.store
+        .getDaemonTurnBridge()
+        .offerInput(f.store.getTaskWithAgent(f.task.id)!);
+      const completion = {
+        trace: {
+          head: 0,
+          event_count: 0,
+          tool_call_count: 0,
+          type_histogram: [],
+          closed: true,
+        },
+        final_reply_md: "finished",
+        model: { provider: "claude", model: "fixture" },
+      };
+      const payload =
+        type === "task.workspace"
+          ? {
+              task_id: f.task.id,
+              runtime_id: f.runtimeIds[0],
+              root_path: "/fixture",
+              branch_name: `agent/${f.issue.key}`,
+              status: "ready",
+              repos: [],
+            }
+          : type === "turn.complete"
+            ? {
+                ...completion,
+                turn_id: turn.id,
+                attempt_id: f.task.id,
+                input_to_seq: input.input_to_seq,
+                reply: { body_md: "finished", message_kind: "final" },
+              }
+            : type === "task.fail"
+              ? { ...completion, task_id: f.task.id, error: "fixture failure" }
+              : {
+                  task_id: f.task.id,
+                  usageSnapshot: {
+                    version: 2,
+                    runId: "budget-run",
+                    revision: 1,
+                    complete: false,
+                    units: [
+                      {
+                        unitId: "request-1",
+                        revision: 1,
+                        provider: "claude",
+                        model: "fixture",
+                        modelSource: "provider_reported",
+                        scope: "request",
+                        source: "provider_request",
+                        accuracy: "exact",
+                        inputTokens: 10,
+                        outputTokens: 2,
+                        cacheReadTokens: 0,
+                        cacheWriteTokens: 0,
+                        actualUnsplitTokens: 0,
+                        reportedTotalTokens: 12,
+                        contextTokens: null,
+                        contextWindow: null,
+                        costAmount: null,
+                        costCurrency: null,
+                        occurredAt: "2026-11-17T00:00:00Z",
+                      },
+                    ],
+                  },
+                };
+      const sql = await countSql(f.database, f.layer, () =>
+        f.sessions[0]!.handleMessage(
+          JSON.stringify({
+            v: 2,
+            t: type,
+            rt: f.runtimeIds[0],
+            seq: 1,
+            p: payload,
+          }),
+        ),
+      );
+      expect(
+        f.frames[0]!.find((frame) => frame.t === "res" && frame.re === "1")?.p
+          .ok,
+      ).toBe(true);
+      if (type === "task.workspace")
+        expect(f.store.getIssueWorkspace(f.issue.id)?.rootPath).toBe(
+          "/fixture",
+        );
+      if (type === "turn.complete") {
+        expect(f.store.getTask(f.task.id)?.status).toBe("completed");
+        expect(
+          f.store.getMessage(f.store.getTurn(turn.id)!.reply_message_id!)
+            ?.body_md,
+        ).toBe("finished");
+      }
+      if (type === "task.fail")
+        expect(f.store.getTask(f.task.id)?.status).toBe("failed");
+      if (type === "task.usage")
+        expect(f.store.getTask(f.task.id)?.usage[0]?.totalTokens).toBe(12);
+      console.info("REPORT_COST", type, size, sql.length);
+      const budgets = {
+        "task.workspace": 48,
+        "turn.complete": 416,
+        "task.fail": 256,
+        "task.usage": 40,
+      };
+      expect(sql.length).toBeLessThanOrEqual(
+        budgets[type as keyof typeof budgets],
+      );
+      expect(
+        sql.filter((statement) =>
+          /SELECT \* FROM multiremi_conversation_log WHERE id=\? AND kind='message'/.test(
+            statement,
+          ),
+        ).length,
+      ).toBeLessThanOrEqual(8);
+    }, 60_000);
+  for (const range of [false, true])
+    test(`session messages ${range ? "range" : "page"} budget with ${size} context messages`, async () => {
+      const f = await loadedFleet(size);
+      const turn = f.store.getTurnForAttempt(f.task.id)!;
+      for (let i = 0; i < size; i++) {
+        const root = f.store.sendMessage({
+          session_id: f.issueSession.id,
+          sender: { type: "platform", id: null },
+          to: { type: "none" },
+          body_md: "question",
+          message_kind: "status",
+          wake_requested: "inbox_only",
+        }).message;
+        f.store.sendMessage({
+          session_id: f.issueSession.id,
+          sender: { type: "platform", id: null },
+          to: { type: "none" },
+          body_md: "answer",
+          message_kind: "status",
+          wake_requested: "inbox_only",
+          reply_to_id: root.id,
+          source_turn_id: turn.id,
+          metadata: { human_response: true },
+        });
+      }
+      await f.layer.drain();
+      const app = createMultiremiApp({
+        store: f.store,
+        authToken: "fixture-cost",
+      });
+      const sql = await countSql(f.database, f.layer, async () => {
+        const response = await app.request(
+          `/api/sessions/${f.issueSession.id}/messages?${range ? "from=0&to=999999" : "limit=100"}`,
+          { headers: { Authorization: "Bearer fixture-cost" } },
+        );
+        expect(response.status).toBe(200);
+        const page = (await response.json()) as any;
+        expect(
+          (range ? page.entries : page.messages).length,
+        ).toBeGreaterThanOrEqual(size);
+      });
+      console.info("MESSAGES_COST", range ? "range" : "page", size, sql.length);
+      expect(sql.length).toBeLessThan(50);
+    }, 60_000);
+}
+
+for (const size of [2, 40])
+  test(`feishu.outbound_result budget with ${size} context messages`, async () => {
+    const f = await loadedFleet(size);
+    const inbound = f.store.submitFeishuBotMessage("local", f.runtimeIds[0]!, {
+      revision: f.config.revision,
+      externalSessionKey: "oc_cost",
+      externalMessageId: "om_cost",
+      chatId: "oc_cost",
+      text: "hello",
+      senderOpenId: "ou_cost",
+      deliveryMode: "native_cot_v1",
+    });
+    await f.layer.drain();
+    const outbound = f.frames[0]!.find(
+      (x) => x.t === "feishu.outbound" && x.p.task_id === inbound.taskId,
+    )!.p;
+    // Historical outbounds share a binding but have no active transport lease.
+    // Seed their persisted rows directly so fixture setup does not send external messages.
+    for (let i = 0; i < size; i++)
+      f.database.run(
+        `INSERT INTO multiremi_feishu_bot_outbound_deliveries
+    (id,workspace_id,binding_id,chat_id,body,status,available_at,created_at,updated_at)
+    SELECT ?,workspace_id,binding_id,chat_id,'history','sent',available_at,created_at,updated_at
+    FROM multiremi_feishu_bot_outbound_deliveries WHERE id=?`,
+        [`history-${i}`, outbound.id],
+      );
+    f.store.claimAcknowledgedFeishuBotOutbound(
+      "local",
+      f.runtimeIds[0]!,
+      outbound.id,
+      outbound.claim_token,
+    );
+    await f.layer.drain();
+    const sql = await countSql(f.database, f.layer, () =>
+      f.sessions[0]!.handleMessage(
+        JSON.stringify({
+          v: 2,
+          t: "feishu.outbound_result",
+          seq: 1,
+          rt: f.runtimeIds[0],
+          p: {
+            request_id: outbound.id,
+            claim_token: outbound.claim_token,
+            status: "sent",
+            external_message_id: "om_sent_cost",
+          },
+        }),
+      ),
+    );
+    expect(f.frames[0]!.find((x) => x.t === "res" && x.re === "1")?.p.ok).toBe(
+      true,
+    );
+    expect(
+      f.database
+        .query(
+          "SELECT status,external_message_id FROM multiremi_feishu_bot_outbound_deliveries WHERE id=?",
+        )
+        .get(outbound.id),
+    ).toMatchObject({ status: "sent", external_message_id: "om_sent_cost" });
+    console.info("OUTBOUND_COST", size, sql.length);
+    expect(sql.length).toBeLessThanOrEqual(64);
+  }, 60_000);
+
+test("task hydration aggregates usage once for the entire task batch", async () => {
+  const f = await loadedFleet(2);
+  const tasks = Array.from({ length: 20 }, (_, index) =>
+    f.store.createTask({ agentId: f.agent.id, prompt: `batch ${index}` }),
+  );
+  await f.layer.drain();
+  const expected = tasks.map((task) => f.store.getTask(task.id)!);
+  let actual: ReturnType<MultiremiStore["hydrateTasksByIds"]> = [];
+  const sql = await countSql(f.database, f.layer, () => {
+    actual = f.store.hydrateTasksByIds(tasks.map((task) => task.id));
+  });
+  expect(actual).toEqual(expected);
+  expect(
+    sql.filter((statement) => /FROM multiremi_usage_units u/.test(statement)),
+  ).toHaveLength(1);
+});
+
+test("batched Runtime identities retain drain fences and invalidate them after writes", async () => {
+  const f = await fleet();
+  const expected = f.runtimeIds
+    .map((id) => f.store.getRuntimeLite(id)!)
+    .sort((a, b) => a!.id.localeCompare(b!.id));
+  const sql = await countSql(f.database, f.layer, () => {
+    const actual = f.store
+      .getRuntimesLite([...f.runtimeIds, f.runtimeIds[0]!])
+      .sort((a, b) => a.id.localeCompare(b.id));
+    expect(actual).toEqual(expected);
+  });
+  expect(sql.length).toBe(1);
+  withSynchronousRequestReadCache(() => {
+    f.store.getRuntimesLite(f.runtimeIds);
+    f.store.beginDaemonDrain("local", "dm_cost_0");
+    expect(f.store.hasCliUpdateDrainForRuntime(f.runtimeIds[0]!)).toBe(true);
+    expect(f.store.hasCliUpdateDrainForRuntime(f.runtimeIds[1]!)).toBe(true);
+    expect(f.store.hasCliUpdateDrainForRuntime(f.runtimeIds[2]!)).toBe(false);
+    f.store.undrainDaemon("local", "dm_cost_0");
+    expect(f.store.hasCliUpdateDrainForRuntime(f.runtimeIds[0]!)).toBe(false);
+  });
+});
+
+for (const size of [2, 40])
+  test(`Chat projection batches retry ancestry with ${size} context messages`, async () => {
+    const f = await loadedFleet(size);
+    const sql = await countSql(f.database, f.layer, () => {
+      const projection = f.store.buildTaskSessionProjection(f.peer.id, {
+        boundsOnly: true,
+      });
+      expect(projection?.sessionId).toBe(f.peer.chatSessionId!);
+    });
+    console.info("PROJECTION_COST", size, sql.length);
+    expect(sql.length).toBeLessThanOrEqual(50);
+    expect(
+      sql.filter((statement) => /WITH RECURSIVE lineage AS/.test(statement)),
+    ).toHaveLength(1);
+  }, 60_000);
+
+for (const size of [2, 40])
+  test(`range markers batch ${size} targets outside the window`, async () => {
+    const f = await loadedFleet(size);
+    const turn = f.store.getTurnForAttempt(f.task.id)!;
+    const roots = Array.from(
+      { length: size },
+      (_, index) =>
+        f.store.sendMessage({
+          session_id: f.issueSession.id,
+          sender: { type: "platform", id: null },
+          to: { type: "none" },
+          message_kind: "status",
+          wake_requested: "inbox_only",
+          body_md: `protected ${index}`,
+          source_turn_id: turn.id,
+          metadata: { human_request: { kind: "fixture" } },
+        }).message,
+    );
+    const from = f.store.getConversationLogHead(f.issueSession.id)!.headSeq;
+    for (const root of roots)
+      f.store.appendConversationLog({
+        sessionId: f.issueSession.id,
+        kind: "message",
+        visibility: "shown",
+        authorType: "platform",
+        bodyMd: "edited copy",
+        metadata: { target_seq: root.seq },
+      });
+    await f.layer.drain();
+    const app = createMultiremiApp({
+      store: f.store,
+      authToken: "fixture-cost",
+    });
+    const sql = await countSql(f.database, f.layer, async () => {
+      const response = await app.request(
+        `/api/sessions/${f.issueSession.id}/messages?from=${from}&to=999999`,
+        { headers: { Authorization: "Bearer fixture-cost" } },
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        entries: Array<{ body_md: string }>;
+      };
+      expect(body.entries.map((entry) => entry.body_md)).toEqual(
+        roots.map(() => "edited copy"),
+      );
+    });
+    console.info("MARKER_COST", size, sql.length);
+    expect(sql.length).toBeLessThan(50);
+  }, 60_000);

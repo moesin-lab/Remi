@@ -2,17 +2,19 @@ import type { MultiremiStore } from "@multiremi/store/store.js";
 
 export function readSessionLogRange(store: MultiremiStore, sessionId: string,
   from: number, to: number, cursor?: string, excludeAgentId?: string | null,
-  visible?: (entry: ReturnType<MultiremiStore['listConversationLogRangePage']>[number]) => boolean) {
+  visible?: (entry: ReturnType<MultiremiStore['listConversationLogRangePage']>[number]) => boolean,
+  prepareVisibility?: (entries: ReturnType<MultiremiStore['listConversationLogRangePage']>) => NonNullable<typeof visible>) {
   const start = cursor ? JSON.parse(cursor) as { seq: number; offset: number } : { seq: from + 1, offset: 0 };
   if (!start || !Number.isSafeInteger(start.seq) || start.seq < from + 1 || start.seq > to + 1
     || !Number.isSafeInteger(start.offset) || start.offset < 0) throw new Error("Invalid range cursor");
   const readTo = Math.min(to, store.getConversationLogHead(sessionId)?.headSeq ?? 0);
   const rows = store.listConversationLogRangePage(sessionId, start.seq - 1, readTo, 100);
+  const isVisible = prepareVisibility?.(rows) ?? visible;
   const entries: Array<Record<string, unknown>> = [];
   let remaining = 32_000;
   let next = { seq: start.seq, offset: start.offset };
   for (const entry of rows) {
-    if (entry.visibility !== "shown" || entry.deleted_at || visible && !visible(entry)
+    if (entry.visibility !== "shown" || entry.deleted_at || isVisible && !isVisible(entry)
       || entry.author_type === "agent" && entry.author_id === excludeAgentId) {
       next = { seq: entry.seq + 1, offset: 0 };
       continue;

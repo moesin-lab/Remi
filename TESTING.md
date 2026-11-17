@@ -17,6 +17,9 @@
 数据库恢复回归：`bun run test tests/integration/database-recovery.test.ts tests/unit/shared/db-recovery.test.ts tests/unit/multiremi/background-db-recovery.test.ts`。
 集成用例启动真实 Bun API 子进程，在同步 SQL 边界注入连接失败，实际执行 Store、scheduler、HTTP 和租约去重；
 覆盖断连期间存活、503/200 探针、自动恢复及提交运行后确认事件前断连的重领场景。
+计划 claim 后断连回归：`bun run test tests/unit/multiremi/scheduler-claim-recovery.test.ts`。
+真实 SQLite Store 与同一个 scheduler 重试循环覆盖单条、批量 trigger 和 runtime provision；
+断连后重新执行启动恢复，从当前时间安排下一次，不补跑错过的那次，也不重放可能已经提交的运行。
 另以真实 PG worker 连接本机未监听端口检查错误分类，不要求外部数据库。
 该组不证明真实 PostgreSQL 重启、网络黑洞或 Compose 重启行为；后者应在隔离部署另行验证。
 

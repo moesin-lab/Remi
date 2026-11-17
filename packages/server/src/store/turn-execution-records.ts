@@ -120,9 +120,36 @@ export function registerExecutionMessageHook(db:SqlDatabase,hook:(id:string)=>vo
 type ExecutionLogMessageInput={senderType?:string;messageKind?:string;metadata?:Record<string,unknown>;visibility?:string;taskId?:string};
 const messageWriters=new WeakMap<SqlDatabase,(sessionId:string,id:string,agentId:string,body:string,input:ExecutionLogMessageInput)=>number>();
 export function registerExecutionMessageWriter(db:SqlDatabase,writer:(sessionId:string,id:string,agentId:string,body:string,input:ExecutionLogMessageInput)=>number):void {messageWriters.set(db,writer);}
-const changeHooks = new WeakMap<SqlDatabase, (turnId:string,created:boolean)=>void>();
-export function registerTurnChangeHook(db:SqlDatabase, hook:(turnId:string,created:boolean)=>void):void { changeHooks.set(db,hook); }
-export function notifyTurnChanged(db:SqlDatabase,turnId:string,created=false):void { changeHooks.get(db)?.(turnId,created); }
+const changeHooks = new WeakMap<SqlDatabase, (turnId:string,created:boolean,revisions:number)=>void>();
+const changeBatches = new WeakMap<SqlDatabase, Map<string, {created:boolean;revisions:number}>>();
+/** Fold intermediate card notifications inside one atomic terminal transaction. */
+export function withTurnChangeBatch<T>(db:SqlDatabase, run:()=>T):T {
+  const parent = changeBatches.get(db);
+  if (parent) {
+    const before = new Map([...parent].map(([id, change]) => [id, { ...change }]));
+    try { return run(); }
+    catch (error) {
+      parent.clear();
+      for (const [id, change] of before) parent.set(id, change);
+      throw error;
+    }
+  }
+  if (!db.inTransaction) throw new Error('Turn change batching requires a transaction');
+  const batch = new Map<string, {created:boolean;revisions:number}>();
+  changeBatches.set(db,batch);
+  try {
+    const result=run();
+    changeBatches.delete(db);
+    for(const [id,change] of batch) changeHooks.get(db)?.(id,change.created,change.revisions);
+    return result;
+  } finally { changeBatches.delete(db); }
+}
+export function registerTurnChangeHook(db:SqlDatabase, hook:(turnId:string,created:boolean,revisions:number)=>void):void { changeHooks.set(db,hook); }
+export function notifyTurnChanged(db:SqlDatabase,turnId:string,created=false):void {
+  const batch=changeBatches.get(db);
+  if(batch){const previous=batch.get(turnId);batch.set(turnId,{created:created||!!previous?.created,revisions:(previous?.revisions??0)+1});}
+  else changeHooks.get(db)?.(turnId,created,1);
+}
 export const executionParameterCount=(sql:string)=>[...maskSqlLiterals(sql).matchAll(/\?/g)].length;
 function flatParams(params: unknown[]): unknown[] { return params.length===1 && Array.isArray(params[0]) ? params[0] as unknown[] : params; }
 function write(db:SqlDatabase,table:string,id:string,fields:Record<string,unknown>):void{

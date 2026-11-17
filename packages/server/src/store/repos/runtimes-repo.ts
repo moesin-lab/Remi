@@ -2372,8 +2372,8 @@ export class RuntimesRepo {
     if (!runtime) return inputs;
     const families = this.probePendingRequestFamilies(runtimeId, { supportsBotMenu: true, supportsDirectoryScan: true });
     for (const kind of families.sweep) this.pendingRequestQueue(kind).expire(runtimeId);
-    this.scrubRuntimeCommandRequests(runtimeId);
-    for (const request of this.updateQueue.pending(runtimeId)) {
+    if (families.claimable.has("command")) this.scrubRuntimeCommandRequests(runtimeId);
+    if (families.claimable.has("update")) for (const request of this.updateQueue.pending(runtimeId)) {
       if (request.scope === "cli" && !this.daemonReadyForUpdate(runtime)) {
         this.ctx.db.run("UPDATE multiremi_runtime_update_requests SET updated_at = ? WHERE id = ? AND status = 'pending'",
           [nowIso(), request.id]);
@@ -2381,18 +2381,18 @@ export class RuntimesRepo {
       }
       add("update", request.id, { id: request.id, target_version: request.targetVersion, ...(request.targetCommit ? { target_commit: request.targetCommit } : {}), scope: request.scope });
     }
-    for (const request of this.modelListQueue.pending(runtimeId)) add("model_list", request.id, { id: request.id });
-    for (const request of this.localSkillListQueue.pending(runtimeId)) add("local_skills", request.id,
+    if (families.claimable.has("model_list")) for (const request of this.modelListQueue.pending(runtimeId)) add("model_list", request.id, { id: request.id });
+    if (families.claimable.has("local_skills")) for (const request of this.localSkillListQueue.pending(runtimeId)) add("local_skills", request.id,
       { id: request.id, ...(request.root ? { root: request.root } : {}) });
-    for (const request of this.directoryScanQueue.pending(runtimeId)) add("directory_scan", request.id,
+    if (families.claimable.has("directory_scan")) for (const request of this.directoryScanQueue.pending(runtimeId)) add("directory_scan", request.id,
       { id: request.id, root: request.params.root, max_depth: request.params.maxDepth, mode: request.params.mode });
-    for (const request of this.gcRunQueue.pending(runtimeId)) add("gc_run", request.id,
+    if (families.claimable.has("gc_run")) for (const request of this.gcRunQueue.pending(runtimeId)) add("gc_run", request.id,
       { id: request.id, mode: request.mode });
-    for (const request of this.localSkillImportQueue.pending(runtimeId, 10)) add("local_skill_import", request.id,
+    if (families.claimable.has("local_skill_import")) for (const request of this.localSkillImportQueue.pending(runtimeId, 10)) add("local_skill_import", request.id,
       { id: request.id, skill_key: request.skillKey, ...(request.root ? { root: request.root } : {}) });
-    for (const request of this.commandQueue.pending(runtimeId)) add("command", request.id,
+    if (families.claimable.has("command")) for (const request of this.commandQueue.pending(runtimeId)) add("command", request.id,
       { id: request.id, command: request.command, args: request.args, timeout_ms: request.timeoutMs });
-    for (const request of this.botMenuPublishQueue.pending(runtimeId)) {
+    if (families.claimable.has("bot_menu")) for (const request of this.botMenuPublishQueue.pending(runtimeId)) {
       const target = request.config.target;
       const bot = this.ctx.db.query(`SELECT app_id, domain, revision, runtime_id
         FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?`)

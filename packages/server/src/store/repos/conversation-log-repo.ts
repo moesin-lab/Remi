@@ -128,11 +128,12 @@ export class ConversationLogRepo {
         wake_requested:'inbox_only',metadata:input.metadata,visibility:input.visibility==='hidden'?'hidden':'shown'},events);
       afterCommit(ctx.db,()=>ctx.emitCommitEvents(events));return result.message.seq;
     });
-    registerTurnChangeHook(ctx.db, (turnId,created) => {
+    registerTurnChangeHook(ctx.db, (turnId,created,revisions) => {
       const row=ctx.db.query("SELECT session_id,seq FROM multiremi_turns WHERE id=?").get(turnId);
       if (!row) return;
-      ctx.db.run("UPDATE multiremi_conversation_log SET revision=revision+1,updated_at=? WHERE session_id=? AND seq=?",[nowIso(),row.session_id,row.seq]);
-      this.touchSessionWithinTransaction(row.session_id);
+      ctx.db.run("UPDATE multiremi_conversation_log SET revision=revision+?,updated_at=? WHERE session_id=? AND seq=?",[revisions,nowIso(),row.session_id,row.seq]);
+      ctx.db.run("UPDATE multiremi_conversation_heads SET log_version=log_version+?,updated_at=? WHERE session_id=?",
+        [revisions,nowIso(),row.session_id]);
       const entry=this.getEntryWithinTransaction(row.session_id,Number(row.seq));
       if(entry)this.emit(entry.session_id,created || entry.session_id.startsWith("chat_") ?entry:toPatch(entry.seq,entry.revision,{metadata:entry.metadata,body_md:entry.body_md,body_html:entry.body_html,render_version:entry.render_version},entry.updated_at));
     });
@@ -819,7 +820,7 @@ export class ConversationLogRepo {
     contextUsage?:TraceContextUsage|null;workedMs?:number|null;processItemCount?:number|null;
     lateSubagents?:TraceLateSubagent[]|null;
     inbox?:{delivered_from_seq:number;delivered_to_seq:number;delivered_at:string;task_id:string};
-  }):ConversationLogEntry|null {
+  }, materialize=true):ConversationLogEntry|null {
     const attempt=this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(taskId);
     if(!attempt)return null;
     const mapping:Record<string,string>={summary:'progress_summary',toolCallCount:'tool_call_count',eventCount:'event_count',typeHistogram:'type_histogram',usage:'usage',model:'model',failureReason:'failure_reason',
@@ -831,7 +832,7 @@ export class ConversationLogRepo {
     if(keys.length)this.ctx.db.run(`UPDATE multiremi_turn_attempts SET ${keys.map(k=>`${k}=?`).join(',')} WHERE id=?`,[...keys.map(k=>values[k]),taskId]);
     if(fields.finalEntryId!==undefined&&fields.finalEntryId!==null)this.ctx.db.run('UPDATE multiremi_turns SET reply_message_id=? WHERE id=? AND current_attempt_id=?',[fields.finalEntryId,attempt.turn_id,taskId]);
     notifyTurnChanged(this.ctx.db,attempt.turn_id);
-    return this.findTurnEntry(taskId);
+    return materialize ? this.findTurnEntry(taskId) : null;
   }
   recordTurnInboxDeliveryWithinTransaction(taskId:string,fromSeq:number,toSeq:number):ConversationLogEntry|null {
     this.ctx.db.run('UPDATE multiremi_turns SET input_from_seq=?,input_to_seq=? WHERE current_attempt_id=?',[fromSeq,toSeq,taskId]);

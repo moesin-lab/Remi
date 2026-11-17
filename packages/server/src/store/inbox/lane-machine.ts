@@ -1,3 +1,4 @@
+import { acquireTransactionLock } from "../request-read-cache.js";
 import type { TaskSessionContinuation } from "../repos/tasks-repo.js";
 import { attemptInputState } from './attempt-input.js';
 import type { SendMessageInput, UnifiedMessage } from '@multiremi/contracts/unified-model.js';
@@ -13,11 +14,13 @@ import { RE_RING_SWEEP_PAGE_SQL, reRingSweepEnabled } from '../re-ring-sweep.js'
 import { settleQueueAfterTurnEndWithinTransaction } from './queued-messages.js';
 
 export function lockLane(ctx: StoreContext, sessionId: string, agentId: string, scope = ''): void {
+  acquireTransactionLock(ctx.db, JSON.stringify(['lane', sessionId, agentId, scope]), () => {
   const at = nowIso();
   ctx.db.run(`INSERT INTO multiremi_session_lanes(session_id,reader_type,reader_id,execution_scope,created_at,updated_at)
     VALUES(?,'agent',?,?,?,?) ON CONFLICT DO NOTHING`, [sessionId, agentId, scope, at, at]);
   ctx.db.run(`UPDATE multiremi_session_lanes SET updated_at=updated_at
     WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`, [sessionId, agentId, scope]);
+  });
 }
 
 export function deliverToRunningTurn(ctx: StoreContext, turn: any, message: UnifiedMessage): string {

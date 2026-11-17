@@ -1,3 +1,4 @@
+import { memoizeRequestRead } from "../request-read-cache.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { refreshResponsibilityEntityChange } from '../issue-responsibility-changes.js';
 import { getExecutionGroup, runtimeExecutionGroupId } from "@multiremi/store/execution-groups.js";
@@ -752,7 +753,8 @@ export class AgentsSkillsRepo {
   }
 
   getAgent(id: string, options: { includeFiles?: boolean } = {}): MultiremiAgent | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_agents'], `agent:${id}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null);
     return row ? this.hydrateAgent(toAgent(row), options) : null;
   }
 
@@ -769,7 +771,8 @@ export class AgentsSkillsRepo {
    * decisions.
    */
   getAgentLite(id: string): MultiremiAgent | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_agents'], `agent:${id}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null);
     return row ? toAgent(row) : null;
   }
 
@@ -891,13 +894,13 @@ export class AgentsSkillsRepo {
   }
 
   private listAgentSkillsForExistingAgent(agent: MultiremiAgent, options: { includeFiles?: boolean }): MultiremiSkill[] {
-    const rows = this.ctx.db.query(
+    const rows = memoizeRequestRead(this.ctx.db, ['multiremi_skills','multiremi_agent_skills'], `skills:${agent.id}`, () => this.ctx.db.query(
       `SELECT s.*
        FROM multiremi_skills s
        JOIN multiremi_agent_skills aks ON aks.skill_id = s.id
        WHERE aks.agent_id = ? AND s.archived_at IS NULL
        ORDER BY aks.created_at ASC, s.name ASC`,
-    ).all(agent.id) as Row[];
+    ).all(agent.id) as Row[]);
     const structured = rows.map((row) => toSkill(row, options.includeFiles ? this.listSkillFiles(String(row.id)) : []));
     return mergeAgentSkills(agent.skills, structured);
   }

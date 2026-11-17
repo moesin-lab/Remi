@@ -472,12 +472,14 @@ for (const size of [2, 40]) {
         expect(f.store.getTask(f.task.id)?.status).toBe("failed");
       if (type === "task.usage")
         expect(f.store.getTask(f.task.id)?.usage[0]?.totalTokens).toBe(12 * size);
-      console.info("REPORT_COST", type, size, sql.length);
+      console.info("REPORT_COST", type, size, sql.length,
+        { reads: sql.filter(statement => /^\s*(SELECT|WITH)\b/i.test(statement)).length,
+          writes: sql.filter(statement => /^\s*(INSERT|UPDATE|DELETE)\b/i.test(statement)).length });
       expectConstantCost(type, size, sql.length);
       const budgets = {
         "task.workspace": 48,
-        "turn.complete": 416,
-        "task.fail": 256,
+        "turn.complete": 288,
+        "task.fail": 179,
         "task.usage": 40,
       };
       expect(sql.length).toBeLessThanOrEqual(

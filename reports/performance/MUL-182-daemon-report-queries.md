@@ -135,3 +135,9 @@ bun test tests/unit/daemon/task-report-outbox.test.ts -t 'replays over 3000'
 新增行数守卫沿用同文件fleet测试的60s夹具期限；既有3500单位outbox回放测试仍为90s，无任何放宽。
 
 JSON TEXT 绑定修正后，同上四文件回归再次72 pass / 1 skip / 0 fail，402 assertions，62.01s，HOME residual paths=[]；SQLite通过不能替代真实PG验证。
+
+单单位写入补充：常见每帧只有一个单位，事实与回执直接用参数化VALUES写一次；多单位仍用单JSON参数批量INSERT，10,000单位和单unit帧均各写两次。预读仍使用本帧ID的JSON集合。避免单单位JSON展开开销后，在独立worktree同命令并行对照：基线36.072s，修复36.053s，各1pass/0fail、3515assertions；90s超时未变。此项替代前两轮8–10%写入开销的实现，仍保留前两轮数字便于审核。
+
+反向启动顺序复测：基线32.612s，单单位直接写入修复32.249s，各1pass/0fail、3515assertions。两轮修复均未明显慢于基线（-0.05% / -1.11%）。
+
+单单位VALUES路径纳入后，四文件回归72pass/1skip/0fail、402assertions，60.44s，HOME residual paths=[]；类型检查、docs:test（13pass）、docs:check、git diff --check通过。

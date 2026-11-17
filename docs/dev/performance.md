@@ -108,11 +108,13 @@ workspace offer 扇出批量读取 Runtime 和 drain 围栏。会话 messages �
 仍可能扫描多个候选页，不能把直接 Question 通知的大/小夹具当作所有隐藏来源路径的常数证明。
 飞书入站 POST 的 Runtime 身份读取不水合历史 usage；已有会话的追加路径有单独预算。
 
-workspace 报告只唤醒派活条件；飞书结果只刷新已验证 bot host 的 pending 队列。
+workspace 报告只唤醒所属 daemon（含别名对应的 provider）的派活条件；start 派生的 Issue 状态事件定向刷新启动 Runtime，浏览器仍接收状态变化。
+下行批量读取 attempt 身份，终态继续发送取消与保留 ACK/discard 清理，但不再投影轮输入。飞书结果只刷新已验证 bot host 的 pending 队列。
 消息和终态事件刷新活跃任务、bot、后台 lane 与 drain host 的输入，配置和维护事件保留完整扇出。
 同步读取范围退出即关闭，后台异步工作重新读取。
 [预算和复现报告](../../reports/performance/MUL-182-daemon-report-queries.md)区分历史放大消除、
 终态仍有的固定 SQL 成本、隐藏页/Question 权限查询边界与未完成的 stable 现场验收。
+[MUL-199 规模测量](../../reports/performance/MUL-199-daemon-report-scale.md)提供 100 Issue、40 会话各 501 日志等共享夹具、逐语句差异与 SQLite 固定预算；真实 PG、更多活跃轮与现场数据分布、完整 Release 检查尚待验证。
 
 ## Issue 详情首屏的工作区读取
 

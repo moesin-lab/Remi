@@ -2929,7 +2929,7 @@ export class RuntimesRepo {
     if (runtime.status !== "online") throw new Error("runtime is offline");
   }
 
-  private runtimeIdsForDaemon(runtime: MultiremiRuntime): string[] {
+  runtimeIdsForDaemon(runtime: MultiremiRuntime): string[] {
     const aliases = runtimeDaemonAliases(runtime);
     if (!aliases.length) return [];
     const placeholders = aliases.map(() => "?").join(", ");

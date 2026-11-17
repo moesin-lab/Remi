@@ -15,9 +15,10 @@ export class TaskCapabilityMonitor {
     this.timer.start();
   }
 
-  stop(): void {
-    this.timer?.stop();
+  stop(): Promise<void> {
+    const stopped = this.timer?.stop();
     this.timer = null;
+    return stopped ?? Promise.resolve();
   }
 
   sweep(): void {

@@ -52,8 +52,13 @@ describe("database recovery boundaries", () => {
       await new Promise<void>(resolve => { release = resolve; });
     }, 1);
     loop.start();
-    loop.stop();
+    let stopped = false;
+    const stopping = loop.stop().then(() => { stopped = true; });
+    await Bun.sleep(0);
+    expect(stopped).toBe(false);
     release();
+    await stopping;
+    expect(stopped).toBe(true);
     await Bun.sleep(20);
     expect(count).toBe(1);
   });

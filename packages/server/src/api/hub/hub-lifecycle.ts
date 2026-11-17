@@ -4,10 +4,10 @@ export function stopHubReadResources(
   detachLogListener: () => void,
   ownedHub: { shutdown(): void } | null,
   readPool: Pick<ReadPool, "close"> | null,
-): void {
+): Promise<void> {
   detachLogListener();
   ownedHub?.shutdown();
-  void readPool?.close().catch(() => {
+  return readPool?.close().catch(() => {
     // Shutdown is best-effort; the store handle is closed by its owner.
-  });
+  }) ?? Promise.resolve();
 }

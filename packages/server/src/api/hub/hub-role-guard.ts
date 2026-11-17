@@ -155,9 +155,11 @@ async function takeLocks(
 ): Promise<LockingConnection | null> {
   let closed = false;
   let exitOnClose = false;
+  let connected = false;
   const sql = new Bun.SQL(url, {
     max: 1,
     ...(signal ? { connectionTimeout: Math.max(0.001, timings.timeoutMs / 1000) } : {}),
+    onconnect: () => { connected = true; },
     // A dropped lock connection is terminal: see the file header.
     onclose: (error) => {
       if (closed || !exitOnClose) return;
@@ -182,10 +184,19 @@ async function takeLocks(
   };
 
   let pending: { cancel(): unknown } | undefined;
-  const abort = () => { pending?.cancel(); void close(); };
+  const abort = () => {
+    // Bun 1.3.14 can orphan a socket if end/cancel interrupts authentication.
+    // The driver's connectionTimeout owns that phase; a late connect is closed
+    // below before any lock SQL. Once connected, dispose active SQL immediately.
+    if (connected) { pending?.cancel(); void close(); }
+  };
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) { await close(); return null; }
   try {
+    if (signal) {
+      await sql.connect();
+      if (signal.aborted) { await close(); return null; }
+    }
     const query = sql.unsafe<{ pid: number }[]>("SELECT pg_backend_pid() AS pid");
     pending = query;
     const rows = await query;

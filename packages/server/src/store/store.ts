@@ -512,6 +512,15 @@ import type {
 export { daemonRuntimeId, isTerminalStatus };
 
 export class MultiremiStore {
+  isDatabaseUnavailable(): boolean { return this.db.connectionUnavailable === true; }
+  private databaseReadyUntil = 0;
+  checkDatabaseReady(force = false): void {
+    if (!force && !this.db.connectionUnavailable && Date.now() < this.databaseReadyUntil) return;
+    this.databaseReadyUntil = 0;
+    this.db.query("SELECT 1 AS ready").get();
+    this.databaseReadyUntil = Date.now() + 1_000;
+  }
+
   private db: SqlDatabase;
   private ctx: StoreContext;
   private feedback: FeedbackRepo;

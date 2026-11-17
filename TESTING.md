@@ -14,6 +14,12 @@
 
 后端测试集中在 `tests/`；前端测试随所属包运行。没有 `.test` 后缀的手动 harness 不由 `bun test` 自动发现。前端 UI 包是否提供 test 脚本以各自 package.json 为准。
 
+数据库恢复回归：`bun run test tests/integration/database-recovery.test.ts tests/unit/shared/db-recovery.test.ts tests/unit/multiremi/background-db-recovery.test.ts`。
+集成用例启动真实 Bun API 子进程，在同步 SQL 边界注入连接失败，实际执行 Store、scheduler、HTTP 和租约去重；
+覆盖断连期间存活、503/200 探针、自动恢复及提交运行后确认事件前断连的重领场景。
+另以真实 PG worker 连接本机未监听端口检查错误分类，不要求外部数据库。
+该组不证明真实 PostgreSQL 重启、网络黑洞或 Compose 重启行为；后者应在隔离部署另行验证。
+
 ## 后端测试入口
 
 ```bash

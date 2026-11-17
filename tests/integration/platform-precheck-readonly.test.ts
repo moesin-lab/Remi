@@ -314,9 +314,9 @@ describe("MUL-464 operation pre-check over real loopback HTTP and SQLite", () =>
         const maintenanceWrites = f.audit.writes.filter((write) => write.sql.includes("multiremi_platform_maintenance"));
         expect(stateWrites.map((write) => write.changes)).toEqual(scenario === "missing-state" ? [1] : []);
         expect(maintenanceWrites.map((write) => write.changes)).toEqual(
-          scenario === "expired-drain" ? [0, 1] : [scenario === "missing-state" ? 1 : 0],
+          scenario === "active-operation" ? [] : [1],
         );
-        expect(f.audit.writes).toHaveLength(scenario === "active-operation" ? 2 : 3);
+        expect(f.audit.writes).toHaveLength(scenario === "active-operation" ? 1 : scenario === "expired-drain" ? 2 : 3);
         if (scenario === "active-operation") {
           expect(f.snapshot()).toEqual(f.before);
         } else {

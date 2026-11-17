@@ -326,7 +326,7 @@ test('WS slow downstream resumes via drain without disconnecting or losing messa
     let received = 0;
     ws.onopen = () => { ws.pause(); ws.send('start'); setTimeout(() => ws.resume(), 100); };
     ws.onmessage = event => {
-      const data = new Uint8Array(event.data as ArrayBuffer);
+      const data = new Uint8Array(event.data as Buffer);
       expect(data.byteLength).toBe(size); expect(data[0]).toBe(received++);
       if (received === count) { ws.onclose = undefined; ws.close(); resolve(); }
     };
@@ -348,7 +348,7 @@ test('rejected upgrade body streams and remains in flight until drained', async 
 });
 
 async function regressionProcess(url: string, wsStallTimeoutMs = 30000) {
-  type Report = { baseline: number; peak: number; closeCalls: { code: number; reason: string }[]; relayTimers: number; activeRelays: number; status: ReturnType<Edge['status']> };
+  type Report = { maxima: { parser: number; pending: number; downstream: number; readable: number }; baseline: number; peak: number; closeCalls: { code: number; reason: string }[]; relayTimers: number; activeRelays: number; status: ReturnType<Edge['status']> };
   let receive: ((data: Report) => void) | undefined;
   const child = Bun.spawn([process.execPath, 'tests/helpers/edge/regression-process.ts', url, String(wsStallTimeoutMs)], {
     stdout: 'pipe', stderr: 'inherit', ipc(data) { receive?.(data as Report); },
@@ -455,7 +455,7 @@ test('isolated edge relays an immediate Bun backend WS close after 101', async (
   expect(status.metrics.wsRelays).toBe(2);
 });
 
-test.each([[64, 4 * 1024 * 1024], [64, 1024 * 1024], [192, 512 * 1024]])(
+test.each([[64, 4 * 1024 * 1024], [64, 1024 * 1024], [192, 512 * 1024], [384, 4 * 1024 * 1024]])(
   'isolated WS streams %i x %i bytes to a slow steady TCP reader without hanging', async (count, size) => {
   const b = Bun.serve({ port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
     maxPayloadLength: 4 * 1024 * 1024, backpressureLimit: 4 * 1024 * 1024, closeOnBackpressureLimit: false,
@@ -470,52 +470,29 @@ test.each([[64, 4 * 1024 * 1024], [64, 1024 * 1024], [192, 512 * 1024]])(
   } });
   cleanups.push(() => { void b.stop(true); });
   const child = await regressionProcess(b.url.href, 1500);
-  await new Promise<void>((resolve, reject) => {
-    const socket = connect(Number(new URL(child.url).port), '127.0.0.1'); cleanups.push(() => socket.destroy());
-    let head = Buffer.alloc(0); let upgraded = false; let frameHeader = Buffer.alloc(0);
-    let remaining = 0; let received = 0; let resume: ReturnType<typeof setTimeout>;
-    cleanups.push(() => clearTimeout(resume));
-    socket.on('connect', () => socket.write('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n'));
-    socket.on('error', reject); socket.on('end', () => reject(new Error(`Early EOF after ${received} frames`)));
-    socket.on('data', data => {
-      let bytes: Buffer = typeof data === 'string' ? Buffer.from(data) : data;
-      try {
-        // Read normally, but yield after each TCP chunk so the sender must buffer.
-        socket.pause(); resume = setTimeout(() => socket.resume(), 1);
-        if (!upgraded) {
-          head = Buffer.concat([head, bytes]); const boundary = head.indexOf('\r\n\r\n');
-          if (boundary < 0) return;
-          expect(head.subarray(0, boundary).toString()).toStartWith('HTTP/1.1 101');
-          bytes = head.subarray(boundary + 4); head = Buffer.alloc(0); upgraded = true;
-          socket.write(Buffer.from([0x81, 0x81, 0, 0, 0, 0, 0x78]));
-        }
-        while (bytes.length) {
-          if (!remaining) {
-            const take = Math.min(10 - frameHeader.length, bytes.length);
-            frameHeader = Buffer.concat([frameHeader, bytes.subarray(0, take)]); bytes = bytes.subarray(take);
-            if (frameHeader.length < 10) return;
-            expect(frameHeader[0]).toBe(0x82); expect(frameHeader[1]).toBe(127);
-            expect(Number(frameHeader.readBigUInt64BE(2))).toBe(size);
-            frameHeader = Buffer.alloc(0); remaining = size;
-          }
-          const take = Math.min(remaining, bytes.length);
-          expect(bytes.subarray(0, take).every(value => value === received)).toBe(true);
-          remaining -= take; bytes = bytes.subarray(take);
-          if (!remaining && ++received === count) { socket.destroy(); resolve(); return; }
-        }
-      } catch (error) { reject(error); }
-    });
-  });
+  await child.query('start');
+  const reader = Bun.spawn(['node', 'tests/helpers/edge/slow-reader.cjs', child.url, String(size), String(count)], { stdout: 'pipe', stderr: 'pipe' });
+  cleanups.push(() => reader.kill());
+  const result = await new Response(reader.stdout).text();
+  const errors = await new Response(reader.stderr).text();
+  expect(await reader.exited, errors).toBe(0);
+  expect(JSON.parse(result)).toEqual({ received: count, bytes: count * size });
   for (let i = 0; i < 200; i++) {
     const report = await child.query('report');
     if (!report.activeRelays) {
+      console.log('WS memory', JSON.stringify({count, size, ...report, afterGC: await child.query('gc')}));
+      expect(report.peak - report.baseline).toBeLessThan(96 * 1024 * 1024);
+      expect(report.maxima.readable).toBeLessThanOrEqual(1024 * 1024);
+      expect(report.maxima.parser).toBeLessThanOrEqual(2 * 4 * 1024 * 1024 + 1024 * 1024);
+      expect(report.maxima.pending).toBeLessThanOrEqual(4 * 1024 * 1024);
+      expect(report.maxima.downstream).toBeLessThanOrEqual(5 * 1024 * 1024 + 14);
       expect(report.relayTimers).toBe(0); expect(report.status.metrics.upstreamErrors).toBe(0);
       return;
     }
     await sleep(5);
   }
   throw new Error('Relay or congestion timer leaked after client close');
-}, 30000);
+}, 90000);
 
 test('standalone edge rejects an empty EDGE_PORT instead of binding an ephemeral port', async () => {
   for (const port of ['', '   ']) {
@@ -560,28 +537,19 @@ test('isolated WS stalled TCP reader closes with 1013 within a bounded time and 
   } });
   cleanups.push(() => { clearInterval(producer); void b.stop(true); });
   const child = await regressionProcess(b.url.href, 250);
-  const socket = connect(Number(new URL(child.url).port), '127.0.0.1'); cleanups.push(() => socket.destroy());
-  await new Promise<void>((resolve, reject) => {
-    let head = '';
-    socket.on('error', reject);
-    socket.on('connect', () => socket.write('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n'));
-    socket.on('data', data => {
-      head += data.toString();
-      if (!head.includes('\r\n\r\n')) return;
-      expect(head).toStartWith('HTTP/1.1 101');
-      socket.pause(); // Stop consuming completely after the handshake.
-      socket.write(Buffer.from([0x81, 0x80, 0, 0, 0, 0]));
-      resolve();
-    });
-  });
+  await child.query('start');
+  const reader = Bun.spawn(['node', 'tests/helpers/edge/slow-reader.cjs', child.url, String(size), '0', 'stalled'], { stdout: 'pipe', stderr: 'pipe' });
+  cleanups.push(() => reader.kill());
   await until(() => backendClose !== undefined);
   const report = await child.query('report');
   expect(report.closeCalls).toContainEqual({ code: 1013, reason: 'Downstream stalled' });
   expect(report.status.backends[0].websockets).toBe(0);
   expect(report.activeRelays).toBe(0); expect(report.relayTimers).toBe(0);
-  socket.removeAllListeners('data');
-  const ended = new Promise<void>((resolve, reject) => { socket.once('end', resolve); socket.once('error', reject); });
-  socket.resume(); await ended;
+  expect(report.peak - report.baseline).toBeLessThan(96 * 1024 * 1024);
+  expect(report.maxima.readable).toBeLessThanOrEqual(1024 * 1024);
+  const stdout = await new Response(reader.stdout).text();
+  const stderr = await new Response(reader.stderr).text();
+  expect(await reader.exited, stderr).toBe(0); expect(JSON.parse(stdout)).toEqual({ ended: true });
   // Close stops the producer even when it has buffered outgoing messages.
   await sleep(100); const finalSent = sent; await sleep(100); expect(sent).toBe(finalSent);
   expect((await child.query('report')).relayTimers).toBe(0);

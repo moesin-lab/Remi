@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multiremi/core/i18n/react";
@@ -8,6 +8,7 @@ import enSettings from "../../locales/en/settings.json";
 
 const updateWorkspace = vi.hoisted(() => vi.fn());
 const setQueryData = vi.hoisted(() => vi.fn());
+const getQueryData = vi.hoisted(() => vi.fn());
 const access = vi.hoisted(() => ({ role: "owner" }));
 const navigate = vi.hoisted(() => vi.fn());
 const workspaceRef = vi.hoisted(() => ({
@@ -20,7 +21,7 @@ const workspaceRef = vi.hoisted(() => ({
 
 vi.mock("@tanstack/react-query", () => ({
   useQuery: () => ({ data: [{ user_id: "local", role: access.role }] }),
-  useQueryClient: () => ({ setQueryData }),
+  useQueryClient: () => ({ setQueryData, getQueryData }),
   queryOptions: <T,>(options: T) => options,
 }));
 
@@ -70,9 +71,15 @@ describe("SourceControlTab", () => {
     vi.clearAllMocks();
     access.role = "owner";
     workspaceRef.current.settings = { retained_setting: "yes" };
+    getQueryData.mockReturnValue(undefined);
+    setQueryData.mockImplementation((_key, updater) => {
+      const updated = updater(getQueryData() ?? [workspaceRef.current]);
+      getQueryData.mockReturnValue(updated);
+      workspaceRef.current = updated[0];
+    });
     updateWorkspace.mockImplementation(async (_id: string, input: { settings: Record<string, unknown> }) => ({
       ...workspaceRef.current,
-      settings: input.settings,
+      settings: Object.fromEntries(Object.entries(input.settings).filter(([, value]) => value !== null)),
     }));
   });
 
@@ -135,6 +142,63 @@ describe("SourceControlTab", () => {
       settings: { retained_setting: "yes", co_authored_by_name: null, co_authored_by_email: null },
     }));
     expect(screen.getByText("Co-authored-by: Remi <remi@openremi.fun>")).toBeInTheDocument();
+  });
+
+  it("serializes identity and switch saves and merges the latest cached settings", async () => {
+    const user = userEvent.setup();
+    let resolveSave!: (value: unknown) => void;
+    updateWorkspace.mockImplementationOnce(() => new Promise((resolve) => { resolveSave = resolve; }));
+    // Keep the rendered workspace stale to prove the next save reads the cache.
+    setQueryData.mockImplementation((_key, updater) => {
+      getQueryData.mockReturnValue(updater(getQueryData() ?? [workspaceRef.current]));
+    });
+    render(<SourceControlTab />, { wrapper: I18nWrapper });
+    const name = screen.getByLabelText(enSettings.source_control.co_author_name);
+    await user.clear(name);
+    await user.type(name, "New Author");
+    await user.click(screen.getByRole("button", { name: enSettings.source_control.co_author_save }));
+    for (const toggle of screen.getAllByRole("switch")) expect(toggle).toHaveAttribute("aria-disabled", "true");
+    expect(name).toBeDisabled();
+    expect(screen.getByRole("button", { name: enSettings.source_control.co_author_reset })).toBeDisabled();
+    const toggle = screen.getByRole("switch", { name: enSettings.source_control.feature_co_author_label });
+    await user.click(toggle);
+    expect(updateWorkspace).toHaveBeenCalledTimes(1);
+    await act(async () => resolveSave({ ...workspaceRef.current, settings: {
+      retained_setting: "latest", co_authored_by_name: "New Author", co_authored_by_email: "new@example.test",
+    } }));
+    await waitFor(() => expect(toggle).not.toHaveAttribute("aria-disabled", "true"));
+    await user.click(toggle);
+    expect(updateWorkspace).toHaveBeenNthCalledWith(2, "workspace-1", { settings: {
+      retained_setting: "latest", co_authored_by_name: "New Author", co_authored_by_email: "new@example.test", co_authored_by_enabled: false,
+    } });
+  });
+
+  it("disables the identity form and other switches while a switch save is pending", async () => {
+    const user = userEvent.setup();
+    let resolveSave!: (value: unknown) => void;
+    updateWorkspace.mockImplementationOnce(() => new Promise((resolve) => { resolveSave = resolve; }));
+    render(<SourceControlTab />, { wrapper: I18nWrapper });
+    await user.click(screen.getByRole("switch", { name: "Record merges on the issue" }));
+    for (const toggle of screen.getAllByRole("switch")) expect(toggle).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("button", { name: enSettings.source_control.co_author_reset })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: enSettings.source_control.co_author_reset }));
+    expect(updateWorkspace).toHaveBeenCalledTimes(1);
+    await act(async () => resolveSave(workspaceRef.current));
+    await waitFor(() => expect(screen.getByRole("button", { name: enSettings.source_control.co_author_reset })).toBeEnabled());
+  });
+
+  it("shows later server identity updates after restoring defaults", async () => {
+    workspaceRef.current.settings = { co_authored_by_name: "Custom", co_authored_by_email: "custom@example.test" };
+    const user = userEvent.setup();
+    const { rerender } = render(<SourceControlTab />, { wrapper: I18nWrapper });
+    await user.click(screen.getByRole("button", { name: enSettings.source_control.co_author_reset }));
+    await waitFor(() => expect(screen.getByLabelText(enSettings.source_control.co_author_name)).toHaveValue("Remi"));
+    workspaceRef.current = { ...workspaceRef.current, settings: {
+      co_authored_by_name: "Server Author", co_authored_by_email: "server@example.test",
+    } };
+    rerender(<SourceControlTab />);
+    expect(screen.getByLabelText(enSettings.source_control.co_author_name)).toHaveValue("Server Author");
+    expect(screen.getByLabelText(enSettings.source_control.co_author_email)).toHaveValue("server@example.test");
   });
 
   it("keeps identity editable when attribution is disabled and marks preview inactive", async () => {

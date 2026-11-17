@@ -40,6 +40,8 @@ const CLI_CAPABILITIES = [
   "autopilot.run-now",
   "task.steer",
   "task.steer.list",
+  "daemon.drain",
+  "daemon.drain.status",
 ];
 
 beforeEach(() => {
@@ -89,6 +91,9 @@ function startFixture(): string {
       }
       if (url.pathname.endsWith("/steer")) {
         return Response.json({ message: { id: "stm_1" } }, { status: 201 });
+      }
+      if (url.pathname === "/api/daemons/fixture-daemon/drain") {
+        return Response.json({ mode: "draining", remaining_tasks: 0 });
       }
       return Response.json({ error: "not found" }, { status: 404 });
     },
@@ -253,9 +258,34 @@ describe("MUL-468 autopilot run guard", () => {
     }
   });
 
-  it("registers no writable command at a path that also has subcommands", () => {
+  it("keeps drain status read-only and requires an explicit target for the drain write", async () => {
+    const baseUrl = startFixture();
+    const result = await runDispatch(["daemon", "drain", "status", "--daemon-id", "fixture-daemon", ...connectionOptions(baseUrl)]);
+    expect(result.error).toBeNull();
+    expect(requests.filter(entry => entry.path !== "/api/cli/capabilities").map(entry => entry.method)).toEqual(["GET"]);
+    requests = [];
+    const drain = await runDispatch(["daemon", "drain", "--daemon-id", "fixture-daemon", ...connectionOptions(baseUrl)]);
+    expect(drain.error).toBeNull();
+    expect(posts()).toHaveLength(1);
+    requests = [];
+    const previous = process.env.MULTIREMI_DAEMON_ID;
+    delete process.env.MULTIREMI_DAEMON_ID;
+    try {
+      const bare = await runDispatch(["daemon", "drain", ...connectionOptions(baseUrl)]);
+      expect(String((bare.error as Error)?.message)).toContain("--daemon-id");
+      expect(posts()).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env.MULTIREMI_DAEMON_ID;
+      else process.env.MULTIREMI_DAEMON_ID = previous;
+    }
+  });
+
+  it("registers no unreviewed writable command at a path that also has subcommands", () => {
     const inventory = cliCommandInventory();
     const nestedWritesWithReason: Record<string, string> = {
+      // MUL-68: drain explicitly stops admission, requires a daemon selector,
+      // and is human-only. Its status child never falls back to the POST (above).
+      "daemon.drain": "Explicit lifecycle write with a separately dispatched status read",
       // `task steer <task>` writes a directive while `task steer list <task>`
       // reads the ones already sent. A bare steer now fails before the request,
       // so the prefix can no longer post anything by accident (see above).

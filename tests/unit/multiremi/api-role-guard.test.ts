@@ -433,22 +433,27 @@ describe("MUL-461 api role — guard over the full golden route inventory", () =
       expect(status === 421, `${pattern} -> ${status}`).toBe(expectedRefusal("runtime", path));
       if (status === 421) refused += 1;
     }
-    // The merged inventory has 834 routes. Responsibility, delivery, Question,
+    // The merged inventory has 838 routes. Responsibility, delivery, Question,
     // Chat follow-up queue (ADR 0020), background-task (PR 6) and slash-command
     // (ADR 0025) user operations belong to UI; runtime owns daemon/health/peer/trace
-    // routes. It refuses 774 HTTP routes and two browser upgrades.
+    // routes. It refuses 778 HTTP routes and two browser upgrades.
     // The independent literal oracle checks every route above.
     const mintRoute = "GET /api/daemon/runtimes/:runtimeId/feishu-bot/decision-cards";
     expect(statuses.has(mintRoute)).toBe(true);
     expect(statuses.get(mintRoute)).not.toBe(421);
     expect(statuses.get("POST /api/issues/:id/workspace/abandon")).toBe(421);
     expect(statuses.get("POST /api/platform-updater/operations/reconcile")).toBe(421);
+    // MUL-68 drain controls and MUL-35 SCM checks are operator/UI routes.
+    for (const route of ["GET /api/daemons/:daemonId/drain", "POST /api/daemons/:daemonId/drain", "DELETE /api/daemons/:daemonId/drain", "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks"]) {
+      expect(statuses.has(route), `${route} is registered`).toBe(true);
+      expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
+    }
     for (const route of [...UI_USAGE_ROUTES, ...UI_BOT_ROUTES, ...UI_RESPONSIBILITY_ROUTES]) {
       expect(statuses.has(route), `${route} is registered`).toBe(true);
       expect(statuses.get(route), `${route} belongs to ui`).toBe(421);
     }
-    expect(refused, routeCountHint("runtime")).toBe(774);
-    expect(refused + 2, routeCountHint("runtime")).toBe(776);
+    expect(refused, routeCountHint("runtime")).toBe(778);
+    expect(refused + 2, routeCountHint("runtime")).toBe(780);
     // ADR 0025: the Chat menu's catalogue is a UI read.
     expect(statuses.get("GET /api/chat/slash-commands")).toBe(421);
   });

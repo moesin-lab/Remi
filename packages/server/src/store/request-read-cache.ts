@@ -57,8 +57,14 @@ class MapReadCache implements RequestReadCache {
    */
   private readonly entries = new Map<string, { value: unknown; generation: number }>();
   private generation = 0;
+  closed = false;
+  close(): void {
+    this.closed = true;
+    this.entries.clear();
+  }
   private transactionDepth = 0;
   get<T>(key: string): T | undefined {
+    if (this.closed) return undefined;
     const entry = this.entries.get(key);
     if (!entry) return undefined;
     if (this.transactionDepth > 0 && entry.generation !== this.generation) return undefined;
@@ -76,7 +82,7 @@ class MapReadCache implements RequestReadCache {
     if (this.transactionDepth > 0) this.generation += 1;
   }
   set<T>(key: string, value: T): void {
-    this.entries.set(key, { value, generation: this.generation });
+    if (!this.closed) this.entries.set(key, { value, generation: this.generation });
   }
   clear(): void {
     this.entries.clear();
@@ -106,13 +112,28 @@ export function writeThroughRequestReadCache<T>(key: string, value: T): void {
 
 /** The cache bound to the current async scope, or null when no scope is active. */
 export function activeRequestReadCache(): RequestReadCache | null {
-  return storage.getStore() ?? null;
+  const cache = storage.getStore();
+  return cache && !cache.closed ? cache : null;
 }
 
 /** Run `fn` with a fresh per-request cache active. Nested calls reuse the outer scope's cache. */
 export function withRequestReadCache<T>(fn: () => T): T {
-  if (storage.getStore()) return fn();
+  if (activeRequestReadCache()) return fn();
   return storage.run(new MapReadCache(), fn);
+}
+
+/**
+ * Cache only the synchronous operation. Async descendants may inherit the ALS object, but it is
+ * closed before their callbacks run, so event-triggered pumps cannot retain heartbeat rows.
+ * Always owns a fresh scope, even inside an HTTP request's longer-lived cache.
+ */
+export function withSynchronousRequestReadCache<T>(fn: () => T): T {
+  const cache = new MapReadCache();
+  try {
+    return storage.run(cache, fn);
+  } finally {
+    cache.close();
+  }
 }
 
 /**
@@ -338,6 +359,8 @@ function invalidateTable(table: string | null): void {
     return;
   }
   cache.clearTable(table);
+  // Runtime lite rows join the physical-daemon drain fence.
+  if (table === "multiremi_daemon_drains") cache.clearTable("multiremi_runtimes");
   if(table==='multiremi_turns'||table==='multiremi_turn_attempts')cache.clearTable('multiremi_turn_execution_records');
   if(table==='multiremi_session_lanes')cache.clearTable('multiremi_agent_lane_records');
   if(table==='multiremi_conversation_log'){cache.clearTable('multiremi_chat_message_records');cache.clearTable('multiremi_issue_message_records');}

@@ -210,6 +210,7 @@ it("Q418-mesh: unchanged mesh heartbeats have bounded full-chain SQL without wak
   try {
     for (let n = 0; n < 3; n++) {
       const fullChain = await countSocketHeartbeat(h, mesh);
+      console.info(`[Q418-mesh SQL] ${JSON.stringify(fullChain)}`);
       // v1 HTTP is now an upgrade channel; it does not perform this mesh report.
       expect(fullChain.selects).toBeLessThanOrEqual(30);
       expect(fullChain.updates).toBeLessThanOrEqual(6);

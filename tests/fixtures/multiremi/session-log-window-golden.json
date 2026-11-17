@@ -1,6 +1,6 @@
 {
  "name": "Session log window responses",
- "source": "MUL-48: per-row capture on 84e31e785 with shared-operator contract fixtures",
+ "source": "MUL-84: per-row capture on ef04e5ffe with drain/runtime read consolidation",
  "probes": [
   {
    "name": "chat-window",
@@ -71,8 +71,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.129Z",
-      "updated_at": "2026-09-20T12:00:02.182Z",
+      "created_at": "2026-09-20T12:00:02.099Z",
+      "updated_at": "2026-09-20T12:00:02.151Z",
       "deleted_at": null
      },
      {
@@ -113,7 +113,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -128,8 +128,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.176Z",
-      "updated_at": "2026-09-20T12:00:02.181Z",
+      "created_at": "2026-09-20T12:00:02.145Z",
+      "updated_at": "2026-09-20T12:00:02.150Z",
       "deleted_at": null
      },
      {
@@ -179,8 +179,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.193Z",
-      "updated_at": "2026-09-20T12:00:02.203Z",
+      "created_at": "2026-09-20T12:00:02.162Z",
+      "updated_at": "2026-09-20T12:00:02.172Z",
       "deleted_at": null
      },
      {
@@ -255,8 +255,8 @@
        "attachments": []
       },
       "revision": 12,
-      "created_at": "2026-09-20T12:00:02.197Z",
-      "updated_at": "2026-09-20T12:00:02.258Z",
+      "created_at": "2026-09-20T12:00:02.166Z",
+      "updated_at": "2026-09-20T12:00:02.226Z",
       "deleted_at": null
      },
      {
@@ -297,7 +297,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 53,
+       "elapsed_ms": 52,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -312,8 +312,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.252Z",
-      "updated_at": "2026-09-20T12:00:02.257Z",
+      "created_at": "2026-09-20T12:00:02.220Z",
+      "updated_at": "2026-09-20T12:00:02.225Z",
       "deleted_at": null
      },
      {
@@ -363,8 +363,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.269Z",
-      "updated_at": "2026-09-20T12:00:02.279Z",
+      "created_at": "2026-09-20T12:00:02.237Z",
+      "updated_at": "2026-09-20T12:00:02.247Z",
       "deleted_at": null
      },
      {
@@ -429,8 +429,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.273Z",
-      "updated_at": "2026-09-20T12:00:02.326Z",
+      "created_at": "2026-09-20T12:00:02.241Z",
+      "updated_at": "2026-09-20T12:00:02.293Z",
       "deleted_at": null
      },
      {
@@ -471,7 +471,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -486,8 +486,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.320Z",
-      "updated_at": "2026-09-20T12:00:02.325Z",
+      "created_at": "2026-09-20T12:00:02.287Z",
+      "updated_at": "2026-09-20T12:00:02.292Z",
       "deleted_at": null
      },
      {
@@ -537,8 +537,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.337Z",
-      "updated_at": "2026-09-20T12:00:02.347Z",
+      "created_at": "2026-09-20T12:00:02.304Z",
+      "updated_at": "2026-09-20T12:00:02.314Z",
       "deleted_at": null
      },
      {
@@ -603,8 +603,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.341Z",
-      "updated_at": "2026-09-20T12:00:02.394Z",
+      "created_at": "2026-09-20T12:00:02.308Z",
+      "updated_at": "2026-09-20T12:00:02.360Z",
       "deleted_at": null
      },
      {
@@ -645,7 +645,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -660,8 +660,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.388Z",
-      "updated_at": "2026-09-20T12:00:02.393Z",
+      "created_at": "2026-09-20T12:00:02.354Z",
+      "updated_at": "2026-09-20T12:00:02.359Z",
       "deleted_at": null
      },
      {
@@ -711,8 +711,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.405Z",
-      "updated_at": "2026-09-20T12:00:02.415Z",
+      "created_at": "2026-09-20T12:00:02.371Z",
+      "updated_at": "2026-09-20T12:00:02.381Z",
       "deleted_at": null
      },
      {
@@ -777,8 +777,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.409Z",
-      "updated_at": "2026-09-20T12:00:02.462Z",
+      "created_at": "2026-09-20T12:00:02.375Z",
+      "updated_at": "2026-09-20T12:00:02.427Z",
       "deleted_at": null
      },
      {
@@ -819,7 +819,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -834,8 +834,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.456Z",
-      "updated_at": "2026-09-20T12:00:02.461Z",
+      "created_at": "2026-09-20T12:00:02.421Z",
+      "updated_at": "2026-09-20T12:00:02.426Z",
       "deleted_at": null
      },
      {
@@ -907,14 +907,14 @@
          "contentType": "text/plain",
          "size_bytes": 36,
          "sizeBytes": 36,
-         "created_at": "2026-09-20T12:00:02.470Z",
-         "createdAt": "2026-09-20T12:00:02.470Z"
+         "created_at": "2026-09-20T12:00:02.435Z",
+         "createdAt": "2026-09-20T12:00:02.435Z"
         }
        ]
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.474Z",
-      "updated_at": "2026-09-20T12:00:02.484Z",
+      "created_at": "2026-09-20T12:00:02.439Z",
+      "updated_at": "2026-09-20T12:00:02.449Z",
       "deleted_at": null
      },
      {
@@ -979,8 +979,8 @@
        "attachments": []
       },
       "revision": 15,
-      "created_at": "2026-09-20T12:00:02.478Z",
-      "updated_at": "2026-09-20T12:00:02.571Z",
+      "created_at": "2026-09-20T12:00:02.443Z",
+      "updated_at": "2026-09-20T12:00:02.534Z",
       "deleted_at": null
      },
      {
@@ -1014,7 +1014,7 @@
       "resolved_by_id": null,
       "metadata": {
        "failure_reason": null,
-       "elapsed_ms": 30,
+       "elapsed_ms": 29,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "execution_scope": "",
@@ -1031,8 +1031,8 @@
        "attachments": []
       },
       "revision": 3,
-      "created_at": "2026-09-20T12:00:02.525Z",
-      "updated_at": "2026-09-20T12:00:02.570Z",
+      "created_at": "2026-09-20T12:00:02.489Z",
+      "updated_at": "2026-09-20T12:00:02.533Z",
       "deleted_at": null
      },
      {
@@ -1082,8 +1082,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.582Z",
-      "updated_at": "2026-09-20T12:00:02.592Z",
+      "created_at": "2026-09-20T12:00:02.545Z",
+      "updated_at": "2026-09-20T12:00:02.555Z",
       "deleted_at": null
      },
      {
@@ -1148,8 +1148,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.586Z",
-      "updated_at": "2026-09-20T12:00:02.639Z",
+      "created_at": "2026-09-20T12:00:02.549Z",
+      "updated_at": "2026-09-20T12:00:02.601Z",
       "deleted_at": null
      },
      {
@@ -1190,7 +1190,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -1205,8 +1205,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.633Z",
-      "updated_at": "2026-09-20T12:00:02.638Z",
+      "created_at": "2026-09-20T12:00:02.595Z",
+      "updated_at": "2026-09-20T12:00:02.600Z",
       "deleted_at": null
      },
      {
@@ -1256,8 +1256,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.650Z",
-      "updated_at": "2026-09-20T12:00:02.660Z",
+      "created_at": "2026-09-20T12:00:02.612Z",
+      "updated_at": "2026-09-20T12:00:02.622Z",
       "deleted_at": null
      },
      {
@@ -1322,8 +1322,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.654Z",
-      "updated_at": "2026-09-20T12:00:02.707Z",
+      "created_at": "2026-09-20T12:00:02.616Z",
+      "updated_at": "2026-09-20T12:00:02.668Z",
       "deleted_at": null
      },
      {
@@ -1364,7 +1364,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -1379,8 +1379,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.701Z",
-      "updated_at": "2026-09-20T12:00:02.706Z",
+      "created_at": "2026-09-20T12:00:02.662Z",
+      "updated_at": "2026-09-20T12:00:02.667Z",
       "deleted_at": null
      },
      {
@@ -1430,8 +1430,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.718Z",
-      "updated_at": "2026-09-20T12:00:02.728Z",
+      "created_at": "2026-09-20T12:00:02.679Z",
+      "updated_at": "2026-09-20T12:00:02.689Z",
       "deleted_at": null
      },
      {
@@ -1496,8 +1496,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.722Z",
-      "updated_at": "2026-09-20T12:00:02.775Z",
+      "created_at": "2026-09-20T12:00:02.683Z",
+      "updated_at": "2026-09-20T12:00:02.735Z",
       "deleted_at": null
      },
      {
@@ -1538,7 +1538,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -1553,8 +1553,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.769Z",
-      "updated_at": "2026-09-20T12:00:02.774Z",
+      "created_at": "2026-09-20T12:00:02.729Z",
+      "updated_at": "2026-09-20T12:00:02.734Z",
       "deleted_at": null
      },
      {
@@ -1604,8 +1604,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.786Z",
-      "updated_at": "2026-09-20T12:00:02.796Z",
+      "created_at": "2026-09-20T12:00:02.746Z",
+      "updated_at": "2026-09-20T12:00:02.756Z",
       "deleted_at": null
      },
      {
@@ -1680,8 +1680,8 @@
        "attachments": []
       },
       "revision": 12,
-      "created_at": "2026-09-20T12:00:02.790Z",
-      "updated_at": "2026-09-20T12:00:02.851Z",
+      "created_at": "2026-09-20T12:00:02.750Z",
+      "updated_at": "2026-09-20T12:00:02.810Z",
       "deleted_at": null
      },
      {
@@ -1722,7 +1722,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 53,
+       "elapsed_ms": 52,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -1737,8 +1737,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.845Z",
-      "updated_at": "2026-09-20T12:00:02.850Z",
+      "created_at": "2026-09-20T12:00:02.804Z",
+      "updated_at": "2026-09-20T12:00:02.809Z",
       "deleted_at": null
      },
      {
@@ -1788,8 +1788,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:04.048Z",
-      "updated_at": "2026-09-20T12:00:04.058Z",
+      "created_at": "2026-09-20T12:00:03.995Z",
+      "updated_at": "2026-09-20T12:00:04.005Z",
       "deleted_at": null
      }
     ],
@@ -1797,7 +1797,7 @@
     "log_version": 592,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:02.125Z",
+    "prev_entry_created_at": "2026-09-20T12:00:02.095Z",
     "before_visible_count": 91,
     "before_visible_count_capped": false
    }
@@ -1899,7 +1899,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -1914,8 +1914,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.638Z",
-      "updated_at": "2026-09-20T12:00:00.643Z",
+      "created_at": "2026-09-20T12:00:00.629Z",
+      "updated_at": "2026-09-20T12:00:00.634Z",
       "deleted_at": null
      },
      {
@@ -1965,8 +1965,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.655Z",
-      "updated_at": "2026-09-20T12:00:00.665Z",
+      "created_at": "2026-09-20T12:00:00.646Z",
+      "updated_at": "2026-09-20T12:00:00.656Z",
       "deleted_at": null
      },
      {
@@ -2031,8 +2031,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:00.659Z",
-      "updated_at": "2026-09-20T12:00:00.712Z",
+      "created_at": "2026-09-20T12:00:00.650Z",
+      "updated_at": "2026-09-20T12:00:00.702Z",
       "deleted_at": null
      },
      {
@@ -2073,7 +2073,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2088,8 +2088,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.706Z",
-      "updated_at": "2026-09-20T12:00:00.711Z",
+      "created_at": "2026-09-20T12:00:00.696Z",
+      "updated_at": "2026-09-20T12:00:00.701Z",
       "deleted_at": null
      },
      {
@@ -2139,8 +2139,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.723Z",
-      "updated_at": "2026-09-20T12:00:00.733Z",
+      "created_at": "2026-09-20T12:00:00.713Z",
+      "updated_at": "2026-09-20T12:00:00.723Z",
       "deleted_at": null
      },
      {
@@ -2205,8 +2205,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:00.727Z",
-      "updated_at": "2026-09-20T12:00:00.780Z",
+      "created_at": "2026-09-20T12:00:00.717Z",
+      "updated_at": "2026-09-20T12:00:00.769Z",
       "deleted_at": null
      },
      {
@@ -2247,7 +2247,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2262,8 +2262,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.774Z",
-      "updated_at": "2026-09-20T12:00:00.779Z",
+      "created_at": "2026-09-20T12:00:00.763Z",
+      "updated_at": "2026-09-20T12:00:00.768Z",
       "deleted_at": null
      },
      {
@@ -2313,8 +2313,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.791Z",
-      "updated_at": "2026-09-20T12:00:00.801Z",
+      "created_at": "2026-09-20T12:00:00.780Z",
+      "updated_at": "2026-09-20T12:00:00.790Z",
       "deleted_at": null
      }
     ],
@@ -2322,7 +2322,7 @@
     "log_version": 592,
     "has_more_before": true,
     "has_more_after": true,
-    "prev_entry_created_at": "2026-09-20T12:00:00.591Z",
+    "prev_entry_created_at": "2026-09-20T12:00:00.583Z",
     "before_visible_count": 26,
     "before_visible_count_capped": false
    }
@@ -2362,7 +2362,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.125Z",
+      "created_at": "2026-09-20T12:00:02.095Z",
       "body_md": "Question 31",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2407,7 +2407,7 @@
        "current_attempt_id": "tsk_eg8koluf1w1g",
        "legacy_prompt": "Question 31"
       },
-      "created_at": "2026-09-20T12:00:02.129Z",
+      "created_at": "2026-09-20T12:00:02.099Z",
       "body_md": "Answer 31",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2430,7 +2430,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2443,7 +2443,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.176Z",
+      "created_at": "2026-09-20T12:00:02.145Z",
       "body_md": "Answer 31",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2473,7 +2473,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.193Z",
+      "created_at": "2026-09-20T12:00:02.162Z",
       "body_md": "Question 32",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2528,7 +2528,7 @@
        "current_attempt_id": "tsk_dh309fgki2iv",
        "legacy_prompt": "Question 32"
       },
-      "created_at": "2026-09-20T12:00:02.197Z",
+      "created_at": "2026-09-20T12:00:02.166Z",
       "body_md": "Answer 32",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2551,7 +2551,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 53,
+       "elapsed_ms": 52,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2564,7 +2564,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.252Z",
+      "created_at": "2026-09-20T12:00:02.220Z",
       "body_md": "Answer 32",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2594,7 +2594,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.269Z",
+      "created_at": "2026-09-20T12:00:02.237Z",
       "body_md": "Question 33",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2639,7 +2639,7 @@
        "current_attempt_id": "tsk_1fpzy7lmhbvv",
        "legacy_prompt": "Question 33"
       },
-      "created_at": "2026-09-20T12:00:02.273Z",
+      "created_at": "2026-09-20T12:00:02.241Z",
       "body_md": "Answer 33",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2662,7 +2662,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2675,7 +2675,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.320Z",
+      "created_at": "2026-09-20T12:00:02.287Z",
       "body_md": "Answer 33",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2705,7 +2705,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.337Z",
+      "created_at": "2026-09-20T12:00:02.304Z",
       "body_md": "Question 34",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2750,7 +2750,7 @@
        "current_attempt_id": "tsk_s5az74nkgrte",
        "legacy_prompt": "Question 34"
       },
-      "created_at": "2026-09-20T12:00:02.341Z",
+      "created_at": "2026-09-20T12:00:02.308Z",
       "body_md": "Answer 34",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2773,7 +2773,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2786,7 +2786,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.388Z",
+      "created_at": "2026-09-20T12:00:02.354Z",
       "body_md": "Answer 34",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2816,7 +2816,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.405Z",
+      "created_at": "2026-09-20T12:00:02.371Z",
       "body_md": "Question 35",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2861,7 +2861,7 @@
        "current_attempt_id": "tsk_ymzvy27063um",
        "legacy_prompt": "Question 35"
       },
-      "created_at": "2026-09-20T12:00:02.409Z",
+      "created_at": "2026-09-20T12:00:02.375Z",
       "body_md": "Answer 35",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2884,7 +2884,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2897,7 +2897,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.456Z",
+      "created_at": "2026-09-20T12:00:02.421Z",
       "body_md": "Answer 35",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2927,7 +2927,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.474Z",
+      "created_at": "2026-09-20T12:00:02.439Z",
       "body_md": "Question 36",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2972,7 +2972,7 @@
        "current_attempt_id": "tsk_vm9tse2daxmc",
        "legacy_prompt": "Question 36"
       },
-      "created_at": "2026-09-20T12:00:02.478Z",
+      "created_at": "2026-09-20T12:00:02.443Z",
       "body_md": "Answer 36 after retry",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2988,7 +2988,7 @@
       "parent_id": null,
       "metadata": {
        "failure_reason": null,
-       "elapsed_ms": 30,
+       "elapsed_ms": 29,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "execution_scope": "",
@@ -3003,7 +3003,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.525Z",
+      "created_at": "2026-09-20T12:00:02.489Z",
       "body_md": "Answer 36 after retry",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -3033,7 +3033,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.582Z",
+      "created_at": "2026-09-20T12:00:02.545Z",
       "body_md": "Question 37",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -3078,7 +3078,7 @@
        "current_attempt_id": "tsk_ynw5d40ii31d",
        "legacy_prompt": "Question 37"
       },
-      "created_at": "2026-09-20T12:00:02.586Z",
+      "created_at": "2026-09-20T12:00:02.549Z",
       "body_md": "Answer 37",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -3140,7 +3140,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3155,8 +3155,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.701Z",
-      "updated_at": "2026-09-20T12:00:02.706Z",
+      "created_at": "2026-09-20T12:00:02.662Z",
+      "updated_at": "2026-09-20T12:00:02.667Z",
       "deleted_at": null
      },
      {
@@ -3206,8 +3206,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.718Z",
-      "updated_at": "2026-09-20T12:00:02.728Z",
+      "created_at": "2026-09-20T12:00:02.679Z",
+      "updated_at": "2026-09-20T12:00:02.689Z",
       "deleted_at": null
      },
      {
@@ -3248,7 +3248,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3263,8 +3263,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.769Z",
-      "updated_at": "2026-09-20T12:00:02.774Z",
+      "created_at": "2026-09-20T12:00:02.729Z",
+      "updated_at": "2026-09-20T12:00:02.734Z",
       "deleted_at": null
      },
      {
@@ -3314,8 +3314,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.786Z",
-      "updated_at": "2026-09-20T12:00:02.796Z",
+      "created_at": "2026-09-20T12:00:02.746Z",
+      "updated_at": "2026-09-20T12:00:02.756Z",
       "deleted_at": null
      },
      {
@@ -3356,7 +3356,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 53,
+       "elapsed_ms": 52,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3371,8 +3371,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.845Z",
-      "updated_at": "2026-09-20T12:00:02.850Z",
+      "created_at": "2026-09-20T12:00:02.804Z",
+      "updated_at": "2026-09-20T12:00:02.809Z",
       "deleted_at": null
      },
      {
@@ -3422,8 +3422,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:04.048Z",
-      "updated_at": "2026-09-20T12:00:04.058Z",
+      "created_at": "2026-09-20T12:00:03.995Z",
+      "updated_at": "2026-09-20T12:00:04.005Z",
       "deleted_at": null
      }
     ],
@@ -3431,7 +3431,7 @@
     "log_version": 592,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:02.650Z",
+    "prev_entry_created_at": "2026-09-20T12:00:02.612Z",
     "before_visible_count": 112,
     "before_visible_count_capped": false
    }
@@ -3476,8 +3476,8 @@
        "title": "Someone else's chat"
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:02.859Z",
-      "updated_at": "2026-09-20T12:00:02.859Z",
+      "created_at": "2026-09-20T12:00:02.818Z",
+      "updated_at": "2026-09-20T12:00:02.818Z",
       "deleted_at": null
      }
     ],
@@ -3557,8 +3557,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.129Z",
-      "updated_at": "2026-09-20T12:00:02.182Z",
+      "created_at": "2026-09-20T12:00:02.099Z",
+      "updated_at": "2026-09-20T12:00:02.151Z",
       "deleted_at": null
      },
      {
@@ -3599,7 +3599,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3614,8 +3614,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.176Z",
-      "updated_at": "2026-09-20T12:00:02.181Z",
+      "created_at": "2026-09-20T12:00:02.145Z",
+      "updated_at": "2026-09-20T12:00:02.150Z",
       "deleted_at": null
      },
      {
@@ -3665,8 +3665,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.193Z",
-      "updated_at": "2026-09-20T12:00:02.203Z",
+      "created_at": "2026-09-20T12:00:02.162Z",
+      "updated_at": "2026-09-20T12:00:02.172Z",
       "deleted_at": null
      },
      {
@@ -3741,8 +3741,8 @@
        "attachments": []
       },
       "revision": 12,
-      "created_at": "2026-09-20T12:00:02.197Z",
-      "updated_at": "2026-09-20T12:00:02.258Z",
+      "created_at": "2026-09-20T12:00:02.166Z",
+      "updated_at": "2026-09-20T12:00:02.226Z",
       "deleted_at": null
      },
      {
@@ -3783,7 +3783,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 53,
+       "elapsed_ms": 52,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3798,8 +3798,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.252Z",
-      "updated_at": "2026-09-20T12:00:02.257Z",
+      "created_at": "2026-09-20T12:00:02.220Z",
+      "updated_at": "2026-09-20T12:00:02.225Z",
       "deleted_at": null
      },
      {
@@ -3849,8 +3849,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.269Z",
-      "updated_at": "2026-09-20T12:00:02.279Z",
+      "created_at": "2026-09-20T12:00:02.237Z",
+      "updated_at": "2026-09-20T12:00:02.247Z",
       "deleted_at": null
      },
      {
@@ -3915,8 +3915,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.273Z",
-      "updated_at": "2026-09-20T12:00:02.326Z",
+      "created_at": "2026-09-20T12:00:02.241Z",
+      "updated_at": "2026-09-20T12:00:02.293Z",
       "deleted_at": null
      },
      {
@@ -3957,7 +3957,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3972,8 +3972,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.320Z",
-      "updated_at": "2026-09-20T12:00:02.325Z",
+      "created_at": "2026-09-20T12:00:02.287Z",
+      "updated_at": "2026-09-20T12:00:02.292Z",
       "deleted_at": null
      },
      {
@@ -4023,8 +4023,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.337Z",
-      "updated_at": "2026-09-20T12:00:02.347Z",
+      "created_at": "2026-09-20T12:00:02.304Z",
+      "updated_at": "2026-09-20T12:00:02.314Z",
       "deleted_at": null
      },
      {
@@ -4089,8 +4089,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.341Z",
-      "updated_at": "2026-09-20T12:00:02.394Z",
+      "created_at": "2026-09-20T12:00:02.308Z",
+      "updated_at": "2026-09-20T12:00:02.360Z",
       "deleted_at": null
      },
      {
@@ -4131,7 +4131,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -4146,8 +4146,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.388Z",
-      "updated_at": "2026-09-20T12:00:02.393Z",
+      "created_at": "2026-09-20T12:00:02.354Z",
+      "updated_at": "2026-09-20T12:00:02.359Z",
       "deleted_at": null
      },
      {
@@ -4197,8 +4197,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.405Z",
-      "updated_at": "2026-09-20T12:00:02.415Z",
+      "created_at": "2026-09-20T12:00:02.371Z",
+      "updated_at": "2026-09-20T12:00:02.381Z",
       "deleted_at": null
      },
      {
@@ -4263,8 +4263,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.409Z",
-      "updated_at": "2026-09-20T12:00:02.462Z",
+      "created_at": "2026-09-20T12:00:02.375Z",
+      "updated_at": "2026-09-20T12:00:02.427Z",
       "deleted_at": null
      },
      {
@@ -4305,7 +4305,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -4320,8 +4320,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.456Z",
-      "updated_at": "2026-09-20T12:00:02.461Z",
+      "created_at": "2026-09-20T12:00:02.421Z",
+      "updated_at": "2026-09-20T12:00:02.426Z",
       "deleted_at": null
      },
      {
@@ -4393,14 +4393,14 @@
          "contentType": "text/plain",
          "size_bytes": 36,
          "sizeBytes": 36,
-         "created_at": "2026-09-20T12:00:02.470Z",
-         "createdAt": "2026-09-20T12:00:02.470Z"
+         "created_at": "2026-09-20T12:00:02.435Z",
+         "createdAt": "2026-09-20T12:00:02.435Z"
         }
        ]
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.474Z",
-      "updated_at": "2026-09-20T12:00:02.484Z",
+      "created_at": "2026-09-20T12:00:02.439Z",
+      "updated_at": "2026-09-20T12:00:02.449Z",
       "deleted_at": null
      },
      {
@@ -4465,8 +4465,8 @@
        "attachments": []
       },
       "revision": 15,
-      "created_at": "2026-09-20T12:00:02.478Z",
-      "updated_at": "2026-09-20T12:00:02.571Z",
+      "created_at": "2026-09-20T12:00:02.443Z",
+      "updated_at": "2026-09-20T12:00:02.534Z",
       "deleted_at": null
      },
      {
@@ -4500,7 +4500,7 @@
       "resolved_by_id": null,
       "metadata": {
        "failure_reason": null,
-       "elapsed_ms": 30,
+       "elapsed_ms": 29,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "execution_scope": "",
@@ -4517,8 +4517,8 @@
        "attachments": []
       },
       "revision": 3,
-      "created_at": "2026-09-20T12:00:02.525Z",
-      "updated_at": "2026-09-20T12:00:02.570Z",
+      "created_at": "2026-09-20T12:00:02.489Z",
+      "updated_at": "2026-09-20T12:00:02.533Z",
       "deleted_at": null
      },
      {
@@ -4568,8 +4568,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.582Z",
-      "updated_at": "2026-09-20T12:00:02.592Z",
+      "created_at": "2026-09-20T12:00:02.545Z",
+      "updated_at": "2026-09-20T12:00:02.555Z",
       "deleted_at": null
      },
      {
@@ -4634,8 +4634,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.586Z",
-      "updated_at": "2026-09-20T12:00:02.639Z",
+      "created_at": "2026-09-20T12:00:02.549Z",
+      "updated_at": "2026-09-20T12:00:02.601Z",
       "deleted_at": null
      },
      {
@@ -4676,7 +4676,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -4691,8 +4691,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.633Z",
-      "updated_at": "2026-09-20T12:00:02.638Z",
+      "created_at": "2026-09-20T12:00:02.595Z",
+      "updated_at": "2026-09-20T12:00:02.600Z",
       "deleted_at": null
      },
      {
@@ -4742,8 +4742,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.650Z",
-      "updated_at": "2026-09-20T12:00:02.660Z",
+      "created_at": "2026-09-20T12:00:02.612Z",
+      "updated_at": "2026-09-20T12:00:02.622Z",
       "deleted_at": null
      },
      {
@@ -4808,8 +4808,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.654Z",
-      "updated_at": "2026-09-20T12:00:02.707Z",
+      "created_at": "2026-09-20T12:00:02.616Z",
+      "updated_at": "2026-09-20T12:00:02.668Z",
       "deleted_at": null
      },
      {
@@ -4850,7 +4850,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -4865,8 +4865,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.701Z",
-      "updated_at": "2026-09-20T12:00:02.706Z",
+      "created_at": "2026-09-20T12:00:02.662Z",
+      "updated_at": "2026-09-20T12:00:02.667Z",
       "deleted_at": null
      },
      {
@@ -4916,8 +4916,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.718Z",
-      "updated_at": "2026-09-20T12:00:02.728Z",
+      "created_at": "2026-09-20T12:00:02.679Z",
+      "updated_at": "2026-09-20T12:00:02.689Z",
       "deleted_at": null
      },
      {
@@ -4982,8 +4982,8 @@
        "attachments": []
       },
       "revision": 10,
-      "created_at": "2026-09-20T12:00:02.722Z",
-      "updated_at": "2026-09-20T12:00:02.775Z",
+      "created_at": "2026-09-20T12:00:02.683Z",
+      "updated_at": "2026-09-20T12:00:02.735Z",
       "deleted_at": null
      },
      {
@@ -5024,7 +5024,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -5039,8 +5039,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.769Z",
-      "updated_at": "2026-09-20T12:00:02.774Z",
+      "created_at": "2026-09-20T12:00:02.729Z",
+      "updated_at": "2026-09-20T12:00:02.734Z",
       "deleted_at": null
      },
      {
@@ -5090,8 +5090,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.786Z",
-      "updated_at": "2026-09-20T12:00:02.796Z",
+      "created_at": "2026-09-20T12:00:02.746Z",
+      "updated_at": "2026-09-20T12:00:02.756Z",
       "deleted_at": null
      },
      {
@@ -5166,8 +5166,8 @@
        "attachments": []
       },
       "revision": 12,
-      "created_at": "2026-09-20T12:00:02.790Z",
-      "updated_at": "2026-09-20T12:00:02.851Z",
+      "created_at": "2026-09-20T12:00:02.750Z",
+      "updated_at": "2026-09-20T12:00:02.810Z",
       "deleted_at": null
      },
      {
@@ -5208,7 +5208,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 53,
+       "elapsed_ms": 52,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -5223,8 +5223,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.845Z",
-      "updated_at": "2026-09-20T12:00:02.850Z",
+      "created_at": "2026-09-20T12:00:02.804Z",
+      "updated_at": "2026-09-20T12:00:02.809Z",
       "deleted_at": null
      },
      {
@@ -5274,8 +5274,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:04.048Z",
-      "updated_at": "2026-09-20T12:00:04.058Z",
+      "created_at": "2026-09-20T12:00:03.995Z",
+      "updated_at": "2026-09-20T12:00:04.005Z",
       "deleted_at": null
      }
     ],
@@ -5283,7 +5283,7 @@
     "log_version": 592,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:02.125Z",
+    "prev_entry_created_at": "2026-09-20T12:00:02.095Z",
     "before_visible_count": 91,
     "before_visible_count_capped": false
    }
@@ -5365,8 +5365,8 @@
        "legacy_prompt": "Round 5 request"
       },
       "revision": 13,
-      "created_at": "2026-09-20T12:00:03.269Z",
-      "updated_at": "2026-09-20T12:00:03.348Z",
+      "created_at": "2026-09-20T12:00:03.224Z",
+      "updated_at": "2026-09-20T12:00:03.302Z",
       "deleted_at": null
      },
      {
@@ -5411,8 +5411,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.332Z",
-      "updated_at": "2026-09-20T12:00:03.341Z",
+      "created_at": "2026-09-20T12:00:03.286Z",
+      "updated_at": "2026-09-20T12:00:03.295Z",
       "deleted_at": null
      },
      {
@@ -5454,14 +5454,14 @@
          "actor_type": "member",
          "actor_id": "mem_local_local",
          "emoji": "+1",
-         "created_at": "2026-09-20T12:00:03.366Z"
+         "created_at": "2026-09-20T12:00:03.320Z"
         }
        ],
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.362Z",
-      "updated_at": "2026-09-20T12:00:03.362Z",
+      "created_at": "2026-09-20T12:00:03.316Z",
+      "updated_at": "2026-09-20T12:00:03.316Z",
       "deleted_at": null
      },
      {
@@ -5512,8 +5512,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.369Z",
-      "updated_at": "2026-09-20T12:00:03.383Z",
+      "created_at": "2026-09-20T12:00:03.323Z",
+      "updated_at": "2026-09-20T12:00:03.337Z",
       "deleted_at": null
      },
      {
@@ -5576,8 +5576,8 @@
        "legacy_prompt": "Round 6 request"
       },
       "revision": 11,
-      "created_at": "2026-09-20T12:00:03.374Z",
-      "updated_at": "2026-09-20T12:00:03.445Z",
+      "created_at": "2026-09-20T12:00:03.328Z",
+      "updated_at": "2026-09-20T12:00:03.398Z",
       "deleted_at": null
      },
      {
@@ -5622,8 +5622,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.429Z",
-      "updated_at": "2026-09-20T12:00:03.438Z",
+      "created_at": "2026-09-20T12:00:03.382Z",
+      "updated_at": "2026-09-20T12:00:03.391Z",
       "deleted_at": null
      },
      {
@@ -5662,8 +5662,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.461Z",
-      "updated_at": "2026-09-20T12:00:03.461Z",
+      "created_at": "2026-09-20T12:00:03.414Z",
+      "updated_at": "2026-09-20T12:00:03.414Z",
       "deleted_at": null
      },
      {
@@ -5714,8 +5714,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.467Z",
-      "updated_at": "2026-09-20T12:00:03.481Z",
+      "created_at": "2026-09-20T12:00:03.420Z",
+      "updated_at": "2026-09-20T12:00:03.434Z",
       "deleted_at": null
      },
      {
@@ -5778,8 +5778,8 @@
        "legacy_prompt": "Round 7 request"
       },
       "revision": 11,
-      "created_at": "2026-09-20T12:00:03.472Z",
-      "updated_at": "2026-09-20T12:00:03.543Z",
+      "created_at": "2026-09-20T12:00:03.425Z",
+      "updated_at": "2026-09-20T12:00:03.495Z",
       "deleted_at": null
      },
      {
@@ -5824,8 +5824,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.527Z",
-      "updated_at": "2026-09-20T12:00:03.536Z",
+      "created_at": "2026-09-20T12:00:03.479Z",
+      "updated_at": "2026-09-20T12:00:03.488Z",
       "deleted_at": null
      },
      {
@@ -5886,14 +5886,14 @@
          "contentType": "text/plain",
          "size_bytes": 8,
          "sizeBytes": 8,
-         "created_at": "2026-09-20T12:00:03.561Z",
-         "createdAt": "2026-09-20T12:00:03.561Z"
+         "created_at": "2026-09-20T12:00:03.513Z",
+         "createdAt": "2026-09-20T12:00:03.513Z"
         }
        ]
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.557Z",
-      "updated_at": "2026-09-20T12:00:03.557Z",
+      "created_at": "2026-09-20T12:00:03.509Z",
+      "updated_at": "2026-09-20T12:00:03.509Z",
       "deleted_at": null
      },
      {
@@ -5944,8 +5944,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.564Z",
-      "updated_at": "2026-09-20T12:00:03.578Z",
+      "created_at": "2026-09-20T12:00:03.516Z",
+      "updated_at": "2026-09-20T12:00:03.530Z",
       "deleted_at": null
      },
      {
@@ -6008,8 +6008,8 @@
        "legacy_prompt": "Round 8 request"
       },
       "revision": 11,
-      "created_at": "2026-09-20T12:00:03.569Z",
-      "updated_at": "2026-09-20T12:00:03.640Z",
+      "created_at": "2026-09-20T12:00:03.521Z",
+      "updated_at": "2026-09-20T12:00:03.591Z",
       "deleted_at": null
      },
      {
@@ -6054,8 +6054,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.624Z",
-      "updated_at": "2026-09-20T12:00:03.633Z",
+      "created_at": "2026-09-20T12:00:03.575Z",
+      "updated_at": "2026-09-20T12:00:03.584Z",
       "deleted_at": null
      },
      {
@@ -6097,14 +6097,14 @@
          "actor_type": "member",
          "actor_id": "mem_local_local",
          "emoji": "+1",
-         "created_at": "2026-09-20T12:00:03.658Z"
+         "created_at": "2026-09-20T12:00:03.609Z"
         }
        ],
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.654Z",
-      "updated_at": "2026-09-20T12:00:03.654Z",
+      "created_at": "2026-09-20T12:00:03.605Z",
+      "updated_at": "2026-09-20T12:00:03.605Z",
       "deleted_at": null
      },
      {
@@ -6155,8 +6155,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.661Z",
-      "updated_at": "2026-09-20T12:00:03.675Z",
+      "created_at": "2026-09-20T12:00:03.612Z",
+      "updated_at": "2026-09-20T12:00:03.626Z",
       "deleted_at": null
      },
      {
@@ -6219,8 +6219,8 @@
        "legacy_prompt": "Round 9 request"
       },
       "revision": 11,
-      "created_at": "2026-09-20T12:00:03.666Z",
-      "updated_at": "2026-09-20T12:00:03.737Z",
+      "created_at": "2026-09-20T12:00:03.617Z",
+      "updated_at": "2026-09-20T12:00:03.687Z",
       "deleted_at": null
      },
      {
@@ -6265,8 +6265,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.721Z",
-      "updated_at": "2026-09-20T12:00:03.730Z",
+      "created_at": "2026-09-20T12:00:03.671Z",
+      "updated_at": "2026-09-20T12:00:03.680Z",
       "deleted_at": null
      },
      {
@@ -6305,8 +6305,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.751Z",
-      "updated_at": "2026-09-20T12:00:03.751Z",
+      "created_at": "2026-09-20T12:00:03.701Z",
+      "updated_at": "2026-09-20T12:00:03.701Z",
       "deleted_at": null
      },
      {
@@ -6357,8 +6357,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.757Z",
-      "updated_at": "2026-09-20T12:00:03.771Z",
+      "created_at": "2026-09-20T12:00:03.707Z",
+      "updated_at": "2026-09-20T12:00:03.721Z",
       "deleted_at": null
      },
      {
@@ -6431,8 +6431,8 @@
        "legacy_prompt": "Round 10 request"
       },
       "revision": 13,
-      "created_at": "2026-09-20T12:00:03.762Z",
-      "updated_at": "2026-09-20T12:00:03.841Z",
+      "created_at": "2026-09-20T12:00:03.712Z",
+      "updated_at": "2026-09-20T12:00:03.790Z",
       "deleted_at": null
      },
      {
@@ -6477,8 +6477,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.825Z",
-      "updated_at": "2026-09-20T12:00:03.834Z",
+      "created_at": "2026-09-20T12:00:03.774Z",
+      "updated_at": "2026-09-20T12:00:03.783Z",
       "deleted_at": null
      },
      {
@@ -6517,8 +6517,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.855Z",
-      "updated_at": "2026-09-20T12:00:03.855Z",
+      "created_at": "2026-09-20T12:00:03.804Z",
+      "updated_at": "2026-09-20T12:00:03.804Z",
       "deleted_at": null
      },
      {
@@ -6569,8 +6569,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.861Z",
-      "updated_at": "2026-09-20T12:00:03.875Z",
+      "created_at": "2026-09-20T12:00:03.810Z",
+      "updated_at": "2026-09-20T12:00:03.824Z",
       "deleted_at": null
      },
      {
@@ -6633,8 +6633,8 @@
        "legacy_prompt": "Round 11 request"
       },
       "revision": 11,
-      "created_at": "2026-09-20T12:00:03.866Z",
-      "updated_at": "2026-09-20T12:00:03.937Z",
+      "created_at": "2026-09-20T12:00:03.815Z",
+      "updated_at": "2026-09-20T12:00:03.885Z",
       "deleted_at": null
      },
      {
@@ -6679,8 +6679,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.921Z",
-      "updated_at": "2026-09-20T12:00:03.930Z",
+      "created_at": "2026-09-20T12:00:03.869Z",
+      "updated_at": "2026-09-20T12:00:03.878Z",
       "deleted_at": null
      },
      {
@@ -6722,7 +6722,7 @@
          "actor_type": "member",
          "actor_id": "mem_local_local",
          "emoji": "+1",
-         "created_at": "2026-09-20T12:00:03.955Z"
+         "created_at": "2026-09-20T12:00:03.903Z"
         }
        ],
        "attachments": [
@@ -6750,14 +6750,14 @@
          "contentType": "text/plain",
          "size_bytes": 12,
          "sizeBytes": 12,
-         "created_at": "2026-09-20T12:00:03.956Z",
-         "createdAt": "2026-09-20T12:00:03.956Z"
+         "created_at": "2026-09-20T12:00:03.904Z",
+         "createdAt": "2026-09-20T12:00:03.904Z"
         }
        ]
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.951Z",
-      "updated_at": "2026-09-20T12:00:03.951Z",
+      "created_at": "2026-09-20T12:00:03.899Z",
+      "updated_at": "2026-09-20T12:00:03.899Z",
       "deleted_at": null
      },
      {
@@ -6808,8 +6808,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.959Z",
-      "updated_at": "2026-09-20T12:00:03.973Z",
+      "created_at": "2026-09-20T12:00:03.907Z",
+      "updated_at": "2026-09-20T12:00:03.921Z",
       "deleted_at": null
      },
      {
@@ -6872,8 +6872,8 @@
        "legacy_prompt": "Round 12 request"
       },
       "revision": 11,
-      "created_at": "2026-09-20T12:00:03.964Z",
-      "updated_at": "2026-09-20T12:00:04.035Z",
+      "created_at": "2026-09-20T12:00:03.912Z",
+      "updated_at": "2026-09-20T12:00:03.982Z",
       "deleted_at": null
      },
      {
@@ -6918,8 +6918,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:04.019Z",
-      "updated_at": "2026-09-20T12:00:04.028Z",
+      "created_at": "2026-09-20T12:00:03.966Z",
+      "updated_at": "2026-09-20T12:00:03.975Z",
       "deleted_at": null
      }
     ],
@@ -6927,7 +6927,7 @@
     "log_version": 208,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:03.264Z",
+    "prev_entry_created_at": "2026-09-20T12:00:03.219Z",
     "before_visible_count": 18,
     "before_visible_count_capped": false,
     "activities": [
@@ -6936,7 +6936,7 @@
       "id": "act_9lalhizagnpy",
       "actor_type": "system",
       "actor_id": null,
-      "created_at": "2026-09-20T12:00:03.456Z",
+      "created_at": "2026-09-20T12:00:03.409Z",
       "action": "issue_updated",
       "details": {
        "status": "in_progress",
@@ -6992,8 +6992,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.855Z",
-      "updated_at": "2026-09-20T12:00:03.855Z",
+      "created_at": "2026-09-20T12:00:03.804Z",
+      "updated_at": "2026-09-20T12:00:03.804Z",
       "deleted_at": null
      },
      {
@@ -7044,8 +7044,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.861Z",
-      "updated_at": "2026-09-20T12:00:03.875Z",
+      "created_at": "2026-09-20T12:00:03.810Z",
+      "updated_at": "2026-09-20T12:00:03.824Z",
       "deleted_at": null
      },
      {
@@ -7108,8 +7108,8 @@
        "legacy_prompt": "Round 11 request"
       },
       "revision": 11,
-      "created_at": "2026-09-20T12:00:03.866Z",
-      "updated_at": "2026-09-20T12:00:03.937Z",
+      "created_at": "2026-09-20T12:00:03.815Z",
+      "updated_at": "2026-09-20T12:00:03.885Z",
       "deleted_at": null
      },
      {
@@ -7154,8 +7154,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.921Z",
-      "updated_at": "2026-09-20T12:00:03.930Z",
+      "created_at": "2026-09-20T12:00:03.869Z",
+      "updated_at": "2026-09-20T12:00:03.878Z",
       "deleted_at": null
      },
      {
@@ -7197,7 +7197,7 @@
          "actor_type": "member",
          "actor_id": "mem_local_local",
          "emoji": "+1",
-         "created_at": "2026-09-20T12:00:03.955Z"
+         "created_at": "2026-09-20T12:00:03.903Z"
         }
        ],
        "attachments": [
@@ -7225,14 +7225,14 @@
          "contentType": "text/plain",
          "size_bytes": 12,
          "sizeBytes": 12,
-         "created_at": "2026-09-20T12:00:03.956Z",
-         "createdAt": "2026-09-20T12:00:03.956Z"
+         "created_at": "2026-09-20T12:00:03.904Z",
+         "createdAt": "2026-09-20T12:00:03.904Z"
         }
        ]
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.951Z",
-      "updated_at": "2026-09-20T12:00:03.951Z",
+      "created_at": "2026-09-20T12:00:03.899Z",
+      "updated_at": "2026-09-20T12:00:03.899Z",
       "deleted_at": null
      },
      {
@@ -7283,8 +7283,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.959Z",
-      "updated_at": "2026-09-20T12:00:03.973Z",
+      "created_at": "2026-09-20T12:00:03.907Z",
+      "updated_at": "2026-09-20T12:00:03.921Z",
       "deleted_at": null
      },
      {
@@ -7347,8 +7347,8 @@
        "legacy_prompt": "Round 12 request"
       },
       "revision": 11,
-      "created_at": "2026-09-20T12:00:03.964Z",
-      "updated_at": "2026-09-20T12:00:04.035Z",
+      "created_at": "2026-09-20T12:00:03.912Z",
+      "updated_at": "2026-09-20T12:00:03.982Z",
       "deleted_at": null
      },
      {
@@ -7393,8 +7393,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:04.019Z",
-      "updated_at": "2026-09-20T12:00:04.028Z",
+      "created_at": "2026-09-20T12:00:03.966Z",
+      "updated_at": "2026-09-20T12:00:03.975Z",
       "deleted_at": null
      }
     ],
@@ -7402,7 +7402,7 @@
     "log_version": 208,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:03.825Z",
+    "prev_entry_created_at": "2026-09-20T12:00:03.774Z",
     "before_visible_count": 40,
     "before_visible_count_capped": false
    }
@@ -7450,8 +7450,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.751Z",
-      "updated_at": "2026-09-20T12:00:03.751Z",
+      "created_at": "2026-09-20T12:00:03.701Z",
+      "updated_at": "2026-09-20T12:00:03.701Z",
       "deleted_at": null
      },
      {
@@ -7502,8 +7502,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.757Z",
-      "updated_at": "2026-09-20T12:00:03.771Z",
+      "created_at": "2026-09-20T12:00:03.707Z",
+      "updated_at": "2026-09-20T12:00:03.721Z",
       "deleted_at": null
      },
      {
@@ -7576,8 +7576,8 @@
        "legacy_prompt": "Round 10 request"
       },
       "revision": 13,
-      "created_at": "2026-09-20T12:00:03.762Z",
-      "updated_at": "2026-09-20T12:00:03.841Z",
+      "created_at": "2026-09-20T12:00:03.712Z",
+      "updated_at": "2026-09-20T12:00:03.790Z",
       "deleted_at": null
      },
      {
@@ -7622,8 +7622,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.825Z",
-      "updated_at": "2026-09-20T12:00:03.834Z",
+      "created_at": "2026-09-20T12:00:03.774Z",
+      "updated_at": "2026-09-20T12:00:03.783Z",
       "deleted_at": null
      },
      {
@@ -7662,8 +7662,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.855Z",
-      "updated_at": "2026-09-20T12:00:03.855Z",
+      "created_at": "2026-09-20T12:00:03.804Z",
+      "updated_at": "2026-09-20T12:00:03.804Z",
       "deleted_at": null
      },
      {
@@ -7714,8 +7714,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.861Z",
-      "updated_at": "2026-09-20T12:00:03.875Z",
+      "created_at": "2026-09-20T12:00:03.810Z",
+      "updated_at": "2026-09-20T12:00:03.824Z",
       "deleted_at": null
      },
      {
@@ -7778,8 +7778,8 @@
        "legacy_prompt": "Round 11 request"
       },
       "revision": 11,
-      "created_at": "2026-09-20T12:00:03.866Z",
-      "updated_at": "2026-09-20T12:00:03.937Z",
+      "created_at": "2026-09-20T12:00:03.815Z",
+      "updated_at": "2026-09-20T12:00:03.885Z",
       "deleted_at": null
      },
      {
@@ -7824,8 +7824,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.921Z",
-      "updated_at": "2026-09-20T12:00:03.930Z",
+      "created_at": "2026-09-20T12:00:03.869Z",
+      "updated_at": "2026-09-20T12:00:03.878Z",
       "deleted_at": null
      },
      {
@@ -7867,7 +7867,7 @@
          "actor_type": "member",
          "actor_id": "mem_local_local",
          "emoji": "+1",
-         "created_at": "2026-09-20T12:00:03.955Z"
+         "created_at": "2026-09-20T12:00:03.903Z"
         }
        ],
        "attachments": [
@@ -7895,14 +7895,14 @@
          "contentType": "text/plain",
          "size_bytes": 12,
          "sizeBytes": 12,
-         "created_at": "2026-09-20T12:00:03.956Z",
-         "createdAt": "2026-09-20T12:00:03.956Z"
+         "created_at": "2026-09-20T12:00:03.904Z",
+         "createdAt": "2026-09-20T12:00:03.904Z"
         }
        ]
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.951Z",
-      "updated_at": "2026-09-20T12:00:03.951Z",
+      "created_at": "2026-09-20T12:00:03.899Z",
+      "updated_at": "2026-09-20T12:00:03.899Z",
       "deleted_at": null
      },
      {
@@ -7953,8 +7953,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.959Z",
-      "updated_at": "2026-09-20T12:00:03.973Z",
+      "created_at": "2026-09-20T12:00:03.907Z",
+      "updated_at": "2026-09-20T12:00:03.921Z",
       "deleted_at": null
      },
      {
@@ -8017,8 +8017,8 @@
        "legacy_prompt": "Round 12 request"
       },
       "revision": 11,
-      "created_at": "2026-09-20T12:00:03.964Z",
-      "updated_at": "2026-09-20T12:00:04.035Z",
+      "created_at": "2026-09-20T12:00:03.912Z",
+      "updated_at": "2026-09-20T12:00:03.982Z",
       "deleted_at": null
      },
      {
@@ -8063,8 +8063,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:04.019Z",
-      "updated_at": "2026-09-20T12:00:04.028Z",
+      "created_at": "2026-09-20T12:00:03.966Z",
+      "updated_at": "2026-09-20T12:00:03.975Z",
       "deleted_at": null
      }
     ],
@@ -8072,7 +8072,7 @@
     "log_version": 208,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:03.721Z",
+    "prev_entry_created_at": "2026-09-20T12:00:03.671Z",
     "before_visible_count": 36,
     "before_visible_count_capped": false,
     "activities": [],
@@ -8124,7 +8124,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -8139,8 +8139,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.769Z",
-      "updated_at": "2026-09-20T12:00:02.774Z",
+      "created_at": "2026-09-20T12:00:02.729Z",
+      "updated_at": "2026-09-20T12:00:02.734Z",
       "deleted_at": null
      },
      {
@@ -8190,8 +8190,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.786Z",
-      "updated_at": "2026-09-20T12:00:02.796Z",
+      "created_at": "2026-09-20T12:00:02.746Z",
+      "updated_at": "2026-09-20T12:00:02.756Z",
       "deleted_at": null
      },
      {
@@ -8232,7 +8232,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 53,
+       "elapsed_ms": 52,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -8247,8 +8247,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.845Z",
-      "updated_at": "2026-09-20T12:00:02.850Z",
+      "created_at": "2026-09-20T12:00:02.804Z",
+      "updated_at": "2026-09-20T12:00:02.809Z",
       "deleted_at": null
      },
      {
@@ -8298,8 +8298,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:04.048Z",
-      "updated_at": "2026-09-20T12:00:04.058Z",
+      "created_at": "2026-09-20T12:00:03.995Z",
+      "updated_at": "2026-09-20T12:00:04.005Z",
       "deleted_at": null
      },
      {
@@ -8360,8 +8360,8 @@
        "attachments": []
       },
       "revision": 7,
-      "created_at": "2026-09-20T12:00:04.052Z",
-      "updated_at": "2026-09-20T12:00:04.087Z",
+      "created_at": "2026-09-20T12:00:03.999Z",
+      "updated_at": "2026-09-20T12:00:04.033Z",
       "deleted_at": null
      }
     ],
@@ -8369,7 +8369,7 @@
     "log_version": 592,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:02.722Z",
+    "prev_entry_created_at": "2026-09-20T12:00:02.683Z",
     "before_visible_count": 116,
     "before_visible_count_capped": false
    }
@@ -8419,7 +8419,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 45,
+       "elapsed_ms": 44,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -8434,8 +8434,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.769Z",
-      "updated_at": "2026-09-20T12:00:02.774Z",
+      "created_at": "2026-09-20T12:00:02.729Z",
+      "updated_at": "2026-09-20T12:00:02.734Z",
       "deleted_at": null
      },
      {
@@ -8485,8 +8485,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.786Z",
-      "updated_at": "2026-09-20T12:00:02.796Z",
+      "created_at": "2026-09-20T12:00:02.746Z",
+      "updated_at": "2026-09-20T12:00:02.756Z",
       "deleted_at": null
      },
      {
@@ -8561,8 +8561,8 @@
        "attachments": []
       },
       "revision": 12,
-      "created_at": "2026-09-20T12:00:02.790Z",
-      "updated_at": "2026-09-20T12:00:02.851Z",
+      "created_at": "2026-09-20T12:00:02.750Z",
+      "updated_at": "2026-09-20T12:00:02.810Z",
       "deleted_at": null
      },
      {
@@ -8603,7 +8603,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 53,
+       "elapsed_ms": 52,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -8618,8 +8618,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.845Z",
-      "updated_at": "2026-09-20T12:00:02.850Z",
+      "created_at": "2026-09-20T12:00:02.804Z",
+      "updated_at": "2026-09-20T12:00:02.809Z",
       "deleted_at": null
      },
      {
@@ -8669,8 +8669,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:04.048Z",
-      "updated_at": "2026-09-20T12:00:04.058Z",
+      "created_at": "2026-09-20T12:00:03.995Z",
+      "updated_at": "2026-09-20T12:00:04.005Z",
       "deleted_at": null
      },
      {
@@ -8731,8 +8731,8 @@
        "attachments": []
       },
       "revision": 7,
-      "created_at": "2026-09-20T12:00:04.052Z",
-      "updated_at": "2026-09-20T12:00:04.087Z",
+      "created_at": "2026-09-20T12:00:03.999Z",
+      "updated_at": "2026-09-20T12:00:04.033Z",
       "deleted_at": null
      }
     ],
@@ -8740,7 +8740,7 @@
     "log_version": 592,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:02.722Z",
+    "prev_entry_created_at": "2026-09-20T12:00:02.683Z",
     "before_visible_count": 116,
     "before_visible_count_capped": false
    }

@@ -331,7 +331,9 @@ export function useUploadDir(): string {
 }
 
 export function mockFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>): void {
-  previousFetch = globalThis.fetch;
+  // A test may replace its fixture several times (e.g. skill re-import).
+  // Teardown must restore the fetch from before the first replacement.
+  previousFetch ??= globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => handler(String(input), init)) as typeof globalThis.fetch;
 }
 

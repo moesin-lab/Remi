@@ -6,7 +6,7 @@
 
 索引候选集仍不足以避免逐候选扫描历史活跃记录。因此 `executionClaimBaseSql` 还物化一次活跃/租约 attempt ID 集合，由 attempt 的 accepted/running/waiting_local_directory、offered 且 offered_at 非空，以及 awaiting_human turn 的 current_attempt_id 取并集，供 runtime 容量、Agent 并发、lane 与共享目录探针复用；各探针仍自行过滤状态。保留 VIEW 对当前 awaiting_human 的覆盖，以及 unknown offer 重排后仍持有的共享 Chat 目录租约，未简单地用 attempt.status 代替 VIEW.status。回归覆盖全部 8 种 attempt 状态与 awaiting_human 覆盖的组合。
 
-新增 expand-only 索引：attempt `(status, created_at, next_retry_at, turn_id)`、`(status, next_retry_at)`；turn `(status, current_attempt_id)`、`(chat_session_id, issue_session_id, priority, chat_queue_order)`。沿用既有 attempt `(runtime_id, status)` 和 turn `(agent_id, status)` 索引。两条启动迁移链在 Chat queue 列就绪后创建索引。migrations.ts 属于平台 dataSchema 指纹输入，因此源码变更会改变指纹；普通源码 PR 不提交指纹文件，发布仍须按既有流程取得跨指纹 rollbackSafeFrom 人工审核。
+新增 expand-only 索引：attempt `(status, created_at, next_retry_at, turn_id)`、`(status, next_retry_at)`；turn `(status, current_attempt_id)`、`(chat_session_id, issue_session_id, priority, chat_queue_order)`。沿用既有 attempt `(runtime_id, status)` 和 turn `(agent_id, status)` 索引。两条启动迁移链在 Chat queue 列就绪后创建索引。migrations.ts 属于平台 dataSchema 指纹输入，因此源码变更会改变指纹（原基线 `fac9c559…` → #92 的 `8ed04b02…`）；普通源码 PR 不提交指纹文件，发布仍须按既有流程取得跨指纹 rollbackSafeFrom 人工审核。
 
 offer 生产默认保留 60 s 兜底扫描，防止漏接事件后任务长期排队；泵忙、等待或冷却中跳过扫描。扫描派出任务记 warn 和 `ws_minute_summary.offer_sweep_recovered`，用于定位并补齐遗漏的事件入口。ack/drain 只恢复有背压等待的泵，消除高频空认领。hello、入队、终态、容量/配置变化、冷却/重试/租约期限继续立即唤醒；测试环境默认禁用分钟扫描，可显式传入 `sweepMs`。
 
@@ -98,3 +98,17 @@ MULTIREMI_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:55464/postgres MUL163_
 ```
 
 相同 10,201 turns / 201 queued 隔离夹具重新 EXPLAIN：旧 lock 5431.145 ms / 142681 shared hits，旧 snapshot 5333.839 ms / 142671 hits，修复后 selection 3.254 ms / 1035 hits；单次暖缓存测量，不代表线上 API 延迟。SQL 执行次数仍为空 claim 22/22/22、成功 claim 78/78，候选仅一次。原始计划随本轮 Session 回复附件交付。批量变更器继续由 MUL-165 跟进，stable 验收与独立复审尚未完成。
+
+### 热修验收补充
+
+进一步增加直接 VIEW 作为独立 oracle 的 128 组对照：runtime_active 容量、running 容量、active lane、active 共享目录四类状态谓词，遍历全部 8 种 attempt 状态 × turn running/awaiting_human × offered_at 空/非空。包含 queued 租约、未发送 offered、awaiting_human 覆盖与各终态；不使用经过改写的 golden 作为预期值。SQLite 上述三个文件最终 60 pass / 0 fail、617 assertions；隔离 PG17.11 上 offer/claim 两文件最终 10 pass / 0 fail、199 assertions，无跳过，空 claim 22/22/22、成功 claim 78/78 不变。
+
+PG17 连接为 `postgres://postgres@127.0.0.1:55465/postgres`。同一造数脚本重新 EXPLAIN 得旧 lock 5957.054 ms / 142681 shared hits，旧 snapshot 5822.444 ms / 142671 hits，修复后 selection 4.301 ms / 1038 hits。相对原 PG17.12 测量 2.732 ms 增加 1.569 ms（约 57%）；不同补丁版本且本轮同时执行回归，单样本不可将差异归因于 UNION 或推导线上延迟。
+
+同类收窄检查：tasks-repo.ts 的 stale reclaim（:4259）没有活跃探针，仅 accepted 基表候选和 VIEW dispatched 投影守卫，因而不注入此 CTE；:1601 为排队阻塞提示的直接 VIEW 查询，未调用 executionClaimBaseSql，同样不受影响。offered_at 实际归属 turn_attempts，并由 VIEW 直接投影。本修复不改迁移或新增索引，复用现有 status 索引。
+
+最终路由实跑：`MULTIREMI_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:55465/postgres bun test --timeout 120000 tests/unit/multiremi/multiremi-store-task-routing.test.ts`：71 pass / 0 fail、411 assertions，无跳过；SQLite 304 组与 PG17 99 组矩阵通过。此前 PG18.6 同命令也为 71 pass / 0 fail。
+
+PG17 offered UNION 分支使用 `Index Scan` / `idx_multiremi_tasks_status`，Index Cond 为 `status = 'offered'`，Filter 为 `offered_at IS NOT NULL`；Rows Removed by Filter = 201，Actual Rows = 0（造数中的 201 条 offered 均未发送）。此计划未全表扫描；本轮没有建立更大 queued 积压的成本曲线，不据单样本增加部分索引或迁移。
+
+分支沿用 `agent/MUL-163-lease-followup` / PR #94：收到明确热修派单前已经建立，派单人同意复用，避免重复 PR。基线为 main `f3a5dfe968d62012a1a6c3f3b04c5a115b2b2fa0`，独立副本 `/tmp/mul163-lease-fix`；共享 `agent/MUL-163` 未切换。

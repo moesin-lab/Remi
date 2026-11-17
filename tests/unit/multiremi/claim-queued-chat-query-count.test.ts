@@ -95,20 +95,33 @@ it("empty claims batch queued Chat decision facts without usage/autopilot hydrat
   console.info(`MUL85_CLAIM_BUDGET ${JSON.stringify({ sessions: [1, 10, 50], counts })}`);
 }, 30_000);
 
-it("the active ID set preserves the VIEW awaiting-human override for every attempt status", async () => {
+it("every active probe matches the direct VIEW across offer leases and status overrides", async () => {
   const database = await openHotspotDatabase();
   const store = new MultiremiStore(database.db);
   try {
     store.ensureLocalWorkspace();
     const agent = store.createAgent({ name: "Active status", provider: "codex", workspaceId: "local" });
     const task = store.createTask({ agentId: agent.id, prompt: "status projection" });
-    const sql = `SELECT runtime_active.id FROM multiremi_turn_execution_records runtime_active
-      WHERE runtime_active.status IN ('dispatched','running','waiting_local_directory','awaiting_human')`;
+    // The oracle is the untouched VIEW query, never executionClaimBaseSql(golden).
+    // These are the status predicates of runtime capacity, Agent capacity,
+    // lane exclusion and shared Chat directory exclusion respectively.
+    const probes = [
+      ["runtime_active", false], ["running", false], ["active", false], ["active", true],
+    ] as const;
     for (const attempt of ["offered", "accepted", "running", "waiting_local_directory", "completed", "failed", "cancelled", "lost"]) {
       for (const turn of ["running", "awaiting_human"]) {
-        database.db.run("UPDATE multiremi_turn_attempts SET status=? WHERE id=?", [attempt, task.id]);
-        database.db.run("UPDATE multiremi_turns SET status=? WHERE current_attempt_id=?", [turn, task.id]);
-        expect(database.db.query(executionClaimBaseSql(sql)).all()).toEqual(database.db.query(sql).all());
+        for (const offeredAt of [null, "2026-11-17T00:00:00.000Z"]) {
+          database.db.run("UPDATE multiremi_turn_attempts SET status=?,offered_at=? WHERE id=?", [attempt, offeredAt, task.id]);
+          database.db.run("UPDATE multiremi_turns SET status=? WHERE current_attempt_id=?", [turn, task.id]);
+          for (const [alias, directory] of probes) {
+            const sql = `SELECT ${alias}.id FROM multiremi_turn_execution_records ${alias}
+              WHERE ${alias}.status IN ('dispatched','running','waiting_local_directory','awaiting_human')
+              ${directory ? `OR (${alias}.status='queued' AND ${alias}.offered_at IS NOT NULL)` : ""}`;
+            expect(database.db.query(executionClaimBaseSql(sql)).all(),
+              JSON.stringify({ alias, directory, attempt, turn, offeredAt }))
+              .toEqual(database.db.query(sql).all());
+          }
+        }
       }
     }
   } finally { store.stopNotificationDeliverySweeper(); await database.dispose(); }

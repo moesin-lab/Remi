@@ -42,7 +42,7 @@ description: 用 Remi 自己的 Agent 持续改进并重新部署 Remi（自举�
   3. 最终 SHA 上所有适用检查都已完成且成功。进行中、排队、缺失都不算通过；策略性跳过的检查、以及有证据的非本 PR 失败（runner 容量取消、已建单的 flaky）逐项列出并写明证据；
   4. 用 `gh pr merge <n> --squash --match-head-commit <sha>` 合并，防止审完之后又被推了新提交。
 
-  合并后只有在该单没有剩余工作时才置 done（例如修复已部署且验证过）。
+  合并后只有在该单没有剩余工作时才置 done（例如修复已部署且验证过）。审阅者给出 approve 后不要置 done；Agent 提前置 done 的，改回 in_review。
 - 数据 schema 指纹在打包时计算，源码 PR 不提交指纹或回退声明。改了迁移依赖的 PR 要同步 `packages/platform-updater/src/data-schema-inputs.json` 清单；回退兼容声明是发版步骤，规则见 `deploy/README.md` 的 Release rollback review。
 - 已知坑和处理办法汇总在 [常见问题](references/pitfalls.md)。
 

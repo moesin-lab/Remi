@@ -529,21 +529,14 @@ export function attachControlPlaneConciergeHosts(
   deps: { workspacesRoot: () => string | undefined; boot?: typeof bootFeishuChannel },
 ): () => Promise<void> {
   const stops = daemons.map((daemon) => {
-    let channel: FeishuChannelHandle | null = null;
-    const host = controlPlaneConciergeHost({
-      daemon: () => daemon,
-      workspacesRoot: deps.workspacesRoot,
-      current: () => channel,
-      attach: (handle) => { channel = handle; },
-      boot: deps.boot,
+    daemon.setFeishuConciergeHost(botId => {
+      let channel: FeishuChannelHandle | null = null;
+      return controlPlaneConciergeHost({
+        botId, daemon: () => daemon, workspacesRoot: deps.workspacesRoot,
+        current: () => channel, attach: handle => { channel = handle; }, boot: deps.boot,
+      });
     });
-    daemon.setFeishuConciergeHost(host);
-    return async () => {
-      // Report stopped before the process disappears so handovers need not
-      // wait for the old owner's heartbeat to become stale.
-      await daemon.shutdownFeishuConcierge();
-      await host.stop();
-    };
+    return async () => { await daemon.shutdownFeishuConcierge(); };
   });
   let stopping: Promise<void> | null = null;
   return () => stopping ??= Promise.all(stops.map(stop => stop())).then(() => {});
@@ -656,6 +649,7 @@ async function runDaemonForeground(options: CliOptions, programName: string): Pr
  * binding to a stale one.
  */
 export function controlPlaneConciergeHost(deps: {
+  botId?: string;
   daemon: () => MultiremiDaemon | undefined;
   workspacesRoot: () => string | undefined;
   current: () => FeishuChannelHandle | null;
@@ -702,10 +696,10 @@ export function controlPlaneConciergeHost(deps: {
             appSecret: config.app_secret,
             domain: config.domain,
           },
-          taskHandler: createFeishuTaskHandler(daemon, config.revision, agent.name),
+          taskHandler: createFeishuTaskHandler(daemon, config.revision, agent.name, deps.botId),
           groupPolicy: { getByChatId: chatId => noMentionChatIds.has(chatId) ? { monitor: true, replyMode: "thread" } : null },
           abortTask: async (sessionKey) => {
-            await daemon.cancelFeishuBotSessionTask(config.revision, sessionKey);
+            await daemon.cancelFeishuBotSessionTask(config.revision, sessionKey, {}, deps.botId);
           },
         },
       );
@@ -717,10 +711,10 @@ export function controlPlaneConciergeHost(deps: {
           throw new Error("bot menu target does not match the running bot; publish again after it reconnects");
         }
         return handle.publishBotMenu(menu, dryRun);
-      });
+      }, deps.botId);
       // The click map is process-local, so a restart empties it while the cards
       // stay on screen. Re-register from the control plane before serving.
-      await restoreDecisionCardClicks(daemon, handle).catch((error: unknown) => {
+      await restoreDecisionCardClicks(daemon, handle, deps.botId).catch((error: unknown) => {
         log.warn(`Decision card recovery failed: ${redactFeishuBotError(error)}`);
       });
       // `handle.start` runs for the life of the channel. Nobody awaits it here —
@@ -730,8 +724,8 @@ export function controlPlaneConciergeHost(deps: {
       void handle.start.catch((error: unknown) => {
         if (deps.current() !== handle) return;
         deps.attach(null);
-        daemon.setBotMenuPublisher(null);
-        void daemon.reportFeishuConciergeFailure(error);
+        daemon.setBotMenuPublisher(null, deps.botId);
+        void daemon.reportFeishuConciergeFailure(error, deps.botId);
       });
       return { botName: agent.name };
     },
@@ -740,7 +734,7 @@ export function controlPlaneConciergeHost(deps: {
       stopQuestionCardClient = undefined;
       const handle = deps.current();
       deps.attach(null);
-      deps.daemon()?.setBotMenuPublisher(null);
+      deps.daemon()?.setBotMenuPublisher(null, deps.botId);
       if (handle) await handle.stop();
     },
     async sendOutbound(delivery, options) {
@@ -1148,8 +1142,8 @@ export async function sendIssueDecisionLane(
  * delivery row the control plane kept — the request identity the callback name
  * is derived from, plus the recipient the card was addressed to.
  */
-export async function restoreDecisionCardClicks(daemon: MultiremiDaemon, handle: FeishuChannelHandle): Promise<void> {
-  const cards = await daemon.listFeishuBotDecisionCards();
+export async function restoreDecisionCardClicks(daemon: MultiremiDaemon, handle: FeishuChannelHandle, botId?: string): Promise<void> {
+  const cards = await daemon.listFeishuBotDecisionCards(botId);
   for (const card of cards) {
     registerDecisionCardClick({
       daemon, appId: handle.appId, chatId: card.chatId, messageId: card.messageId,
@@ -1158,7 +1152,7 @@ export async function restoreDecisionCardClicks(daemon: MultiremiDaemon, handle:
   }
   // The Issue-decision family (MUL-412) is keyed by decision rather than Task,
   // so it is recovered from its own list.
-  const decisions = await daemon.listFeishuIssueDecisionCards();
+  const decisions = await daemon.listFeishuIssueDecisionCards(botId);
   for (const card of decisions) {
     registerIssueDecisionCardClick({
       daemon, appId: handle.appId, chatId: card.chatId, messageId: card.messageId,
@@ -1243,6 +1237,7 @@ export function createFeishuTaskHandler(
   daemon: MultiremiDaemon,
   revision: number,
   displayName: string,
+  botId?: string,
 ): TaskStreamingHandler {
   return async (message, sessionKey, consumer) => {
     // Commands are matched on the raw body. `message.text` carries the group
@@ -1264,7 +1259,7 @@ export function createFeishuTaskHandler(
           chatId: message.chatId,
           senderOpenId: stringMetadata(message, "senderOpenId"),
           target: command.args || null,
-        });
+        }, botId);
       } catch (error) {
         await replyCard(
           renderFeishuStopFailure(error),
@@ -1281,9 +1276,9 @@ export function createFeishuTaskHandler(
       return;
     }
     if (command && command.name === "new") {
-      const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey);
-      await daemon.cancelFeishuBotSessionTask(revision, sessionKey);
-      const reset = await daemon.resetFeishuBotSession(revision, sessionKey);
+      const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey, botId);
+      await daemon.cancelFeishuBotSessionTask(revision, sessionKey, {}, botId);
+      const reset = await daemon.resetFeishuBotSession(revision, sessionKey, botId);
       await replyCard(
         reset ? "已开启新对话。" : "当前已是新对话。",
         "feishu-command-new",
@@ -1292,7 +1287,7 @@ export function createFeishuTaskHandler(
       return;
     }
     if (command && command.name === "status") {
-      const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey);
+      const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey, botId);
       await replyCard(
         renderFeishuStatus(snapshot),
         "feishu-command-status",
@@ -1315,7 +1310,7 @@ export function createFeishuTaskHandler(
     for (const media of message.media ?? []) {
       if (media.mediaType === "sticker") continue;
       const attachment = await daemon.uploadFeishuBotAttachment({ revision, externalSessionKey: sessionKey,
-        externalMessageId, fileName: media.fileName ?? "attachment.bin", contentType: media.contentType, buffer: media.buffer });
+        externalMessageId, fileName: media.fileName ?? "attachment.bin", contentType: media.contentType, buffer: media.buffer }, botId);
       attachmentIds.push(attachment.id);
     }
     let submitted: Awaited<ReturnType<typeof daemon.submitFeishuBotMessage>>;
@@ -1336,7 +1331,7 @@ export function createFeishuTaskHandler(
         text: message.text,
         attachmentIds,
         deliveryMode: "native_cot_v1",
-      });
+      }, botId);
     } catch (error) {
       if (error instanceof MultiremiDaemonHttpError && error.code === "sender_not_allowed") {
         await replyCard(FEISHU_SENDER_NOT_ALLOWED_MESSAGE, "feishu-sender-not-allowed", displayName);

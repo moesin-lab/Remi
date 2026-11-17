@@ -3084,3 +3084,18 @@ describe("ADR 0018 local records migration", () => {
       .toEqual({ name: "idx_multiremi_autopilot_runs_chat" });
   });
 });
+
+
+it("expands a legacy unique Feishu runtime index idempotently while preserving app uniqueness", () => {
+  const database = freshDb();
+  const sql = database as unknown as SqlDatabase;
+  runMigrations(sql);
+  database.exec(`DROP INDEX idx_multiremi_feishu_bot_configs_runtime;
+    CREATE UNIQUE INDEX idx_multiremi_feishu_bot_configs_runtime ON multiremi_feishu_bot_configs(workspace_id, runtime_id);
+    DELETE FROM multiremi_schema_migrations WHERE id = '20261117_feishu_multi_runtime_v1';`);
+  runMigrations(sql); runMigrations(sql);
+  const indexes = database.query("PRAGMA index_list(multiremi_feishu_bot_configs)").all() as Array<{ name: string; unique: number }>;
+  expect(indexes.find(index => index.name === "idx_multiremi_feishu_bot_configs_runtime")?.unique).toBe(0);
+  expect(indexes.find(index => index.name === "idx_multiremi_feishu_bot_configs_app")?.unique).toBe(1);
+  expect(database.query("SELECT COUNT(*) AS count FROM multiremi_schema_migrations WHERE id = '20261117_feishu_multi_runtime_v1'").get()).toEqual({ count: 1 });
+});

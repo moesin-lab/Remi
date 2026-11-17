@@ -420,9 +420,11 @@ function FeishuBotAdminPanel({
                     // A Runtime that has not advertised the capability is shown
                     // but not selectable: hiding it would leave an admin
                     // wondering why their daemon is missing from the list.
-                    <SelectItem key={runtime.id} value={runtime.id} disabled={!runtime.supports_config || (!!runtime.assigned_bot_id && runtime.assigned_bot_id !== botId)}>
+                    <SelectItem key={runtime.id} value={runtime.id} disabled={!runtime.supports_config || (!runtime.supports_multi && !!runtime.assigned_bot_id && runtime.assigned_bot_id !== botId)}>
                       {runtime.name}
-                      {!!runtime.assigned_bot_id && runtime.assigned_bot_id !== botId ? ` — ${t($ => $.bots.runtimeAssigned)}` : ""}
+                      {runtime.supports_multi && runtime.assigned_bot_ids?.length
+                        ? ` — ${t($ => $.bots.runtimeHosted, { names: (runtime.assigned_bot_names?.length ? runtime.assigned_bot_names : runtime.assigned_bot_ids).join("、") })}`
+                        : !!runtime.assigned_bot_id && runtime.assigned_bot_id !== botId ? ` — ${t($ => $.bots.runtimeUpgrade)}` : ""}
                       {!runtime.supports_config
                         ? ` — ${t(($) => $.feishu.concierge.runtime_unsupported)}`
                         : !runtime.online
@@ -786,6 +788,7 @@ const ERROR_KEYS = [
   "insufficient_permissions",
   "agent_unavailable",
   "runtime_unavailable",
+  "runtime_unsupported",
   "connector_start_failed",
   "network_unreachable",
   "unknown",

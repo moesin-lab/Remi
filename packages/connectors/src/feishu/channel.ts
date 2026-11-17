@@ -8,7 +8,7 @@
 import type { FeishuChannelConfig, FeishuSenderAuthorizer, GroupPolicy } from "./config.js";
 import { createLogger } from "@shared/logger.js";
 import { createFeishuClient } from "./client.js";
-import { startWebSocketListener, setGroupPolicy, flushDedupCacheSync, type FeishuWSHandle, type ParsedFeishuMessage } from "./receive.js";
+import { startWebSocketListener, flushDedupCacheSync, type FeishuWSHandle, type ParsedFeishuMessage } from "./receive.js";
 import { sendMarkdownCardFeishu, sendCardFeishu } from "./send.js";
 import { FeishuStreamingSession, buildFinalCard, type TokenProvider } from "./streaming.js";
 import { handleAgentStream } from "./adapters/stream-handler.js";
@@ -78,6 +78,7 @@ export class FeishuChannel {
   private _activeSessions = new Map<string, FeishuStreamingSession | FeishuTaskPresentation>();
   private _abortHandler: ((sessionKey: string) => Promise<void>) | null = null;
   private _tokenProvider: TokenProvider | null = null;
+  private _groupPolicy?: GroupPolicy;
   private _senderAuthorizer: FeishuSenderAuthorizer | null = null;
 
   constructor(config: FeishuChannelConfig) {
@@ -88,7 +89,7 @@ export class FeishuChannel {
 
   /** Inject group policy (remi's GroupConfigStore). Must be called before connect(). */
   setGroupPolicy(policy: GroupPolicy): this {
-    setGroupPolicy(policy);
+    this._groupPolicy = policy;
     return this;
   }
 
@@ -126,7 +127,7 @@ export class FeishuChannel {
           await handler(msg).catch((err) => log.error(`message handler error: ${String(err)}`));
         }
       },
-      this._senderAuthorizer,
+      this._senderAuthorizer, this._groupPolicy,
     );
 
     return this._wsHandle.ready.then(() => new Promise<void>(() => {
@@ -226,7 +227,7 @@ export class FeishuChannel {
       });
 
       // Consume ACP stream
-      const result = await handleAgentStream(session, stream, acpAdapter, chatId, slog, meta);
+      const result = await handleAgentStream(session, stream, acpAdapter, chatId, slog, meta, this._config.appId);
 
       // Close card
       await session.close({
@@ -284,7 +285,7 @@ export class FeishuChannel {
 
   /** Abort an active streaming session by sessionKey (called on /esc). */
   async abortSession(sessionKey: string, chatId?: string): Promise<void> {
-    if (chatId) rejectPendingActionsForChat(chatId, "User sent /esc");
+    if (chatId) rejectPendingActionsForChat(chatId, "User sent /esc", this._config.appId);
     const session = this._activeSessions.get(sessionKey);
     if (session?.isActive()) {
       await session.abort();
@@ -296,7 +297,7 @@ export class FeishuChannel {
 
   /** Cancel pending interactions for a chat (when a new message supersedes). */
   cancelPendingInteractions(chatId: string): number {
-    return rejectPendingActionsForChat(chatId, "New message received, cancelling pending interaction");
+    return rejectPendingActionsForChat(chatId, "New message received, cancelling pending interaction", this._config.appId);
   }
 
   /** Reconcile the original message's persistent receipt without blocking intake on failure. */

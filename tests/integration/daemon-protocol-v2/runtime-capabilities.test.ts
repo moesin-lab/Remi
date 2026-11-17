@@ -75,6 +75,7 @@ function assertHostedCapabilities(h: DaemonProtocolHarness, type: "hello" | "hb"
     supports_bot_menu: true,
     bot_menu_protocol: BOT_MENU_PROTOCOL_VERSION,
     agent_plugin_protocol: MULTIREMI_AGENT_PLUGIN_PROTOCOL_VERSION,
+    feishu_concierge_multi: 0,
     feishu_concierge_protocol: FEISHU_CONCIERGE_ATTACHMENT_PROTOCOL_VERSION,
     feishu_decision_card: FEISHU_DECISION_CARD_PROTOCOL_VERSION,
     feishu_issue_decision_card: FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION,

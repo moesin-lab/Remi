@@ -75,3 +75,10 @@ Remi 的 Agent/Runtime 绑定、Issue 话题、持久 outbox 和独立的 Messag
 平台目录及路径测试在 [core/im-platforms](../../frontend/packages/core/im-platforms)；页面、迁移后的交互回归和按页查询测试在 [views/im-platforms](../../frontend/packages/views/im-platforms)。运行方式和 CI 覆盖见 [TESTING.md](../../TESTING.md)。
 
 机器人与话题表单不要求人类责任人。符合发送者授权和提案策略的群消息可直接建单；事项按执行 Agent 与父子关系完成交付验收，详见 [事项责任](issue-responsibility.md)。旧可选联系人字段仅保留兼容与审计。
+
+
+同一 runtime 托管多个飞书 bot 需要 daemon 声明 `feishu_concierge_multi: 1`。机器候选返回
+`supports_multi`、`assigned_bot_ids` 和 `assigned_bot_names`；页面列出已托管的 bot，多 bot
+机器仍可选择。旧 daemon 机器托管其他 bot 时显示升级提示并禁选；能力回退后，只有最早
+启用的 bot 可运行，其余 bot 的独立状态显示 `runtime_unsupported`。各 bot 的凭据、通道、
+消息去重、菜单发布与停止确认独立，迁移仍使用原来的 stopped 确认或 90 秒过期交接。

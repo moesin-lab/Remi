@@ -382,6 +382,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       supports_bot_menu?: boolean;
       bot_menu_protocol?: number;
       feishu_concierge_protocol?: number;
+      feishu_concierge_multi?: number;
       feishu_decision_card?: number;
       feishu_issue_decision_card?: number;
       feishu_outbound_kinds?: number;
@@ -430,6 +431,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       supportsBotMenu: body.supports_bot_menu,
       botMenuProtocol: Number.isSafeInteger(body.bot_menu_protocol) ? body.bot_menu_protocol : 0,
       supportsFeishuBotConfig,
+      supportsFeishuBotMulti: normalizeDaemonProtocolVersion(body.feishu_concierge_multi) >= 1,
       supportsDecisionCard: normalizeDaemonProtocolVersion(body.feishu_decision_card)
         >= FEISHU_DECISION_CARD_PROTOCOL_VERSION,
       // MUL-412: a separate flag, so a host that predates decisions keeps its
@@ -473,6 +475,44 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
    * scoped twice over: the daemon token must be bound to this Runtime, and the
    * store returns null unless this Runtime is the one selected to host the bot.
    */
+  app.use("/api/daemon/runtimes/:runtimeId/*", async (c, next) => {
+    if (!c.req.path.includes("/feishu-bot")) return next();
+    const runtimeId = c.req.param("runtimeId");
+    const denied = denyDaemonTokenRuntimeIdentity(c, store, runtimeId);
+    if (denied) return denied;
+    let botId: unknown = c.req.query("bot_id");
+    if (c.req.method === "POST") {
+      if (c.req.header("content-type")?.includes("multipart/form-data")) botId = (await c.req.formData()).get("bot_id") ?? undefined;
+      else {
+        const body = await c.req.raw.clone().json().catch(() => null);
+        botId = body?.bot_id;
+      }
+    }
+    if (botId !== undefined) {
+      if (typeof botId !== "string" || !botId) return c.json({ error: "invalid bot_id", code: "invalid_bot_id" }, 400);
+      const runtime = store.getRuntimeLite(runtimeId);
+      if (!runtime) return c.json({ error: "runtime not found" }, 404);
+      try { store.feishuBotFor().forDaemon(runtime.workspaceId ?? "local", runtimeId, botId); }
+      catch (error) {
+        if (error instanceof FeishuBotConfigError) return c.json({ error: error.message, code: error.code }, 403);
+        throw error;
+      }
+    }
+    await next();
+  });
+  app.get("/api/daemon/runtimes/:runtimeId/feishu-bots", c => {
+    const runtimeId = c.req.param("runtimeId");
+    if (currentAccessToken(c)?.type !== "daemon") return c.json({ error: "daemon token required" }, 403);
+    const denied = denyDaemonTokenRuntimeIdentity(c, store, runtimeId);
+    if (denied) return denied;
+    const runtime = store.getRuntimeLite(runtimeId);
+    if (!runtime) return c.json({ error: "runtime not found" }, 404);
+    const workspaceId = runtime.workspaceId ?? "local";
+    if (!store.supportsFeishuBotMulti(workspaceId, runtimeId)) return c.json({ error: "multi-bot capability required", code: "capability_required" }, 409);
+    c.header("Cache-Control", "no-store");
+    return c.json({ bots: store.listFeishuBotDaemonAssignments(workspaceId, runtimeId) });
+  });
+
   app.get("/api/daemon/runtimes/:runtimeId/feishu-bot", (c) => {
     const runtimeId = c.req.param("runtimeId");
     if (currentAccessToken(c)?.type !== "daemon") {
@@ -484,7 +524,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     if (!runtime) return c.json({ error: "runtime not found" }, 404);
     try {
       const workspaceId = runtime.workspaceId ?? "local";
-      const config = store.getFeishuBotDaemonConfig(workspaceId, runtimeId);
+      const config = store.getFeishuBotDaemonConfig(workspaceId, runtimeId, c.req.query("bot_id"));
       if (!config) return c.json({ error: "feishu bot is not assigned to this runtime" }, 404);
       // The Agent ships with the credentials so the daemon can boot the channel
       // from one fetch. An archived Agent already disables the config, so a
@@ -525,8 +565,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     const workspaceId = runtime.workspaceId ?? "local";
     // Two card families ride this route (MUL-407, MUL-412); each is listed only
     // for a host that declared the matching capability, exactly like the queue.
-    const humanRequestCards = store.listFeishuBotLiveDecisionCards(workspaceId, runtimeId);
-    const issueDecisionCards = store.listFeishuIssueDecisionCards(workspaceId, runtimeId);
+    const humanRequestCards = store.listFeishuBotLiveDecisionCards(workspaceId, runtimeId, c.req.query("bot_id"));
+    const issueDecisionCards = store.listFeishuIssueDecisionCards(workspaceId, runtimeId, c.req.query("bot_id"));
     // The S5a rows keep exactly their old shape; only the new family carries a
     // discriminator, so an older daemon's parser is unaffected.
     const cards = [
@@ -551,6 +591,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         return c.json({ error: "daemon token required", code: "daemon_token_required" }, 403);
       }
       const runtimeId = c.req.param("runtimeId");
+      const denied = denyDaemonTokenRuntimeIdentity(c, store, runtimeId);
+      if (denied) return denied;
       const runtime = store.getRuntime(runtimeId);
       if (!runtime) return c.json({ error: "attachment not available" }, 404);
       const claimToken = cleanString(c.req.header(FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER));
@@ -561,6 +603,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         c.req.param("deliveryId"),
         claimToken,
         c.req.param("attachmentId"),
+        c.req.query("bot_id"),
       );
       if (!attachment) return c.json({ error: "attachment not available" }, 404);
       if (
@@ -588,11 +631,11 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       externalMessageId: stringFormValue(form.get("external_message_id")) ?? "" };
     const workspaceId = runtime.workspaceId ?? "local";
     try {
-      store.assertFeishuBotInboundAttachmentScope(workspaceId, runtimeId, scope);
+      store.assertFeishuBotInboundAttachmentScope(workspaceId, runtimeId, scope, stringFormValue(form.get("bot_id")) ?? undefined);
       const filename = sanitizeChatAttachmentFilename(file.name);
       const attachment = await persistUploadedAttachments(workspaceId, [{ filename,
         bytes: new Uint8Array(await file.arrayBuffer()), contentType: detectContentTypeFromFilename(filename) }],
-        ([input]) => store.createFeishuBotInboundAttachment(workspaceId, runtimeId, scope, input!));
+        ([input]) => store.createFeishuBotInboundAttachment(workspaceId, runtimeId, scope, input!, stringFormValue(form.get("bot_id")) ?? undefined));
       return c.json({ attachment }, 201);
     } catch (error) {
       if (error instanceof FeishuBotConfigError) return c.json({ error: error.message, code: error.code }, error.status as 400 | 403 | 409);
@@ -605,7 +648,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const runtime = store.getRuntime(runtimeId);
     if (!runtime) return c.json({ error: "runtime not found", code: "runtime_not_found" }, 404);
-    const body = await readJsonStrict<{
+    const body = await readJsonStrict<{ bot_id?: string;
       revision?: unknown;
       external_session_key?: unknown;
       external_message_id?: unknown;
@@ -646,7 +689,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       deliveryMode: body.delivery_mode === "native_cot_v1" ? "native_cot_v1" : undefined,
     };
     try {
-      return c.json(store.submitFeishuBotMessage(runtime.workspaceId ?? "local", runtimeId, input), 202);
+      return c.json(store.submitFeishuBotMessage(runtime.workspaceId ?? "local", runtimeId, input, body.bot_id), 202);
     } catch (error) {
       if (error instanceof FeishuBotConfigError) {
         return c.json(
@@ -663,15 +706,14 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const runtime = store.getRuntime(runtimeId);
     if (!runtime) return c.json({ error: "runtime not found" }, 404);
-    const body = await readJsonStrict<{ revision?: unknown; external_session_key?: unknown }>(c);
+    const body = await readJsonStrict<{ bot_id?: string; revision?: unknown; external_session_key?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     return c.json({
       reset: store.resetFeishuBotSession(
         runtime.workspaceId ?? "local",
         runtimeId,
         Number(body.revision),
-        cleanString(typeof body.external_session_key === "string" ? body.external_session_key : null) ?? "",
-      ),
+        cleanString(typeof body.external_session_key === "string" ? body.external_session_key : null) ?? "", body.bot_id),
     });
   });
   app.post("/api/daemon/runtimes/:runtimeId/feishu-bot/session/cancel", async (c) => {
@@ -680,7 +722,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const runtime = store.getRuntime(runtimeId);
     if (!runtime) return c.json({ error: "runtime not found" }, 404);
-    const body = await readJsonStrict<{
+    const body = await readJsonStrict<{ bot_id?: string;
       revision?: unknown;
       external_session_key?: unknown;
       chat_id?: unknown;
@@ -699,8 +741,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         chatId: cleanString(typeof body.chat_id === "string" ? body.chat_id : null),
         senderOpenId: cleanString(typeof body.sender_open_id === "string" ? body.sender_open_id : null),
         target: cleanString(typeof body.target === "string" ? body.target : null),
-      },
-    );
+      }, body.bot_id);
     return c.json({
       outcome: result.outcome,
       cancelled: result.outcome === "cancelled",
@@ -727,14 +768,13 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     if (denied) return denied;
     const runtime = store.getRuntime(runtimeId);
     if (!runtime) return c.json({ error: "runtime not found" }, 404);
-    const body = await readJsonStrict<{ revision?: unknown; external_session_key?: unknown }>(c);
+    const body = await readJsonStrict<{ bot_id?: string; revision?: unknown; external_session_key?: unknown }>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const snapshot = store.inspectFeishuBotSession(
       runtime.workspaceId ?? "local",
       runtimeId,
       Number(body.revision),
-      cleanString(typeof body.external_session_key === "string" ? body.external_session_key : null) ?? "",
-    );
+      cleanString(typeof body.external_session_key === "string" ? body.external_session_key : null) ?? "", body.bot_id);
     return c.json({
       chat_session_id: snapshot.chatSessionId,
       agent_id: snapshot.agentId,

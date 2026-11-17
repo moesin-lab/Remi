@@ -17,6 +17,7 @@ import type { MultiremiFeishuBotAssignment } from "../../../packages/server/src/
 import {
   FeishuConciergeError,
   FeishuConciergeSupervisor,
+  FeishuConciergeHosts,
   type FeishuConciergeStatusReport,
 } from "../../../packages/server/src/worker/feishu-concierge.js";
 
@@ -326,4 +327,23 @@ describe("FeishuConciergeSupervisor", () => {
     expect(test.stops).toBe(0);
     expect(test.reports).toHaveLength(0);
   });
+});
+
+it("isolates bot start failures, channel crashes, retries, sends and stops", async () => {
+  const healthy = harness();
+  const failing = harness({ start: async () => { throw new Error("offline"); } });
+  const hosts = new FeishuConciergeHosts(id => id === "healthy" ? healthy.supervisor : failing.supervisor);
+  await Promise.all([hosts.apply(directive(), "healthy"), hosts.apply(directive(), "failed")]);
+  expect(healthy.supervisor.snapshot().state).toBe("online");
+  expect(failing.supervisor.snapshot().state).toBe("failed");
+  await hosts.tick();
+  expect(healthy.starts).toHaveLength(1);
+  expect(failing.starts).toHaveLength(1);
+  await hosts.apply(directive({ desired_state: "stopped", config_available: false }), "failed");
+  expect(healthy.supervisor.snapshot().state).toBe("online");
+  expect(healthy.stops).toBe(0);
+  await hosts.get("healthy")!.reportChannelFailure(new Error("socket closed"));
+  expect(healthy.supervisor.snapshot().state).toBe("failed");
+  await hosts.shutdown();
+  expect(healthy.supervisor.snapshot().state).toBe("stopped");
 });

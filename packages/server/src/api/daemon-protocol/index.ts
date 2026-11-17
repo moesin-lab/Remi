@@ -65,6 +65,7 @@ function runtimeCapabilityOptions(capabilities: DaemonRuntimeCapabilities | unde
     supportsBotMenu: reported.supports_bot_menu === true,
     botMenuProtocol: version(reported.bot_menu_protocol),
     agentPluginProtocol: version(reported.agent_plugin_protocol),
+    supportsFeishuBotMulti: version(reported.feishu_concierge_multi) >= 1,
     supportsFeishuBotConfig: version(reported.feishu_concierge_protocol) >= FEISHU_CONCIERGE_PROTOCOL_VERSION,
     supportsDecisionCard: version(reported.feishu_decision_card) >= FEISHU_DECISION_CARD_PROTOCOL_VERSION,
     supportsIssueDecisionCard: version(reported.feishu_issue_decision_card) >= FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION,

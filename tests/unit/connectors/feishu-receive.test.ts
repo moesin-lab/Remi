@@ -9,7 +9,6 @@ import {
   processFeishuMessageEvent,
   processFeishuMessageEventWithBotIdentity,
   setDedupCachePathForTesting,
-  setGroupPolicy,
   type FeishuAdmissionDenialReason,
   type FeishuBotIdentityState,
 } from "@connectors/feishu/receive.js";
@@ -19,6 +18,8 @@ import type { IncomingMessage } from "@connectors/base.js";
 import type { FeishuMessageEvent } from "@connectors/feishu/types.js";
 
 let messageSequence = 0;
+let groupPolicy: import("@connectors/feishu/config.js").GroupPolicy;
+function setGroupPolicy(policy: typeof groupPolicy) { groupPolicy = policy; }
 const dedupTestDir = mkdtempSync(join(tmpdir(), "remi-feishu-receive-"));
 
 beforeAll(() => {
@@ -164,6 +165,7 @@ function admission(
   authorizeSender: (senderOpenId: string) => Promise<boolean>,
 ): {
   options: {
+    groupPolicy: typeof groupPolicy;
     authorizeSender: (senderOpenId: string) => Promise<boolean>;
     onDenied: (_context: unknown, reason: FeishuAdmissionDenialReason) => Promise<void>;
   };
@@ -172,6 +174,7 @@ function admission(
   const deniedReasons: FeishuAdmissionDenialReason[] = [];
   return {
     options: {
+      groupPolicy,
       authorizeSender,
       onDenied: async (_context, reason) => {
         deniedReasons.push(reason);
@@ -203,7 +206,7 @@ describe("Feishu workspace membership admission", () => {
     const cachePath = join(dedupTestDir, "lazy-cache.json");
     const persistedId = uniqueMessageId("persisted");
     const expiredId = uniqueMessageId("expired");
-    writeFileSync(cachePath, JSON.stringify([[persistedId, Date.now()], [expiredId, Date.now() - 31 * 60_000]]));
+    writeFileSync(cachePath, JSON.stringify([[`legacy:${persistedId}`, Date.now()], [expiredId, Date.now() - 31 * 60_000]]));
     setDedupCachePathForTesting(cachePath);
     const { client } = clientWithSender();
     const gate = admission(async () => true);
@@ -215,7 +218,7 @@ describe("Feishu workspace membership admission", () => {
       expect(await receive(expiredId)).toBeNull();
       flushDedupCacheSync();
       expect(JSON.parse(readFileSync(cachePath, "utf8")).map(([id]: [string, number]) => id))
-        .toEqual([persistedId, expiredId]);
+        .toEqual([`legacy:${persistedId}`, `legacy:${expiredId}`]);
       setDedupCachePathForTesting(cachePath);
       expect(await receive(expiredId)).toBeNull();
     } finally {
@@ -830,5 +833,20 @@ describe("Feishu bot identity readiness", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+describe("multiple Feishu channel isolation", () => {
+  it("deduplicates per app and keeps group policy and sender names local", async () => {
+    const event = messageEvent({ messageId: uniqueMessageId("two-apps"), senderOpenId: "ou_shared", chatType: "group", chatId: "oc_shared" });
+    const gate = admission(async () => true).options;
+    const receive = (appId: string, monitor: boolean, name: string) => processFeishuMessageEvent(
+      clientWithBasicBatchSender(name).client, event, "ou_bot", {
+        ...gate, appId, groupPolicy: { getByChatId: () => ({ monitor }) },
+      });
+    expect(await receive("a", true, "Alice")).toMatchObject({ senderName: "Alice", monitored: true });
+    expect(await receive("b", false, "Bob")).toBeNull();
+    expect(await receive("c", true, "Carol")).toMatchObject({ senderName: "Carol", monitored: true });
+    expect(await receive("a", true, "Alice")).toBeNull();
   });
 });

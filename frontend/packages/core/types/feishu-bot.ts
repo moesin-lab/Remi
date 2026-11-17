@@ -46,6 +46,7 @@ export type FeishuBotErrorCode =
   | "insufficient_permissions"
   | "agent_unavailable"
   | "runtime_unavailable"
+  | "runtime_unsupported"
   | "connector_start_failed"
   | "network_unreachable"
   | "unknown";
@@ -144,6 +145,9 @@ export interface FeishuBotAgentCandidate {
 
 export interface FeishuBotRuntimeCandidate {
   assigned_bot_id?: string | null;
+  assigned_bot_ids?: string[];
+  assigned_bot_names?: string[];
+  supports_multi?: boolean;
   id: string;
   name: string;
   provider: string;

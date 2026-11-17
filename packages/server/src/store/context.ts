@@ -18,7 +18,7 @@ import { createId, nowIso } from "@multiremi/ids.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
 import { createLogger } from "@shared/logger.js";
 import { INBOX_ROUTING, inboxRouteFor } from "@multiremi/store/inbox-routing.js";
-import { markRequestReadCacheLockTaken } from "@multiremi/store/request-read-cache.js";
+import { acquireTransactionLock, markRequestReadCacheLockTaken } from "@multiremi/store/request-read-cache.js";
 import type { MultiremiTaskTrace } from "@multiremi/contracts/trace-file.js";
 import type { TaskMessageFanoutSubject } from "@multiremi/contracts/task-message-fanout.js";
 export type { TaskMessageFanoutSubject } from "@multiremi/contracts/task-message-fanout.js";
@@ -775,6 +775,7 @@ export interface ConversationLogSurface {
       elapsedMs?: number | null;
       failureReason?: string | null;
     },
+    materialize?: boolean,
   ): import("@multiremi/contracts/conversation-log").ConversationLogEntry | null;
   appendConversationLog(input: import("@multiremi/store/repos/conversation-log-repo.js").AppendConversationLogInput): import("@multiremi/contracts/conversation-log").ConversationLogEntry;
   appendConversationLogWithinTransaction(input: import("@multiremi/store/repos/conversation-log-repo.js").AppendConversationLogInput): import("@multiremi/contracts/conversation-log").ConversationLogEntry;
@@ -1079,11 +1080,13 @@ export class StoreContext {
    * The caller must already be inside a database transaction.
    */
   lockWorkspaceRuntimeLifecycle(workspaceId: string): void {
-    this.db.run(
-      "UPDATE multiremi_workspaces SET updated_at = updated_at WHERE id = ?",
-      [workspaceId],
-    );
-    markRequestReadCacheLockTaken();
+    acquireTransactionLock(this.db, `workspace:${workspaceId}`, () => {
+      this.db.run(
+        "UPDATE multiremi_workspaces SET updated_at = updated_at WHERE id = ?",
+        [workspaceId],
+      );
+      markRequestReadCacheLockTaken();
+    });
   }
 
   /** Serialize repository topology and project repository-resource mutations. */

@@ -4665,8 +4665,9 @@ runMigrations(this.db);
   recordAttemptOutcomeWithinTransaction(
     taskId: string,
     fields: Parameters<ConversationLogRepo["recordAttemptOutcomeWithinTransaction"]>[1],
+    materialize = true,
   ): ConversationLogEntry | null {
-    return this.conversationLog.recordAttemptOutcomeWithinTransaction(taskId, fields);
+    return this.conversationLog.recordAttemptOutcomeWithinTransaction(taskId, fields, materialize);
   }
 
   /**
@@ -4730,7 +4731,7 @@ runMigrations(this.db);
       workedMs,
       processItemCount,
       lateSubagents,
-    });
+    }, false);
     return true;
   }
 

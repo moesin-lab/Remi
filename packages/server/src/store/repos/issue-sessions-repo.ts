@@ -1,3 +1,4 @@
+import { memoizeRequestRead } from "../request-read-cache.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Issue sessions domain (sessions, participants, session events, agent lanes and published
 // results), extracted verbatim from MultiremiStore (the facade delegates every public method here).
@@ -429,12 +430,15 @@ export class IssueSessionsRepo {
   }
 
   getIssueSession(id: string): MultiremiIssueSession | null {
-    const row = this.ctx.db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_issue_sessions', 'multiremi_conversation_log'], `session:${id}`,
+      () => this.ctx.db.query(`${SESSION_SELECT} WHERE id = ?`).get(id) as Row | null);
     return row ? toIssueSession(row) : null;
   }
 
   getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null; historicalWorkspaceId: string | null } | null {
-    const row = this.ctx.db.query(`SELECT scoped.*,
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_issue_sessions', 'multiremi_conversation_log', 'multiremi_chat_sessions',
+      'multiremi_issues', 'multiremi_conversation_heads', 'multiremi_issue_activity'], `session-owner:${id}`,
+      () => this.ctx.db.query(`SELECT scoped.*,
         CASE WHEN scoped.chat_id IS NOT NULL THEN chat.workspace_id ELSE issue.workspace_id END AS owner_workspace_id,
         head.workspace_id AS head_workspace_id,
         CASE WHEN scoped.parent_session_id IS NULL OR (parent.id IS NOT NULL
@@ -448,7 +452,7 @@ export class IssueSessionsRepo {
       LEFT JOIN multiremi_chat_sessions chat ON chat.id = scoped.chat_id
       LEFT JOIN multiremi_issues issue ON issue.id = scoped.issue_id
       LEFT JOIN multiremi_issue_sessions parent ON parent.id = scoped.parent_session_id
-      LEFT JOIN multiremi_conversation_heads head ON head.session_id = scoped.id`).get(id) as Row | null;
+      LEFT JOIN multiremi_conversation_heads head ON head.session_id = scoped.id`).get(id) as Row | null);
     if (!row || row.chat_id == null && row.issue_id == null) return null;
 
     const session = toIssueSession(row);

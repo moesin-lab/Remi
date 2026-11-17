@@ -1,3 +1,4 @@
+import { withTurnChangeBatch } from "../turn-execution-records.js";
 import { attemptInputState, acknowledgeAttemptInput } from '../inbox/attempt-input.js';
 import { InputUnreadError, assertOfferedInputRead, lockLane,reRingAfterTurnEnd,sweepIdleLanes,acknowledgeInput } from "../inbox/lane-machine.js";
 import { countMessageDelegationPairHops, sendMessageWithinTransaction } from "../inbox/send-message.js";
@@ -5420,7 +5421,7 @@ ${placementAfter.sql}
     };
     let terminal: ReturnType<typeof completeWithinTransaction>;
     try {
-      terminal = ownsTransaction ? this.ctx.db.transaction(completeWithinTransaction)() : completeWithinTransaction();
+      terminal = ownsTransaction ? this.ctx.db.transaction(() => withTurnChangeBatch(this.ctx.db, completeWithinTransaction))() : withTurnChangeBatch(this.ctx.db, completeWithinTransaction);
     } catch (error) {
       if (!ownsTransaction || !(error instanceof AgentReplyCommentError)) throw error;
       // Roll back partial comment writes and PG statement failures, then finish once with a result pointer.
@@ -5428,7 +5429,7 @@ ${placementAfter.sql}
       skipAutoReply = true;
       childStatusChanges.length = 0;
       deferredEvents = createCommitEventQueue();
-      terminal = this.ctx.db.transaction(completeWithinTransaction)();
+      terminal = this.ctx.db.transaction(() => withTurnChangeBatch(this.ctx.db, completeWithinTransaction))();
     }
     const task = terminal.task;
     const followUps = terminal.followUps;
@@ -5506,7 +5507,7 @@ ${placementAfter.sql}
       recordLaneSlashCommandsWithinTransaction(this.ctx.db, taskId, input.completionFields?.available_commands);
       return { task: failed, followUps };
     };
-    const terminal = this.ctx.db.inTransaction ? failWithinTransaction() : this.ctx.db.transaction(failWithinTransaction)();
+    const terminal = this.ctx.db.inTransaction ? withTurnChangeBatch(this.ctx.db, failWithinTransaction) : this.ctx.db.transaction(() => withTurnChangeBatch(this.ctx.db, failWithinTransaction))();
     const followUps = terminal.followUps;
     if (!followUps) return terminal.task;
     afterCommit(this.ctx.db, () => {
@@ -6641,7 +6642,7 @@ ${placementAfter.sql}
         status,
         failureReason,
         elapsedMs,
-      });
+      }, false);
       // Promote the session ATOMICALLY as one unit — session_id together with
       // its machine (runtime) and engine (provider) — and ONLY when this task
       // actually produced a new session id. Otherwise a task that promotes but
@@ -6752,7 +6753,7 @@ ${placementAfter.sql}
       const terminalEvent = this.ctx.issueSessions().appendSessionEventWithinTransaction(task.issueSessionId, event);
       this.ctx.conversationLog().recordAttemptOutcomeWithinTransaction(task.id, {
         status, finalEntryId: replyComment?.id ?? sessionReplyId, failureReason: task.failureReason,
-      });
+      }, false);
       if (status === "completed") this.promoteSessionAgentLane(task);
       else if (status === "failed" && !retry && (RESUME_UNSAFE_FAILURE_REASONS.has(task.failureReason ?? "")
         || !this.promoteSessionAgentLane(task))) {
@@ -7179,7 +7180,7 @@ ${placementAfter.sql}
           "SELECT reply_message_id FROM multiremi_turns WHERE current_attempt_id = ?",
         ).get(task.id)?.reply_message_id ?? undefined,
       });
-      this.ctx.conversationLog().recordAttemptOutcomeWithinTransaction(task.id, { finalEntryId: created.comment.id });
+      this.ctx.conversationLog().recordAttemptOutcomeWithinTransaction(task.id, { finalEntryId: created.comment.id }, false);
       reply = { id: created.comment.id };
       afterCommit(this.ctx.db, () => {
         try {

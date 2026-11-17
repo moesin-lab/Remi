@@ -114,6 +114,14 @@ workspace 报告只唤醒派活条件；飞书结果只刷新已验证 bot host 
 [预算和复现报告](../../reports/performance/MUL-182-daemon-report-queries.md)区分历史放大消除、
 终态仍有的固定 SQL 成本、隐藏页/Question 权限查询边界与未完成的 stable 现场验收。
 
+终态事务复用 workspace/lane 首锁，savepoint/嵌套事务回滚恢复入口锁集合；
+终态轮卡通知在事务内累积，最终一次投影并按原次数累计 revision/log_version。
+Session/owner scope、Issue/标签、Agent/Skills 与 usage 的显式原始读缓存登记所有依赖表，
+任一依赖写入、事务首锁或回滚后重读；跨异步范围不复用。
+下行快照只查询既有 UNION 探测命中的队列，platform maintenance 单例存在时无需重复插入。
+[MUL-191 逐语句报告](../../reports/performance/MUL-191-terminal-sql.md)记录 SQLite complete 288、fail 179；
+这仍未达到 60/40，真实 PG 与完整 Release build check 需单独提供证据。
+
 ## Issue 详情首屏的工作区读取
 
 Issue 详情首屏的三个只读 GET 路由（详情、Sessions、timeline）启用请求级读取缓存。

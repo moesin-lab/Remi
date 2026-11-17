@@ -1,0 +1,2404 @@
+{
+  "complete": {
+    "total": 288,
+    "reads": 226,
+    "writes": 62,
+    "locks": 19,
+    "statements": [
+      {
+        "count": 18,
+        "category": "read",
+        "sql": "SELECT runtime.*, profile.display_name AS daemon_display_name, drain.daemon_id AS draining_daemon_id FROM multiremi_runtimes runtime LEFT JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) LEFT JOIN multiremi_daemon_profiles profile ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local') AND profile.daemon_id = runtime.daemon_id WHERE runtime.id = ?",
+        "sources": [
+          "packages/server/src/store/repos/runtimes-repo.ts:632:7)"
+        ],
+        "id": "complete-001",
+        "reason": "宿主身份、排空围栏或下行目标选择；只在同步范围复用，事务首锁与写入后重读。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT 1 FROM multiremi_daemon_retirements WHERE workspace_id = ? AND daemon_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/daemon-retirement-repo.ts:160:7)"
+        ],
+        "id": "complete-002",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 6,
+        "category": "lock",
+        "sql": "UPDATE multiremi_workspaces SET updated_at = updated_at WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/context.ts:1084:15)"
+        ],
+        "id": "complete-003",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 3,
+        "category": "read",
+        "sql": "SELECT t.*,a.runtime_id,a.status AS attempt_status,a.offered_at,a.projection_to_seq AS offered_to FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id WHERE t.id=? AND a.id=?",
+        "sources": [
+          "packages/server/src/store/inbox/daemon-turn-bridge.ts:48:230)"
+        ],
+        "id": "complete-004",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 3,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_session_lanes(session_id,reader_type,reader_id,execution_scope,created_at,updated_at) VALUES(?,'agent',?,?,?,?) ON CONFLICT DO NOTHING",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:19:10)"
+        ],
+        "id": "complete-005",
+        "reason": "持久化 lane 游标、provider lineage 或后继状态，保证 ACK/重试/再响铃。"
+      },
+      {
+        "count": 3,
+        "category": "lock",
+        "sql": "UPDATE multiremi_session_lanes SET updated_at=updated_at WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:21:10)"
+        ],
+        "id": "complete-006",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 4,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_turn_execution_records WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:2671:98)"
+        ],
+        "id": "complete-007",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT u.task_id AS task_id,u.provider,COALESCE(u.model,u.requested_model,'unknown') AS model, SUM(COALESCE(input_tokens,0)) AS input_tokens,SUM(COALESCE(output_tokens,0)) AS output_tokens, SUM(COALESCE(cache_read_tokens,0)) AS cache_read_tokens,SUM(COALESCE(cache_write_tokens,0)) AS cache_write_tokens, SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)+COALESCE(cache_read_tokens,0)+COALESCE(cache_write_tokens,0)+COALESCE(actual_unsplit_tokens,0)) AS total_tokens FROM multiremi_usage_units u WHERE u.task_id IN (?) AND source<>'context_snapshot' AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cache_read_tokens IS NOT NULL OR cache_write_tokens IS NOT NULL OR actual_unsplit_tokens IS NOT NULL) GROUP BY u.task_id,u.provider,COALESCE(u.model,u.requested_model,'unknown') ORDER BY task_id,u.provider,model",
+        "sources": [
+          "packages/server/src/store/usage-projection.ts:21:18)"
+        ],
+        "id": "complete-008",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 7,
+        "category": "read",
+        "sql": "SELECT id FROM multiremi_autopilot_run_records WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:7311:7)",
+          "packages/server/src/store/repos/tasks-repo.ts:6810:7)"
+        ],
+        "id": "complete-009",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_workspaces WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/workspaces-repo.ts:581:86)"
+        ],
+        "id": "complete-010",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 6,
+        "category": "read",
+        "sql": "SELECT scoped.*, CASE WHEN scoped.chat_id IS NOT NULL THEN chat.workspace_id ELSE issue.workspace_id END AS owner_workspace_id, head.workspace_id AS head_workspace_id, CASE WHEN scoped.parent_session_id IS NULL OR (parent.id IS NOT NULL AND parent.workspace_id = scoped.workspace_id AND COALESCE(parent.chat_id, '') = COALESCE(scoped.chat_id, '') AND (scoped.chat_id IS NOT NULL OR parent.issue_id = scoped.issue_id)) THEN 1 ELSE 0 END AS parent_owner_valid, CASE WHEN scoped.chat_id IS NULL AND EXISTS (SELECT 1 FROM multiremi_issue_activity activity WHERE activity.issue_id = scoped.issue_id AND activity.type = 'issue_main_session_rotated') THEN 1 ELSE 0 END AS has_rotation FROM (SELECT s.*, ( SELECT COUNT(*) FROM multiremi_conversation_log e WHERE e.session_id = s.parent_session_id AND e.kind <> 'head' AND e.seq > 0 AND ((s.inherit_mode = 'follow' AND (s.follow_frozen_seq IS NULL OR e.seq <= s.follow_frozen_seq)) OR (s.inherit_mode <> 'follow' AND e.seq <= s.inherit_cutoff_seq)) ) AS inherited_event_count FROM multiremi_issue_sessions s WHERE s.id = ?) scoped LEFT JOIN multiremi_chat_sessions chat ON chat.id = scoped.chat_id LEFT JOIN multiremi_issues issue ON issue.id = scoped.issue_id LEFT JOIN multiremi_issue_sessions parent ON parent.id = scoped.parent_session_id LEFT JOIN multiremi_conversation_heads head ON head.session_id = scoped.id",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:439:17)"
+        ],
+        "id": "complete-011",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 4,
+        "category": "lock",
+        "sql": "UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:7051:19)",
+          "packages/server/src/store/repos/issue-sessions-repo.ts:1106:17)",
+          "packages/server/src/store/repos/tasks-repo.ts:6307:17)"
+        ],
+        "id": "complete-012",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_turns WHERE current_attempt_id=?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:5358:96)"
+        ],
+        "id": "complete-013",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT projection_to_seq FROM multiremi_turn_attempts WHERE id=?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:5362:111)"
+        ],
+        "id": "complete-014",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT 1 FROM multiremi_conversation_log WHERE session_id=? AND kind='message' AND visibility='shown' AND deleted_at IS NULL AND to_agent_id=? AND wake_applied='now' AND seq>? AND seq<=? AND COALESCE(json_extract(metadata,'$.execution_scope'),'')=? LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:5369:14)"
+        ],
+        "id": "complete-015",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 4,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_turn_attempts WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/attempt-input.ts:33:86)"
+        ],
+        "id": "complete-016",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT session_id,attempt_no,input_trigger_ack FROM multiremi_turn_attempts WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:126:120)"
+        ],
+        "id": "complete-017",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT seq,sender_type,sender_id,body_md,to_agent_id,wake_applied,metadata FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND visibility='shown' AND deleted_at IS NULL",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:131:245)"
+        ],
+        "id": "complete-018",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 4,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_turns WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:140:71)",
+          "packages/server/src/store/inbox/send-message.ts:90:92)",
+          "packages/server/src/store/inbox/lane-machine.ts:80:71)"
+        ],
+        "id": "complete-019",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT cursor_seq,cursor_offset FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:144:88)"
+        ],
+        "id": "complete-020",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 5,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_conversation_heads WHERE session_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:579:78)"
+        ],
+        "id": "complete-021",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turns SET input_from_seq=COALESCE(input_from_seq,?),input_to_seq=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:151:10)"
+        ],
+        "id": "complete-022",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turn_attempts SET input_ack_seq=?,input_trigger_ack=1 WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/attempt-input.ts:47:12)"
+        ],
+        "id": "complete-023",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 3,
+        "category": "read",
+        "sql": "SELECT 1 AS present FROM multiremi_conversation_log log JOIN multiremi_issue_sessions s ON s.id = log.session_id WHERE s.issue_id = ? AND log.sender_type = 'agent' AND log.sender_id = ? AND log.kind = 'message' AND log.message_kind IN ('request', 'reply', 'final') AND log.to_type = 'none' AND SUBSTR(log.id, 1, 4) = 'cmt_' AND log.visibility='shown' AND log.deleted_at IS NULL AND log.task_id = (SELECT turn_id FROM multiremi_turn_attempts WHERE id=?) AND log.created_at >= ? LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:7222:70)"
+        ],
+        "id": "complete-024",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "lock",
+        "sql": "UPDATE multiremi_turns SET current_attempt_id=current_attempt_id WHERE id IN (SELECT turn_id FROM multiremi_turn_execution_records WHERE id = ? AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human'))",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:170:8)"
+        ],
+        "id": "complete-025",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id,turn_id,('completed') AS mutation_0,(?) AS mutation_1,(?) AS mutation_2,(COALESCE(?, session_id)) AS mutation_3,(COALESCE(?, work_dir)) AS mutation_4,(NULL) AS mutation_5,(NULL) AS mutation_6,(?) AS mutation_7,(?) AS mutation_8 FROM multiremi_turn_execution_records WHERE id = ? AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:173:62)"
+        ],
+        "id": "complete-026",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT current_attempt_id,session_id,agent_id FROM multiremi_turns WHERE id=?",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:194:111)"
+        ],
+        "id": "complete-027",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT reply_message_id FROM multiremi_turns WHERE id=?",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:205:89)",
+          "packages/server/src/store/inbox/daemon-turn-bridge.ts:193:95)"
+        ],
+        "id": "complete-028",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id FROM multiremi_turns WHERE id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:125:92)"
+        ],
+        "id": "complete-029",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 8,
+        "category": "read",
+        "sql": "SELECT s.*, ( SELECT COUNT(*) FROM multiremi_conversation_log e WHERE e.session_id = s.parent_session_id AND e.kind <> 'head' AND e.seq > 0 AND ((s.inherit_mode = 'follow' AND (s.follow_frozen_seq IS NULL OR e.seq <= s.follow_frozen_seq)) OR (s.inherit_mode <> 'follow' AND e.seq <= s.inherit_cutoff_seq)) ) AS inherited_event_count FROM multiremi_issue_sessions s WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:433:17)"
+        ],
+        "id": "complete-030",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 3,
+        "category": "read",
+        "sql": "SELECT chat.id, chat.workspace_id, chat.creator_id, chat.agent_id, chat.runtime_workspace_id, chat.project_id, chat.title, chat.status, chat.session_id, chat.work_dir, chat.session_runtime_id, chat.session_provider, chat.session_execution_fingerprint, chat.latest_task_id, chat.pinned, chat.origin_autopilot_id, chat.origin_run_id, chat.created_at, chat.updated_at, (SELECT COUNT(*) FROM multiremi_conversation_log m LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = '' LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id AND shared.workspace_id = chat.workspace_id WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown' AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS unread_count, (SELECT MIN(m.created_at) FROM multiremi_conversation_log m LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = '' LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id AND shared.workspace_id = chat.workspace_id WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown' AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS reader_unread_since, (SELECT SUBSTR(m.body, 1, 240) FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_content, (SELECT m.role FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_role, (SELECT m.created_at FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_created_at FROM multiremi_chat_sessions chat WHERE chat.id = ?",
+        "sources": [
+          "packages/server/src/store/repos/chat-repo.ts:252:79)"
+        ],
+        "id": "complete-031",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT workspace_id FROM multiremi_autopilots WHERE session_id=?",
+        "sources": [
+          "packages/server/src/store/inbox/send-message.ts:73:95)"
+        ],
+        "id": "complete-032",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 5,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_conversation_log WHERE id=? AND kind='message'",
+        "sources": [
+          "packages/server/src/store/inbox/send-message.ts:19:100)"
+        ],
+        "id": "complete-033",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 7,
+        "category": "read",
+        "sql": "SELECT i.*, w.id AS existing_workspace_id FROM multiremi_issues i LEFT JOIN multiremi_workspaces w ON w.id = i.workspace_id WHERE i.id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:849:17)"
+        ],
+        "id": "complete-034",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT l.* FROM multiremi_issue_labels l JOIN multiremi_issue_to_labels il ON il.label_id = l.id WHERE il.issue_id = ? ORDER BY lower(l.name) ASC",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:5398:18)"
+        ],
+        "id": "complete-035",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_agents WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/agents-skills-repo.ts:756:17)"
+        ],
+        "id": "complete-036",
+        "reason": "校验 Agent 工作区/活动状态并提供实际 Skills；原始行可复用，消费者对象重新水合。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT s.* FROM multiremi_skills s JOIN multiremi_agent_skills aks ON aks.skill_id = s.id WHERE aks.agent_id = ? AND s.archived_at IS NULL ORDER BY aks.created_at ASC, s.name ASC",
+        "sources": [
+          "packages/server/src/store/repos/agents-skills-repo.ts:897:18)"
+        ],
+        "id": "complete-037",
+        "reason": "校验 Agent 工作区/活动状态并提供实际 Skills；原始行可复用，消费者对象重新水合。"
+      },
+      {
+        "count": 2,
+        "category": "lock",
+        "sql": "UPDATE multiremi_issue_sessions SET updated_at=updated_at WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/send-message.ts:151:19)"
+        ],
+        "id": "complete-038",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 2,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_heads SET workspace_id=COALESCE(workspace_id,?),updated_at=updated_at WHERE session_id=?",
+        "sources": [
+          "packages/server/src/store/inbox/send-message.ts:153:10)"
+        ],
+        "id": "complete-039",
+        "reason": "持久化日志 seq/version；轮卡通知批次累计原有 revision/version 次数。其它消息写入仍保留各自版本，尚未证明不能进一步合并。"
+      },
+      {
+        "count": 3,
+        "category": "read",
+        "sql": "SELECT id,workspace_id,parent_issue_id,assignee_type,assignee_id FROM multiremi_issues WHERE id=?",
+        "sources": [
+          "packages/server/src/store/issue-responsibility.ts:20:131)"
+        ],
+        "id": "complete-040",
+        "reason": "从工作轮、责任链、未答 Q/子单推导 Issue 状态；尚未将这些判定合并为一条查询。"
+      },
+      {
+        "count": 3,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_conversation_log WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:602:92)"
+        ],
+        "id": "complete-041",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 2,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, updated_at) VALUES (?, 0, 0, ?) ON CONFLICT(session_id) DO NOTHING",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:345:17)"
+        ],
+        "id": "complete-042",
+        "reason": "持久化日志 seq/version；轮卡通知批次累计原有 revision/version 次数。其它消息写入仍保留各自版本，尚未证明不能进一步合并。"
+      },
+      {
+        "count": 2,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, updated_at) VALUES (?, ?, 0, ?) ON CONFLICT(session_id) DO UPDATE SET head_seq = CASE WHEN multiremi_conversation_heads.head_seq < excluded.head_seq THEN excluded.head_seq ELSE multiremi_conversation_heads.head_seq END",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:352:17)"
+        ],
+        "id": "complete-043",
+        "reason": "持久化日志 seq/version；轮卡通知批次累计原有 revision/version 次数。其它消息写入仍保留各自版本，尚未证明不能进一步合并。"
+      },
+      {
+        "count": 2,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_heads SET head_seq = head_seq + 1, log_version = log_version + 1, updated_at = ? WHERE session_id = ? RETURNING head_seq",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:557:7)"
+        ],
+        "id": "complete-044",
+        "reason": "持久化日志 seq/version；轮卡通知批次累计原有 revision/version 次数。其它消息写入仍保留各自版本，尚未证明不能进一步合并。"
+      },
+      {
+        "count": 9,
+        "category": "read",
+        "sql": "SELECT turn_id FROM multiremi_turn_attempts WHERE id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:495:107)",
+          "packages/server/src/store/repos/issues-repo.ts:4429:105)",
+          "packages/server/src/store/repos/conversation-log-repo.ts:824:95)",
+          "packages/server/src/store/repos/tasks-repo.ts:7136:92)",
+          "packages/server/src/store/inbox/daemon-turn-bridge.ts:109:128)"
+        ],
+        "id": "complete-045",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 2,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_conversation_log ( session_id, seq, id, kind, visibility, sender_type, sender_id, task_id, body_md, body_html, render_version, reply_to_id, resolved_at, resolved_by_type, resolved_by_id, metadata, revision, created_at, updated_at, deleted_at, to_type,to_ref,to_agent_id,to_member_id,message_kind,wake_requested,wake_applied,wake_reason,dedupe_key, options,card_token_hash,card_token_recipient,card_token_consumed_at ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:499:17)"
+        ],
+        "id": "complete-046",
+        "reason": "持久化回复/轮卡/消息头或修订版本，支撑回放与副本；回复暂存后发布仍有多次写入，尚可继续整合。"
+      },
+      {
+        "count": 7,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_conversation_log WHERE session_id = ? AND seq = ?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:597:7)"
+        ],
+        "id": "complete-047",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turn_attempts SET status=?,branch_name=?,session_id=?,work_dir=?,wait_reason=?,failure_reason=?,ended_at=?,updated_at=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:148:6)"
+        ],
+        "id": "complete-048",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turns SET status=?,ended_at=?,reply_message_id=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:148:6)"
+        ],
+        "id": "complete-049",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_task_traces (task_id, location, updated_at) VALUES (?, 'none', ?) ON CONFLICT(task_id) DO UPDATE SET location = 'none', runtime_id = NULL, updated_at = excluded.updated_at WHERE multiremi_task_traces.location = 'daemon'",
+        "sources": [
+          "packages/server/src/store/repos/task-traces-repo.ts:55:17)"
+        ],
+        "id": "complete-050",
+        "reason": "现有业务持久化副作用；保留幂等谓词与原事务边界。其语句来源见 source，未证明不可合并。"
+      },
+      {
+        "count": 4,
+        "category": "read",
+        "sql": "SELECT id, workspace_id, runtime_id, status, agent_id, chat_session_id, issue_id, issue_session_id FROM multiremi_turn_execution_records WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:2697:7)"
+        ],
+        "id": "complete-051",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id FROM multiremi_message_question_records WHERE task_id = ? AND status IN ('pending','responded')",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:6946:7)"
+        ],
+        "id": "complete-052",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT reply_message_id FROM multiremi_turns WHERE current_attempt_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:6538:10)"
+        ],
+        "id": "complete-053",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT t.id, t.status, t.current_attempt_id FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id = t.id WHERE a.id = ?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:6595:24)"
+        ],
+        "id": "complete-054",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_access_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE type = 'task' AND task_id = ? AND revoked_at IS NULL",
+        "sources": [
+          "packages/server/src/store/repos/access-tokens-repo.ts:243:28)"
+        ],
+        "id": "complete-055",
+        "reason": "终态撤销 attempt 凭据，避免终态任务继续写入。"
+      },
+      {
+        "count": 3,
+        "category": "read",
+        "sql": "SELECT workspace_id FROM multiremi_issues WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/context.ts:1586:89)"
+        ],
+        "id": "complete-056",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 2,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_issue_activity (id, issue_id, workspace_id, actor_type, actor_id, type, body, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "sources": [
+          "packages/server/src/store/context.ts:1448:13)"
+        ],
+        "id": "complete-057",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT log.*,log.sender_type AS author_type,log.sender_id AS author_id,log.reply_to_id AS parent_id, s.issue_id, log.session_id AS issue_session_id, log.body_md AS body, CASE WHEN log.sender_type = 'platform' THEN 'system' ELSE 'comment' END AS type FROM multiremi_conversation_log log JOIN multiremi_issue_sessions s ON s.id = log.session_id WHERE log.id = ? AND log.kind IN ('message', 'system') AND log.deleted_at IS NULL",
+        "sources": [
+          "packages/server/src/store/context.ts:1579:91)"
+        ],
+        "id": "complete-058",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "lock",
+        "sql": "UPDATE multiremi_workspaces SET updated_at = updated_at WHERE id = (SELECT workspace_id FROM multiremi_issues WHERE id = ?)",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:4366:17)"
+        ],
+        "id": "complete-059",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_issues SET id = id WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/issue-row-lock.ts:5:19)"
+        ],
+        "id": "complete-060",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 3,
+        "category": "read",
+        "sql": "SELECT cmt.*, log.id AS log_id, log.body_md AS log_body_md, log.updated_at AS log_updated_at, log.resolved_at AS log_resolved_at, log.resolved_by_type AS log_resolved_by_type, log.resolved_by_id AS log_resolved_by_id FROM multiremi_issue_message_records cmt LEFT JOIN multiremi_conversation_log log ON log.id = cmt.id WHERE cmt.id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:4906:7)"
+        ],
+        "id": "complete-061",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 3,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_comment_reactions WHERE comment_id IN (?) ORDER BY created_at ASC",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:5690:7)"
+        ],
+        "id": "complete-062",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 3,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_attachments WHERE comment_id IN (?) ORDER BY created_at ASC",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:5844:7)"
+        ],
+        "id": "complete-063",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_issues SET updated_at = ? WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:4409:17)"
+        ],
+        "id": "complete-064",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_issue_message_records WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/context.ts:1568:93)"
+        ],
+        "id": "complete-065",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_session_participants ( id, session_id, participant_type, participant_id, role, status, joined_at, updated_at ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(session_id, participant_type, participant_id) DO UPDATE SET role = excluded.role, status = 'active', updated_at = excluded.updated_at",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:607:17)"
+        ],
+        "id": "complete-066",
+        "reason": "现有业务持久化副作用；保留幂等谓词与原事务边界。其语句来源见 source，未证明不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_session_lanes ( session_id, reader_id, execution_scope, cursor_seq, generation, status, created_at, updated_at ) VALUES (?, ?, ?, 0, 1, 'active', ?, ?) ON CONFLICT(session_id, reader_type, reader_id, execution_scope) DO NOTHING",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:788:17)"
+        ],
+        "id": "complete-067",
+        "reason": "持久化 lane 游标、provider lineage 或后继状态，保证 ACK/重试/再响铃。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_agent_lane_records WHERE session_id = ? AND agent_id = ? AND execution_scope = ?",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:797:7)"
+        ],
+        "id": "complete-068",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_session_participants WHERE session_id = ? AND participant_type = ? AND participant_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:619:7)"
+        ],
+        "id": "complete-069",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_log SET to_type=?,to_ref=?,to_agent_id=?,to_member_id=?,message_kind=?,reply_to_id=?, wake_requested=?,wake_applied=?,wake_reason=?,dedupe_key=?,options=?,task_id=COALESCE(?,task_id) WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/send-message.ts:222:12)"
+        ],
+        "id": "complete-070",
+        "reason": "持久化回复/轮卡/消息头或修订版本，支撑回放与副本；回复暂存后发布仍有多次写入，尚可继续整合。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_heads SET log_version = log_version + 1, updated_at = ? WHERE session_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:675:19)"
+        ],
+        "id": "complete-071",
+        "reason": "持久化日志 seq/version；轮卡通知批次累计原有 revision/version 次数。其它消息写入仍保留各自版本，尚未证明不能进一步合并。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_log SET metadata = ?, updated_at = ?, revision = revision + 1 WHERE session_id = ? AND seq = ?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:680:17)"
+        ],
+        "id": "complete-072",
+        "reason": "持久化回复/轮卡/消息头或修订版本，支撑回放与副本；回复暂存后发布仍有多次写入，尚可继续整合。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_log SET visibility='shown' WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/send-message.ts:227:12)"
+        ],
+        "id": "complete-073",
+        "reason": "持久化回复/轮卡/消息头或修订版本，支撑回放与副本；回复暂存后发布仍有多次写入，尚可继续整合。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_workspace_members WHERE workspace_id = ? AND archived_at IS NULL ORDER BY name ASC",
+        "sources": [
+          "packages/server/src/store/repos/workspaces-repo.ts:218:131)"
+        ],
+        "id": "complete-074",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_system_events (id, workspace_id, resource, event, resource_id, project_id, payload, status, attempt_count, available_at, created_at) VALUES (?, ?, 'issue_comment', ?, ?, ?, ?, 'pending', 0, ?, ?)",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:4523:17)"
+        ],
+        "id": "complete-075",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 2,
+        "category": "write",
+        "sql": "UPDATE multiremi_turns SET reply_message_id=? WHERE id=? AND current_attempt_id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:833:80)"
+        ],
+        "id": "complete-076",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:721:17)"
+        ],
+        "id": "complete-077",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT seq FROM multiremi_conversation_log WHERE session_id = ? AND task_id = ? AND kind = 'turn' ORDER BY seq ASC LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:750:11)"
+        ],
+        "id": "complete-078",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turn_attempts SET failure_reason=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:832:32)"
+        ],
+        "id": "complete-079",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:93:88)"
+        ],
+        "id": "complete-080",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id FROM multiremi_conversation_log WHERE session_id=? AND kind='message' AND to_agent_id=? AND seq>? AND wake_applied='now' AND deleted_at IS NULL AND COALESCE(json_extract(metadata,'$.execution_scope'),'')=? ORDER BY seq DESC LIMIT 1",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:102:33)"
+        ],
+        "id": "complete-081",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT task.*,snapshot.id AS terminal_report_id,snapshot.metadata AS terminal_report_metadata, (SELECT MAX(seq) FROM multiremi_conversation_log e WHERE e.session_id=task.issue_session_id AND e.task_id=t.id) AS terminal_event_seq FROM multiremi_turn_execution_records task JOIN multiremi_turns t ON t.id=task.turn_id AND t.current_attempt_id=task.id LEFT JOIN multiremi_conversation_log snapshot ON snapshot.session_id=? AND snapshot.dedupe_key='delegation_terminal:'||task.id WHERE COALESCE(t.delegated_from_issue_session_id,t.session_id)=? AND t.status IN ('completed','failed','cancelled') AND t.delegation_id IS NOT NULL AND t.delegated_by_agent_id IS NOT NULL AND t.agent_id<>t.delegated_by_agent_id AND t.delegation_return_turn_id IS NULL AND t.delegation_skip_reason IS NULL ORDER BY t.ended_at,t.created_at,t.id",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:6319:47)"
+        ],
+        "id": "complete-082",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "lock",
+        "sql": "UPDATE multiremi_issues SET id=id WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/issue-status.ts:9:14)"
+        ],
+        "id": "complete-083",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT t.*,m.sender_type AS trigger_sender,m.wake_reason AS trigger_reason,m.message_kind AS trigger_kind, (SELECT COUNT(*) FROM multiremi_conversation_log merged WHERE merged.kind='message' AND merged.deleted_at IS NULL AND json_extract(CASE WHEN json_valid(merged.metadata) THEN merged.metadata ELSE '{}' END,'$.delivery_turn_id')=t.id AND merged.wake_reason IN ('human_sender','agent_dispatch')) AS merged_work_triggers FROM multiremi_turns t LEFT JOIN multiremi_conversation_log m ON m.id=t.trigger_message_id LEFT JOIN multiremi_issue_sessions owned_session ON owned_session.id=t.session_id WHERE t.issue_id=? AND COALESCE(owned_session.chat_id,t.chat_session_id) IS NULL AND (owned_session.id IS NULL OR owned_session.issue_id=t.issue_id) ORDER BY t.created_at DESC,t.seq DESC,t.id DESC",
+        "sources": [
+          "packages/server/src/store/inbox/issue-status.ts:20:125)"
+        ],
+        "id": "complete-084",
+        "reason": "从工作轮、责任链、未答 Q/子单推导 Issue 状态；尚未将这些判定合并为一条查询。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT 1 FROM multiremi_conversation_log d JOIN multiremi_issue_sessions s ON s.id=d.session_id WHERE s.issue_id=? AND s.chat_id IS NULL AND d.kind='message' AND d.message_kind='decision' AND d.sender_type='agent' AND d.sender_id=? AND d.deleted_at IS NULL AND d.resolved_at IS NULL AND NOT EXISTS(SELECT 1 FROM multiremi_conversation_log r WHERE r.reply_to_id=d.id AND r.message_kind='reply' AND r.deleted_at IS NULL) LIMIT 1",
+        "sources": [
+          "packages/server/src/store/inbox/issue-status.ts:25:95)"
+        ],
+        "id": "complete-085",
+        "reason": "从工作轮、责任链、未答 Q/子单推导 Issue 状态；尚未将这些判定合并为一条查询。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT m.id FROM multiremi_turns t JOIN multiremi_conversation_log m ON m.task_id = t.id WHERE t.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision' AND m.deleted_at IS NULL AND m.resolved_at IS NULL UNION SELECT m.id FROM multiremi_issue_sessions s JOIN multiremi_conversation_log m ON m.session_id = s.id WHERE s.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision' AND m.deleted_at IS NULL AND m.resolved_at IS NULL",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:579:7)"
+        ],
+        "id": "complete-086",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT COUNT(*) AS open_children FROM multiremi_issues child JOIN multiremi_issues parent ON parent.id = child.parent_issue_id AND parent.workspace_id = child.workspace_id WHERE child.parent_issue_id = ? AND child.status NOT IN ('done', 'cancelled')",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:1490:7)"
+        ],
+        "id": "complete-087",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_issues SET status=?,completed_at=?,archived_at=NULL,updated_at=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/issue-status.ts:51:10)"
+        ],
+        "id": "complete-088",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_system_events ( id, workspace_id, resource, event, resource_id, project_id, payload, status, attempt_count, available_at, lease_until, last_error, created_at, processed_at ) VALUES (?, ?, 'issue', 'status_changed', ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?, NULL)",
+        "sources": [
+          "packages/server/src/store/repos/autopilots-repo.ts:1012:17)"
+        ],
+        "id": "complete-089",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_system_events WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/autopilots-repo.ts:1042:89)"
+        ],
+        "id": "complete-090",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT 1 AS present FROM multiremi_turns turns JOIN multiremi_issue_sessions sessions ON sessions.id = turns.session_id WHERE turns.issue_id = ? AND sessions.issue_id = turns.issue_id AND sessions.chat_id IS NULL AND turns.status IN ('pending', 'running', 'awaiting_human') LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:7304:7)"
+        ],
+        "id": "complete-091",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "lock",
+        "sql": "UPDATE multiremi_issues SET lifecycle_state = lifecycle_state WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/context.ts:1102:13)"
+        ],
+        "id": "complete-092",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT s.*, ( SELECT COUNT(*) FROM multiremi_conversation_log e WHERE e.session_id = s.parent_session_id AND e.kind <> 'head' AND e.seq > 0 AND ((s.inherit_mode = 'follow' AND (s.follow_frozen_seq IS NULL OR e.seq <= s.follow_frozen_seq)) OR (s.inherit_mode <> 'follow' AND e.seq <= s.inherit_cutoff_seq)) ) AS inherited_event_count FROM multiremi_issue_sessions s WHERE s.chat_id IS NULL AND s.issue_id = ? AND s.is_default = 1 LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:304:7)"
+        ],
+        "id": "complete-093",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT c.id, c.agent_id, b.id AS binding_id FROM multiremi_feishu_bot_chat_bindings b JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id WHERE b.issue_id = ? AND b.workspace_id = ? AND c.workspace_id = ? AND c.status <> 'archived' ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC",
+        "sources": [
+          "packages/server/src/store/repos/inbox-repo.ts:155:70)"
+        ],
+        "id": "complete-094",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? ORDER BY created_at, bot_id",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:265:8)"
+        ],
+        "id": "complete-095",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 5,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:436:8)"
+        ],
+        "id": "complete-096",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT turn_id FROM multiremi_turn_attempts WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:2846:102)"
+        ],
+        "id": "complete-097",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT b.* FROM multiremi_feishu_bot_chat_bindings b JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id WHERE b.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND b.issue_id = ? AND c.status = 'active' AND b.chat_id IS NOT NULL AND b.reply_to_message_id IS NOT NULL ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:2856:7)"
+        ],
+        "id": "complete-098",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT DISTINCT sessions.issue_id FROM multiremi_conversation_log messages JOIN multiremi_issue_sessions sessions ON sessions.id = messages.session_id WHERE messages.task_id = ? AND messages.kind = 'message' AND messages.sender_type = 'agent' AND messages.sender_id = ? AND messages.message_kind IN ('request', 'reply', 'final') AND messages.deleted_at IS NULL AND sessions.chat_id IS NULL AND sessions.issue_id <> ? ORDER BY sessions.issue_id",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:6799:9)"
+        ],
+        "id": "complete-099",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_log SET message_kind=? WHERE id=(SELECT reply_message_id FROM multiremi_turns WHERE id=?)",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:5416:44)"
+        ],
+        "id": "complete-100",
+        "reason": "持久化回复/轮卡/消息头或修订版本，支撑回放与副本；回复暂存后发布仍有多次写入，尚可继续整合。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT event_count, tool_call_count, type_histogram, model, context_usage, worked_ms, process_item_count, late_subagents FROM multiremi_turn_attempts WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/store.ts:4693:7)"
+        ],
+        "id": "complete-101",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turn_attempts SET tool_call_count=?,event_count=?,type_histogram=?,model=?,context_usage=?,worked_ms=?,process_item_count=?,late_subagents=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:832:32)"
+        ],
+        "id": "complete-102",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT session_id,seq FROM multiremi_turns WHERE id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:132:87)"
+        ],
+        "id": "complete-103",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_log SET revision=revision+?,updated_at=? WHERE session_id=? AND seq=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:134:14)"
+        ],
+        "id": "complete-104",
+        "reason": "持久化回复/轮卡/消息头或修订版本，支撑回放与副本；回复暂存后发布仍有多次写入，尚可继续整合。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_heads SET log_version=log_version+?,updated_at=? WHERE session_id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:135:14)"
+        ],
+        "id": "complete-105",
+        "reason": "持久化日志 seq/version；轮卡通知批次累计原有 revision/version 次数。其它消息写入仍保留各自版本，尚未证明不能进一步合并。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT t.*,a.status AS attempt_status,a.attempt_no,a.failure_reason,a.progress_summary,a.event_count, a.tool_call_count,a.type_histogram,a.model,a.trace_ref,a.usage,a.started_at AS attempt_started_at,a.ended_at AS attempt_ended_at, a.context_usage,a.worked_ms,a.process_item_count,a.late_subagents FROM multiremi_turns t LEFT JOIN multiremi_turn_attempts a ON a.id=t.current_attempt_id WHERE t.id=?",
+        "sources": [
+          "packages/server/src/store/turn-attempts.ts:82:58)"
+        ],
+        "id": "complete-106",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT body_md FROM multiremi_conversation_log WHERE id=?",
+        "sources": [
+          "packages/server/src/store/turn-attempts.ts:84:108)"
+        ],
+        "id": "complete-107",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT a.turn_id AS task_id,u.provider,COALESCE(u.model,u.requested_model,'unknown') AS model, SUM(COALESCE(input_tokens,0)) AS input_tokens,SUM(COALESCE(output_tokens,0)) AS output_tokens, SUM(COALESCE(cache_read_tokens,0)) AS cache_read_tokens,SUM(COALESCE(cache_write_tokens,0)) AS cache_write_tokens, SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)+COALESCE(cache_read_tokens,0)+COALESCE(cache_write_tokens,0)+COALESCE(actual_unsplit_tokens,0)) AS total_tokens FROM multiremi_usage_units u JOIN multiremi_turn_attempts a ON a.id=u.task_id WHERE a.turn_id IN (?) AND source<>'context_snapshot' AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cache_read_tokens IS NOT NULL OR cache_write_tokens IS NOT NULL OR actual_unsplit_tokens IS NOT NULL) GROUP BY a.turn_id,u.provider,COALESCE(u.model,u.requested_model,'unknown') ORDER BY task_id,u.provider,model",
+        "sources": [
+          "packages/server/src/store/usage-projection.ts:21:18)"
+        ],
+        "id": "complete-108",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 5,
+        "category": "read",
+        "sql": "SELECT runtime_id FROM multiremi_turn_execution_records WHERE workspace_id=? AND runtime_id IS NOT NULL AND status IN ('dispatched','running','waiting_local_directory','awaiting_human') UNION SELECT runtime_id FROM multiremi_feishu_bot_configs WHERE workspace_id=? AND runtime_id IS NOT NULL UNION SELECT runtime_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id=? AND (state<>'stopped' OR release_pending=1) UNION SELECT runtime_id FROM multiremi_background_tasks WHERE workspace_id=? AND lane_state<>'closed' UNION SELECT r.id AS runtime_id FROM multiremi_runtimes r JOIN multiremi_daemon_drains d ON d.workspace_id=COALESCE(r.workspace_id,'local') AND d.daemon_id=COALESCE(r.daemon_id,r.id) WHERE d.workspace_id=?",
+        "sources": [
+          "packages/server/src/store/repos/runtimes-repo.ts:581:34)"
+        ],
+        "id": "complete-109",
+        "reason": "宿主身份、排空围栏或下行目标选择；只在同步范围复用，事务首锁与写入后重读。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_issue_subscribers WHERE issue_id = ? ORDER BY created_at ASC",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:5250:7)"
+        ],
+        "id": "complete-110",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT member.* FROM multiremi_workspace_members member JOIN multiremi_workspaces workspace ON workspace.id = member.workspace_id WHERE member.workspace_id = ? AND member.user_id = 'local' ORDER BY CASE WHEN member.id = ? THEN 0 ELSE 1 END, member.created_at, member.id LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/workspaces-repo.ts:138:8)"
+        ],
+        "id": "complete-111",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT workspace_id FROM multiremi_system_events WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:4558:106)"
+        ],
+        "id": "complete-112",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_system_events SET status = 'processed', processed_at = ?, lease_until = NULL WHERE id = ? AND status = 'pending'",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:4564:23)"
+        ],
+        "id": "complete-113",
+        "reason": "现有业务持久化副作用；保留幂等谓词与原事务边界。其语句来源见 source，未证明不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT seq FROM multiremi_conversation_log WHERE id = ? AND kind IN ('message', 'system') LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:6244:7)"
+        ],
+        "id": "complete-114",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_turns WHERE id=? OR current_attempt_id=?",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:6400:119)"
+        ],
+        "id": "complete-115",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_system_events SET last_error = NULL WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:4598:19)"
+        ],
+        "id": "complete-116",
+        "reason": "现有业务持久化副作用；保留幂等谓词与原事务边界。其语句来源见 source，未证明不可合并。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT runtime.*, profile.display_name AS daemon_display_name, drain.daemon_id AS draining_daemon_id FROM multiremi_runtimes runtime LEFT JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) LEFT JOIN multiremi_daemon_profiles profile ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local') AND profile.daemon_id = runtime.daemon_id WHERE runtime.id IN (?,?,?,?,?,?,?,?)",
+        "sources": [
+          "packages/server/src/store/repos/runtimes-repo.ts:562:67)"
+        ],
+        "id": "complete-117",
+        "reason": "宿主身份、排空围栏或下行目标选择；只在同步范围复用，事务首锁与写入后重读。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id FROM multiremi_feishu_bot_outbound_deliveries WHERE task_id = ? AND kind = 'cot' AND delivery_mode = 'split'",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3055:72)"
+        ],
+        "id": "complete-118",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 4,
+        "category": "read",
+        "sql": "SELECT bot_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND runtime_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:276:10)"
+        ],
+        "id": "complete-119",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'pending' AND available_at > ? UNION ALL SELECT leased_until AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'sending' AND leased_until > ? ) deadlines",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3551:19)"
+        ],
+        "id": "complete-120",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT request.created_at, request.expires_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id WHERE task.workspace_id = ? AND task.issue_id IS NOT NULL AND request.status = 'pending' AND request.reminder_sent_at IS NULL AND request.expires_at IS NOT NULL AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries delivery WHERE delivery.human_request_id = request.id AND delivery.kind = 'decision_card' AND delivery.status = 'sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL)",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3560:8)"
+        ],
+        "id": "complete-121",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id=request.task_id JOIN multiremi_conversation_log message ON message.id=request.id JOIN multiremi_feishu_bot_outbound_deliveries delivery ON delivery.human_request_id=request.id JOIN multiremi_feishu_bot_chat_bindings binding ON binding.id=delivery.binding_id AND binding.workspace_id=delivery.workspace_id WHERE task.workspace_id=? AND task.issue_id IS NOT NULL AND request.status='pending' AND binding.bot_id=? AND binding.app_id=? AND request.reminder_sent_at IS NULL AND request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND delivery.kind='decision_card' AND delivery.status='sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL GROUP BY request.id",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3578:29)"
+        ],
+        "id": "complete-122",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) WHERE runtime.id = ?",
+        "sources": [
+          "packages/server/src/store/store.ts:3507:30)"
+        ],
+        "id": "complete-123",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT id, status, runtime_id, agent_id FROM multiremi_turn_execution_records WHERE status IN (?, ?, ?, ?) AND runtime_id = ? ORDER BY created_at DESC",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:3144:7)"
+        ],
+        "id": "complete-124",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT bot_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ? AND (state <> 'stopped' OR release_pending = 1) ORDER BY reported_at DESC LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:284:10)"
+        ],
+        "id": "complete-125",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND deleted_at IS NULL AND visibility='shown' ORDER BY seq",
+        "sources": [
+          "packages/server/src/store/inbox/daemon-turn-bridge.ts:55:264)"
+        ],
+        "id": "complete-126",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turn_attempts SET projection_to_seq=CASE WHEN COALESCE(projection_to_seq,0)<? THEN ? ELSE projection_to_seq END WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/daemon-turn-bridge.ts:117:21)"
+        ],
+        "id": "complete-127",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T17:13:11.247Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T17:13:11.247Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T16:55:11.247Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:14:41.247Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:14:41.247Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:11.247Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:11.247Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:11.247Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T16:55:11.247Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:11.247Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:11.247Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:11.247Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:11.247Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:11.247Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:11.247Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:05:11.247Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:05:11.247Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:05:11.247Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:11.247Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:11.247Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:10:11.247Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:11.247Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:11.247Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:11.247Z'))) AS sweep, FALSE AS housekeeping",
+        "sources": [
+          "packages/server/src/store/repos/runtimes-repo.ts:2681:68)"
+        ],
+        "id": "complete-128",
+        "reason": "宿主身份、排空围栏或下行目标选择；只在同步范围复用，事务首锁与写入后重读。"
+      },
+      {
+        "count": 8,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_platform_maintenance WHERE id = 'platform'",
+        "sources": [
+          "packages/server/src/store/repos/platform-maintenance-repo.ts:192:7)"
+        ],
+        "id": "complete-129",
+        "reason": "排空/更新围栏读取，不能用前一事务的缓存跨越维护切换；已移除存在单例时的重复 INSERT。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND bot_id = ? AND runtime_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:4182:8)"
+        ],
+        "id": "complete-130",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 6,
+        "category": "read",
+        "sql": "SELECT 1 FROM multiremi_turn_execution_records WHERE workspace_id = ? AND status IN ('queued', 'dispatched') LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:3324:79)"
+        ],
+        "id": "complete-131",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T17:13:11.251Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T17:13:11.251Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T16:55:11.251Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:14:41.251Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:14:41.251Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:11.251Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:11.251Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:11.251Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T16:55:11.251Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:11.251Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:11.251Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:11.251Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:11.251Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:11.251Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:11.251Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:05:11.251Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:05:11.251Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:05:11.251Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:11.251Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:11.251Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:10:11.251Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:11.251Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:11.251Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:11.251Z'))) AS sweep, FALSE AS housekeeping",
+        "sources": [
+          "packages/server/src/store/repos/runtimes-repo.ts:2681:68)"
+        ],
+        "id": "complete-132",
+        "reason": "宿主身份、排空围栏或下行目标选择；只在同步范围复用，事务首锁与写入后重读。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id, operation FROM multiremi_feishu_bot_outbound_operations WHERE workspace_id = ? AND ((status = 'pending' AND available_at <= ?) OR (status = 'processing' AND leased_until <= ?)) ORDER BY created_at, CASE kind WHEN 'topic' THEN 0 WHEN 'round' THEN 1 WHEN 'retarget' THEN 2 WHEN 'human_request' THEN 3 WHEN 'round_delivery' THEN 4 ELSE 5 END, id LIMIT 32",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3123:96)"
+        ],
+        "id": "complete-133",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT decision.id, decision.issue_id FROM multiremi_message_decision_records decision JOIN multiremi_issues issue ON issue.id = decision.issue_id WHERE decision.status = 'escalated' AND decision.reminder_sent_at IS NULL AND issue.workspace_id = ? AND ( SELECT o.sent_at FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.kind = 'decision_card' AND o.decision_id = decision.id AND b.bot_id = ? AND o.status = 'sent' AND o.external_message_id IS NOT NULL AND o.degraded IS NULL AND o.sent_at IS NOT NULL ORDER BY o.created_at DESC, o.id DESC LIMIT 1 ) <= ? ORDER BY decision.id ASC",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3318:38)"
+        ],
+        "id": "complete-134",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id, kind FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND delivery_mode = 'split' AND attempt_count >= 6 AND binding_id IN (SELECT id FROM multiremi_feishu_bot_chat_bindings WHERE workspace_id = ? AND bot_id = ?) AND ((status = 'pending' AND available_at <= ?) OR (status = 'sending' AND leased_until <= ?))",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3325:9)"
+        ],
+        "id": "complete-135",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT request.id, request.task_id, request.expires_at, request.created_at, (SELECT MAX(card.sent_at) FROM multiremi_feishu_bot_outbound_deliveries card WHERE card.human_request_id=request.id AND card.kind='decision_card' AND card.status='sent' AND card.external_message_id IS NOT NULL AND card.degraded IS NULL) AS card_sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id JOIN multiremi_conversation_log message ON message.id=request.id WHERE request.status = 'pending' AND request.reminder_sent_at IS NULL -- A reminder is worth sending only while it still leaves the reader -- time to act: under a minute of lifetime left, the nudge would arrive -- as the request expires. The bound is the same expression the CAS and -- the claim use, so SQLite and Postgres agree. AND (request.expires_at >= ? OR (request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries card WHERE card.human_request_id=request.id AND card.kind='decision_card' AND card.status='sent' AND card.external_message_id IS NOT NULL AND card.degraded IS NULL AND card.sent_at<=?))) AND task.issue_id IS NOT NULL AND task.workspace_id = ? AND ( SELECT COUNT(*) FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.kind = 'decision_card' AND o.human_request_id = request.id AND b.bot_id = ? AND o.status = 'sent' AND o.external_message_id IS NOT NULL AND o.degraded IS NULL ) > 0 ORDER BY request.expires_at ASC, request.id ASC",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:2519:7)"
+        ],
+        "id": "complete-136",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT d.*, COALESCE(d.outbound_task_id, d.task_id) AS target_task_id, b.chat_id, b.thread_id, s.open_id FROM multiremi_feishu_bot_deliveries d JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id AND b.workspace_id = d.workspace_id LEFT JOIN multiremi_feishu_bot_senders s ON s.id = d.sender_id WHERE d.workspace_id = ? AND d.outbound_requested = 1 AND b.chat_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries carrier WHERE carrier.task_id = COALESCE(d.outbound_task_id, d.task_id) AND (carrier.kind IS NULL OR carrier.kind = 'cot') AND carrier.unit_key = '') AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_deliveries earlier WHERE COALESCE(earlier.outbound_task_id, earlier.task_id) = COALESCE(d.outbound_task_id, d.task_id) AND earlier.outbound_requested = 1 AND (earlier.created_at < d.created_at OR (earlier.created_at = d.created_at AND earlier.external_message_id < d.external_message_id))) ORDER BY d.created_at, d.external_message_id LIMIT 32",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3196:63)"
+        ],
+        "id": "complete-137",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT o.task_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_turn_execution_records t ON t.id = o.task_id WHERE o.workspace_id = ? AND o.kind = 'cot' AND o.delivery_mode = 'split' AND (t.status NOT IN ('completed', 'failed', 'cancelled') OR NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries r WHERE r.task_id = o.task_id AND r.kind = 'result_card'))",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3213:8)"
+        ],
+        "id": "complete-138",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT o.* FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND (o.kind IS NULL OR o.kind NOT IN ('decision_card', 'decision_card_patch', 'decision_reminder') OR o.degraded IS NOT NULL) AND (? = 1 OR o.delivery_mode IS NULL OR o.delivery_mode = 'legacy') AND (o.decision_id IS NULL OR EXISTS ( SELECT 1 FROM multiremi_message_decision_records decision JOIN multiremi_issues target ON target.id = decision.issue_id AND target.workspace_id = decision.workspace_id JOIN multiremi_issues source ON source.id = decision.source_issue_id AND source.workspace_id = decision.workspace_id WHERE decision.id = o.decision_id AND decision.workspace_id = o.workspace_id AND decision.issue_id = o.decision_issue_id AND b.workspace_id = o.workspace_id AND b.issue_id = decision.issue_id )) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_round_pushes r WHERE r.wake_task_id = o.task_id AND r.binding_id = b.id AND r.workspace_id = o.workspace_id AND r.delivery_mode = 'proactive' AND (b.issue_id IS NULL OR b.issue_id <> r.issue_id) ) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_human_request_pushes h WHERE h.wake_task_id = o.task_id AND h.binding_id = b.id AND h.workspace_id = o.workspace_id AND (b.issue_id IS NULL OR b.issue_id <> h.issue_id) ) AND (o.task_id IS NULL OR ? = 1 OR o.body <> '') AND (? = 1 OR o.presentation_checkpoint IS NULL) AND (? = 1 OR o.attachments IS NULL) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries received WHERE o.kind = 'receipt' AND o.unit_key <> o.target_message_id || ':received' AND received.task_id = o.task_id AND received.kind = 'receipt' AND received.unit_key = o.target_message_id || ':received' AND received.status IN ('pending', 'sending')) AND (o.previous_delivery_id IS NULL OR EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries previous WHERE previous.id = o.previous_delivery_id AND previous.workspace_id = o.workspace_id AND (previous.status = 'sent' OR (o.cascade_failure = 0 AND previous.status = 'failed')))) AND ((o.status = 'pending' AND o.available_at <= ?) OR (o.status = 'sending' AND o.leased_until IS NOT NULL AND o.leased_until <= ?)) ORDER BY o.created_at ASC, o.id ASC LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3409:9)"
+        ],
+        "id": "complete-139",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      }
+    ]
+  },
+  "fail": {
+    "total": 179,
+    "reads": 146,
+    "writes": 33,
+    "locks": 12,
+    "statements": [
+      {
+        "count": 4,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_turn_execution_records WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:2671:98)"
+        ],
+        "id": "fail-001",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT u.task_id AS task_id,u.provider,COALESCE(u.model,u.requested_model,'unknown') AS model, SUM(COALESCE(input_tokens,0)) AS input_tokens,SUM(COALESCE(output_tokens,0)) AS output_tokens, SUM(COALESCE(cache_read_tokens,0)) AS cache_read_tokens,SUM(COALESCE(cache_write_tokens,0)) AS cache_write_tokens, SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)+COALESCE(cache_read_tokens,0)+COALESCE(cache_write_tokens,0)+COALESCE(actual_unsplit_tokens,0)) AS total_tokens FROM multiremi_usage_units u WHERE u.task_id IN (?) AND source<>'context_snapshot' AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cache_read_tokens IS NOT NULL OR cache_write_tokens IS NOT NULL OR actual_unsplit_tokens IS NOT NULL) GROUP BY u.task_id,u.provider,COALESCE(u.model,u.requested_model,'unknown') ORDER BY task_id,u.provider,model",
+        "sources": [
+          "packages/server/src/store/usage-projection.ts:21:18)"
+        ],
+        "id": "fail-002",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 6,
+        "category": "read",
+        "sql": "SELECT id FROM multiremi_autopilot_run_records WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:7311:7)",
+          "packages/server/src/store/repos/tasks-repo.ts:6810:7)"
+        ],
+        "id": "fail-003",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 17,
+        "category": "read",
+        "sql": "SELECT runtime.*, profile.display_name AS daemon_display_name, drain.daemon_id AS draining_daemon_id FROM multiremi_runtimes runtime LEFT JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) LEFT JOIN multiremi_daemon_profiles profile ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local') AND profile.daemon_id = runtime.daemon_id WHERE runtime.id = ?",
+        "sources": [
+          "packages/server/src/store/repos/runtimes-repo.ts:632:7)"
+        ],
+        "id": "fail-004",
+        "reason": "宿主身份、排空围栏或下行目标选择；只在同步范围复用，事务首锁与写入后重读。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT 1 FROM multiremi_daemon_retirements WHERE workspace_id = ? AND daemon_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/daemon-retirement-repo.ts:160:7)"
+        ],
+        "id": "fail-005",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 4,
+        "category": "lock",
+        "sql": "UPDATE multiremi_workspaces SET updated_at = updated_at WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/context.ts:1084:15)"
+        ],
+        "id": "fail-006",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_workspaces WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/workspaces-repo.ts:581:86)"
+        ],
+        "id": "fail-007",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 4,
+        "category": "read",
+        "sql": "SELECT scoped.*, CASE WHEN scoped.chat_id IS NOT NULL THEN chat.workspace_id ELSE issue.workspace_id END AS owner_workspace_id, head.workspace_id AS head_workspace_id, CASE WHEN scoped.parent_session_id IS NULL OR (parent.id IS NOT NULL AND parent.workspace_id = scoped.workspace_id AND COALESCE(parent.chat_id, '') = COALESCE(scoped.chat_id, '') AND (scoped.chat_id IS NOT NULL OR parent.issue_id = scoped.issue_id)) THEN 1 ELSE 0 END AS parent_owner_valid, CASE WHEN scoped.chat_id IS NULL AND EXISTS (SELECT 1 FROM multiremi_issue_activity activity WHERE activity.issue_id = scoped.issue_id AND activity.type = 'issue_main_session_rotated') THEN 1 ELSE 0 END AS has_rotation FROM (SELECT s.*, ( SELECT COUNT(*) FROM multiremi_conversation_log e WHERE e.session_id = s.parent_session_id AND e.kind <> 'head' AND e.seq > 0 AND ((s.inherit_mode = 'follow' AND (s.follow_frozen_seq IS NULL OR e.seq <= s.follow_frozen_seq)) OR (s.inherit_mode <> 'follow' AND e.seq <= s.inherit_cutoff_seq)) ) AS inherited_event_count FROM multiremi_issue_sessions s WHERE s.id = ?) scoped LEFT JOIN multiremi_chat_sessions chat ON chat.id = scoped.chat_id LEFT JOIN multiremi_issues issue ON issue.id = scoped.issue_id LEFT JOIN multiremi_issue_sessions parent ON parent.id = scoped.parent_session_id LEFT JOIN multiremi_conversation_heads head ON head.session_id = scoped.id",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:439:17)"
+        ],
+        "id": "fail-008",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 3,
+        "category": "lock",
+        "sql": "UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:7051:19)",
+          "packages/server/src/store/repos/issue-sessions-repo.ts:1106:17)",
+          "packages/server/src/store/repos/tasks-repo.ts:6307:17)"
+        ],
+        "id": "fail-009",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "lock",
+        "sql": "UPDATE multiremi_turns SET current_attempt_id=current_attempt_id WHERE id IN (SELECT turn_id FROM multiremi_turn_execution_records WHERE id = ? AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human'))",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:170:8)"
+        ],
+        "id": "fail-010",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id,turn_id,('failed') AS mutation_0,(?) AS mutation_1,(?) AS mutation_2,(COALESCE(?, session_id)) AS mutation_3,(COALESCE(?, work_dir)) AS mutation_4,(NULL) AS mutation_5,(?) AS mutation_6,(?) AS mutation_7,(?) AS mutation_8 FROM multiremi_turn_execution_records WHERE id = ? AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:173:62)"
+        ],
+        "id": "fail-011",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT current_attempt_id,session_id,agent_id FROM multiremi_turns WHERE id=?",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:194:111)"
+        ],
+        "id": "fail-012",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turn_attempts SET status=?,error=?,failure_reason=?,session_id=?,work_dir=?,wait_reason=?,ended_at=?,updated_at=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:148:6)"
+        ],
+        "id": "fail-013",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turns SET status=?,ended_at=?,ended_reason=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/turn-execution-records.ts:148:6)"
+        ],
+        "id": "fail-014",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_task_traces (task_id, location, updated_at) VALUES (?, 'none', ?) ON CONFLICT(task_id) DO UPDATE SET location = 'none', runtime_id = NULL, updated_at = excluded.updated_at WHERE multiremi_task_traces.location = 'daemon'",
+        "sources": [
+          "packages/server/src/store/repos/task-traces-repo.ts:55:17)"
+        ],
+        "id": "fail-015",
+        "reason": "现有业务持久化副作用；保留幂等谓词与原事务边界。其语句来源见 source，未证明不可合并。"
+      },
+      {
+        "count": 4,
+        "category": "read",
+        "sql": "SELECT id, workspace_id, runtime_id, status, agent_id, chat_session_id, issue_id, issue_session_id FROM multiremi_turn_execution_records WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:2697:7)"
+        ],
+        "id": "fail-016",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id FROM multiremi_message_question_records WHERE task_id = ? AND status IN ('pending','responded')",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:6946:7)"
+        ],
+        "id": "fail-017",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT t.id, t.status, t.current_attempt_id FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id = t.id WHERE a.id = ?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:6595:24)"
+        ],
+        "id": "fail-018",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_access_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE type = 'task' AND task_id = ? AND revoked_at IS NULL",
+        "sources": [
+          "packages/server/src/store/repos/access-tokens-repo.ts:243:28)"
+        ],
+        "id": "fail-019",
+        "reason": "终态撤销 attempt 凭据，避免终态任务继续写入。"
+      },
+      {
+        "count": 4,
+        "category": "read",
+        "sql": "SELECT i.*, w.id AS existing_workspace_id FROM multiremi_issues i LEFT JOIN multiremi_workspaces w ON w.id = i.workspace_id WHERE i.id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:849:17)"
+        ],
+        "id": "fail-020",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT l.* FROM multiremi_issue_labels l JOIN multiremi_issue_to_labels il ON il.label_id = l.id WHERE il.issue_id = ? ORDER BY lower(l.name) ASC",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:5398:18)"
+        ],
+        "id": "fail-021",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT workspace_id FROM multiremi_issues WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/context.ts:1586:89)"
+        ],
+        "id": "fail-022",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 2,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_issue_activity (id, issue_id, workspace_id, actor_type, actor_id, type, body, data, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "sources": [
+          "packages/server/src/store/context.ts:1448:13)"
+        ],
+        "id": "fail-023",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 3,
+        "category": "read",
+        "sql": "SELECT s.*, ( SELECT COUNT(*) FROM multiremi_conversation_log e WHERE e.session_id = s.parent_session_id AND e.kind <> 'head' AND e.seq > 0 AND ((s.inherit_mode = 'follow' AND (s.follow_frozen_seq IS NULL OR e.seq <= s.follow_frozen_seq)) OR (s.inherit_mode <> 'follow' AND e.seq <= s.inherit_cutoff_seq)) ) AS inherited_event_count FROM multiremi_issue_sessions s WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:433:17)"
+        ],
+        "id": "fail-024",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_issue_sessions SET updated_at = ? WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:721:17)"
+        ],
+        "id": "fail-025",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT seq FROM multiremi_conversation_log WHERE session_id = ? AND task_id = ? AND kind = 'turn' ORDER BY seq ASC LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:750:11)"
+        ],
+        "id": "fail-026",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_conversation_log WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:602:92)"
+        ],
+        "id": "fail-027",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, updated_at) VALUES (?, 0, 0, ?) ON CONFLICT(session_id) DO NOTHING",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:345:17)"
+        ],
+        "id": "fail-028",
+        "reason": "持久化日志 seq/version；轮卡通知批次累计原有 revision/version 次数。其它消息写入仍保留各自版本，尚未证明不能进一步合并。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_conversation_heads (session_id, head_seq, log_version, updated_at) VALUES (?, ?, 0, ?) ON CONFLICT(session_id) DO UPDATE SET head_seq = CASE WHEN multiremi_conversation_heads.head_seq < excluded.head_seq THEN excluded.head_seq ELSE multiremi_conversation_heads.head_seq END",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:352:17)"
+        ],
+        "id": "fail-029",
+        "reason": "持久化日志 seq/version；轮卡通知批次累计原有 revision/version 次数。其它消息写入仍保留各自版本，尚未证明不能进一步合并。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_heads SET head_seq = head_seq + 1, log_version = log_version + 1, updated_at = ? WHERE session_id = ? RETURNING head_seq",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:557:7)"
+        ],
+        "id": "fail-030",
+        "reason": "持久化日志 seq/version；轮卡通知批次累计原有 revision/version 次数。其它消息写入仍保留各自版本，尚未证明不能进一步合并。"
+      },
+      {
+        "count": 6,
+        "category": "read",
+        "sql": "SELECT turn_id FROM multiremi_turn_attempts WHERE id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:495:107)",
+          "packages/server/src/store/repos/conversation-log-repo.ts:824:95)",
+          "packages/server/src/store/repos/tasks-repo.ts:7136:92)",
+          "packages/server/src/store/inbox/daemon-turn-bridge.ts:109:128)"
+        ],
+        "id": "fail-031",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_conversation_log ( session_id, seq, id, kind, visibility, sender_type, sender_id, task_id, body_md, body_html, render_version, reply_to_id, resolved_at, resolved_by_type, resolved_by_id, metadata, revision, created_at, updated_at, deleted_at, to_type,to_ref,to_agent_id,to_member_id,message_kind,wake_requested,wake_applied,wake_reason,dedupe_key, options,card_token_hash,card_token_recipient,card_token_consumed_at ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:499:17)"
+        ],
+        "id": "fail-032",
+        "reason": "持久化回复/轮卡/消息头或修订版本，支撑回放与副本；回复暂存后发布仍有多次写入，尚可继续整合。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_conversation_log WHERE session_id = ? AND seq = ?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:597:7)"
+        ],
+        "id": "fail-033",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turn_attempts SET failure_reason=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:832:32)"
+        ],
+        "id": "fail-034",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_agent_lane_records WHERE session_id = ? AND agent_id = ? AND execution_scope = ?",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:804:7)"
+        ],
+        "id": "fail-035",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_session_lanes SET provider_session_id = NULL, runtime_id = NULL, provider = NULL, execution_fingerprint = NULL, work_dir = NULL, provider_cursor_seq = 0, parent_cursor_seq = 0, generation = generation + 1, last_attempt_id = NULL, updated_at = ? WHERE reader_type = 'agent' AND session_id = ? AND reader_id = ? AND execution_scope = ?",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:2430:17)"
+        ],
+        "id": "fail-036",
+        "reason": "持久化 lane 游标、provider lineage 或后继状态，保证 ACK/重试/再响铃。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_turns WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:80:71)"
+        ],
+        "id": "fail-037",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_agents WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/agents-skills-repo.ts:756:17)"
+        ],
+        "id": "fail-038",
+        "reason": "校验 Agent 工作区/活动状态并提供实际 Skills；原始行可复用，消费者对象重新水合。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT s.* FROM multiremi_skills s JOIN multiremi_agent_skills aks ON aks.skill_id = s.id WHERE aks.agent_id = ? AND s.archived_at IS NULL ORDER BY aks.created_at ASC, s.name ASC",
+        "sources": [
+          "packages/server/src/store/repos/agents-skills-repo.ts:897:18)"
+        ],
+        "id": "fail-039",
+        "reason": "校验 Agent 工作区/活动状态并提供实际 Skills；原始行可复用，消费者对象重新水合。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT chat.id, chat.workspace_id, chat.creator_id, chat.agent_id, chat.runtime_workspace_id, chat.project_id, chat.title, chat.status, chat.session_id, chat.work_dir, chat.session_runtime_id, chat.session_provider, chat.session_execution_fingerprint, chat.latest_task_id, chat.pinned, chat.origin_autopilot_id, chat.origin_run_id, chat.created_at, chat.updated_at, (SELECT COUNT(*) FROM multiremi_conversation_log m LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = '' LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id AND shared.workspace_id = chat.workspace_id WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown' AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS unread_count, (SELECT MIN(m.created_at) FROM multiremi_conversation_log m LEFT JOIN multiremi_session_lanes legacy ON legacy.session_id = m.session_id AND legacy.reader_type = 'member' AND legacy.reader_id = m.to_member_id AND legacy.execution_scope = '' LEFT JOIN multiremi_workspace_read_cursors shared ON shared.session_id = m.session_id AND shared.workspace_id = chat.workspace_id WHERE m.session_id = chat.id AND m.kind = 'message' AND m.visibility = 'shown' AND m.to_member_id IS NOT NULL AND m.deleted_at IS NULL AND m.seq > COALESCE(legacy.cursor_seq, 0) AND m.seq > COALESCE(shared.cursor_seq, 0)) AS reader_unread_since, (SELECT SUBSTR(m.body, 1, 240) FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_content, (SELECT m.role FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_role, (SELECT m.created_at FROM multiremi_chat_message_records m WHERE m.chat_session_id = chat.id ORDER BY m.sequence DESC, m.id DESC LIMIT 1) AS last_message_created_at FROM multiremi_chat_sessions chat WHERE chat.id = ?",
+        "sources": [
+          "packages/server/src/store/repos/chat-repo.ts:252:79)"
+        ],
+        "id": "fail-040",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 2,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_session_lanes(session_id,reader_type,reader_id,execution_scope,created_at,updated_at) VALUES(?,'agent',?,?,?,?) ON CONFLICT DO NOTHING",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:19:10)"
+        ],
+        "id": "fail-041",
+        "reason": "持久化 lane 游标、provider lineage 或后继状态，保证 ACK/重试/再响铃。"
+      },
+      {
+        "count": 2,
+        "category": "lock",
+        "sql": "UPDATE multiremi_session_lanes SET updated_at=updated_at WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:21:10)"
+        ],
+        "id": "fail-042",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT cursor_seq FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:93:88)"
+        ],
+        "id": "fail-043",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT seq FROM multiremi_conversation_log WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:97:84)"
+        ],
+        "id": "fail-044",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id FROM multiremi_conversation_log WHERE session_id=? AND kind='message' AND to_agent_id=? AND seq>? AND wake_applied='now' AND deleted_at IS NULL AND COALESCE(json_extract(metadata,'$.execution_scope'),'')=? ORDER BY seq DESC LIMIT 1",
+        "sources": [
+          "packages/server/src/store/inbox/lane-machine.ts:102:33)"
+        ],
+        "id": "fail-045",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT task.*,snapshot.id AS terminal_report_id,snapshot.metadata AS terminal_report_metadata, (SELECT MAX(seq) FROM multiremi_conversation_log e WHERE e.session_id=task.issue_session_id AND e.task_id=t.id) AS terminal_event_seq FROM multiremi_turn_execution_records task JOIN multiremi_turns t ON t.id=task.turn_id AND t.current_attempt_id=task.id LEFT JOIN multiremi_conversation_log snapshot ON snapshot.session_id=? AND snapshot.dedupe_key='delegation_terminal:'||task.id WHERE COALESCE(t.delegated_from_issue_session_id,t.session_id)=? AND t.status IN ('completed','failed','cancelled') AND t.delegation_id IS NOT NULL AND t.delegated_by_agent_id IS NOT NULL AND t.agent_id<>t.delegated_by_agent_id AND t.delegation_return_turn_id IS NULL AND t.delegation_skip_reason IS NULL ORDER BY t.ended_at,t.created_at,t.id",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:6319:47)"
+        ],
+        "id": "fail-046",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "lock",
+        "sql": "UPDATE multiremi_issues SET id=id WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/issue-status.ts:9:14)"
+        ],
+        "id": "fail-047",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id,workspace_id,parent_issue_id,assignee_type,assignee_id FROM multiremi_issues WHERE id=?",
+        "sources": [
+          "packages/server/src/store/issue-responsibility.ts:20:131)"
+        ],
+        "id": "fail-048",
+        "reason": "从工作轮、责任链、未答 Q/子单推导 Issue 状态；尚未将这些判定合并为一条查询。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT t.*,m.sender_type AS trigger_sender,m.wake_reason AS trigger_reason,m.message_kind AS trigger_kind, (SELECT COUNT(*) FROM multiremi_conversation_log merged WHERE merged.kind='message' AND merged.deleted_at IS NULL AND json_extract(CASE WHEN json_valid(merged.metadata) THEN merged.metadata ELSE '{}' END,'$.delivery_turn_id')=t.id AND merged.wake_reason IN ('human_sender','agent_dispatch')) AS merged_work_triggers FROM multiremi_turns t LEFT JOIN multiremi_conversation_log m ON m.id=t.trigger_message_id LEFT JOIN multiremi_issue_sessions owned_session ON owned_session.id=t.session_id WHERE t.issue_id=? AND COALESCE(owned_session.chat_id,t.chat_session_id) IS NULL AND (owned_session.id IS NULL OR owned_session.issue_id=t.issue_id) ORDER BY t.created_at DESC,t.seq DESC,t.id DESC",
+        "sources": [
+          "packages/server/src/store/inbox/issue-status.ts:20:125)"
+        ],
+        "id": "fail-049",
+        "reason": "从工作轮、责任链、未答 Q/子单推导 Issue 状态；尚未将这些判定合并为一条查询。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT 1 FROM multiremi_conversation_log d JOIN multiremi_issue_sessions s ON s.id=d.session_id WHERE s.issue_id=? AND s.chat_id IS NULL AND d.kind='message' AND d.message_kind='decision' AND d.sender_type='agent' AND d.sender_id=? AND d.deleted_at IS NULL AND d.resolved_at IS NULL AND NOT EXISTS(SELECT 1 FROM multiremi_conversation_log r WHERE r.reply_to_id=d.id AND r.message_kind='reply' AND r.deleted_at IS NULL) LIMIT 1",
+        "sources": [
+          "packages/server/src/store/inbox/issue-status.ts:25:95)"
+        ],
+        "id": "fail-050",
+        "reason": "从工作轮、责任链、未答 Q/子单推导 Issue 状态；尚未将这些判定合并为一条查询。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT m.id FROM multiremi_turns t JOIN multiremi_conversation_log m ON m.task_id = t.id WHERE t.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision' AND m.deleted_at IS NULL AND m.resolved_at IS NULL UNION SELECT m.id FROM multiremi_issue_sessions s JOIN multiremi_conversation_log m ON m.session_id = s.id WHERE s.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision' AND m.deleted_at IS NULL AND m.resolved_at IS NULL",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:579:7)"
+        ],
+        "id": "fail-051",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_issues SET status=?,completed_at=?,archived_at=NULL,updated_at=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/issue-status.ts:51:10)"
+        ],
+        "id": "fail-052",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "INSERT INTO multiremi_system_events ( id, workspace_id, resource, event, resource_id, project_id, payload, status, attempt_count, available_at, lease_until, last_error, created_at, processed_at ) VALUES (?, ?, 'issue', 'status_changed', ?, ?, ?, 'pending', 0, ?, NULL, NULL, ?, NULL)",
+        "sources": [
+          "packages/server/src/store/repos/autopilots-repo.ts:1012:17)"
+        ],
+        "id": "fail-053",
+        "reason": "持久化 Issue 状态、参与者、活动或派单意图；通知和后继任务须与终态原子提交。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_system_events WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/autopilots-repo.ts:1042:89)"
+        ],
+        "id": "fail-054",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT d.id, d.issue_id, d.depends_on_issue_id, d.type FROM multiremi_issue_dependencies d JOIN multiremi_issues a ON a.id = d.issue_id AND a.workspace_id = d.workspace_id JOIN multiremi_issues b ON b.id = d.depends_on_issue_id AND b.workspace_id = a.workspace_id WHERE (d.depends_on_issue_id = ? OR d.issue_id = ?) AND d.type IN ('blocked_by', 'blocks') ORDER BY d.created_at ASC, d.id ASC",
+        "sources": [
+          "packages/server/src/store/repos/issues-repo.ts:3062:7)"
+        ],
+        "id": "fail-055",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT 1 AS present FROM multiremi_turns turns JOIN multiremi_issue_sessions sessions ON sessions.id = turns.session_id WHERE turns.issue_id = ? AND sessions.issue_id = turns.issue_id AND sessions.chat_id IS NULL AND turns.status IN ('pending', 'running', 'awaiting_human') LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:7304:7)"
+        ],
+        "id": "fail-056",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "lock",
+        "sql": "UPDATE multiremi_issues SET lifecycle_state = lifecycle_state WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/context.ts:1102:13)"
+        ],
+        "id": "fail-057",
+        "reason": "保留首个事务互斥锁；同一事务的 workspace/lane 重入已复用，不同事务或回滚后的锁必须重新获取。Session/Issue/turn 锁仍按现有顺序取得。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT s.*, ( SELECT COUNT(*) FROM multiremi_conversation_log e WHERE e.session_id = s.parent_session_id AND e.kind <> 'head' AND e.seq > 0 AND ((s.inherit_mode = 'follow' AND (s.follow_frozen_seq IS NULL OR e.seq <= s.follow_frozen_seq)) OR (s.inherit_mode <> 'follow' AND e.seq <= s.inherit_cutoff_seq)) ) AS inherited_event_count FROM multiremi_issue_sessions s WHERE s.chat_id IS NULL AND s.issue_id = ? AND s.is_default = 1 LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/issue-sessions-repo.ts:304:7)"
+        ],
+        "id": "fail-058",
+        "reason": "校验当前 Session 所有者、Issue 状态、回复来源或下游资格；表依赖缓存失效后重新读取。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_conversation_heads WHERE session_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:579:78)"
+        ],
+        "id": "fail-059",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT c.id, c.agent_id, b.id AS binding_id FROM multiremi_feishu_bot_chat_bindings b JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id WHERE b.issue_id = ? AND b.workspace_id = ? AND c.workspace_id = ? AND c.status <> 'archived' ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC",
+        "sources": [
+          "packages/server/src/store/repos/inbox-repo.ts:155:70)"
+        ],
+        "id": "fail-060",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? ORDER BY created_at, bot_id",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:265:8)"
+        ],
+        "id": "fail-061",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 5,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:436:8)"
+        ],
+        "id": "fail-062",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT turn_id FROM multiremi_turn_attempts WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:2846:102)"
+        ],
+        "id": "fail-063",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT b.* FROM multiremi_feishu_bot_chat_bindings b JOIN multiremi_chat_sessions c ON c.id = b.chat_session_id WHERE b.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND b.issue_id = ? AND c.status = 'active' AND b.chat_id IS NOT NULL AND b.reply_to_message_id IS NOT NULL ORDER BY b.updated_at DESC, b.created_at DESC, b.id DESC",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:2856:7)"
+        ],
+        "id": "fail-064",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT DISTINCT sessions.issue_id FROM multiremi_conversation_log messages JOIN multiremi_issue_sessions sessions ON sessions.id = messages.session_id WHERE messages.task_id = ? AND messages.kind = 'message' AND messages.sender_type = 'agent' AND messages.sender_id = ? AND messages.message_kind IN ('request', 'reply', 'final') AND messages.deleted_at IS NULL AND sessions.chat_id IS NULL AND sessions.issue_id <> ? ORDER BY sessions.issue_id",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:6799:9)"
+        ],
+        "id": "fail-065",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT event_count, tool_call_count, type_histogram, model, context_usage, worked_ms, process_item_count, late_subagents FROM multiremi_turn_attempts WHERE id = ?",
+        "sources": [
+          "packages/server/src/store/store.ts:4693:7)"
+        ],
+        "id": "fail-066",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turn_attempts SET tool_call_count=?,event_count=?,type_histogram=?,model=?,context_usage=?,worked_ms=?,process_item_count=?,late_subagents=? WHERE id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:832:32)"
+        ],
+        "id": "fail-067",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT session_id,seq FROM multiremi_turns WHERE id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:132:87)"
+        ],
+        "id": "fail-068",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_log SET revision=revision+?,updated_at=? WHERE session_id=? AND seq=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:134:14)"
+        ],
+        "id": "fail-069",
+        "reason": "持久化回复/轮卡/消息头或修订版本，支撑回放与副本；回复暂存后发布仍有多次写入，尚可继续整合。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_conversation_heads SET log_version=log_version+?,updated_at=? WHERE session_id=?",
+        "sources": [
+          "packages/server/src/store/repos/conversation-log-repo.ts:135:14)"
+        ],
+        "id": "fail-070",
+        "reason": "持久化日志 seq/version；轮卡通知批次累计原有 revision/version 次数。其它消息写入仍保留各自版本，尚未证明不能进一步合并。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT t.*,a.status AS attempt_status,a.attempt_no,a.failure_reason,a.progress_summary,a.event_count, a.tool_call_count,a.type_histogram,a.model,a.trace_ref,a.usage,a.started_at AS attempt_started_at,a.ended_at AS attempt_ended_at, a.context_usage,a.worked_ms,a.process_item_count,a.late_subagents FROM multiremi_turns t LEFT JOIN multiremi_turn_attempts a ON a.id=t.current_attempt_id WHERE t.id=?",
+        "sources": [
+          "packages/server/src/store/turn-attempts.ts:82:58)"
+        ],
+        "id": "fail-071",
+        "reason": "投影当前轮卡/回复或日志 seq；批次只发布最终轮卡，默认要求返回值的调用方仍 materialize。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT a.turn_id AS task_id,u.provider,COALESCE(u.model,u.requested_model,'unknown') AS model, SUM(COALESCE(input_tokens,0)) AS input_tokens,SUM(COALESCE(output_tokens,0)) AS output_tokens, SUM(COALESCE(cache_read_tokens,0)) AS cache_read_tokens,SUM(COALESCE(cache_write_tokens,0)) AS cache_write_tokens, SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)+COALESCE(cache_read_tokens,0)+COALESCE(cache_write_tokens,0)+COALESCE(actual_unsplit_tokens,0)) AS total_tokens FROM multiremi_usage_units u JOIN multiremi_turn_attempts a ON a.id=u.task_id WHERE a.turn_id IN (?) AND source<>'context_snapshot' AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cache_read_tokens IS NOT NULL OR cache_write_tokens IS NOT NULL OR actual_unsplit_tokens IS NOT NULL) GROUP BY a.turn_id,u.provider,COALESCE(u.model,u.requested_model,'unknown') ORDER BY task_id,u.provider,model",
+        "sources": [
+          "packages/server/src/store/usage-projection.ts:21:18)"
+        ],
+        "id": "fail-072",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT runtime_id FROM multiremi_turn_execution_records WHERE workspace_id=? AND runtime_id IS NOT NULL AND status IN ('dispatched','running','waiting_local_directory','awaiting_human') UNION SELECT runtime_id FROM multiremi_feishu_bot_configs WHERE workspace_id=? AND runtime_id IS NOT NULL UNION SELECT runtime_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id=? AND (state<>'stopped' OR release_pending=1) UNION SELECT runtime_id FROM multiremi_background_tasks WHERE workspace_id=? AND lane_state<>'closed' UNION SELECT r.id AS runtime_id FROM multiremi_runtimes r JOIN multiremi_daemon_drains d ON d.workspace_id=COALESCE(r.workspace_id,'local') AND d.daemon_id=COALESCE(r.daemon_id,r.id) WHERE d.workspace_id=?",
+        "sources": [
+          "packages/server/src/store/repos/runtimes-repo.ts:581:34)"
+        ],
+        "id": "fail-073",
+        "reason": "宿主身份、排空围栏或下行目标选择；只在同步范围复用，事务首锁与写入后重读。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT runtime.*, profile.display_name AS daemon_display_name, drain.daemon_id AS draining_daemon_id FROM multiremi_runtimes runtime LEFT JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) LEFT JOIN multiremi_daemon_profiles profile ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local') AND profile.daemon_id = runtime.daemon_id WHERE runtime.id IN (?,?,?,?,?,?,?,?)",
+        "sources": [
+          "packages/server/src/store/repos/runtimes-repo.ts:562:67)"
+        ],
+        "id": "fail-074",
+        "reason": "宿主身份、排空围栏或下行目标选择；只在同步范围复用，事务首锁与写入后重读。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id FROM multiremi_feishu_bot_outbound_deliveries WHERE task_id = ? AND kind = 'cot' AND delivery_mode = 'split'",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3055:72)"
+        ],
+        "id": "fail-075",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 4,
+        "category": "read",
+        "sql": "SELECT bot_id FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND runtime_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:276:10)"
+        ],
+        "id": "fail-076",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'pending' AND available_at > ? UNION ALL SELECT leased_until AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'sending' AND leased_until > ? ) deadlines",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3551:19)"
+        ],
+        "id": "fail-077",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT request.created_at, request.expires_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id WHERE task.workspace_id = ? AND task.issue_id IS NOT NULL AND request.status = 'pending' AND request.reminder_sent_at IS NULL AND request.expires_at IS NOT NULL AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries delivery WHERE delivery.human_request_id = request.id AND delivery.kind = 'decision_card' AND delivery.status = 'sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL)",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3560:8)"
+        ],
+        "id": "fail-078",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id=request.task_id JOIN multiremi_conversation_log message ON message.id=request.id JOIN multiremi_feishu_bot_outbound_deliveries delivery ON delivery.human_request_id=request.id JOIN multiremi_feishu_bot_chat_bindings binding ON binding.id=delivery.binding_id AND binding.workspace_id=delivery.workspace_id WHERE task.workspace_id=? AND task.issue_id IS NOT NULL AND request.status='pending' AND binding.bot_id=? AND binding.app_id=? AND request.reminder_sent_at IS NULL AND request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND delivery.kind='decision_card' AND delivery.status='sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL GROUP BY request.id",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3578:29)"
+        ],
+        "id": "fail-079",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) WHERE runtime.id = ?",
+        "sources": [
+          "packages/server/src/store/store.ts:3507:30)"
+        ],
+        "id": "fail-080",
+        "reason": "现有调用需要的身份、所有权或派生输入，见 source；保留目前契约，尚未证明该查询不可合并。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT id, status, runtime_id, agent_id FROM multiremi_turn_execution_records WHERE status IN (?, ?, ?, ?) AND runtime_id = ? ORDER BY created_at DESC",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:3144:7)"
+        ],
+        "id": "fail-081",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT t.*,a.runtime_id,a.status AS attempt_status,a.offered_at,a.projection_to_seq AS offered_to FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id WHERE t.id=? AND a.id=?",
+        "sources": [
+          "packages/server/src/store/inbox/daemon-turn-bridge.ts:48:230)"
+        ],
+        "id": "fail-082",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT bot_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND runtime_id = ? AND (state <> 'stopped' OR release_pending = 1) ORDER BY reported_at DESC LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:284:10)"
+        ],
+        "id": "fail-083",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_turn_attempts WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/attempt-input.ts:33:86)"
+        ],
+        "id": "fail-084",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND deleted_at IS NULL AND visibility='shown' ORDER BY seq",
+        "sources": [
+          "packages/server/src/store/inbox/daemon-turn-bridge.ts:55:264)"
+        ],
+        "id": "fail-085",
+        "reason": "校验当前 attempt/宿主、已 offer 输入范围、完整输入读取或再响铃；完成预检/终态写/提交后快照仍分开读取。"
+      },
+      {
+        "count": 1,
+        "category": "write",
+        "sql": "UPDATE multiremi_turn_attempts SET projection_to_seq=CASE WHEN COALESCE(projection_to_seq,0)<? THEN ? ELSE projection_to_seq END WHERE id=?",
+        "sources": [
+          "packages/server/src/store/inbox/daemon-turn-bridge.ts:117:21)"
+        ],
+        "id": "fail-086",
+        "reason": "持久化 attempt/turn 终态、输入 ACK 或 completion fields；当前通用 mutator 与 outcome 路径仍分步写入。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T17:13:25.386Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T17:13:25.386Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T16:55:25.386Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:14:55.386Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:14:55.386Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:25.386Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:25.386Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:25.386Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T16:55:25.386Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:25.386Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:25.386Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:25.386Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:25.386Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:25.386Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:25.386Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:05:25.386Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:05:25.386Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:05:25.386Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:25.386Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:25.386Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:10:25.386Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:25.386Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:25.386Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:25.386Z'))) AS sweep, FALSE AS housekeeping",
+        "sources": [
+          "packages/server/src/store/repos/runtimes-repo.ts:2681:68)"
+        ],
+        "id": "fail-087",
+        "reason": "宿主身份、排空围栏或下行目标选择；只在同步范围复用，事务首锁与写入后重读。"
+      },
+      {
+        "count": 8,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_platform_maintenance WHERE id = 'platform'",
+        "sources": [
+          "packages/server/src/store/repos/platform-maintenance-repo.ts:192:7)"
+        ],
+        "id": "fail-088",
+        "reason": "排空/更新围栏读取，不能用前一事务的缓存跨越维护切换；已移除存在单例时的重复 INSERT。"
+      },
+      {
+        "count": 2,
+        "category": "read",
+        "sql": "SELECT * FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND bot_id = ? AND runtime_id = ?",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:4182:8)"
+        ],
+        "id": "fail-089",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 6,
+        "category": "read",
+        "sql": "SELECT 1 FROM multiremi_turn_execution_records WHERE workspace_id = ? AND status IN ('queued', 'dispatched') LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/tasks-repo.ts:3324:79)"
+        ],
+        "id": "fail-090",
+        "reason": "任务/自动化 run 身份、重试/委派/终态后继判定；既有域边界仍有重复读取，未声称达到理论下限。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T17:13:25.391Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T17:13:25.391Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T16:55:25.391Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:14:55.391Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:14:55.391Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:25.391Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:25.391Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:25.391Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T16:55:25.391Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:25.391Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:25.391Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:25.391Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:25.391Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:25.391Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:25.391Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:05:25.391Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:05:25.391Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:05:25.391Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:25.391Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:25.391Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:10:25.391Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T17:12:25.391Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T17:12:25.391Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T17:14:25.391Z'))) AS sweep, FALSE AS housekeeping",
+        "sources": [
+          "packages/server/src/store/repos/runtimes-repo.ts:2681:68)"
+        ],
+        "id": "fail-091",
+        "reason": "宿主身份、排空围栏或下行目标选择；只在同步范围复用，事务首锁与写入后重读。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id, operation FROM multiremi_feishu_bot_outbound_operations WHERE workspace_id = ? AND ((status = 'pending' AND available_at <= ?) OR (status = 'processing' AND leased_until <= ?)) ORDER BY created_at, CASE kind WHEN 'topic' THEN 0 WHEN 'round' THEN 1 WHEN 'retarget' THEN 2 WHEN 'human_request' THEN 3 WHEN 'round_delivery' THEN 4 ELSE 5 END, id LIMIT 32",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3123:96)"
+        ],
+        "id": "fail-092",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT decision.id, decision.issue_id FROM multiremi_message_decision_records decision JOIN multiremi_issues issue ON issue.id = decision.issue_id WHERE decision.status = 'escalated' AND decision.reminder_sent_at IS NULL AND issue.workspace_id = ? AND ( SELECT o.sent_at FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.kind = 'decision_card' AND o.decision_id = decision.id AND b.bot_id = ? AND o.status = 'sent' AND o.external_message_id IS NOT NULL AND o.degraded IS NULL AND o.sent_at IS NOT NULL ORDER BY o.created_at DESC, o.id DESC LIMIT 1 ) <= ? ORDER BY decision.id ASC",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3318:38)"
+        ],
+        "id": "fail-093",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT id, kind FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND delivery_mode = 'split' AND attempt_count >= 6 AND binding_id IN (SELECT id FROM multiremi_feishu_bot_chat_bindings WHERE workspace_id = ? AND bot_id = ?) AND ((status = 'pending' AND available_at <= ?) OR (status = 'sending' AND leased_until <= ?))",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3325:9)"
+        ],
+        "id": "fail-094",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT request.id, request.task_id, request.expires_at, request.created_at, (SELECT MAX(card.sent_at) FROM multiremi_feishu_bot_outbound_deliveries card WHERE card.human_request_id=request.id AND card.kind='decision_card' AND card.status='sent' AND card.external_message_id IS NOT NULL AND card.degraded IS NULL) AS card_sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id JOIN multiremi_conversation_log message ON message.id=request.id WHERE request.status = 'pending' AND request.reminder_sent_at IS NULL -- A reminder is worth sending only while it still leaves the reader -- time to act: under a minute of lifetime left, the nudge would arrive -- as the request expires. The bound is the same expression the CAS and -- the claim use, so SQLite and Postgres agree. AND (request.expires_at >= ? OR (request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries card WHERE card.human_request_id=request.id AND card.kind='decision_card' AND card.status='sent' AND card.external_message_id IS NOT NULL AND card.degraded IS NULL AND card.sent_at<=?))) AND task.issue_id IS NOT NULL AND task.workspace_id = ? AND ( SELECT COUNT(*) FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.kind = 'decision_card' AND o.human_request_id = request.id AND b.bot_id = ? AND o.status = 'sent' AND o.external_message_id IS NOT NULL AND o.degraded IS NULL ) > 0 ORDER BY request.expires_at ASC, request.id ASC",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:2519:7)"
+        ],
+        "id": "fail-095",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT d.*, COALESCE(d.outbound_task_id, d.task_id) AS target_task_id, b.chat_id, b.thread_id, s.open_id FROM multiremi_feishu_bot_deliveries d JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id AND b.workspace_id = d.workspace_id LEFT JOIN multiremi_feishu_bot_senders s ON s.id = d.sender_id WHERE d.workspace_id = ? AND d.outbound_requested = 1 AND b.chat_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries carrier WHERE carrier.task_id = COALESCE(d.outbound_task_id, d.task_id) AND (carrier.kind IS NULL OR carrier.kind = 'cot') AND carrier.unit_key = '') AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_deliveries earlier WHERE COALESCE(earlier.outbound_task_id, earlier.task_id) = COALESCE(d.outbound_task_id, d.task_id) AND earlier.outbound_requested = 1 AND (earlier.created_at < d.created_at OR (earlier.created_at = d.created_at AND earlier.external_message_id < d.external_message_id))) ORDER BY d.created_at, d.external_message_id LIMIT 32",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3196:63)"
+        ],
+        "id": "fail-096",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT o.task_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_turn_execution_records t ON t.id = o.task_id WHERE o.workspace_id = ? AND o.kind = 'cot' AND o.delivery_mode = 'split' AND (t.status NOT IN ('completed', 'failed', 'cancelled') OR NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries r WHERE r.task_id = o.task_id AND r.kind = 'result_card'))",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3213:8)"
+        ],
+        "id": "fail-097",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      },
+      {
+        "count": 1,
+        "category": "read",
+        "sql": "SELECT o.* FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND (o.kind IS NULL OR o.kind NOT IN ('decision_card', 'decision_card_patch', 'decision_reminder') OR o.degraded IS NOT NULL) AND (? = 1 OR o.delivery_mode IS NULL OR o.delivery_mode = 'legacy') AND (o.decision_id IS NULL OR EXISTS ( SELECT 1 FROM multiremi_message_decision_records decision JOIN multiremi_issues target ON target.id = decision.issue_id AND target.workspace_id = decision.workspace_id JOIN multiremi_issues source ON source.id = decision.source_issue_id AND source.workspace_id = decision.workspace_id WHERE decision.id = o.decision_id AND decision.workspace_id = o.workspace_id AND decision.issue_id = o.decision_issue_id AND b.workspace_id = o.workspace_id AND b.issue_id = decision.issue_id )) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_round_pushes r WHERE r.wake_task_id = o.task_id AND r.binding_id = b.id AND r.workspace_id = o.workspace_id AND r.delivery_mode = 'proactive' AND (b.issue_id IS NULL OR b.issue_id <> r.issue_id) ) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_human_request_pushes h WHERE h.wake_task_id = o.task_id AND h.binding_id = b.id AND h.workspace_id = o.workspace_id AND (b.issue_id IS NULL OR b.issue_id <> h.issue_id) ) AND (o.task_id IS NULL OR ? = 1 OR o.body <> '') AND (? = 1 OR o.presentation_checkpoint IS NULL) AND (? = 1 OR o.attachments IS NULL) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries received WHERE o.kind = 'receipt' AND o.unit_key <> o.target_message_id || ':received' AND received.task_id = o.task_id AND received.kind = 'receipt' AND received.unit_key = o.target_message_id || ':received' AND received.status IN ('pending', 'sending')) AND (o.previous_delivery_id IS NULL OR EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries previous WHERE previous.id = o.previous_delivery_id AND previous.workspace_id = o.workspace_id AND (previous.status = 'sent' OR (o.cascade_failure = 0 AND previous.status = 'failed')))) AND ((o.status = 'pending' AND o.available_at <= ?) OR (o.status = 'sending' AND o.leased_until IS NOT NULL AND o.leased_until <= ?)) ORDER BY o.created_at ASC, o.id ASC LIMIT 1",
+        "sources": [
+          "packages/server/src/store/repos/feishu-bot-repo.ts:3409:9)"
+        ],
+        "id": "fail-098",
+        "reason": "下行飞书 delivery/outbox 资格、claim token、提醒或重放；尚未合并独立检查，不主张每条都不可消除。"
+      }
+    ]
+  }
+}

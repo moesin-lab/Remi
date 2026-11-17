@@ -932,12 +932,13 @@ export class MultiremiDaemonClient {
     return response.allowed === true;
   }
 
-  async reportRuntimeUpdateResult(runtimeId: string, requestId: string, result: { status: string; output?: string; error?: string }): Promise<void> {
+  async reportRuntimeUpdateResult(runtimeId: string, requestId: string, result: { status: string; output?: string; error?: string; self_check?: boolean }): Promise<void> {
     if (!this.reportTransport || this.reportTransport.upgradeWaiting()) {
       await this.post(`/api/daemon/runtimes/${runtimeId}/update/${requestId}/result`, result);
       return;
     }
-    await this.report("runtime.update_result", `rt:${runtimeId}`, { ...result, request_id: requestId, runtime_id: runtimeId });
+    await this.report("runtime.update_result", `rt:${runtimeId}`, { ...result, request_id: requestId, runtime_id: runtimeId },
+      result.status === "completed" || result.status === "rolled_back");
   }
 
   async reportRuntimeCommandResult(runtimeId: string, requestId: string, result: {

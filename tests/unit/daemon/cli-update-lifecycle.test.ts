@@ -14,7 +14,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-for (const outcome of ["failed", "completed"] as const) {
+for (const outcome of ["failed", "restarting"] as const) {
   test(`co-resident offers survive a slow CLI update until it is ${outcome}`, async () => {
     const root = mkdtempSync(join(tmpdir(), "cli-update-lifecycle-"));
     roots.push(root);

@@ -108,6 +108,25 @@ describe("MachineCliUpdate", () => {
     await waitFor(() => expect(screen.getByText(fullError)).toBeInTheDocument());
   });
 
+  it("keeps polling during restart and verification, then displays rollback", async () => {
+    vi.useFakeTimers();
+    apiMocks.getUpdateResult.mockResolvedValueOnce({ status: "restarting" })
+      .mockResolvedValueOnce({ status: "verifying" })
+      .mockResolvedValue({ status: "rolled_back", error: "candidate startup exited" });
+    renderWithProviders(<MachineCliUpdate runtimeId="rt-1" currentVersion="0.3.0" cliVersions={["0.3.0"]} managedByDesktop={false} />);
+    await act(async () => Promise.resolve());
+    fireEvent.click(screen.getByRole("button", { name: "Update" }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByTestId("machine-cli-update")).toHaveTextContent(enRuntimes.update.status.restarting);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByTestId("machine-cli-update")).toHaveTextContent(enRuntimes.update.status.verifying);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByRole("button", { name: "Rolled back" })).toBeInTheDocument();
+    const calls = apiMocks.getUpdateResult.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+    expect(apiMocks.getUpdateResult).toHaveBeenCalledTimes(calls);
+  });
+
   it("disables an available update when the machine has no online representative", async () => {
     renderWithProviders(
       <MachineCliUpdate runtimeId={null} currentVersion="0.3.0" cliVersions={["0.3.0"]} managedByDesktop={false} />,

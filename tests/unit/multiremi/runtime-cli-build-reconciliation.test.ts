@@ -84,6 +84,31 @@ describe("deployment CLI identity reconciliation", () => {
 });
 
 describe("automatic failure issues", () => {
+  for (const [label, diagnostic, secrets] of [
+    ["JSON authorization", '{"headers":{"Authorization":"Bearer exampleOpaqueCredential123"}}', ["exampleOpaqueCredential123"]],
+    ["JSON cookie", '{"Cookie":"session=exampleCookieCredential123"}', ["exampleCookieCredential123"]],
+    ["JSON proxy authorization", '{"Proxy-Authorization":"Basic exampleProxyCredential123"}', ["exampleProxyCredential123"]],
+    ["JSON set-cookie", '{"Set-Cookie":"session=exampleSetCookieCredential123; Secure"}', ["exampleSetCookieCredential123"]],
+    ["double quoted password", 'password="alpha beta gamma"', ["alpha", "beta", "gamma"]],
+    ["single quoted password", "password='delta epsilon zeta'", ["delta", "epsilon", "zeta"]],
+    ["escaped quote in JSON secret", JSON.stringify({ api_key: 'first\\part "second part" finalPart' }), ["first", "second", "finalPart"]],
+    ["long quoted credential", `credential="${"longSecret ".repeat(300)}tailSecret"`, ["longSecret", "tailSecret"]],
+  ] as const) it(`redacts ${label} in the persisted failure issue`, () => {
+    const store = createLocalStore(); runtime(store);
+    const project = store.createProject({ title: "Redacted failures" });
+    process.env.MULTIREMI_DAEMON_UPDATE_FAILURE_TARGETS = JSON.stringify({ local: { projectId: project.id } });
+    const [request] = store.reconcileRuntimeCliRelease(version, A);
+    store.reportRuntimeUpdateResult("rt_build", request!.id, { status: "failed", error: diagnostic, output: diagnostic });
+    const issues = store.listIssues({ projectId: project.id });
+    expect(issues).toHaveLength(1);
+    const description = issues[0]!.description!;
+    expect(description).toContain(`Target commit: ${A}`);
+    expect(description).toContain("Terminal status: failed");
+    expect(description).toContain("Error: ");
+    expect(description).toContain("Output: ");
+    expect(description).toContain("[REDACTED]");
+    for (const secret of secrets) expect(description).not.toContain(secret);
+  });
   for (const status of ["failed", "rolled_back"] as const) it(`creates one issue for ${status} reports, including after reopen`, () => {
     const store = createLocalStore(); runtime(store);
     const project = store.createProject({ title: "Daemon failures" });

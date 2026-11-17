@@ -385,18 +385,19 @@ export class Edge extends EventEmitter {
     relay.pending = []; relay.bytes = 0;
     // Reserved transport codes cannot appear in a close frame.
     const wireCode = code === 1005 ? 1000 : [1006, 1015].includes(code) ? 1011 : code;
+    if (relay.upstream.readyState === WebSocket.OPEN) {
+      relay.upstream.close(wireCode, reason);
+      // Initiate the backend close before closing the downstream.
+      // Release TCP backpressure so the peer can finish its queued writes and
+      // exchange close frames before the upstream close deadline.
+      relay.upstream.resume();
+    } else if (relay.upstream.readyState === WebSocket.CONNECTING) relay.upstream.close();
     relay.client?.close(wireCode, reason);
     if (relay.client) {
       const client = relay.client;
       const timer = setTimeout(() => { client.terminate(); this.clients.delete(client); }, 100);
       timer.unref();
     }
-    if (relay.upstream.readyState === WebSocket.OPEN) {
-      relay.upstream.close(wireCode, reason);
-      // Release TCP backpressure so the peer can finish its queued writes and
-      // exchange close frames before the upstream close deadline.
-      relay.upstream.resume();
-    } else if (relay.upstream.readyState === WebSocket.CONNECTING) relay.upstream.close();
     if (this.relays.delete(relay)) { relay.slot.websockets--; this.checkDrained(relay.slot); }
   }
   stop() {

@@ -1,4 +1,4 @@
-import { SlotLifecycle, resolveSlotConfiguration, type SlotConfiguration } from "./slot-lifecycle.js";
+import { API_SHUTDOWN_TIMEOUT_MS, DrainTimeoutError, SlotLifecycle, resolveSlotConfiguration, type SlotConfiguration } from "./slot-lifecycle.js";
 import { startHubRoleGuard, locksForRole } from "./hub/hub-role-guard.js";
 import { reconcileCurrentDaemonBuild } from "../releases/current-daemon-build.js";
 import { isDatabaseConnectionError, withDatabaseTimeout } from "@shared/db/recovery.js";
@@ -374,7 +374,7 @@ export interface MultiremiApiOptions {
   backgroundJobs?: boolean;
   /** null preserves legacy startup even when the parent environment has a slot. */
   slotConfiguration?: SlotConfiguration | null;
-  slotFence?: () => Promise<number | string | null>;
+  slotFence?: (signal: AbortSignal) => Promise<number | string | null>;
   verifyScmConnection?: ScmConnectionVerifier;
   /** Per-request performance metrics (MUL-367). Undefined reads the env config. */
   requestMetrics?: RequestMetricsOptions;
@@ -1354,11 +1354,11 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   const pendingRequests = (): number => Math.max(0, server.pendingRequests
     - [...pendingSlotControls].filter(req => !req.signal.aborted).length);
   const slot = slotConfiguration ? new SlotLifecycle(slotConfiguration, multiremiVersion, {
-    acquire: async () => {
+    acquire: async (signal) => {
       const guard = await startHubRoleGuard({
         databaseUrl: process.env.MULTIREMI_DATABASE_URL,
         locks: locksForRole(effectiveApiRole, Boolean(peerUrl)),
-        timeoutMs: slotConfiguration.lockTimeoutMs, throwOnFailure: true,
+        timeoutMs: slotConfiguration.lockTimeoutMs, throwOnFailure: true, signal,
       });
       if (!guard) throw new Error("hub role lock could not be acquired");
       return guard;
@@ -1390,14 +1390,14 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
             if (req.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
             try {
               if (action === "activate") await slot.activate();
-              else await slot.release();
+              else if (action === "release") await slot.release();
               if (action === "exit") {
-                await slot.exit();
                 setTimeout(() => requestExit(), 0);
               }
               return Response.json(slot.status());
-            } catch {
-              return Response.json({ ...slot.status(), error: "slot transition failed" }, { status: 503 });
+            } catch (error) {
+              return Response.json({ ...slot.status(), error: error instanceof DrainTimeoutError ? "drain_timeout" : "slot transition failed",
+                ...(error instanceof DrainTimeoutError ? { in_flight: error.inFlight } : {}) }, { status: 503 });
             }
           } finally { pendingSlotControls.delete(req); }
         }
@@ -1649,9 +1649,17 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   if (!slot) startJobs();
   let shutdown: Promise<void> | undefined;
   serverWithResync.shutdown = () => shutdown ??= (async () => {
-    await requestLifecycle.exit();
-    await server.stop(false);
-    if (slot) slot.state = "exited";
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // One budget for drain, jobs, read resources, sockets and final disposal.
+      await Promise.race([(async () => {
+        await requestLifecycle.exit();
+        await server.stop(false);
+        if (slot) slot.state = "exited";
+      })(), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("API shutdown deadline exceeded")), API_SHUTDOWN_TIMEOUT_MS);
+      })]);
+    } finally { clearTimeout(timer); }
   })();
   void exitRequested.then(() => serverWithResync.shutdown()).catch(() => {
     log.error("slot shutdown failed");

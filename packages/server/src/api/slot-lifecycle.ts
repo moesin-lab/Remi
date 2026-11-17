@@ -1,5 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 
+export const API_SHUTDOWN_TIMEOUT_MS = 25_000;
+
 export type SlotState = "standby" | "activating" | "active" | "draining" | "released" | "failed" | "exited";
 export interface SlotConfiguration {
   id: string;
@@ -29,23 +31,31 @@ export function resolveSlotConfiguration(env: NodeJS.ProcessEnv): SlotConfigurat
   };
 }
 
+type SlotGuard = { close(): Promise<void> };
+
 export interface SlotHooks {
   /** Native HTTP count, excluding control handlers; SSE is subtracted here. */
   pendingRequests?(): number;
-  acquire(): Promise<{ close(): Promise<void> }>;
+  acquire(signal: AbortSignal): Promise<SlotGuard>;
   /** A3 supplies the live term here, after acquiring the role lock. */
-  fence?(): Promise<number | string | null>;
+  fence?(signal: AbortSignal): Promise<number | string | null>;
   start(): void | Promise<void>;
   disconnect(): void;
   stop(): void | Promise<void>;
+}
+
+export class DrainTimeoutError extends Error {
+  constructor(readonly inFlight: number) { super("drain_timeout"); }
 }
 
 /** Serializes transitions; a failed activation keeps its listener for retry/rollback. */
 export class SlotLifecycle {
   state: SlotState = "standby";
   term: number | string | null = null;
-  private guard: { close(): Promise<void> } | null = null;
+  private guard: SlotGuard | null = null;
   private exiting = false;
+  private drainTimedOut = false;
+  private activationCleanup: Promise<void> | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly requests = new Set<symbol>();
   private readonly streams = new Set<() => void>();
@@ -64,31 +74,75 @@ export class SlotLifecycle {
     return this.serialize(async () => {
       if (this.state === "active") return;
       if (this.exiting || this.state === "exited") throw new Error("slot has exited");
+      if (this.drainTimedOut && this.state === "draining") {
+        // HTTP timeout occurs before disconnect/stop, so the existing activation
+        // is intact. Rollback must reuse its locks, term and running jobs.
+        this.drainTimedOut = false;
+        this.state = "active";
+        return;
+      }
       if (this.guard) throw new Error("release the previous activation before retrying");
       this.state = "activating";
-      try {
-        this.guard = await this.hooks.acquire();
-        this.term = await this.hooks.fence?.() ?? null;
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let started = false;
+      const activation = (async () => {
+        const guard = await this.hooks.acquire(controller.signal);
+        if (controller.signal.aborted) { await guard.close(); return; }
+        this.guard = guard;
+        const term = await this.hooks.fence?.(controller.signal) ?? null;
+        if (controller.signal.aborted) return;
+        this.term = term;
+        started = true;
         await this.hooks.start();
-        this.state = "active";
+        if (!controller.signal.aborted) this.state = "active";
+      })();
+      try {
+        await Promise.race([activation, new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error("activation_timeout"));
+          }, this.config.lockTimeoutMs);
+        })]);
       } catch (error) {
+        controller.abort();
         this.state = "failed";
-        // Retain ownership if stopping fails: never hand live jobs to a successor.
-        await this.hooks.stop();
-        await this.guard?.close();
-        this.guard = null;
+        // No jobs exist during connect/SQL/fence. Do not wait for a late fence
+        // or let it start jobs after the deadline. Discard the lock session.
+        // The acquisition above mutates guard asynchronously.
+        const guard = this.guard as SlotGuard | null;
+        if (started) {
+          // An asynchronous start hook may still be unwinding. Fail within the
+          // activation deadline, but retain ownership until it and stop finish.
+          this.activationCleanup = activation.catch(() => {}).then(() => this.hooks.stop()).then(async () => {
+            await guard?.close();
+            if (this.guard === guard) this.guard = null;
+          }).finally(() => { this.activationCleanup = null; });
+          void this.activationCleanup.catch(() => {});
+        } else {
+          await guard?.close();
+          this.guard = null;
+        }
+        this.term = null;
         throw error;
-      }
+      } finally { clearTimeout(timer); }
     });
   }
 
   release(): Promise<void> {
     return this.serialize(async () => {
       if (this.state === "released" || this.state === "exited") return;
+      if (this.activationCleanup) throw new Error("activation cleanup pending; role lock retained");
+      if (this.drainTimedOut) throw new DrainTimeoutError(this.pendingRequests());
       this.state = "draining";
       const deadline = Date.now() + this.config.drainTimeoutMs;
       while (this.pendingRequests() > 0 && Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, Math.min(10, Math.max(0, deadline - Date.now()))));
+      }
+      const inFlight = this.pendingRequests();
+      if (inFlight > 0) {
+        this.drainTimedOut = true;
+        throw new DrainTimeoutError(inFlight);
       }
       for (const close of this.streams) close();
       this.hooks.disconnect();

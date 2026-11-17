@@ -1,4 +1,4 @@
-import { resolveSlotConfiguration } from "@multiremi/api/slot-lifecycle.js";
+import { API_SHUTDOWN_TIMEOUT_MS, resolveSlotConfiguration } from "@multiremi/api/slot-lifecycle.js";
 import { BUILD_COMMIT } from "@shared/version.js";
 import { bindUpdateCandidate } from "@shared/daemon-update.js";
 /**
@@ -2396,14 +2396,21 @@ function localIPv4Addresses(): string[] {
 
 export async function waitForShutdown(stop: () => void | Promise<void>, exitRequested?: Promise<void>): Promise<void> {
   let resolve!: () => void;
-  let reject!: (error: unknown) => void;
-  const done = new Promise<void>((r, fail) => { resolve = r; reject = fail; });
+  const done = new Promise<void>(r => { resolve = r; });
   let stopping = false;
   const shutdown = async () => {
     if (stopping) return;
     stopping = true;
+    const deadline = setTimeout(() => {
+      log.error("shutdown deadline exceeded; terminating process");
+      process.exit(1);
+    }, API_SHUTDOWN_TIMEOUT_MS);
     try { await stop(); resolve(); }
-    catch (error) { reject(error); }
+    catch (error) {
+      log.error("shutdown failed; terminating process before releasing ownership");
+      process.exit(1);
+    }
+    finally { clearTimeout(deadline); }
   };
   const signalShutdown = () => {
     if (stopping) process.exit(1);

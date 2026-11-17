@@ -20887,6 +20887,8 @@
         "scope": "acp",
         "targetVersion": "9.9.9",
         "target_version": "9.9.9",
+        "targetCommit": null,
+        "target_commit": null,
         "output": null,
         "error": null,
         "createdAt": "<timestamp>",
@@ -21650,6 +21652,8 @@
             "feishu_bot_menu": true,
             "feishu_concierge_config_v1": true
           },
+          "cli_commit": null,
+          "cli_commit_matches_platform": null,
           "protocol": {
             "version": 1,
             "state": "rejected",
@@ -21911,6 +21915,7 @@
         "status": "running",
         "scope": "acp",
         "target_version": "9.9.9",
+        "target_commit": null,
         "created_at": "<timestamp>",
         "updated_at": "<timestamp>"
       }
@@ -29331,6 +29336,8 @@
           "feishu_bot_menu": true,
           "feishu_concierge_config_v1": true
         },
+        "cli_commit": null,
+        "cli_commit_matches_platform": null,
         "protocol": {
           "version": 1,
           "state": "rejected",

@@ -11,6 +11,7 @@ export interface DaemonUpdateJournal {
   runtimeId: string;
   requestId: string;
   targetVersion: string;
+  targetCommit?: string;
   previousVersion: string;
   launcherPath: string;
   snapshotDir: string;
@@ -119,19 +120,25 @@ export function restorePreviousLauncher(journal: DaemonUpdateJournal): void {
 export function journalForInstall(result: Extract<UpdateResult, { status: "installed" }>,
   runtimeId: string, requestId: string, previousVersion: string): DaemonUpdateJournal {
   if (!existsSync(join(result.snapshotDir, "previous-launcher"))) throw new Error("No previous launcher available for automatic rollback");
-  return { runtimeId, requestId, targetVersion: result.version, previousVersion,
+  return { runtimeId, requestId, targetVersion: result.version, targetCommit: result.commit, previousVersion,
     launcherPath: result.launcherPath, snapshotDir: result.snapshotDir };
 }
 
 /** Bind before provider preparation or registration can hang. Only the candidate version owns this pid. */
-export function bindUpdateCandidate(stateDir: string, version: string, pid = process.pid): void {
+export function bindUpdateCandidate(stateDir: string, version: string, pid = process.pid, commit?: string | null): void {
   const root = join(stateDir, "cli-updates");
   if (!existsSync(root)) return;
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name.endsWith(".settled")) continue;
     const directory = join(root, entry.name);
     const journal = readUpdateJournal(directory);
-    if (journal?.targetVersion !== version.replace(/^v/, "")) continue;
+    if (!matchesUpdateIdentity(journal, version, commit)) continue;
     writeFileSync(join(directory, "candidate.pid"), String(pid), { mode: 0o600 });
   }
+}
+
+/** A version alone cannot attest a build when the platform pins a commit. */
+export function matchesUpdateIdentity(journal: DaemonUpdateJournal | null, version: string, commit?: string | null): boolean {
+  return !!journal && journal.targetVersion === version.replace(/^v/, "")
+    && (!journal.targetCommit || journal.targetCommit === commit);
 }

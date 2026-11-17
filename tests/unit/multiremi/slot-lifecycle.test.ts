@@ -90,6 +90,7 @@ describe("API slot lifecycle", () => {
     const scheduler = new MultiremiScheduler({ store });
     const start = spyOn(scheduler, "start").mockImplementation(() => {});
     const stop = spyOn(scheduler, "stop").mockImplementation(async () => {});
+    const reconcile = spyOn(store, "reconcileRuntimeUpdateFailures");
     const server = startMultiremiServer({
       store, port: 0, hostname: "127.0.0.1", authToken: "request-token", slotConfiguration: config,
       backgroundJobs: true, scheduler, scmPolling: null, messaging: null, issueTitleScheduler: null,
@@ -98,18 +99,23 @@ describe("API slot lifecycle", () => {
     try {
       await server.slotStartup;
       expect(start).not.toHaveBeenCalled();
+      expect(reconcile).not.toHaveBeenCalled();
       await server.slot!.activate();
       expect(start).toHaveBeenCalledTimes(1);
+      expect(reconcile).toHaveBeenCalled();
       await server.slot!.release();
       expect(stop).toHaveBeenCalledTimes(1);
+      reconcile.mockClear();
       await server.slot!.activate();
       expect(start).toHaveBeenCalledTimes(2);
+      expect(reconcile).toHaveBeenCalled();
       await server.stop(true);
       expect(server.slot!.state).toBe("exited");
     } finally {
       await server.shutdown();
       start.mockRestore();
       stop.mockRestore();
+      reconcile.mockRestore();
     }
   });
 

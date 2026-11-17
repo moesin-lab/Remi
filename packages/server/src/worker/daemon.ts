@@ -1,3 +1,4 @@
+import { resolveCoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
 import { performUpdate } from "@shared/cli-update.js";
 import { armUpdateWatchdog, restorePreviousLauncher, journalForInstall, updateJournalDir, readUpdateJournal, updateDecision, decideUpdate, DAEMON_STOP_TIMEOUT_MS } from "@shared/daemon-update.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
@@ -155,6 +156,8 @@ import {
   type TaskFailureReasonValue,
 } from "./task-failure.js";
 import { executeRuntimeCommand } from "./runtime-command.js";
+import { BUILD_COMMIT } from "@shared/version.js";
+import { matchesUpdateIdentity } from "@shared/daemon-update.js";
 import { multiremiVersion } from "@multiremi/version.js";
 import {
   writeTaskContext,
@@ -1672,7 +1675,7 @@ export class MultiremiDaemon {
               this.taskDownlinks.reconcileCancellation(task.task_id, task.status);
             }
           }
-          if (ack.pending_update) await this.handleRuntimeUpdate(this.options.runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli");
+          if (ack.pending_update) await this.handleRuntimeUpdate(this.options.runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli", ack.pending_update.target_commit);
         } catch (error) {
           if (isTerminalDaemonAuthorityError(error)) await this.stopAfterTerminalAuthority();
         }
@@ -2254,6 +2257,7 @@ export class MultiremiDaemon {
       metadata: {
         version: multiremiVersion,
         cli_version: multiremiVersion,
+        ...(BUILD_COMMIT ? { cli_commit: BUILD_COMMIT } : {}),
         parallel_agent_execution: 1,
         acp_version: this.acpVersion() ?? undefined,
         agent_version: this.agentVersion() ?? undefined,
@@ -2317,7 +2321,7 @@ export class MultiremiDaemon {
       this.workspaceRelays.set(workspaceId, ack.relay);
     }
     if (ack.pending_update) {
-      await this.handleRuntimeUpdate(runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli");
+      await this.handleRuntimeUpdate(runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli", ack.pending_update.target_commit);
     }
     if (ack.pending_model_list) {
       const requestId = ack.pending_model_list.id;
@@ -2420,6 +2424,7 @@ export class MultiremiDaemon {
     requestId: string,
     targetVersion: string,
     scope: MultiremiRuntimeUpdateScope = "cli",
+    targetCommit?: string,
   ): Promise<void> {
     // Only the CLI binary is owned by the Desktop app; the ACP bridges live in
     // ~/.remi and are independent of how the daemon was launched.
@@ -2445,7 +2450,7 @@ export class MultiremiDaemon {
         : scope === "agent"
           ? await this.updateAgentCli()
           : this.updateRunner ? await this.updateRunner(targetVersion)
-            : await this.installRuntimeUpdate(runtimeId, requestId, targetVersion);
+            : await this.installRuntimeUpdate(runtimeId, requestId, targetVersion, targetCommit);
       await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
         status: scope === "cli" ? "restarting" : "completed",
         output: output || (scope === "acp" ? "ACP bridge updated" : scope === "agent" ? "Agent updated" : `Updated to ${targetVersion}`),
@@ -2468,10 +2473,11 @@ export class MultiremiDaemon {
     }
   }
 
-  private async installRuntimeUpdate(runtimeId: string, requestId: string, targetVersion: string): Promise<string> {
+  private async installRuntimeUpdate(runtimeId: string, requestId: string, targetVersion: string, targetCommit?: string): Promise<string> {
     const restart = this.updateRestartSpec;
     if (!restart) throw new Error("This daemon launch has no recoverable update restart specification");
-    const result = await performUpdate({ targetVersion, currentVersion: multiremiVersion, serviceRestart: restart,
+    const result = await performUpdate({ targetVersion, targetCommit, currentCommit: BUILD_COMMIT, serverUrl: this.options.serverUrl, token: this.options.token,
+      onProgress: message => log.info(`[cli-update] ${message}`), currentVersion: multiremiVersion, serviceRestart: restart,
       ...(basename(process.execPath) === "remi" ? { rollbackExecutable: process.execPath } : {}),
       beforeActivate: async installed => {
         const journal = journalForInstall(installed, runtimeId, requestId, multiremiVersion);
@@ -2480,7 +2486,7 @@ export class MultiremiDaemon {
           restart: restart.command, manager: restart.manager, timeoutSeconds: this.updateVerifyTimeoutSeconds });
       },
     });
-    return `Installed ${result.version}; awaiting target-version hello and startup self-check`;
+    return `Installed ${result.version} from ${result.source}${result.commit ? ` (${result.commit})` : ""}; awaiting target-version hello and startup self-check`;
   }
 
   private async confirmRuntimeUpdate(): Promise<void> {
@@ -2489,9 +2495,9 @@ export class MultiremiDaemon {
     const journal = readUpdateJournal(directory);
     if (!journal) return;
     const version = multiremiVersion.replace(/^v/, "");
-    if (!updateDecision(directory) && version === journal.targetVersion) decideUpdate(directory, "completed");
+    if (!updateDecision(directory) && matchesUpdateIdentity(journal, version, BUILD_COMMIT)) decideUpdate(directory, "completed");
     const decision = updateDecision(directory);
-    if (decision === "completed" && version === journal.targetVersion) {
+    if (decision === "completed" && matchesUpdateIdentity(journal, version, BUILD_COMMIT)) {
       await this.client.reportRuntimeUpdateResult(journal.runtimeId, journal.requestId, {
         status: "completed", self_check: true, output: `Registered ${version}; startup self-check passed`,
       });
@@ -4410,6 +4416,7 @@ export class MultiremiDaemon {
           skipFetch: true,
           signal,
           coAuthoredByEnabled: this.workspaceCoAuthoredByEnabled(task.workspaceId),
+          coAuthoredBy: this.workspaceCoAuthoredBy(task.workspaceId),
         });
         if (result.preferredRefResolved === false) {
           const message = `Configured default branch ${JSON.stringify(repo.defaultBranch)} could not be resolved; fell back to ${result.baseRef}`;
@@ -6028,6 +6035,7 @@ export class MultiremiDaemon {
         ...(subjectBranch ? { branchName: subjectBranch, reuseExisting: true } : {}),
         signal: request.signal,
         coAuthoredByEnabled: this.workspaceCoAuthoredByEnabled(workspaceId),
+        coAuthoredBy: this.workspaceCoAuthoredBy(workspaceId),
       });
       // A reclaimed subject checks its repositories out again on demand; this is where its unsaved work returns.
       if (subjectId) {
@@ -6117,6 +6125,7 @@ export class MultiremiDaemon {
       workspace_id: this.options.workspaceId,
       server_url: this.options.serverUrl,
       cli_version: multiremiVersion,
+      ...(BUILD_COMMIT ? { cli_commit: BUILD_COMMIT } : {}),
       supervisor_ready: this.supervisorReady(),
       active_task_count: this.activeTaskCount,
       draining_task_count: this.drainingTaskCount,
@@ -6214,6 +6223,10 @@ export class MultiremiDaemon {
 
   private isRepoAllowed(workspaceId: string, repoUrl: string): boolean {
     return this.workspaceRepoUrls.get(workspaceId)?.has(repoUrl.trim()) ?? false;
+  }
+
+  private workspaceCoAuthoredBy(workspaceId: string) {
+    return resolveCoAuthoredByIdentity(this.workspaceSettings.get(workspaceId) ?? {});
   }
 
   private workspaceCoAuthoredByEnabled(workspaceId: string): boolean {

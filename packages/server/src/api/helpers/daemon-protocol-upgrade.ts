@@ -21,5 +21,5 @@ export function ensureDaemonProtocolUpgrade(store: MultiremiStore, runtimeId: st
   if (ack.pending_update) return;
   // Reuse the queue's physical-daemon drain/idle gate; do not invent another one.
   const pending = store.claimRuntimeUpdateRequest(runtimeId);
-  if (pending) ack.pending_update = { id: pending.id, target_version: pending.targetVersion, scope: pending.scope };
+  if (pending) ack.pending_update = { id: pending.id, target_version: pending.targetVersion, ...(pending.targetCommit ? { target_commit: pending.targetCommit } : {}), scope: pending.scope };
 }

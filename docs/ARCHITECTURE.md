@@ -37,6 +37,14 @@ store 的四路实时事件由 [realtime-fanout](../packages/server/src/api/real
 两个 API 进程之间用 [peer channel](../packages/server/src/api/peer/peer-channel.ts)（`POST /internal/peer/events`）互转，`MULTIREMI_PEER_URL` 不设即完全关闭。
 协议、消息引用、字节预算与角色解析链见 [Realtime peer channel](dev/realtime-peer.md)。
 
+**服务端 Skill 导入**：API 路由与 Agent 模板导入通过
+[GitHub 只读鉴权](../packages/server/src/scm/github-read-auth.ts)按当前工作区和目标仓库解析凭据：
+已启用的显式仓库绑定优先，其次为同源的全部仓库默认连接，再回退到 API 进程的 `GITHUB_TOKEN`，最后匿名。
+连接解密失败时继续回退，不记录凭据或异常内容。凭据提供者只注入
+[Skill 导入网络层](../packages/daemon/src/agent-runtime/skills/skill-import-network.ts)，不进入任务环境或 daemon 配置。
+仅 GitHub 官方 HTTPS 主机的 GET 请求可携带鉴权；跨源重定向及其后续请求均不携带鉴权，导入期限覆盖整个跳转链。
+响应文本和错误中的已用凭据被脱敏，provider 错误正文不透传；daemon CLI 更新不使用工作区连接。
+
 **任务执行**：issue/chat/autopilot 经[统一消息入口](../packages/server/src/store/inbox/send-message.ts)写 Message →
 [lane 状态机](../packages/server/src/store/inbox/lane-machine.ts)创建或合并 Turn → current attempt →
 [服务端 offer 泵](../packages/server/src/api/daemon-protocol/task-offers.ts) 推送 →
@@ -112,6 +120,19 @@ shared 的 `getDb` 不依赖 server，由 `openMultiremiDatabase` 给返回的�
 [架构扫描](../tests/arch/sqlite-handle-entry.test.ts)禁止其他 git 跟踪源码直接构造或恢复 `bun:sqlite` handle。
 SQLite 最外层事务以 `BEGIN IMMEDIATE` 取得写锁，嵌套事务仍用 savepoint，避免跨进程先读后写升级锁时立即失败；PostgreSQL 事务语义不变。详见 [ADR 0011](adr/0011-transaction-ownership-and-side-effect-timing.md)。
 这是底层存储适配的选择；生产 server 启动还有[必要配置检查](dev/auth.md)，不能据此省略部署配置。
+数据库可用性与进程存活分离：`/healthz` 不访问数据库，`/readyz` 执行轻量探针，连接不可用时返回
+503 与 `database_unavailable`。HTTP 在鉴权前探测（健康结果最多缓存一秒），失败响应带 `Retry-After: 1`；
+请求期间数据库断连也映射为 503。同步桥在连接失败后一秒内快速拒绝后续 SQL，随后允许探测恢复，
+不自动重放 SQL 或提交。HTTP 单条 SQL 的等待预算为两秒，后台循环为五秒；超时后丢弃连接，
+写入结果可能未知，调用者必须使用既有幂等键重试。迁移等无预算作用域的操作保留桥原来的等待上限。
+
+[后台恢复边界](../packages/shared/src/db/recovery.ts)只重试有类型标记的连接/服务不可用错误，
+按循环以 1、2、4、8、16、30 秒退避，警告每循环最多每 30 秒一次，恢复后回到正常间隔。
+Scheduler 的各 tick 共用一次 sync 边界；failure monitor、归档、SCM、messaging、标题、通知、
+能力维护、HTML 回填和 Wiki storage 各自恢复。Offer pump 和 downlink 按 Runtime 使用相同上限与日志频率。
+非连接错误向上传播；已有 provider/领域错误仍由各模块处理。断连时不确认 system event，
+保留 processing 租约；到期后重新领取，已提交的自动化运行由 `(trigger_id, event_id)` 去重。
+
 PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packages/server/src/store/db/pg-worker.ts)，worker 使用单连接。
 这是真实实现约束，不应被“整体 async/await”概述掩盖。
 嵌套 `transaction()` 在 PostgreSQL 使用 savepoint；外层提交前会拒绝未恢复的语句失败。

@@ -512,6 +512,15 @@ import type {
 export { daemonRuntimeId, isTerminalStatus };
 
 export class MultiremiStore {
+  isDatabaseUnavailable(): boolean { return this.db.connectionUnavailable === true; }
+  private databaseReadyUntil = 0;
+  checkDatabaseReady(force = false): void {
+    if (!force && !this.db.connectionUnavailable && Date.now() < this.databaseReadyUntil) return;
+    this.databaseReadyUntil = 0;
+    this.db.query("SELECT 1 AS ready").get();
+    this.databaseReadyUntil = Date.now() + 1_000;
+  }
+
   private db: SqlDatabase;
   private ctx: StoreContext;
   private feedback: FeedbackRepo;
@@ -652,6 +661,7 @@ export class MultiremiStore {
       now => this.tasks.sweepIdleIssueLanes(now),
       now => this.archiveIdleChats(now),
       now => this.backgroundTasks.sweep(now),
+      () => this.reconcileRuntimeUpdateFailures(),
     ]);
     this.migrate();
     for (const workspace of this.workspaces.listWorkspaces()) {
@@ -1176,7 +1186,7 @@ runMigrations(this.db);
     return this.agents.listSkills(workspaceId, options);
   }
 
-  getSkill(id: string, options: { includeArchived?: boolean; includeFiles?: boolean } = { includeFiles: true }): MultiremiSkill | null {
+  getSkill(id: string, options: { includeArchived?: boolean; includeFiles?: boolean } = {}): MultiremiSkill | null {
     return this.agents.getSkill(id, options);
   }
 
@@ -1192,7 +1202,7 @@ runMigrations(this.db);
     return this.agents.deleteSkillFile(skillId, fileId);
   }
 
-  listAgentSkills(agentId: string, options: { includeFiles?: boolean } = { includeFiles: true }): MultiremiSkill[] {
+  listAgentSkills(agentId: string, options: { includeFiles?: boolean } = {}): MultiremiSkill[] {
     return this.agents.listAgentSkills(agentId, options);
   }
 
@@ -1373,8 +1383,8 @@ runMigrations(this.db);
     return this.agents.getDefaultAgent(workspaceId, provider, ownerId);
   }
 
-  getAgent(id: string): MultiremiAgent | null {
-    return this.agents.getAgent(id);
+  getAgent(id: string, options: { includeFiles?: boolean } = {}): MultiremiAgent | null {
+    return this.agents.getAgent(id, options);
   }
 
   /** The Agent row without its Skills or Skill files — for eligibility decisions only. */
@@ -3447,12 +3457,14 @@ runMigrations(this.db);
     return this.runtimes.createRuntimeUpdateRequest(runtimeId, input);
   }
 
-  reconcileRuntimeCliRelease(targetVersion: string): MultiremiRuntimeUpdateRequest[] {
-    return this.runtimes.reconcileRuntimeCliRelease(targetVersion);
+  reconcileRuntimeCliRelease(targetVersion: string, targetCommit?: string): MultiremiRuntimeUpdateRequest[] {
+    return this.runtimes.reconcileRuntimeCliRelease(targetVersion, targetCommit);
   }
 
-  runtimeCliReleaseReconciliationKey(targetVersion: string): string {
-    return this.runtimes.runtimeCliReleaseReconciliationKey(targetVersion);
+  reconcileRuntimeUpdateFailures(): void { this.runtimes.reconcileRuntimeUpdateFailures(); }
+
+  runtimeCliReleaseReconciliationKey(targetVersion: string, targetCommit?: string): string {
+    return this.runtimes.runtimeCliReleaseReconciliationKey(targetVersion, targetCommit);
   }
 
   getRuntimeUpdateRequest(runtimeId: string, requestId: string): MultiremiRuntimeUpdateRequest | null {
@@ -3469,11 +3481,12 @@ runMigrations(this.db);
       generation: maintenance.generation };
   }
   nextDaemonDrainWakeAt(runtimeId: string): number | null {
-    if (!this.hasCliUpdateDrainForRuntime(runtimeId)) return null;
-    const runtime = this.getRuntimeLite(runtimeId);
-    if (!runtime) return null;
-    const state = this.getDaemonDrainStatus(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id);
-    const at = state.deadline ? Date.parse(state.deadline) : NaN;
+    // Scheduling only needs the deadline, not the status/task/ack aggregate.
+    const row = this.ctx.db.query(`SELECT drain.deadline FROM multiremi_runtimes runtime
+      JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local')
+        AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id)
+      WHERE runtime.id = ?`).get(runtimeId) as { deadline: string } | null;
+    const at = row ? Date.parse(row.deadline) : NaN;
     return Number.isFinite(at) && at > Date.now() ? at : null;
   }
 
@@ -3487,6 +3500,7 @@ runMigrations(this.db);
 
   reportRuntimeUpdateResult(runtimeId: string, requestId: string, input: ReportRuntimeUpdateInput): MultiremiRuntimeUpdateRequest {
     const request = this.runtimes.reportRuntimeUpdateResult(runtimeId, requestId, input);
+    this.reconcileRuntimeUpdateFailures();
     this.publishDaemonDispatchConditionsChanged(this.getRuntimeLite(runtimeId)?.workspaceId ?? "local");
     return request;
   }
@@ -5537,6 +5551,10 @@ runMigrations(this.db);
 
   archiveIdleChats(now?: number): string[] {
     return this.chat.archiveIdleChats(now);
+  }
+
+  listChatSessionsByIds(ids: readonly string[]): MultiremiChatSession[] {
+    return this.chat.listChatSessionsByIds(ids);
   }
 
   getChatSession(id: string): MultiremiChatSession | null {

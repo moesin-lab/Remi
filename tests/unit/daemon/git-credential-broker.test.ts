@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,7 +39,7 @@ describe("Multiremi Git credential broker", () => {
       fallbackHelpers: ["cache --timeout=60"],
     });
 
-    expect(env.GIT_CONFIG_COUNT).toBe("5");
+    expect(env.GIT_CONFIG_COUNT).toBe("6");
     expect(env.GIT_CONFIG_KEY_1).toBe("credential.helper");
     expect(env.GIT_CONFIG_VALUE_1).toBe("");
     expect(env.GIT_CONFIG_VALUE_2).toBe("!'remi' git-credential");
@@ -52,6 +53,38 @@ describe("Multiremi Git credential broker", () => {
       .map(([, value]) => value)
       .join("\n"))
       .not.toContain("daemon-secret");
+  });
+
+  it("routes retained SSH origins for fetch and push without changing repository config", () => {
+    const root = mkdtempSync(join(tmpdir(), "remi-git-transport-"));
+    const repositoryUrl = "git@code.byted.org:ies/aiden_infra_dashboard.git";
+    const git = (args: string[], env = process.env) => {
+      const result = spawnSync("git", args, { cwd: root, env, encoding: "utf8" });
+      expect(result.status).toBe(0);
+      return result.stdout.trim();
+    };
+    try {
+      git(["init", "--quiet"]);
+      git(["remote", "add", "origin", repositoryUrl]);
+      git(["remote", "add", "other", "git@code.byted.org:ies/other.git"]);
+      git(["remote", "add", "custom", "ssh://git@code.byted.org:2222/ies/repo.git"]);
+      const env = appendGitCredentialBrokerEnv(process.env, {
+        serverUrl: "https://multiremi.example",
+        workspaceId: "wsp_1",
+        repositoryUrls: [repositoryUrl, repositoryUrl, "ssh://git@code.byted.org:2222/ies/repo.git"],
+        helperCommand: "remi git-credential",
+        fallbackHelpers: [],
+      });
+      const httpsUrl = "https://code.byted.org/ies/aiden_infra_dashboard.git";
+      expect(git(["remote", "get-url", "origin"], env)).toBe(httpsUrl);
+      expect(git(["remote", "get-url", "--push", "origin"], env)).toBe(httpsUrl);
+      expect(git(["remote", "get-url", "other"], env)).toBe("git@code.byted.org:ies/other.git");
+      expect(git(["remote", "get-url", "custom"], env)).toBe("ssh://git@code.byted.org:2222/ies/repo.git");
+      expect(git(["config", "--get", "remote.origin.url"], env)).toBe(repositoryUrl);
+      expect(git(["remote", "get-url", "origin"])).toBe(repositoryUrl);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("preserves an existing SSH command and only supplies BatchMode by default", () => {

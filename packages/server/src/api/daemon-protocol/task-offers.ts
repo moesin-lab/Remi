@@ -1,3 +1,5 @@
+import { isDatabaseConnectionError, withDatabaseTimeout } from "@shared/db/recovery.js";
+import { withDbJob } from "@shared/observability/db-sources.js";
 import { DAEMON_OFFER_COOLDOWN_MS, DAEMON_OFFER_TIMEOUT_MS, type DaemonTurnInput } from "@multiremi/contracts/daemon-protocol.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import type { MultiremiTask, MultiremiTaskWithAgent } from "@multiremi/contracts/types.js";
@@ -65,6 +67,8 @@ interface RuntimePump {
     session: DaemonProtocolSession; seq: number; timer: DaemonProtocolTimer } | null;
   accepted: Set<string>;
   sweep: boolean;
+  databaseFailures?: number;
+  databaseWarningAt?: number;
 }
 
 /** The database is the queue; memory holds only leases, deadlines and single-flight state. */
@@ -126,6 +130,8 @@ export class DaemonTaskOffers {
       close: session => this.closed(session),
     });
     options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.ready(frame, session));
+    // Dispatch is driven by queue/capacity/configuration events and explicit deadlines.
+    // Keep a low-frequency safety net for missed events; recoveries expose missing wiring.
     const sweepMs = options.sweepMs ?? (process.env.NODE_ENV === "test" ? 2_147_483_647 : DAEMON_OFFER_SWEEP_MS);
     const sweep = () => {
       if (this.stopped) return;
@@ -156,9 +162,29 @@ export class DaemonTaskOffers {
         pump.dirty = false;
         const fromSweep = pump.sweep;
         pump.sweep = false;
-        await this.run(runtimeId, pump, fromSweep);
+        await withDatabaseTimeout(5_000, () => withDbJob("daemon.offer", () => this.run(runtimeId, pump, fromSweep)));
+        pump.databaseFailures = 0;
+        pump.databaseWarningAt = undefined;
       } while (pump.dirty && !pump.waiting && !pump.pending && this.clock.now() >= pump.cooldownUntil);
     }).catch(error => {
+      if (!isDatabaseConnectionError(error)) {
+        console.error("daemon offer failed", error);
+        throw error;
+      }
+      if (this.stopped) return;
+      const delay = Math.min(30_000, 1_000 * 2 ** Math.min(pump.databaseFailures ?? 0, 16));
+      pump.databaseFailures = (pump.databaseFailures ?? 0) + 1;
+      pump.cooldownUntil = this.clock.now() + delay;
+      pump.cooldownReason = "database_unavailable";
+      if (pump.cooldownTimer !== null) this.clock.clearTimeout(pump.cooldownTimer);
+      pump.cooldownTimer = this.clock.setTimeout(() => {
+        pump.cooldownTimer = null;
+        pump.cooldownReason = null;
+        this.kick(runtimeId);
+      }, delay);
+      (pump.cooldownTimer as ReturnType<typeof setTimeout>).unref?.();
+      if (pump.databaseWarningAt !== undefined && this.clock.now() - pump.databaseWarningAt < 30_000) return;
+      pump.databaseWarningAt = this.clock.now();
       console.warn(JSON.stringify({ event: "daemon_offer_failed", runtime_id: runtimeId,
         error_class: error instanceof Error ? error.name : typeof error }));
     }).finally(() => {
@@ -283,6 +309,7 @@ export class DaemonTaskOffers {
           .map(entry => Number(entry.seq)) } : null;
       pump.pending = { taskId: task.id, agentId: task.agentId, inlineRead, session, seq: sent.seq, timer };
     } catch (error) {
+      if (isDatabaseConnectionError(error)) throw error;
       const current = store.getTaskIdentity(task.id);
       if (current?.status === "dispatched" && current.runtimeId === runtimeId) this.rescind(runtimeId, pump, task.id);
       throw error;
@@ -334,7 +361,8 @@ export class DaemonTaskOffers {
   private resume(session: DaemonProtocolSession): void {
     for (const runtimeId of session.runtimeIds) {
       const pump = this.pumps.get(runtimeId);
-      if (pump) pump.waiting = false;
+      if (!pump?.waiting) continue;
+      pump.waiting = false;
       this.kick(runtimeId);
     }
   }

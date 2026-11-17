@@ -111,6 +111,20 @@ Project 设备绑定（含独享设备）是放置约束，任何亲和都不能
 各覆盖完整 304 个组合（合计 608）。PG 每格使用独立数据库，逐 Runtime 领取探测以
 SAVEPOINT 回滚。
 
+## 任务 Git 传输
+
+Agent 的 Git 环境通过 `remi git-credential` 按任务身份获取已关联仓库的 HTTPS 凭据。
+对于任务仓库列表中的标准 SSH URL，daemon 还通过进程级 `GIT_CONFIG_*` 注入
+`url.<https-url>.insteadOf=<ssh-url>`，使保留 SSH origin 的工作树也能 fetch/push；
+不修改 origin、共享 Git 配置、SSH 配置或私钥。未列出的仓库不添加映射，非标准
+SSH 端口保留原传输。Git 的 `insteadOf` 是 URL 前缀匹配，凭据 broker 仍独立
+核对实际请求的仓库与服务端返回的 clone URL，不因映射而扩大凭据范围。
+
+实现和验证入口：[credential-broker.ts](../../packages/daemon/src/agent-runtime/repo/credential-broker.ts)、
+[Git 传输回归测试](../../tests/unit/daemon/git-credential-broker.test.ts)。URL 解析回归
+不等于真实 SCM 已可访问；端到端验收仍需在已配置 SCM 连接的 Agent 中执行读取、
+推送测试分支并删除。
+
 ## 任务私有 /tmp
 
 每个任务执行前，daemon 在 `env/<主体>/tmp/` 下分配一个独占目录（`<task>-XXXXXX`，0700），执行结束后删除；每轮 GC 还会清掉不在运行的执行留下的残留。Linux 把它挂载为进程树的字面 `/tmp`（[实现](../../packages/acp/src/private-tmp.ts)），因此同一个任务里的 shell、子进程和 ACP 文件工具看到同一份 `/tmp`，不同任务互不可见。namespace 不可用时 fail-closed：任务以 `private_tmp_isolation_unavailable` 失败，不退回共享 `/tmp`。

@@ -14,6 +14,15 @@
 
 后端测试集中在 `tests/`；前端测试随所属包运行。没有 `.test` 后缀的手动 harness 不由 `bun test` 自动发现。前端 UI 包是否提供 test 脚本以各自 package.json 为准。
 
+数据库恢复回归：`bun run test tests/integration/database-recovery.test.ts tests/unit/shared/db-recovery.test.ts tests/unit/multiremi/background-db-recovery.test.ts`。
+集成用例启动真实 Bun API 子进程，在同步 SQL 边界注入连接失败，实际执行 Store、scheduler、HTTP 和租约去重；
+覆盖断连期间存活、503/200 探针、自动恢复及提交运行后确认事件前断连的重领场景。
+计划 claim 后断连回归：`bun run test tests/unit/multiremi/scheduler-claim-recovery.test.ts`。
+真实 SQLite Store 与同一个 scheduler 重试循环覆盖单条、批量 trigger 和 runtime provision；
+断连后重新执行启动恢复，从当前时间安排下一次，不补跑错过的那次，也不重放可能已经提交的运行。
+另以真实 PG worker 连接本机未监听端口检查错误分类，不要求外部数据库。
+该组不证明真实 PostgreSQL 重启、网络黑洞或 Compose 重启行为；后者应在隔离部署另行验证。
+
 ## 后端测试入口
 
 ```bash
@@ -79,6 +88,46 @@ API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api
 全路由 golden 捕获是功能契约检查，单次测试限时 60 秒；其限时不作为 API 延迟或查询性能预算。页面首屏、SQL 查询次数和读取字节边界仍由对应性能 guard 独立验证。
 
 调整 `DAEMON_MIN_CLI_VERSION` 时，用 `bun run scripts/snapshot-api-routes.ts` 和 `bun run tests/fixtures/multiremi/capture-first-screen-hotspots-pr2-golden.ts` 重新捕获响应基准，并核对差异仅包含批准的契约变更。[发版架构守卫](tests/arch/release-workflows.test.ts)在 PR 的快速检查中核对两份基准的最低版本；完整响应一致性仍由对应 golden 测试验证。
+
+## Daemon 更新的隔离 systemd 演练
+
+[更新恢复 harness](tests/integration/daemon-update-recovery.ts) 的 `--systemd` 模式只在
+`MULTIREMI_SYSTEMD_REHEARSAL=1` 时运行，否则输出 SKIP，不执行无 manager 的替代路径：
+
+```bash
+MULTIREMI_SYSTEMD_REHEARSAL=1 bun run tests/integration/daemon-update-recovery.ts --systemd
+```
+
+要求 Linux 用户 manager 可用、`systemd-run`/`systemctl`/`journalctl`/`ss` 可执行，且 manager
+与执行端共享隔离目录、仓库和 Bun 的可访问路径。仅能连接用户 bus 的容器不一定满足此条件；
+默认隔离根目录为 realpath(HOME) 下 `.cache/remi-rehearsals`，可用 `REMI_REHEARSAL_ROOT` 指定共享父目录；
+默认结果输出到 realpath(HOME) 下 `.cache/remi-rehearsal-results`。
+启动前由真实 transient probe 检查隔离根目录、launcher、旧二进制、Bun 和 ACP fixture 的可访问性，失败即停止，不降级。
+隔离 HOME 下 launcher、安装目录、状态、SQLite API、Release fixture 和随机端口均独立。
+产品的 restart planner 决定真实 `systemctl --user restart` 命令，watchdog 由产品代码用
+`systemd-run --user` 启动。ACP 与 Release 仍是 fixture（tarball 使用真实 sha256），不访问 GitHub Release
+或真实模型。服务使用产品的 45 秒停止超时和 `KillMode=control-group`；演练确认期限为 60 秒。
+
+演练覆盖正常更新、exit 23 候选回滚、unit 直指版本二进制时拒绝更新三例，各自在更新/恢复/拒绝后派任务并断言 completed。
+第三例重新用旧二进制 1.0.0 启动隔离 unit，断言 failed 且带实际入口与预期 launcher 的拒绝原因；
+MainPID 与启动时间保持一致，未出现 restarting/verifying，launcher、版本目录、BIN_DIR 的内容及哈希不变，
+更新日志目录不变，且本窗口的用户 journal 没有 remi-update-* unit 启动记录。
+`update-recovery.json` 保存观测状态序列、版本、任务、unit、watchdog 决策和日志、清理与线上快照比较；
+`update-recovery.log` 保存 daemon 日志。SIGINT/SIGTERM 会让等待退出并进入 finally 清理；
+仅停止本轮 daemon/watchdog unit，不操作线上 unit。初始已有 rehearsal/update unit 时拒绝启动。
+systemd 模式在保存证据后删除隔离根目录（包括失败/中断路径）。daemon unit 不启用 `--collect`，
+避免候选 exit 23 后丢失 transient 定义；finally stop/reset-failed 清理。线上快照只读获取 MainPID/ExecStart、CLI sha256、stable/drop-in 目录清单与
+6131–6134 监听进程。通过短暂的只读观察 unit 在 manager 的挂载/PID 命名空间内读取 journal、
+`ss` 和本轮进程的环境标记，避免把沙箱内不可见进程误记为已清理。
+测试侧另用 Python 3 transient monitor 以约 20ms 间隔只读采样本轮进程；fixture 写入
+entry/ready/provider-created/signal/exit 事件。JSON 按场景记录 from/to 版本、最终 launcher 目标、
+ExecMainStartTimestamp/ExecMainPID/ExecMainStatus、restart journal、停止耗时和新 MainPID 的观测耗时。
+轮询耗时是观测上界；瞬时退出可能只留下 ExecMainStatus。未采到的退出信号必须保留为未知，
+不能把进程消失推断成 SIGKILL。monitor 同样由 finally 停止并清理。
+
+MUL-71 首轮在隔离 daemon 注册前超时：本任务执行端的 `/tmp` 路径在用户 manager 中不可见。
+迁到共享目录后场景 1、2 和中断清理已有实跑证据。合入 MUL-70 后使用上述三例做最终一轮，
+以该轮 JSON 和中断 JSON 作为交付证据。产品的 fallback 竞态另见 MUL-72，不在本单处理。
 
 ## CI 覆盖
 

@@ -6,7 +6,7 @@ import { Questions } from '../inbox/questions.js';
 import { deriveIssueStatusWithinTransaction } from "../inbox/issue-status.js";
 import { runAutopilotRunMutation } from "@multiremi/store/autopilot-run-records.js";
 import { createReplacementAttemptWithinTransaction } from "@multiremi/store/turn-attempts.js";
-import { AgentReplyCommentError, turnExecutionMutationStatement, runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
+import { AgentReplyCommentError, executionClaimBaseSql, turnExecutionMutationStatement, runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Tasks domain (task lifecycle, claiming/dispatch, task messages, human requests, usage and the
 // terminal-state fan-out into issues/sessions/autopilots), extracted verbatim from MultiremiStore
 // (the facade delegates every public method here).
@@ -2535,8 +2535,9 @@ export class TasksRepo {
     hasPlugins: boolean,
     chatProjectId?: string | null,
     runtimeWorkspaceId?: string | null,
+    feishuIssueChat?: boolean,
   ): { runtimeId: string | null; inheritChatSession: boolean } {
-    if (!issue && chatSession && this.ctx.feishuBot().getFeishuIssueIdForChatSession(chatSession.id)) {
+    if (!issue && chatSession && (feishuIssueChat ?? Boolean(this.ctx.feishuBot().getFeishuIssueIdForChatSession(chatSession.id)))) {
       // Preserve the topic's files in storage, but never lend them to private turns.
       return { runtimeId: agent.runtimeId, inheritChatSession: false };
     }
@@ -2932,7 +2933,7 @@ export class TasksRepo {
     return {
       ...task,
       runtimeWorkspace: task.runtimeWorkspaceId ? new RuntimeWorkspacesRepo(this.ctx).get(task.runtimeWorkspaceId) : null,
-      agent: this.ctx.agents().getAgent(task.agentId),
+      agent: this.ctx.agents().getAgent(task.agentId, { includeFiles: true }),
       ...(issueSession ? { issueSession, issue_session: issueSession } : {}),
       issue,
       project,
@@ -3404,17 +3405,30 @@ export class TasksRepo {
       // Frozen retries and configuration readiness are task-specific. Check
       // each queued task so a pending group or an incompatible legacy Runtime
       // connection cannot block another runnable task from the same Agent.
-      const profileTaskRows = this.ctx.db.query(`SELECT t.id FROM multiremi_turn_execution_records t
+      const profileTaskRows = this.ctx.db.query(`SELECT t.id, t.agent_id, t.runtime_id,
+          t.execution_model, t.execution_thinking_level, t.execution_fingerprint, t.codex_profile, t.claude_profile
+        FROM multiremi_turn_execution_records t
         JOIN multiremi_agents a ON a.id = t.agent_id
         WHERE a.workspace_id = ? AND t.status = 'queued'
           AND (t.runtime_id IS NULL OR t.runtime_id = ?)`
-      ).all(lockedRuntime.workspaceId ?? "local", runtimeId) as { id: string }[];
+      ).all(lockedRuntime.workspaceId ?? "local", runtimeId) as Row[];
+      const profileAgents = new Map(this.ctx.agents().listAgentsLiteByIds(profileTaskRows.map(row => String(row.agent_id)))
+        .map(agent => [agent.id, agent]));
       const excludedTaskIds: string[] = [];
+      // Readiness belongs to Agent/runtime configuration, which is stable under
+      // the workspace lock; do not reload the same execution profile per task.
+      const readyGroups = new Map<string, boolean>();
+      const readyGroup = (agent: MultiremiAgent): boolean => {
+        if (!readyGroups.has(agent.id)) readyGroups.set(agent.id, this.runtimeHasReadyExecutionGroup(lockedRuntime, agent));
+        return readyGroups.get(agent.id)!;
+      };
       for (const row of profileTaskRows) {
-        const task = this.getTask(row.id);
-        const agent = task && this.ctx.agents().getAgentLite(task.agentId);
+        // Eligibility uses identity, target and frozen profile; usage/autopilot
+        // hydration belongs only to the task actually selected below.
+        const task = toTask(row, []);
+        const agent = profileAgents.get(task.agentId);
         if (task && (!agent || !this.runtimeCanRunTaskAgent(lockedRuntime, agent, task)
-          || (!task.executionFingerprint && !this.runtimeHasReadyExecutionGroup(lockedRuntime, agent)))) {
+          || (!task.executionFingerprint && !readyGroup(agent)))) {
           excludedTaskIds.push(task.id);
         }
       }
@@ -4242,25 +4256,22 @@ ${routing.sql}
     const leases = [...this.acceptedOfferLeases];
     const cutoff = new Date(Date.now() - CLAIM_RESPONSE_RECOVERY_MS).toISOString();
     const now = nowIso();
+    const candidate = this.ctx.db.query(executionClaimBaseSql(`
+      SELECT t.id FROM multiremi_turn_attempts claim_attempt
+      JOIN multiremi_turns claim_turn ON claim_turn.id = claim_attempt.turn_id
+      WHERE claim_attempt.status = 'accepted' AND t.status = 'dispatched'
+        AND t.runtime_id = ? AND t.started_at IS NULL
+        AND t.dispatched_at IS NOT NULL AND t.dispatched_at < ?
+        ${leases.length ? `AND t.id NOT IN (${leases.map(() => "?").join(", ")})` : ""}
+        ${excludedAgentIds.length ? `AND t.agent_id NOT IN (${excludedAgentIds.map(() => "?").join(", ")})` : ""}
+      ORDER BY t.priority DESC, t.dispatched_at ASC LIMIT 1
+      ${this.ctx.db.dialect === "postgres" ? "FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED" : ""}
+    `)).get(runtimeId, cutoff, ...leases, ...excludedAgentIds) as Row | null;
+    if (!candidate) return null;
     const row = turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records
        SET dispatched_at = ?, updated_at = ?
-       WHERE id = (
-         SELECT id
-         FROM multiremi_turn_execution_records
-         WHERE runtime_id = ?
-           AND status = 'dispatched'
-           AND started_at IS NULL
-           AND dispatched_at IS NOT NULL
-           AND dispatched_at < ?
-           ${leases.length ? `AND id NOT IN (${leases.map(() => "?").join(", ")})` : ""}
-           ${excludedAgentIds.length ? `AND agent_id NOT IN (${excludedAgentIds.map(() => "?").join(", ")})` : ""}
-         ORDER BY priority DESC, dispatched_at ASC
-         LIMIT 1
-       )
-       AND status = 'dispatched'
-       AND started_at IS NULL
-       RETURNING *`,
-    ).get(now, now, runtimeId, cutoff, ...leases, ...excludedAgentIds) as Row | null;
+       WHERE id = ? AND status = 'dispatched' AND started_at IS NULL RETURNING *`
+    ).get(now, now, candidate.id) as Row | null;
     if (!row) return null;
     const task = this.getTaskWithAgent(String(row.id));
     // The re-claim above matches only on runtime_id, so a task whose agent or
@@ -4402,7 +4413,11 @@ ${routing.sql}
   /** Queued user turns inherit the last completed turn at claim time. Retries
    * (attempt > 1) keep their explicitly chosen resume/reset behavior. */
   private refreshQueuedChatAffinity(workspaceId: string): void {
-    const rows = this.ctx.db.query(`SELECT t.id,
+    const rows = this.ctx.db.query(`SELECT t.id, t.agent_id, t.chat_session_id, t.issue_id,
+      t.runtime_id, t.runtime_workspace_id, t.workspace_id, t.holds_workspace,
+      t.session_id, t.work_dir, t.execution_fingerprint,
+      EXISTS (SELECT 1 FROM multiremi_feishu_bot_chat_bindings binding
+        WHERE binding.chat_session_id = t.chat_session_id AND binding.issue_id IS NOT NULL) AS feishu_issue_chat,
       EXISTS (SELECT 1 FROM multiremi_feishu_bot_chat_bindings b
         WHERE b.chat_session_id = t.chat_session_id AND b.workspace_id = t.workspace_id
           AND b.agent_id = t.agent_id) AS feishu_transport
@@ -4415,22 +4430,35 @@ ${routing.sql}
         OR EXISTS (SELECT 1 FROM multiremi_feishu_bot_chat_bindings b
           WHERE b.chat_session_id = t.chat_session_id AND b.workspace_id = t.workspace_id
             AND b.agent_id = t.agent_id))`).all(workspaceId) as Row[];
+    // This runs under the claim's workspace lifecycle lock. Batch decision
+    // facts within this transaction; never retain them across claims or writes
+    // to Agent/plugin configuration. Usage and autopilot state do not affect affinity.
+    const chats = new Map(this.ctx.chat().listChatSessionsByIds(rows.map(row => String(row.chat_session_id)))
+      .map(chat => [chat.id, chat]));
+    const agents = new Map(this.ctx.agents().listAgentsLiteByIds(rows.map(row => String(row.agent_id)))
+      .map(agent => [agent.id, agent]));
+    const pluginFacts = new Map<string, { hasPlugins: boolean; fingerprint: string }>();
     for (const row of rows) {
-      const task = this.getTask(String(row.id))!;
-      const chat = this.ctx.chat().getChatSession(task.chatSessionId!);
+      const task = toTask(row, []);
+      const chat = chats.get(task.chatSessionId!);
       // Affinity is decided from identity/model/ownership; the Agent's Skills cannot change
       // which machine can resume the session, so the Skills are not read on this path.
-      const agent = this.ctx.agents().getAgentLite(task.agentId);
+      const agent = agents.get(task.agentId);
       if (!chat || !agent || chat.status === "archived" || agent.archivedAt) continue;
       // Internal callers can supply an initial provider session before Chat has
       // promoted any lineage. Only later user turns inherit the completed lane.
       if (!row.feishu_transport && task.sessionId && !chat.sessionId && !chat.workDir
         && !chat.sessionRuntimeId && !chat.sessionExecutionFingerprint) continue;
-      const plugins = this.ctx.agentPlugins().resolveAgentPluginSnapshot(agent.id);
-      const fingerprint = this.ctx.agentPlugins().getAgentPluginCapabilityRevision(agent.id);
+      let plugins = pluginFacts.get(agent.id);
+      if (!plugins) {
+        const snapshot = this.ctx.agentPlugins().resolveAgentPluginSnapshot(agent.id);
+        plugins = { hasPlugins: snapshot.length > 0,
+          fingerprint: createHash("sha256").update(canonicalJson(snapshot)).digest("hex") };
+        pluginFacts.set(agent.id, plugins);
+      }
       const issue = task.issueId ? this.ctx.issues().getIssue(task.issueId) : null;
       const profile = chat.sessionRuntimeId ? this.runtimeProfileForAgent(chat.sessionRuntimeId, agent) : null;
-      const affinity = this.resolveTaskAffinity(agent, chat, issue, task.holdsWorkspace, withRuntimeProfileFingerprint(fingerprint, profile), plugins.length > 0 || Boolean(profile), chat.projectId, task.runtimeWorkspaceId);
+      const affinity = this.resolveTaskAffinity(agent, chat, issue, task.holdsWorkspace, withRuntimeProfileFingerprint(plugins.fingerprint, profile), plugins.hasPlugins || Boolean(profile), chat.projectId, task.runtimeWorkspaceId, Number(row.feishu_issue_chat) === 1);
       // A managed fallback must release the previous assignment's directory
       // pin. A resumable session still supplies normal machine affinity above.
       // Pre-upgrade Feishu turns may still carry the connector's Runtime pin.
@@ -4501,14 +4529,18 @@ ${routing.sql}
     // lets any member stamp an arbitrary agent+runtime (a stamp is not proof
     // of authorization). Kept as a JS comment, not inline SQL: an apostrophe
     // in an in-string `--` comment corrupts the sqlite→pg placeholder scanner.
-    const claimOne = (): Row | null => turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records
-       SET offered_at = CASE WHEN runtime_id = ? THEN offered_at ELSE NULL END,
-           accepted_at = CASE WHEN runtime_id = ? THEN accepted_at ELSE NULL END,
-           status = 'dispatched', runtime_id = ?, dispatched_at = ?, wait_reason = NULL, updated_at = ?
-       WHERE id = (
+    // The workspace lifecycle lock above serializes capacity/configuration decisions.
+    // Select once, lock base identities on PG, then mutate only the selected ID.
+    const selectCandidate = this.ctx.db.query(executionClaimBaseSql(`
          SELECT t.id
-         ${TASK_CLAIM_FROM_SQL}
-         WHERE t.status = 'queued'
+         FROM multiremi_turn_attempts claim_attempt
+         JOIN multiremi_turns claim_turn ON claim_turn.id = claim_attempt.turn_id
+         JOIN multiremi_agents a ON a.id = claim_turn.agent_id
+         LEFT JOIN multiremi_chat_sessions project_chat ON project_chat.id = claim_turn.chat_session_id
+         LEFT JOIN multiremi_issues project_issue ON project_issue.id = claim_turn.issue_id
+         LEFT JOIN multiremi_issue_sessions code_session ON code_session.id = claim_turn.issue_session_id
+         LEFT JOIN multiremi_runtimes code_runtime ON code_runtime.id = code_session.code_runtime_id
+         WHERE claim_attempt.status = 'offered' AND t.status = 'queued'
            AND (t.next_retry_at IS NULL OR t.next_retry_at <= ?)
            AND a.archived_at IS NULL
            AND (t.chat_session_id IS NULL OR project_chat.status = 'active')
@@ -4601,10 +4633,18 @@ ${placementAfter.sql}
            ${excludedTaskIds.length ? `AND t.id NOT IN (${excludedTaskIds.map(() => "?").join(", ")})` : ""}
          ORDER BY t.priority DESC, t.created_at ASC
          LIMIT 1
-       )
-       AND status = 'queued'
-       RETURNING *`,
-    ).get(...params) as Row | null;
+
+         ${this.ctx.db.dialect === "postgres" ? "FOR UPDATE OF claim_turn, claim_attempt SKIP LOCKED" : ""}`));
+    const claimOne = (): Row | null => {
+      const candidate = selectCandidate.get(...params.slice(5)) as Row | null;
+      if (!candidate) return null;
+      return turnExecutionMutationStatement(this.ctx.db, `UPDATE multiremi_turn_execution_records
+        SET offered_at = CASE WHEN runtime_id = ? THEN offered_at ELSE NULL END,
+            accepted_at = CASE WHEN runtime_id = ? THEN accepted_at ELSE NULL END,
+            status = 'dispatched', runtime_id = ?, dispatched_at = ?, wait_reason = NULL, updated_at = ?
+        WHERE id = ? AND status = 'queued' RETURNING *`
+      ).get(...params.slice(0, 5), candidate.id) as Row | null;
+    };
     for (;;) {
       const row = claimOne();
       if (!row) return null;

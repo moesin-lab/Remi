@@ -48,14 +48,18 @@ export class SystemdRehearsal {
     assert(existsSync("/usr/bin/systemd-run"), "systemd-run missing; no fallback allowed");
     assert.deepEqual(units(), [], "Existing rehearsal/update units; stop without touching them");
   }
+  private monitoring = false;
   async launch(executable: string, env: Record<string, string>, cwd: string, dependencies: string[]) {
     // A reachable user bus alone does not prove the manager shares our mount namespace.
     const probe = Bun.spawnSync(["/usr/bin/systemd-run", "--user", "--wait", "--pipe", "--collect",
       `--unit=${this.unit.replace(".service", "-probe.service")}`, "/bin/sh", "-c", 'for file do test -r "$file" || exit 1; done', "preflight", this.root, executable, ...dependencies],
       { stdout: "pipe", stderr: "pipe" });
     assert.equal(probe.exitCode, 0, `User manager cannot see the isolated root or its dependencies (permissions or mount namespace); no fallback allowed: ${probe.stderr}`);
-    run(["/usr/bin/systemd-run", "--user", "--collect", `--unit=${this.monitor}`,
-      "/usr/bin/python3", join(cwd, "tests/fixtures/daemon-update-monitor.py"), this.root]);
+    if (!this.monitoring) {
+      run(["/usr/bin/systemd-run", "--user", "--collect", `--unit=${this.monitor}`,
+        "/usr/bin/python3", join(cwd, "tests/fixtures/daemon-update-monitor.py"), this.root]);
+      this.monitoring = true;
+    }
     // Pass only fixture settings. Manager-provided INVOCATION_ID identifies the real unit.
     // Keep a failed transient definition until rollback restarts it. --collect would
     // unload it after exit 23, unlike the installed product service.
@@ -64,6 +68,14 @@ export class SystemdRehearsal {
       `--property=WorkingDirectory=${cwd}`,
       ...Object.entries(env).filter(([key]) => /^(HOME|PATH|TMPDIR|NODE_ENV|MULTIREMI_|REHEARSAL_)/.test(key))
         .map(([key, value]) => `--setenv=${key}=${value}`), executable, "daemon", "start", "--foreground"]);
+  }
+  stopDaemon() {
+    run(["systemctl", "--user", "stop", this.unit]);
+    run(["systemctl", "--user", "reset-failed", this.unit], true);
+  }
+  watchdogActivity(since: string) {
+    return hostRun(["/usr/bin/journalctl", "--user", "--since", since, "--no-pager", "-o", "short-iso-precise"])
+      .split("\n").filter(line => line.includes("remi-update-"));
   }
   state() {
     return run(["systemctl", "--user", "show", this.unit, "-p", "MainPID", "-p", "ExecStart", "-p", "ActiveState", "-p", "SubState", "-p", "TimeoutStopUSec", "-p", "KillMode", "-p", "ExecMainStartTimestamp", "-p", "ExecMainStartTimestampMonotonic", "-p", "ExecMainPID", "-p", "ExecMainCode", "-p", "ExecMainStatus", "-p", "Result"]);

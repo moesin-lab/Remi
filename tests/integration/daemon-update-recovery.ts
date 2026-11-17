@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
@@ -143,6 +143,66 @@ export async function runUpdateRecovery(output: string, systemd = false) {
           reason: (() => { try { return readFileSync(join(directory, "reason"), "utf8").trim(); } catch { return null; } })(),
           script: readFileSync(join(directory, "watchdog.sh"), "utf8") };
       });
+    }
+    if (manager) {
+      // Intentionally bypass the launcher, reproducing an outdated service definition.
+      manager.stopDaemon();
+      await manager.launch(oldBinary, env, repo, [process.execPath, env.REHEARSAL_FAKE_ACP!]);
+      await wait("direct binary daemon hello", () => runtime()?.metadata.cli_version === "1.0.0");
+      const fileSnapshot = () => {
+        const tree = (path: string): any => {
+          const stat = lstatSync(path);
+          if (stat.isSymbolicLink()) return { link: readlinkSync(path) };
+          if (stat.isDirectory()) return Object.fromEntries(readdirSync(path).sort().map(name => [name, tree(join(path, name))]));
+          return { mode: stat.mode, sha256: createHash("sha256").update(readFileSync(path)).digest("hex") };
+        };
+        return { launcher: readFileSync(launcher, "utf8"),
+          versions: tree(join(root, "install/versions")), bin: tree(env.MULTIREMI_BIN_DIR!),
+          update_journals: tree(join(root, "state/cli-updates")) };
+      };
+      const before = fileSnapshot();
+      const unitBefore = manager.state();
+      const watchdogsBefore = [...manager.watchdogs];
+      const since = new Date().toISOString().replace("T", " ").replace("Z", " UTC");
+      const rt = runtime()!;
+      const request = store.createRuntimeUpdateRequest(rt.id, { target_version: "1.0.2" });
+      const states = ["pending"]; observed.set(request.id, states);
+      const scenario: any = { kind: "direct-binary-service-rejected", from_version: "1.0.0", to_version: "1.0.2",
+        starts_from_previous_scenario: false, states, unit_before: unitBefore, files_before: before, unit_samples: [] };
+      evidence.scenarios.push(scenario);
+      await wait("direct binary service update rejection", () => {
+        capture(rt.id);
+        scenario.unit_samples.push({ at_ms: Date.now(), unit: manager.state() });
+        return ["failed", "completed", "rolled_back", "timeout"].includes(store.getRuntimeUpdateRequest(rt.id, request.id)!.status);
+      });
+      const result = store.getRuntimeUpdateRequest(rt.id, request.id)!;
+      Object.assign(scenario, { result, state_times_ms: stateTimes.get(request.id),
+        observed_version: runtime()!.metadata.cli_version, task: await taskEvidence() });
+      // Include post-rejection work in the no-restart/no-watchdog observation window.
+      manager.discoverWatchdogs();
+      Object.assign(scenario, { unit_after: manager.state(), files_after: fileSnapshot(),
+        watchdog_units_before: watchdogsBefore, watchdog_units_after: [...manager.watchdogs],
+        watchdog_journal_since: since, watchdog_start_journal: manager.watchdogActivity(since),
+        launcher: readFileSync(launcher, "utf8"),
+        final_launcher_target: readFileSync(launcher, "utf8").match(/^exec (.+) "\$@"$/m)?.[1] });
+      assert.equal(result.status, "failed");
+      assert.match(result.error ?? "", /CLI update blocked: systemd actual ExecStart/);
+      assert(result.error?.includes(oldBinary));
+      assert(result.error?.includes(`expected launcher=${launcher}`));
+      assert(!states.some(state => ["restarting", "verifying"].includes(state)));
+      for (const unit of [scenario.unit_after, ...scenario.unit_samples.map((sample: any) => sample.unit)]) {
+        for (const field of ["MainPID", "ExecMainStartTimestamp", "ExecMainStartTimestampMonotonic"]) {
+          const pattern = new RegExp(`^${field}=(.*)$`, "m");
+          assert.equal(unit.match(pattern)?.[1], unitBefore.match(pattern)?.[1], `${field} changed during rejection`);
+        }
+      }
+      assert.deepEqual(scenario.files_after, before);
+      assert.deepEqual(scenario.watchdog_units_after, watchdogsBefore);
+      assert.deepEqual(scenario.watchdog_start_journal, []);
+      assert.equal(scenario.observed_version, "1.0.0");
+      scenario.files_unchanged = true;
+      scenario.no_restart = true;
+      scenario.no_watchdog_started = true;
     }
     evidence.ok = true;
   } catch (error) { failure = error; evidence.ok = false; evidence.error = String(error); }

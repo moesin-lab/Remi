@@ -786,3 +786,41 @@ test('usage fact and receipt writes stay batched at the 10,000-unit protocol lim
   expect(replay.length).toBeLessThan(40);
   console.info('MAX_USAGE_COST', sql.length, replay.length);
 }, 60_000);
+
+for (const historySize of [100, 3000]) {
+  test(`task.usage incremental prefetch reads only frame units with ${historySize} historical units`, async () => {
+    const f = await loadedFleet(2);
+    const unit = { unitId: 'history', revision: 1, provider: 'claude', model: 'fixture', scope: 'request' as const,
+      source: 'provider_request' as const, accuracy: 'exact' as const, inputTokens: 10, outputTokens: 2,
+      cacheReadTokens: 0, cacheWriteTokens: 0, actualUnsplitTokens: 0, reportedTotalTokens: 12,
+      contextTokens: null, contextWindow: null, costAmount: null, costCurrency: null, occurredAt: '2026-11-17T00:00:00Z' };
+    const snapshot = { version: 2 as const, runId: 'incremental-history', revision: 1, complete: false,
+      units: Array.from({ length: historySize }, (_, index) => ({ ...unit, unitId: `history-${index}` })) };
+    f.store.reportTaskUsageSnapshot(f.task.id, snapshot);
+    // Include audit history in the scale fixture: no historical conflict may be
+    // fetched for an unrelated incremental unit (or parsed as a revision floor).
+    f.database.run(`INSERT INTO multiremi_usage_identity_conflicts
+      (task_id,run_id,unit_id,revision,evidence_sha256,identity_key,owner_task_id,owner_run_id,unit_json,recorded_at)
+      SELECT task_id,run_id,unit_id,revision,'fixture','fixture',task_id,run_id,'{}',occurred_at
+      FROM multiremi_usage_units WHERE task_id=? AND run_id=?`, [f.task.id, snapshot.runId]);
+    for (const [index, delta] of [
+      { ...unit, unitId: 'history-0', revision: 2, outputTokens: 3, reportedTotalTokens: 13 },
+      { ...unit, unitId: 'new-unit' },
+    ].entries()) {
+      const observed: Record<string, number[]> = {};
+      const sql = await countSql(f.database, f.layer, () => f.sessions[0]!.handleMessage(JSON.stringify({
+        v: 2, t: 'task.usage', rt: f.runtimeIds[0], seq: index + 1,
+        p: { task_id: f.task.id, usageSnapshot: { ...snapshot, revision: index + 2, units: [delta] } },
+      })), (statement, result) => {
+        const table = /FROM (multiremi_usage_units|multiremi_usage_unit_receipts|multiremi_usage_identity_conflicts) WHERE/.exec(statement)?.[1];
+        if (table && Array.isArray(result)) (observed[table] ??= []).push(result.length);
+      });
+      expect(f.frames[0]!.find(frame => frame.t === 'res' && frame.re === String(index + 1))?.p.ok).toBe(true);
+      console.info('INCREMENTAL_USAGE_ROWS', historySize, delta.unitId, observed, sql.length);
+      const expectedRows = index === 0 ? 1 : 0;
+      expect(observed).toEqual({ multiremi_usage_units: [expectedRows], multiremi_usage_unit_receipts: [expectedRows], multiremi_usage_identity_conflicts: [expectedRows] });
+      expect(sql.length).toBeLessThanOrEqual(40);
+      expect(f.store.getTask(f.task.id)?.usage[0]?.totalTokens).toBe(12 * historySize + 1 + 12 * index);
+    }
+  });
+}

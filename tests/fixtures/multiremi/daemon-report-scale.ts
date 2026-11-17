@@ -1,0 +1,102 @@
+import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
+import { loadedFleet } from "./daemon-report-fleet.js";
+import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
+
+export interface ReportScale {
+  issues: number;
+  sessions: number;
+  logsPerSession: number;
+  agents: number;
+  skillsPerAgent: number;
+  runtimes: number;
+  historicalAttempts: number;
+  outboxRows: number;
+  queuedRows: number;
+}
+export const REPORT_SCALES = {
+  small: { issues: 2, sessions: 2, logsPerSession: 4, agents: 2, skillsPerAgent: 1,
+    runtimes: 4, historicalAttempts: 2, outboxRows: 2, queuedRows: 2 },
+  stable: { issues: 100, sessions: 40, logsPerSession: 501, agents: 10, skillsPerAgent: 3,
+    runtimes: 8, historicalAttempts: 80, outboxRows: 100, queuedRows: 100 },
+} satisfies Record<string, ReportScale>;
+
+// Use each driver's native JSON expansion, as the usage ledger does. One bound
+// array avoids 20,000 synchronous PG round trips and SQLite's bind limit.
+function insertRows(db: SqlDatabase, table: string, columns: string[], rows: unknown[][], integers: string[] = []) {
+  if (!rows.length) return;
+  const fields = columns.map((column, i) => {
+    const field = db.dialect === "postgres" ? `batch.value->>${i}` : `json_extract(batch.value,'$[${i}]')`;
+    return `CAST(${field} AS ${integers.includes(column) ? "BIGINT" : "TEXT"})`;
+  });
+  const from = db.dialect === "postgres"
+    ? "jsonb_array_elements(CAST(CAST(? AS TEXT) AS JSONB)) AS batch(value)" : "json_each(?) AS batch";
+  db.run(`INSERT INTO ${table} (${columns.join(',')}) SELECT ${fields.join(',')} FROM ${from}`, [JSON.stringify(rows)]);
+}
+
+/** Seed once per tier in beforeAll; callers reuse the live protocol fleet.
+ * No timers, external providers or production connections are needed. Set
+ * MULTIREMI_TEST_POSTGRES_URL to run the identical seed and frames on real PG.
+ */
+export async function createReportScaleFixture(scale: ReportScale) {
+  for (const [dimension, value] of Object.entries(scale))
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(`Invalid scale: ${dimension}`);
+  if (scale.issues < scale.sessions - 1 || scale.agents < 2 || scale.sessions < 2 || scale.runtimes < 4 || scale.runtimes % 2)
+    throw new Error("Scale requires >=2 agents/sessions, enough issues, and an even runtime count >=4");
+  const f = await loadedFleet(2, scale.runtimes, false, true);
+  const agents = [f.agent, f.store.getAgent(f.peer.agentId)!];
+  for (let i = agents.length; i < scale.agents; i++) agents.push(f.store.createAgent({
+    name: `Scale agent ${i}`, provider: i % 2 ? "codex" : "claude", runtimeId: f.runtimeIds[i % f.runtimeIds.length],
+  }));
+  for (const [i, agent] of agents.entries()) {
+    const skills = Array.from({ length: scale.skillsPerAgent }, (_, j) => f.store.createSkill({
+      name: `Scale skill ${i}-${j}`, content: "# Fixture skill", files: [{ path: "reference.md", content: "fixture" }],
+    }));
+    f.store.setAgentSkills(agent.id, skills.map(skill => skill.id!));
+  }
+  const issues = [f.issue];
+  for (let i = 1; i < scale.issues; i++) issues.push(createResponsibleTestIssue(f.store, {
+    title: `Scale issue ${i}`, workspaceId: "local", status: "in_progress",
+    assigneeType: "agent", assigneeId: agents[i % agents.length]!.id,
+  }));
+  const sessionIds = [f.issueSession.id, f.peer.chatSessionId!];
+  for (let i = 2; i < scale.sessions; i++) sessionIds.push(f.store.getOrCreateDefaultIssueSession(issues[i - 1]!.id).id);
+  const now = new Date().toISOString();
+  f.database.transaction(() => {
+    for (const sessionId of sessionIds) {
+      const from = f.store.getConversationLogHead(sessionId)?.headSeq ?? 0;
+      insertRows(f.database, 'multiremi_conversation_log',
+        ['session_id','seq','id','kind','visibility','sender_type','sender_id','body_md','message_kind','metadata','created_at','updated_at'],
+        Array.from({ length: scale.logsPerSession }, (_, i) => [sessionId,from+i+1,`scale-${sessionId}-${i}`,
+          'message','shown','agent',f.agent.id,`Scale log ${i}`,'status','{}',now,now]), ['seq']);
+      f.database.run(`INSERT INTO multiremi_conversation_heads (head_seq,session_id,log_version,updated_at) VALUES (?,?,1,?) ON CONFLICT(session_id) DO UPDATE SET head_seq=excluded.head_seq,log_version=multiremi_conversation_heads.log_version+1`,
+        [from + scale.logsPerSession, sessionId, now]);
+    }
+  })();
+  for (let i = 0; i < scale.historicalAttempts; i++) {
+    const task = f.store.createTask({ agentId: f.agent.id, maxAttempts: 1, prompt: `Historical attempt ${i}`,
+      runtimeId: f.runtimeIds[0] });
+    f.store.claimTask(f.runtimeIds[0]!);
+    f.store.startTask(task.id);
+    f.store.reportTaskUsage(task.id, [{ provider: 'claude', model: 'fixture', inputTokens: 10, outputTokens: 2 }]);
+    f.store.failTask(task.id, { error: 'historical failure' });
+  }
+  // Seed actual bot binding/outbox rows through the store, then expand terminal
+  // history without scheduling external deliveries.
+  const inbound = f.store.submitFeishuBotMessage('local', f.runtimeIds[0]!, {
+    revision: f.config.revision, externalSessionKey: 'oc_scale', externalMessageId: 'om_scale',
+    chatId: 'oc_scale', text: 'scale seed', senderOpenId: 'ou_scale', deliveryMode: 'native_cot_v1',
+  });
+  const binding = f.database.query('SELECT id FROM multiremi_feishu_bot_chat_bindings WHERE chat_session_id=?').get(inbound.chatSessionId)!;
+  insertRows(f.database, 'multiremi_feishu_bot_outbound_deliveries',
+    ['id','workspace_id','binding_id','chat_id','body','status','available_at','created_at','updated_at'],
+    Array.from({ length: scale.outboxRows }, (_, i) => [`scale-outbox-${i}`,'local',binding.id,'oc_scale','history','sent',now,now,now]));
+  insertRows(f.database, 'multiremi_queued_messages',
+    ['id','workspace_id','session_id','agent_id','seq','sender_member_id','body_md','client_id','status','created_at','updated_at'],
+    Array.from({ length: scale.queuedRows }, (_, i) => [`scale-queue-${i}`,'local',f.peer.chatSessionId,f.peer.agentId,i+1,'local','queued',`scale-client-${i}`,'queued',now,now]), ['seq']);
+  for (let i = 0; i < scale.queuedRows; i++) f.store.createRuntimeCommandRequest(f.runtimeIds[i % f.runtimeIds.length]!, { command: 'fixture-no-execution' });
+  await f.layer.drain();
+  for (const session of f.sessions) await session.handleMessage(JSON.stringify({ v: 2, t: 'ack', ack: session.lastSentSeq, p: {} }));
+  await f.layer.drain();
+  console.info('SCALE_ROWS', JSON.stringify(scale), f.database.query('SELECT status,COUNT(*) AS count FROM multiremi_turn_execution_records GROUP BY status').all());
+  return { ...f, scale, sessionIds, agents, issues };
+}

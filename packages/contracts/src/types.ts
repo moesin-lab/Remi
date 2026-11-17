@@ -1,3 +1,4 @@
+import type { DaemonRuntimeUpdatePayload } from "./daemon-protocol.js";
 import type { PlatformSchemaContractFailure } from './platform-failure.js';
 // Wire contracts for every Multiremi product domain. Entities and their Create*/Update* input DTOs
 // are grouped into the sections below; within a section, enums come first, then entities, then the
@@ -905,11 +906,7 @@ export interface MultiremiDaemonRuntimeInput {
   runtime_id: string;
   status: "ok" | "runtime_gone";
   runtime_gone?: boolean;
-  pending_update?: {
-    id: string;
-    target_version: string;
-    scope?: MultiremiRuntimeUpdateScope;
-  };
+  pending_update?: DaemonRuntimeUpdatePayload;
   pending_model_list?: {
     id: string;
   };

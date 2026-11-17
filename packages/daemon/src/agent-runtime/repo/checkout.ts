@@ -1,3 +1,4 @@
+import { DEFAULT_CO_AUTHORED_BY, type CoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
 import { createHash } from "node:crypto";
 import { accessSync, constants, existsSync, mkdirSync, statSync, lstatSync, realpathSync, chmodSync, copyFileSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync, type Dirent } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -28,6 +29,7 @@ export interface MultiremiWorktreeParams {
   /** Stable branch for Issue workspaces, for example agent/MUL-28. */
   branchName?: string;
   coAuthoredByEnabled?: boolean;
+  coAuthoredBy?: CoAuthoredByIdentity;
   // Leave an existing worktree untouched (no reset/clean/checkout) and return
   // its current branch. Used by the daemon's pre-flight auto-checkout so a
   // resumed task never wipes uncommitted work; the CLI keeps the default
@@ -170,10 +172,12 @@ case "$COMMIT_SOURCE" in
   merge|squash) exit 0 ;;
 esac
 
-TRAILER="Co-authored-by: Remi <remi@openremi.fun>"
+CO_AUTHOR=$(git config --get multiremi.coAuthoredBy)
+[ -n "$CO_AUTHOR" ] || exit 0
+TRAILER="Co-authored-by: $CO_AUTHOR"
 
 # Don't add if already present.
-if grep -qF "$TRAILER" "$COMMIT_MSG_FILE"; then
+if grep -qxF -- "$TRAILER" "$COMMIT_MSG_FILE"; then
   exit 0
 fi
 
@@ -432,7 +436,7 @@ export class MultiremiRepoCache {
         throw new Error(`worktree ${worktreePath} is on ${currentBranch}, expected ${requestedBranch}; refusing to switch a persistent workspace`);
       }
       const resolution = resolveBaseRef(barePath, params.ref, params.preferredRef);
-      applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled !== false);
+      applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled === false ? null : params.coAuthoredBy ?? DEFAULT_CO_AUTHORED_BY);
       return { path: worktreePath, branch_name: currentBranch, branchName: currentBranch, created: false, ...worktreeBaseResult(worktreePath, resolution) };
     }
 
@@ -456,7 +460,7 @@ export class MultiremiRepoCache {
       if (requestedBranch && currentBranch !== requestedBranch) {
         throw new Error(`worktree ${worktreePath} is on ${currentBranch}, expected ${requestedBranch}; refusing to switch a persistent workspace`);
       }
-      applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled !== false);
+      applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled === false ? null : params.coAuthoredBy ?? DEFAULT_CO_AUTHORED_BY);
       return { path: worktreePath, branch_name: currentBranch, branchName: currentBranch, created: false, ...worktreeBaseResult(worktreePath, resolution) };
     }
 
@@ -472,7 +476,7 @@ export class MultiremiRepoCache {
     } else {
       git(barePath, ["worktree", "add", "-b", branchName, worktreePath, baseRef]);
     }
-    applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled !== false);
+    applyCoAuthoredByHook(worktreePath, params.coAuthoredByEnabled === false ? null : params.coAuthoredBy ?? DEFAULT_CO_AUTHORED_BY);
     return { path: worktreePath, branch_name: branchName, branchName, created: true, ...worktreeBaseResult(worktreePath, resolution) };
   }
 
@@ -1240,14 +1244,19 @@ function shortId(value: string): string {
   return normalized.length > 12 ? normalized.slice(0, 12) : normalized;
 }
 
-function applyCoAuthoredByHook(worktreePath: string, enabled: boolean): void {
+function applyCoAuthoredByHook(worktreePath: string, identity: CoAuthoredByIdentity | null): void {
   try {
-    if (enabled) installCoAuthoredByHook(worktreePath);
-    else removeCoAuthoredByHook(worktreePath);
+    if (identity) {
+      git(worktreePath, ["config", "--local", "multiremi.coAuthoredBy", `${identity.name} <${identity.email}>`]);
+      installCoAuthoredByHook(worktreePath);
+    } else {
+      git(worktreePath, ["config", "--local", "--unset", "multiremi.coAuthoredBy"], { allowFailure: true });
+      removeCoAuthoredByHook(worktreePath);
+    }
   } catch (error) {
     log.warn("Failed to apply co-authored-by hook; continuing checkout", {
       worktreePath,
-      enabled,
+      enabled: identity !== null,
       error: redactGitCredentialError(errorMessage(error)),
     });
   }

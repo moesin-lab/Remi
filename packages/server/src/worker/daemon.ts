@@ -1,3 +1,4 @@
+import { resolveCoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
 import { performUpdate } from "@shared/cli-update.js";
 import { armUpdateWatchdog, restorePreviousLauncher, journalForInstall, updateJournalDir, readUpdateJournal, updateDecision, decideUpdate, DAEMON_STOP_TIMEOUT_MS } from "@shared/daemon-update.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
@@ -4410,6 +4411,7 @@ export class MultiremiDaemon {
           skipFetch: true,
           signal,
           coAuthoredByEnabled: this.workspaceCoAuthoredByEnabled(task.workspaceId),
+          coAuthoredBy: this.workspaceCoAuthoredBy(task.workspaceId),
         });
         if (result.preferredRefResolved === false) {
           const message = `Configured default branch ${JSON.stringify(repo.defaultBranch)} could not be resolved; fell back to ${result.baseRef}`;
@@ -6028,6 +6030,7 @@ export class MultiremiDaemon {
         ...(subjectBranch ? { branchName: subjectBranch, reuseExisting: true } : {}),
         signal: request.signal,
         coAuthoredByEnabled: this.workspaceCoAuthoredByEnabled(workspaceId),
+        coAuthoredBy: this.workspaceCoAuthoredBy(workspaceId),
       });
       // A reclaimed subject checks its repositories out again on demand; this is where its unsaved work returns.
       if (subjectId) {
@@ -6214,6 +6217,10 @@ export class MultiremiDaemon {
 
   private isRepoAllowed(workspaceId: string, repoUrl: string): boolean {
     return this.workspaceRepoUrls.get(workspaceId)?.has(repoUrl.trim()) ?? false;
+  }
+
+  private workspaceCoAuthoredBy(workspaceId: string) {
+    return resolveCoAuthoredByIdentity(this.workspaceSettings.get(workspaceId) ?? {});
   }
 
   private workspaceCoAuthoredByEnabled(workspaceId: string): boolean {

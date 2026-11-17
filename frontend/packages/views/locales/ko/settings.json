@@ -333,7 +333,15 @@
     "section_repositories": "저장소",
     "repositories_shortcut_label": "저장소 URL은 저장소 탭에 있습니다",
     "repositories_shortcut_link": "저장소 관리 →",
-    "toast_failed": "소스 제어 설정을 업데이트하지 못했습니다"
+    "toast_failed": "소스 제어 설정을 업데이트하지 못했습니다",
+    "co_author_description": "에이전트 커밋에 공동 작성자를 자동으로 추가합니다.",
+    "co_author_name": "이름",
+    "co_author_email": "이메일",
+    "co_author_invalid_name": "제어 문자와 꺾쇠 없이 1~100자의 이름을 입력하세요.",
+    "co_author_invalid_email": "점이 있는 도메인의 유효한 이메일을 254자 이내로 입력하세요.",
+    "co_author_disabled": "트레일러가 비활성화되어 있습니다.",
+    "co_author_save": "저장",
+    "co_author_reset": "기본값 복원"
   },
   "repositories": {
     "section_title": "저장소",

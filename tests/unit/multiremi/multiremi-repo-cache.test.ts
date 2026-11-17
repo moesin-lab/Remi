@@ -722,6 +722,38 @@ describe("Multiremi repo cache", () => {
     expect(existsSync(hookPath)).toBe(false);
   });
 
+  it("reads custom identity from config safely, updates on reuse, and deduplicates exact trailers", async () => {
+    const source = createRepo("main", "custom identity");
+    const cache = new MultiremiRepoCache(tempDir("custom-cache-"));
+    const params = { workspaceId: "local", repoUrl: source, workDir: tempDir("custom-work-"), taskId: "tsk_custom" };
+    await cache.sync("local", [{ url: source }]);
+    const identity = { name: "$(touch pwned) `touch pwned2`", email: "custom@example.test" };
+    const result = await cache.createWorktree({ ...params, coAuthoredBy: identity });
+    const hook = readFileSync(prepareCommitMsgHookPath(result.path), "utf8");
+    expect(hook).not.toContain(identity.name);
+    expect(hook).not.toContain(identity.email);
+    git(result.path, ["config", "user.name", "Tester"]);
+    git(result.path, ["config", "user.email", "tester@example.test"]);
+    const trailer = `Co-authored-by: ${identity.name} <${identity.email}>`;
+    git(result.path, ["commit", "--allow-empty", "-m", `custom\n\n${trailer}`]);
+    expect(git(result.path, ["log", "-1", "--format=%B"]).split(trailer)).toHaveLength(2);
+    git(result.path, ["commit", "--allow-empty", "-m", "append custom identity"]);
+    const oldSha = git(result.path, ["rev-parse", "HEAD"]);
+    const oldMessage = git(result.path, ["log", "-1", "--format=%B"]);
+    expect(oldMessage.split(trailer)).toHaveLength(2);
+    expect(oldMessage.trim().endsWith(trailer)).toBe(true);
+    expect(existsSync(join(result.path, "pwned"))).toBe(false);
+    expect(existsSync(join(result.path, "pwned2"))).toBe(false);
+    await cache.createWorktree({ ...params, reuseExisting: true, coAuthoredBy: { name: "New Author", email: "new@example.test" } });
+    git(result.path, ["commit", "--allow-empty", "-m", "new"]);
+    expect(git(result.path, ["log", "-1", "--format=%B"])).toContain("Co-authored-by: New Author <new@example.test>");
+    expect(git(result.path, ["show", "-s", "--format=%B", oldSha])).toBe(oldMessage);
+    await cache.createWorktree({ ...params, reuseExisting: true, coAuthoredByEnabled: false });
+    expect(spawnSync("git", ["config", "--local", "--get", "multiremi.coAuthoredBy"], { cwd: result.path }).status).toBe(1);
+    git(result.path, ["commit", "--allow-empty", "-m", "disabled"]);
+    expect(git(result.path, ["log", "-1", "--format=%B"])).not.toContain("Co-authored-by:");
+  });
+
   it("upgrades a legacy hook while reusing an existing worktree", async () => {
     const source = createRepo("main", "legacy hook repo");
     const cacheRoot = tempDir("multiremi-repo-legacy-hook-");
@@ -753,7 +785,7 @@ git interpret-trailers --in-place --trailer "Co-authored-by: Multimira Agent <gi
 
     expect(reused.created).toBe(false);
     const upgraded = readFileSync(hookPath, "utf8");
-    expect(upgraded).toContain("Co-authored-by: Remi <remi@openremi.fun>");
+    expect(upgraded).toContain("git config --get multiremi.coAuthoredBy");
     expect(upgraded).not.toContain("Multimira Agent");
   });
 

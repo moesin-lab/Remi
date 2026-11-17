@@ -1892,16 +1892,7 @@
               "description": "Snapshot skill",
               "content": "# snapshot skill",
               "config": {},
-              "files": [
-                {
-                  "id": "skf_d0ubu46g61m1",
-                  "skillId": "skl_snapshot",
-                  "path": "reference.md",
-                  "content": "snapshot reference",
-                  "createdAt": "<timestamp>",
-                  "updatedAt": "<timestamp>"
-                }
-              ],
+              "files": [],
               "createdBy": null,
               "archivedAt": null,
               "createdAt": "<timestamp>",
@@ -1949,16 +1940,7 @@
             "description": "Snapshot skill",
             "content": "# snapshot skill",
             "config": {},
-            "files": [
-              {
-                "id": "skf_d0ubu46g61m1",
-                "skillId": "skl_snapshot",
-                "path": "reference.md",
-                "content": "snapshot reference",
-                "createdAt": "<timestamp>",
-                "updatedAt": "<timestamp>"
-              }
-            ],
+            "files": [],
             "createdBy": null,
             "archivedAt": null,
             "createdAt": "<timestamp>",
@@ -2101,16 +2083,7 @@
               "description": "Snapshot skill",
               "content": "# snapshot skill",
               "config": {},
-              "files": [
-                {
-                  "id": "skf_d0ubu46g61m1",
-                  "skillId": "skl_snapshot",
-                  "path": "reference.md",
-                  "content": "snapshot reference",
-                  "createdAt": "<timestamp>",
-                  "updatedAt": "<timestamp>"
-                }
-              ],
+              "files": [],
               "createdBy": null,
               "archivedAt": null,
               "createdAt": "<timestamp>",
@@ -16695,16 +16668,7 @@
                 "description": "Snapshot skill",
                 "content": "# snapshot skill",
                 "config": {},
-                "files": [
-                  {
-                    "id": "skf_d0ubu46g61m1",
-                    "skillId": "skl_snapshot",
-                    "path": "reference.md",
-                    "content": "snapshot reference",
-                    "createdAt": "<timestamp>",
-                    "updatedAt": "<timestamp>"
-                  }
-                ],
+                "files": [],
                 "createdBy": null,
                 "archivedAt": null,
                 "createdAt": "<timestamp>",
@@ -16770,16 +16734,7 @@
               "description": "Snapshot skill",
               "content": "# snapshot skill",
               "config": {},
-              "files": [
-                {
-                  "id": "skf_d0ubu46g61m1",
-                  "skillId": "skl_snapshot",
-                  "path": "reference.md",
-                  "content": "snapshot reference",
-                  "createdAt": "<timestamp>",
-                  "updatedAt": "<timestamp>"
-                }
-              ],
+              "files": [],
               "createdBy": null,
               "archivedAt": null,
               "createdAt": "<timestamp>",
@@ -29729,16 +29684,7 @@
                 "description": "Snapshot skill",
                 "content": "# snapshot skill",
                 "config": {},
-                "files": [
-                  {
-                    "id": "skf_d0ubu46g61m1",
-                    "skillId": "skl_snapshot",
-                    "path": "reference.md",
-                    "content": "snapshot reference",
-                    "createdAt": "<timestamp>",
-                    "updatedAt": "<timestamp>"
-                  }
-                ],
+                "files": [],
                 "createdBy": null,
                 "archivedAt": null,
                 "createdAt": "<timestamp>",
@@ -29807,16 +29753,7 @@
                 "description": "Snapshot skill",
                 "content": "# snapshot skill",
                 "config": {},
-                "files": [
-                  {
-                    "id": "skf_d0ubu46g61m1",
-                    "skillId": "skl_snapshot",
-                    "path": "reference.md",
-                    "content": "snapshot reference",
-                    "createdAt": "<timestamp>",
-                    "updatedAt": "<timestamp>"
-                  }
-                ],
+                "files": [],
                 "createdBy": null,
                 "archivedAt": null,
                 "createdAt": "<timestamp>",
@@ -30155,16 +30092,7 @@
           "description": "Snapshot skill",
           "content": "# snapshot skill",
           "config": {},
-          "files": [
-            {
-              "id": "skf_d0ubu46g61m1",
-              "skillId": "skl_snapshot",
-              "path": "reference.md",
-              "content": "snapshot reference",
-              "createdAt": "<timestamp>",
-              "updatedAt": "<timestamp>"
-            }
-          ],
+          "files": [],
           "createdBy": null,
           "archivedAt": "<timestamp>",
           "createdAt": "<timestamp>",

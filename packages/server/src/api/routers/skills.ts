@@ -114,7 +114,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/multiremi/skills/:id", (c) => {
     const loaded = loadSkillForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    return c.json({ skill: loaded.skill });
+    return c.json({ skill: store.getSkill(loaded.skill.id!, { includeFiles: true }) });
   });
   app.patch("/api/multiremi/skills/:id", async (c) => {
     const loaded = loadSkillForCurrentManager(c, store, c.req.param("id"));
@@ -205,7 +205,7 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/skills/:id", (c) => {
     const loaded = loadSkillForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    return c.json(skillWithFilesCompatibilityResponse(loaded.skill));
+    return c.json(skillWithFilesCompatibilityResponse(store.getSkill(loaded.skill.id!, { includeFiles: true })!));
   });
   app.patch("/api/skills/:id", async (c) => {
     const loaded = loadSkillForCurrentManager(c, store, c.req.param("id"));

@@ -1,3 +1,4 @@
+import { withDbJob } from "@shared/observability/db-sources.js";
 import { Cron } from "croner";
 import { createLogger } from "@shared/logger.js";
 import type {
@@ -69,8 +70,8 @@ export class MultiremiScheduler {
     this.running = true;
     this.store.recoverLostScheduleTriggers();
     this.store.recoverLostRuntimeProvisionSchedules();
-    this.sync();
-    this.timer = setInterval(() => this.sync(), this.pollIntervalMs);
+    withDbJob("scheduler.sync", () => this.sync());
+    this.timer = setInterval(() => withDbJob("scheduler.sync", () => this.sync()), this.pollIntervalMs);
     this.timer.unref?.();
     this.startFailureMonitor();
     this.startIssueArchiveSweep();
@@ -190,8 +191,8 @@ export class MultiremiScheduler {
     if (this.failureMonitorIntervalMs <= 0) return;
     const run = () => {
       if (!this.running) return;
-      this.runFailureMonitorOnce();
-      this.failureMonitorTimer = setInterval(() => this.runFailureMonitorOnce(), this.failureMonitorIntervalMs);
+      withDbJob("scheduler.failure-monitor", () => this.runFailureMonitorOnce());
+      this.failureMonitorTimer = setInterval(() => withDbJob("scheduler.failure-monitor", () => this.runFailureMonitorOnce()), this.failureMonitorIntervalMs);
       this.failureMonitorTimer.unref?.();
     };
     if (this.failureMonitorStartupDelayMs <= 0) {
@@ -208,7 +209,7 @@ export class MultiremiScheduler {
       this.issueArchiveSweepTimer = setTimeout(() => {
         if (!this.running) return;
         try {
-          this.runIssueArchiveSweepOnce();
+          withDbJob("scheduler.issue-archive", () => this.runIssueArchiveSweepOnce());
         } catch (error) {
           log.warn(`Issue archive sweep failed: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -229,7 +230,7 @@ export class MultiremiScheduler {
         protect: true,
         unref: true,
       }, () => {
-        this.runScheduledAutopilot(autopilot.id);
+        withDbJob("scheduler.autopilot", () => this.runScheduledAutopilot(autopilot.id));
       });
       this.jobs.set(autopilot.id, { expression, job });
     } catch (err) {

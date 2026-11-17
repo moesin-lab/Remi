@@ -253,6 +253,19 @@ export class ChatRepo {
     return row ? toChatSession(row) : null;
   }
 
+  /** Internal batch read; the same projection as getChatSession, no derived usage. */
+  listChatSessionsByIds(ids: readonly string[]): MultiremiChatSession[] {
+    const unique = [...new Set(ids)];
+    const sessions: MultiremiChatSession[] = [];
+    for (let offset = 0; offset < unique.length; offset += 500) {
+      const batch = unique.slice(offset, offset + 500);
+      const rows = this.ctx.db.query(`${CHAT_SESSION_SELECT} WHERE chat.id IN (${batch.map(() => "?").join(",")})`)
+        .all(...batch) as Row[];
+      sessions.push(...rows.map(toChatSession));
+    }
+    return sessions;
+  }
+
   updateChatSession(id: string, input: UpdateChatSessionInput): MultiremiChatSession {
     if (Object.hasOwn(input, "projectId") || Object.hasOwn(input, "project_id")) {
       throw new ChatValidationError("A Chat Project can only be selected when creating the session");

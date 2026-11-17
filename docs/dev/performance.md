@@ -33,6 +33,18 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 - **风险推断：** 长 trace 的分页、全数组派生与 DOM 成本仍可能随事件数增长；断线补读可能与当前帧追赶叠加。需要用请求数、长任务和 React commit 测量实际成本。
 - **采集重点：** 固定事件数、平均文本长度、工具/子 agent 比例和每秒事件数；记录首次打开、滚动、实时追加与断线重连期间的请求数、长任务、React commit 时长与内存。
 
+## Agent 与 Skill 文件读取边界
+
+普通 `getAgent`、Agent 列表、`getSkill` 和 `listAgentSkills` 不读取关联的
+`multiremi_skill_files`；列表在有界批次中读取关联 Skill 信息。`includeArchived`
+不隐式启用文件。需要完整 bundle 的 Store 调用方必须传 `{ includeFiles: true }`。
+任务执行上下文（`getTaskWithAgent`，用于 claim/offer/workspace）、Skill 详情和 Skill
+创建/更新响应显式保留文件及二进制编码；权限检查不加载关联文件。历史 inline Skills
+仍来自 Agent 行，保留原合并优先级。本次没有增加缓存或改变轮询频率。
+
+[大文件复现与验证](../../reports/performance/MUL-85-skill-files.md)记录操作者 PostgreSQL
+采样与本地 1,277 文件夹具；本地 SQLite 耗时不能代表生产 PG 同步桥或部署后的性能。
+
 ## Daemon 保活与事件唤醒边界
 
 保活写入与业务变化通知分开：机器人相同状态报告仍更新 `reported_at`，SSH 相同状态心跳
@@ -177,6 +189,78 @@ bun run tests/manual/smoke-request-metrics.ts
 ```
 
 冒烟脚本默认用 0 ms 阈值和 5 s 汇总间隔以便一次跑完就同时看到两个事件；`MUL367_SMOKE_PORT` / `MUL367_SMOKE_SUMMARY_MS` 可覆盖。它只连 127.0.0.1 的临时实例和内存 SQLite，不读凭证、不碰生产。上线后需要真实基线数字时，按本文档开头「复现顺序与记录」的模板记录环境、并发和样本数，**不要**把本页的示例行情当作实测结论。
+
+## SQL 来源排行（MUL-85）
+
+`MULTIREMI_METRICS_DB_ROUTES=1` 在现有 `api_minute_summary` 中增加 `db_routes`，默认关闭。
+仓库所有者可通过 API 部署环境启用并重启 API，采集完成后撤销；没有新增业务接口或逐请求日志。
+此项复用已有请求缓冲区与 DB 计数，不增加 SQL。`routes` 仍按累计耗时排序；`db_routes`
+独立按 `db_queries`、`db_ms`、`sum_ms` 排序，防止高频短请求被耗时榜截掉。
+每项包含 method、路由模式、count、db_queries、queries_per_request、db_ms、sum_ms、p50_ms、p95_ms。
+`count × queries_per_request` 是该路由窗口内的 SQL 总数（均值保留两位小数）。
+前 N 项沿用 `MULTIREMI_METRICS_SUMMARY_TOP_N`，定位时至少为 10；保留 pid、role 和 window_ms。
+
+同一开关还增加 `db_sources`（HTTP、daemon WS 帧和后台 job 的统一 SQL 榜）、
+`db_attributed: {http, ws, job}` 与 `db_unattributed`。它们在 **SQL 完成时**计数，与进程总数
+使用同一窗口；`db_unattributed = db_queries - http - ws - job`，相减使用完整分类总数，
+不会因 Top N 截断或请求缓冲溢出而漏算。`db_routes` 仍是已完成请求的口径，不用于此相减。
+`db_sources` 每项为 kind、name、count、db_queries、queries_per_invocation、db_ms；count 是
+本窗启动或在本窗执行 SQL 的 invocation 数，因此跨窗工作可在两窗各计一次，分母不是完成数。
+HTTP 名称仅含 method + route pattern，WS 仅用已识别帧类型（未知归 `<unknown>`），job 名称为
+代码常量；每窗最多 512 个不同名称，另设各 kind 的 `<overflow>` 桶保留计数。没有 SQL 文本、参数、
+原始 URL、凭证、用户或任务 ID。关闭开关时不分配来源上下文或归因表项。
+
+后台入口覆盖 scheduler（sync、failure-monitor、issue-archive、autopilot）、SCM、issue-title、
+messaging、notifications sweep/retry、capability sweep、body-html backfill、repository-wiki storage/lease，
+以及异步 daemon.offer。daemon 端 task-activity / parked-lanes 的周期报告在 API 侧按相应 WS 帧归因，
+不伪装成 API job。未包裹的启动/维护查询仍落在 `db_unattributed`。异步派生工作沿用触发来源，
+显式 job 边界覆盖继承来源，互不重复计数。大回复 guardrail 的 `<background>` 兼容策略保持原定义。
+
+线上代采（由有宿主机权限的仓库所有者执行，按实际容器名替换）：
+
+```sh
+docker logs --since 5m multiremi-platform-app-api-1 2>&1 | grep -E '"event":"(api_minute_summary|ws_minute_summary|api_slow_request)"'
+```
+
+同时记录活跃 daemon/runtime/Agent/lane 数、浏览器标签数及采集 SHA。两版必须保持同等规模和
+请求节奏，比较每分钟进程 db_queries、event_loop_lag_max_ms、turns/inbox 的窗口 p50。
+采样总量超过缓冲容量时 `dropped>0`，路由归因仅覆盖保留样本；进程计数仍覆盖全窗口，不能
+把路由计数总和当作进程总量。请求跨窗时按完成时刻入样；异步派生工作也不能强行归为同窗 HTTP。
+SQLite 不经过 PG bridge，生产指标的 db_queries 在 SQLite 下不能代替驱动级 SQL 计数。
+
+Daemon RPC 使用实际帧 type（如 `turn.*`）和 direction 读取 `ws_minute_summary.types`；
+`db_queries/count` 是近似每方法成本。该旧指标用进程计数差分，异步并发可能重叠，不能与 HTTP
+归因相加或声称是精确互斥分解。心跳的排队下行与派活成本需通过完整 drain 的驱动级测试核对。
+
+隔离 HTTP 来源采样：`bun run test tests/manual/profile-api-load.test.ts`，输出 `MUL85_PROFILE` JSON。
+固定 8 Agent、60 Chat Session、1 Runtime、100 未读消息；12 个真实路由各预热一次、采样十次，
+按执行 SQL 总数排行，同时保留累计耗时、p50 和最频繁 SQL 模板。显式 PostgreSQL 失败不回落。
+该夹具没有运行 daemon，等频 HTTP 请求也不是生产流量；不能由它推出线上前三来源或每分钟负载。
+
+混合负载采样（独立临时 SQLite，不启动模型）：
+
+```sh
+MUL85_RUNTIMES=8 MUL85_POLLERS=10 MUL85_SQL_MS=2.5 MUL85_SECONDS=60 \
+  MUL85_PROFILE_OUT=/tmp/mul85-mixed.json bun test tests/manual/profile-api-mixed-load.test.ts
+```
+
+复用真实 WS daemon harness，一个 socket 广告 N 个已登记 Runtime；以 15 秒发送心跳、启用
+生产 60 秒空派活扫描和后台 scheduler/SCM/title/messaging/notification/capability 入口。
+8 Agent、60 个排队 Chat、100 条收件箱消息；独立客户端进程中的 M 个轮询方每秒并发请求五个真实
+鉴权路由。客户端计时不会随 API 事件循环阻塞；每条 SQLite 执行可注入同步阻塞延迟模拟 PG RTT，
+嵌套驱动入口只计一次。预热后采样，发送窗口结束后等待所有响应，不丢请求、不加超时；
+输出含发送时长、排空后的实际窗口时长、实际分钟 SQL、统一榜、事件循环最大 lag 和客户端 p50/p95。
+零查询延迟也可通过 `MUL85_SQL_MS=0` 运行。N/M 是合成规模，活跃 provider lane 为 0；不代表
+宿主实际规模或真实 PG，通过后仍需用宿主提供的规模和线上日志复核。PG 下此延迟模型明确拒绝运行。
+
+领取成本回归：`bun test tests/unit/multiremi/claim-queued-chat-query-count.test.ts`。
+事务内批量读取候选 Chat/Agent，将插件证据按 Agent 复用，不读取未选任务的 usage/autopilot 投影；
+任务目标筛选只读决策列。批量读取按 500 个 ID 分块；选中的任务仍走完整水合与原锁/鉴权检查。
+它不跨请求或事务保存结果，不改变轮询频率或缓存一致性。已有复杂目录/重试/插件情形仍需行为测试。
+
+列表成本回归：`bun run test tests/unit/multiremi/first-screen-hotspots-inbox-attachments.test.ts`。
+MUL-85 用真实鉴权和 SQLite/显式 PostgreSQL 数据库，校验 turns/inbox 返回 1、10、50 条时
+SQL 数一致；本地夹具通过不代表已复现生产规模、PG 延迟或部署后性能改善。
 
 ## WebSocket 帧汇总：`ws_minute_summary`（MUL-417）
 
@@ -688,3 +772,6 @@ CHAT_PANEL_TOKEN=<token> CHAT_PANEL_CHAT=<第一个 chat> CHAT_PANEL_ROUNDS=5 bu
 普通测试工作量另有两种显式治理：[SQLite snapshot](../../tests/helpers/sqlite-store-snapshot.ts)在18个接入文件中减少重复冷bootstrap，但每例仍建独立连接和新Store；[pending-turn committed baseline](../../tests/unit/multiremi/pending-turn-test-backends.ts)在七个同步套件中保留96个双方言场景，定向验证96个场景全部通过、实采14次Store初始化；按原每例fresh策略，同一96场景需96次初始化（原96次为源码推导，未实测）；helper自身的隔离回归另计，不把这项毛减少当作全仓净收益。snapshot迁移种子元数据共享，fresh默认和敏感用例限制见[测试说明](../../TESTING.md)。snapshot统计由文件afterAll输出窗口增量；pending-turn统计按suite输出，均只覆盖该helper，不能混作全仓成本。
 
 [PR2夹具](../../tests/fixtures/multiremi/first-screen-hotspots-pr2-fixture.ts)的附件功能专用选项减少无关播种，默认规模、golden和查询计数回归不变。上述范围已有定向验证：数据库helper三个契约文件18个用例、七个committed-baseline文件96个场景，以及两后端各304组合的路由矩阵均通过；不代表全部消费者或完整CI验证。PG八次重置的小型profile显示TRUNCATE和schema检查占主要成本；将schema五查询合并为单次SQL虽然减少往返，但schema耗时未改善，已回退。尚无同条件完整CI前后对照，不能宣称总体提速或未经实测的时间达标。
+
+本次定位、同规模对照、N/M 敏感性及未完成的生产验收见
+[MUL-85 混合负载报告](../../reports/performance/MUL-85-mixed-load.md)。

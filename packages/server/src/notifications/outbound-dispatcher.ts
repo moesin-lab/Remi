@@ -1,3 +1,4 @@
+import { withDbJob } from "@shared/observability/db-sources.js";
 import type {
   MultiremiNotificationChannelKind,
   MultiremiNotificationDelivery,
@@ -77,8 +78,8 @@ export class OutboundNotificationDispatcher {
 
   start(): void {
     if (this.sweepTimer) return;
-    void this.sweep();
-    this.sweepTimer = setInterval(() => void this.sweep(), this.sweepIntervalMs);
+    void withDbJob("notifications.sweep", () => this.sweep());
+    this.sweepTimer = setInterval(() => void withDbJob("notifications.sweep", () => this.sweep()), this.sweepIntervalMs);
     this.sweepTimer.unref?.();
   }
 
@@ -193,7 +194,7 @@ export class OutboundNotificationDispatcher {
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
       this.retryTimers.delete(id);
-      void this.dispatch(id);
+      void withDbJob("notifications.retry", () => this.dispatch(id));
     }, delayMs);
     timer.unref?.();
     this.retryTimers.set(id, timer);

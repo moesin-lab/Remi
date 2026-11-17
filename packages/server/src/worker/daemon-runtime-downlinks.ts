@@ -34,6 +34,7 @@ export function registerDaemonRuntimeDownlinks(client: DaemonProtocolClient, run
     "platform.drain": (payload: Record<string, unknown>) => ({ drain: payload }),
     "workspace.settings": (payload: Record<string, unknown>) => ({ workspace_settings: payload.settings }),
     "workspace.relay": (payload: Record<string, unknown>) => ({ relay: payload.relay }),
+    "feishu.bot_directive": (payload: Record<string, unknown>) => ({ feishu_bots: [payload] }),
     "feishu.directive": (payload: Record<string, unknown>) => ({ feishu_bot: payload }),
     "ssh_mesh.reconcile": (payload: Record<string, unknown>) => ({ ssh_mesh: payload }),
   };

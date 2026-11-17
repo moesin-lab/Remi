@@ -13,7 +13,7 @@ type Credentials = {
   domain?: FeishuDomain;
 };
 
-let cachedClient: { client: Lark.Client; key: string } | null = null;
+const cachedClients = new Map<string, { client: Lark.Client; secret: string }>();
 
 export function resolveLarkSdkDomain(domain?: FeishuDomain): Lark.Domain | string {
   if (domain === "lark") return Lark.Domain.Lark;
@@ -24,8 +24,9 @@ export function resolveLarkSdkDomain(domain?: FeishuDomain): Lark.Domain | strin
 /** Create or get a cached Feishu HTTP client. */
 export function createFeishuClient(creds: Credentials): Lark.Client {
   const key = `${creds.appId}:${creds.domain ?? "feishu"}`;
-  if (cachedClient && cachedClient.key === key) {
-    return cachedClient.client;
+  const cached = cachedClients.get(key);
+  if (cached && cached.secret === creds.appSecret) {
+    return cached.client;
   }
 
   const client = new Lark.Client({
@@ -35,7 +36,7 @@ export function createFeishuClient(creds: Credentials): Lark.Client {
     domain: resolveLarkSdkDomain(creds.domain),
   });
 
-  cachedClient = { client, key };
+  cachedClients.set(key, { client, secret: creds.appSecret });
   return client;
 }
 

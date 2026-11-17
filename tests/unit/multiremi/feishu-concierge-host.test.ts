@@ -176,7 +176,7 @@ describe("control-plane Feishu concierge host", () => {
     for (const [index, test] of daemons.entries()) {
       Object.assign(test.daemon, {
         localPort: () => 4242 + index,
-        setFeishuConciergeHost: (host: FeishuConciergeHost) => { hosts[index] = host; },
+        setFeishuConciergeHost: (create: (botId?: string) => FeishuConciergeHost) => { hosts[index] = create(); },
         shutdownFeishuConcierge: async () => {
           shutdowns[index]!++;
           await hosts[index]!.stop();

@@ -21,16 +21,6 @@ import {
   waitForFeishuWSReady,
 } from "./client.js";
 
-/** Group policy injected by the caller (remi's GroupConfigStore). */
-let _groupPolicy: GroupPolicy | undefined;
-function gcStore(): GroupPolicy {
-  return _groupPolicy ?? { getByChatId: () => null };
-}
-/** Set the group policy implementation (called by FeishuChannel on init). */
-export function setGroupPolicy(policy: GroupPolicy): void {
-  _groupPolicy = policy;
-}
-
 type GroupMessageDropReason =
   | "duplicate"
   | "membership_gate_unconfigured"
@@ -149,7 +139,7 @@ function tryRecordMessage(messageId: string): boolean {
 
 // ── Sender name resolution ───────────────────────────────────
 const SENDER_NAME_TTL_MS = 10 * 60 * 1000;
-const senderNameCache = new Map<string, { name: string; expireAt: number }>();
+const senderNameCaches = new WeakMap<Lark.Client, Map<string, { name: string; expireAt: number }>>();
 
 async function resolveSenderName(
   client: Lark.Client,
@@ -157,6 +147,8 @@ async function resolveSenderName(
 ): Promise<string | undefined> {
   if (!senderOpenId) return undefined;
 
+  let senderNameCache = senderNameCaches.get(client);
+  if (!senderNameCache) { senderNameCache = new Map(); senderNameCaches.set(client, senderNameCache); }
   const cached = senderNameCache.get(senderOpenId);
   const now = Date.now();
   if (cached && cached.expireAt > now) return cached.name || undefined;
@@ -519,6 +511,8 @@ export type ParsedFeishuMessage = {
 export type FeishuAdmissionDenialReason = "not_member" | "unavailable";
 
 export interface FeishuMessageAdmissionOptions {
+  appId?: string;
+  groupPolicy?: GroupPolicy;
   authorizeSender: FeishuSenderAuthorizer;
   onDenied: (
     context: FeishuMessageContext,
@@ -562,7 +556,7 @@ export async function processFeishuMessageEvent(
   }
 
   // Dedup
-  if (!tryRecordMessage(messageId)) {
+  if (!tryRecordMessage(`${admission?.appId ?? "legacy"}:${messageId}`)) {
     logDroppedGroupMessage(event, "duplicate");
     return null;
   }
@@ -613,7 +607,7 @@ export async function processFeishuMessageEvent(
     } else if (directedAtOthers) {
       logDroppedGroupMessage(event, "directed_at_others");
       return null;
-    } else if (gcStore().getByChatId(ctx.chatId)?.monitor === true) {
+    } else if (admission?.groupPolicy?.getByChatId(ctx.chatId)?.monitor === true) {
       monitored = true;
     } else {
       logDroppedGroupMessage(event, "not_mentioned");
@@ -783,6 +777,7 @@ export function startWebSocketListener(
   config: FeishuChannelConfig,
   onMessage: FeishuMessageCallback,
   authorizeSender: FeishuSenderAuthorizer,
+  groupPolicy?: GroupPolicy,
 ): FeishuWSHandle {
   const creds = {
     appId: config.appId,
@@ -811,7 +806,7 @@ export function startWebSocketListener(
       }
       try {
         const msg = await processFeishuMessageEventWithBotIdentity(client, event, botIdentity, {
-          authorizeSender,
+          appId: config.appId, groupPolicy, authorizeSender,
           onDenied: async (context, reason) => {
             await sendMarkdownCardFeishu(client, context.chatId, feishuAdmissionDenialMessage(reason), {
               replyToMessageId: context.messageId,

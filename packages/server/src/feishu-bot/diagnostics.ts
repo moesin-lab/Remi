@@ -16,6 +16,7 @@ const ERROR_CODES: ReadonlySet<FeishuBotErrorCode> = new Set<FeishuBotErrorCode>
   "insufficient_permissions",
   "agent_unavailable",
   "runtime_unavailable",
+  "runtime_unsupported",
   "connector_start_failed",
   "network_unreachable",
   "unknown",

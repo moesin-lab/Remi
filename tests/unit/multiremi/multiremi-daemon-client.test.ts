@@ -671,3 +671,18 @@ describe("MultiremiDaemonClient workspace configuration", () => {
     expect(ack.relay?.claude).toMatchObject({ revision: 3, auth_token: "relay-secret" });
   });
 });
+
+
+it("recovers decision-card clicks for only the requested bot", async () => {
+  const paths: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    paths.push(String(input)); return Response.json({ cards: [] });
+  }) as typeof fetch;
+  const client = new MultiremiDaemonClient("https://remi.example", "daemon-test-token");
+  await client.listFeishuBotDecisionCards("runtime", "second");
+  await client.listFeishuIssueDecisionCards("runtime", "second");
+  expect(paths).toEqual([
+    "https://remi.example/api/daemon/runtimes/runtime/feishu-bot/decision-cards?bot_id=second",
+    "https://remi.example/api/daemon/runtimes/runtime/feishu-bot/decision-cards?bot_id=second",
+  ]);
+});

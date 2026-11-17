@@ -179,6 +179,7 @@ export async function handleAgentStream(
   chatId: string,
   log: StreamHandlerLog,
   meta: StreamMeta,
+  appId?: string,
 ): Promise<{ failed: boolean; elapsedSec: number; usageTokens: number; contextWindow: number | null; stats: string | null; toolCount: number; contentText: string; thinkingText: string; toolEntries: ToolEntry[] }> {
   let thinkingText = "";
   let contentText = "";
@@ -226,7 +227,7 @@ export async function handleAgentStream(
           const questions = askData
             ? askData.questions.map((q) => ({ question: q.question, options: q.options }))
             : undefined;
-          actionId = registerPendingAction(resolve, reject, questions, chatId);
+          actionId = registerPendingAction(resolve, reject, questions, chatId, appId);
         });
 
         let form;
@@ -311,7 +312,7 @@ export async function handleAgentStream(
       try {
         actionPromise = new Promise<unknown>((resolve, reject) => {
           const questions = elicQuestions.map((q) => ({ question: q.question.question, options: q.question.options }));
-          actionId = registerPendingAction(resolve, reject, questions, chatId);
+          actionId = registerPendingAction(resolve, reject, questions, chatId, appId);
         });
 
         const form = buildAskQuestionForm(actionId, askData);

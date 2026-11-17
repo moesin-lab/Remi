@@ -1,3 +1,4 @@
+import { FeishuBotConfigError } from "@multiremi/store/repos/feishu-bot-repo.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import { UsageValidationError, validateUsageSnapshot } from "@multiremi/store/usage-accounting.js";
 import { isDeepStrictEqual } from "node:util";
@@ -420,14 +421,15 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
           break;
         }
         case "feishu.outbound_result": {
+          if (p.bot_id !== undefined && (typeof p.bot_id !== "string" || !p.bot_id)) reject();
           const runtime = store.getRuntimeLite(runtimeId)!;
           const claimToken = nullable(p.claim_token);
           if (!claimToken) reject();
           if (p.status === "prepared") {
             if (p.mention_open_id !== null && !isFeishuOpenId(p.mention_open_id)) reject();
-            const prepared = store.prepareFeishuBotOutboundMention(runtime.workspaceId ?? "local", runtimeId, requestId, claimToken, p.mention_open_id as string | null);
+            const prepared = store.prepareFeishuBotOutboundMention(runtime.workspaceId ?? "local", runtimeId, requestId, claimToken, p.mention_open_id as string | null, undefined, nullable(p.bot_id) ?? undefined);
             if (!prepared) {
-              const current = store.getFeishuBotOutboundReportState(runtime.workspaceId ?? "local", runtimeId, requestId, claimToken);
+              const current = store.getFeishuBotOutboundReportState(runtime.workspaceId ?? "local", runtimeId, requestId, claimToken, nullable(p.bot_id) ?? undefined);
               log.warn("Absorbed Feishu mention checkpoint whose lease or policy is no longer current", { deliveryId: requestId, status: current.status });
               return { ok: true, lease_lost: true } satisfies DaemonFeishuOutboundOkReply;
             }
@@ -442,9 +444,9 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
             retryable: typeof p.retryable === "boolean" ? p.retryable : undefined,
             interactionOpenId: p.interaction_open_id === null ? null : nullable(p.interaction_open_id),
             degraded: FEISHU_DECISION_DEGRADE_REASONS.includes(p.degraded as FeishuDecisionDegradeReason) ? p.degraded as FeishuDecisionDegradeReason : undefined,
-          });
+          }, undefined, nullable(p.bot_id) ?? undefined);
           if (!accepted) {
-            const current = store.getFeishuBotOutboundReportState(runtime.workspaceId ?? "local", runtimeId, requestId, claimToken);
+            const current = store.getFeishuBotOutboundReportState(runtime.workspaceId ?? "local", runtimeId, requestId, claimToken, nullable(p.bot_id) ?? undefined);
             const duplicate = current.currentRuntime && current.status === p.status && ["sent", "failed"].includes(current.status);
             if (duplicate || (p.status === "streaming" && current.currentLease)) {
               log.debug("Absorbed replayed Feishu result or old checkpoint", { deliveryId: requestId, status: current.status });
@@ -464,13 +466,14 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
         }
         case "concierge.status":
         case "concierge.status_report": {
+          if (p.bot_id !== undefined && (typeof p.bot_id !== "string" || !p.bot_id)) reject();
           if (!["stopped", "starting", "online", "failed"].includes(string(p.state))) reject();
           const revision = Number(p.applied_revision);
           store.reportFeishuBotRuntimeStatus(store.getRuntimeLite(runtimeId)!.workspaceId ?? "local", runtimeId, {
             appliedRevision: Number.isSafeInteger(revision) && revision >= 0 ? revision : 0,
             state: p.state as "stopped" | "starting" | "online" | "failed", botName: nullable(p.bot_name), botOpenId: nullable(p.bot_open_id),
             errorCode: normalizeFeishuBotErrorCode(p.error_code), errorMessage: p.error_message ? redactFeishuBotError(String(p.error_message)) : null,
-          });
+          }, nullable(p.bot_id) ?? undefined);
           break;
         }
         default: reject();
@@ -478,6 +481,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
       return { ok: true };
     } catch (error) {
       if (error instanceof TaskDaemonReportError) return { ok: false, code: error.code, retryable: error.retryable };
+      if (error instanceof FeishuBotConfigError) return { ok: false, code: error.code, retryable: false };
       if (error instanceof ReportRejection) return { ok: false, code: error.code, retryable: false };
       throw error;
     }
@@ -578,6 +582,7 @@ export function registerDaemonMaintenanceHandlers(layer: DaemonProtocolLayer, st
       }
     } catch (error) {
       if (error instanceof GcRejection) return gcError(error.status, error.code, error.message);
+      if (error instanceof FeishuBotConfigError) return { ok: false, code: error.code, retryable: false };
       if (error instanceof ReportRejection) return gcError(error.code === "task_not_found" ? 404 : error.code === "authority_revoked" ? 403 : 400, null, error.message);
       throw error;
     }

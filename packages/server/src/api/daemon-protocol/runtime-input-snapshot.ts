@@ -40,15 +40,18 @@ export function runtimeInputSnapshot(store: MultiremiStore, runtimeId: string, s
     const role = !token || token.type === "daemon" && token.workspaceId === workspaceId ? "owner" : null;
     const workspace = workspaceReposResponse(store, runtime.workspaceId ?? "local", role === "owner" || role === "admin");
     if (workspace) entities.push(config("workspace.settings", { settings: workspace.settings }), config("workspace.relay", { relay: workspace.relay }));
-    const directive = store.feishuBotDirectiveForRuntime(workspaceId, runtimeId);
-    if (directive) entities.push(config("feishu.directive", { ...directive }));
+    if (store.supportsFeishuBotMulti(workspaceId, runtimeId)) {
+      for (const directive of store.feishuBotDirectivesForRuntime(workspaceId, runtimeId)) entities.push(config("feishu.bot_directive", directive));
+    } else {
+      const directive = store.feishuBotDirectiveForRuntime(workspaceId, runtimeId);
+      if (directive) entities.push(config("feishu.directive", { ...directive }));
+    }
     const mesh = store.sshMeshDirectiveForRuntime(runtimeId);
     if (mesh) entities.push(config("ssh_mesh.reconcile", { ...mesh }));
   }
-  const outbound = store.pendingFeishuBotOutbound(workspaceId, runtimeId);
-  if (outbound) entities.push({
+  for (const outbound of store.pendingFeishuBotOutbounds(workspaceId, runtimeId)) entities.push({
     key: `feishu.outbound:${outbound.id}`, type: "feishu.outbound",
-    payload: { id: outbound.id, claim_token: outbound.claimToken, chat_id: outbound.chatId,
+    payload: { bot_id: outbound.botId, id: outbound.id, claim_token: outbound.claimToken, chat_id: outbound.chatId,
       thread_id: outbound.threadId, reply_to_message_id: outbound.replyToMessageId,
       body: outbound.body, body_origin: outbound.bodyOrigin, idempotency_key: outbound.idempotencyKey,
       attachments: outbound.attachments, task_id: outbound.taskId, resume_message_id: outbound.resumeMessageId,
@@ -57,8 +60,8 @@ export function runtimeInputSnapshot(store: MultiremiStore, runtimeId: string, s
       decision_id: outbound.decisionId, decision_issue_id: outbound.decisionIssueId, human_request_id: outbound.humanRequestId,
       human_request_task_id: outbound.humanRequestTaskId, target_message_id: outbound.targetMessageId,
       expires_at: outbound.expiresAt, degraded: outbound.degraded },
-    claimed: () => store.claimAcknowledgedFeishuBotOutbound(workspaceId, runtimeId, outbound.id, outbound.claimToken),
-    discard: () => store.discardPendingFeishuBotOutbound(workspaceId, runtimeId, outbound.id),
+    claimed: () => store.claimAcknowledgedFeishuBotOutbound(workspaceId, runtimeId, outbound.id, outbound.claimToken, outbound.botId),
+    discard: () => store.discardPendingFeishuBotOutbound(workspaceId, runtimeId, outbound.id, outbound.botId),
   });
   entities.push(...pending);
   return entities;

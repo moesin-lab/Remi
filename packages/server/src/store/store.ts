@@ -49,6 +49,7 @@ import { MessagingRepo } from "@multiremi/store/repos/messaging-repo.js";
 import { MessagingOutcomeService } from "@multiremi/messaging/outcomes.js";
 import {
   FeishuBotRepo,
+  FeishuBotConfigError,
   type FeishuBotStatusSnapshot,
 } from "@multiremi/store/repos/feishu-bot-repo.js";
 import {
@@ -2301,16 +2302,17 @@ runMigrations(this.db);
     return this.feishuBot.revealSecrets(workspaceId);
   }
 
-  getFeishuBotDaemonConfig(workspaceId: string, runtimeId: string): MultiremiFeishuBotDaemonConfig | null {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).getDaemonConfig(workspaceId, runtimeId);
+  getFeishuBotDaemonConfig(workspaceId: string, runtimeId: string, botId?: string): MultiremiFeishuBotDaemonConfig | null {
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).getDaemonConfig(workspaceId, runtimeId);
   }
 
   submitFeishuBotMessage(
     workspaceId: string,
     runtimeId: string,
     input: Parameters<FeishuBotRepo["submitMessage"]>[2],
+    botId?: string,
   ): ReturnType<FeishuBotRepo["submitMessage"]> {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).submitMessage(workspaceId, runtimeId, input);
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).submitMessage(workspaceId, runtimeId, input);
   }
 
   getFeishuIssueIdForChatSession(chatSessionId: string): string | null {
@@ -2345,8 +2347,8 @@ runMigrations(this.db);
     return this.feishuBot.resolveIssueDecisionOperatorMember(workspaceId, appId, openId);
   }
 
-  listFeishuIssueDecisionCards(workspaceId: string, runtimeId: string) {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).listLiveIssueDecisionCards(workspaceId, runtimeId);
+  listFeishuIssueDecisionCards(workspaceId: string, runtimeId: string, botId?: string) {
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).listLiveIssueDecisionCards(workspaceId, runtimeId);
   }
 
   getFeishuIssueDecisionCardContext(workspaceId: string, decisionId: string) {
@@ -2356,20 +2358,21 @@ runMigrations(this.db);
   listFeishuBotLiveDecisionCards(
     workspaceId: string,
     runtimeId: string,
+    botId?: string,
   ): ReturnType<FeishuBotRepo["listLiveDecisionCards"]> {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).listLiveDecisionCards(workspaceId, runtimeId);
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).listLiveDecisionCards(workspaceId, runtimeId);
   }
 
-  listFeishuBotSettledHumanRequestCandidates(workspaceId: string, runtimeId: string, daemonId?: string) {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).listSettledHumanRequestCandidates(workspaceId, runtimeId, daemonId);
+  listFeishuBotSettledHumanRequestCandidates(workspaceId: string, runtimeId: string, daemonId?: string, botId?: string) {
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).listSettledHumanRequestCandidates(workspaceId, runtimeId, daemonId);
   }
 
-  assertFeishuBotInboundAttachmentScope(...args: Parameters<FeishuBotRepo["assertInboundAttachmentScope"]>) {
-    return this.feishuBot.forRuntime(args[0], args[1]).assertInboundAttachmentScope(...args);
+  assertFeishuBotInboundAttachmentScope(...args: [...Parameters<FeishuBotRepo["assertInboundAttachmentScope"]>, botId?: string]) {
+    return this.feishuBot.forDaemon(args[0], args[1], args[3]).assertInboundAttachmentScope(args[0], args[1], args[2]);
   }
 
-  createFeishuBotInboundAttachment(...args: Parameters<FeishuBotRepo["createInboundAttachment"]>) {
-    return this.feishuBot.forRuntime(args[0], args[1]).createInboundAttachment(...args);
+  createFeishuBotInboundAttachment(...args: [...Parameters<FeishuBotRepo["createInboundAttachment"]>, botId?: string]) {
+    return this.feishuBot.forDaemon(args[0], args[1], args[4]).createInboundAttachment(args[0], args[1], args[2], args[3]);
   }
 
   sendChatAttachments(...args: Parameters<FeishuBotRepo["sendChatAttachments"]>) {
@@ -2461,7 +2464,40 @@ runMigrations(this.db);
     this.feishuBot.materializeTaskDeliveries(taskId);
   }
 
+  supportsFeishuBotMulti(workspaceId: string, runtimeId: string): boolean {
+    return this.feishuBot.supportsMulti(workspaceId, runtimeId);
+  }
+
+  listFeishuBotDaemonAssignments(workspaceId: string, runtimeId: string) {
+    if (!this.supportsFeishuBotMulti(workspaceId, runtimeId)) throw new FeishuBotConfigError("multi-bot capability required", 409, "capability_required");
+    return this.feishuBot.relatedBots(workspaceId, runtimeId).flatMap(bot => {
+      const directive = bot.directiveForRuntime(workspaceId, runtimeId);
+      return directive ? [{ bot_id: bot.botId, revision: directive.revision,
+        enabled: bot.getConfig(workspaceId)?.enabled ?? false, desired_state: directive.desired_state }] : [];
+    });
+  }
+
+  feishuBotDirectivesForRuntime(workspaceId: string, runtimeId: string) {
+    return this.feishuBot.relatedBots(workspaceId, runtimeId).flatMap(bot => {
+      const directive = bot.directiveForRuntime(workspaceId, runtimeId);
+      return directive ? [{ ...directive, bot_id: bot.botId }] : [];
+    });
+  }
+
+  pendingFeishuBotOutbounds(workspaceId: string, runtimeId: string): MultiremiFeishuBotOutboundDelivery[] {
+    return this.feishuBot.relatedBots(workspaceId, runtimeId).flatMap(bot => {
+      const delivery = bot.claimOutbound(workspaceId, runtimeId, undefined, true, true, true, true, "peek");
+      return delivery ? [{ ...delivery, botId: bot.botId }] : [];
+    });
+  }
+
   claimFeishuBotOutbounds(workspaceId: string, runtimeId: string, now?: string | Date): MultiremiFeishuBotOutboundDelivery[] {
+    if (this.feishuBot.supportsMulti(workspaceId, runtimeId)) {
+      return this.feishuBot.relatedBots(workspaceId, runtimeId).flatMap(bot => {
+        const delivery = bot.claimOutbound(workspaceId, runtimeId, now, true, true, true, true);
+        return delivery ? [{ ...delivery, botId: bot.botId }] : [];
+      });
+    }
     const deliveries: MultiremiFeishuBotOutboundDelivery[] = [];
     for (let count = 0; count < 16; count++) {
       const delivery = this.feishuBot.forRuntime(workspaceId, runtimeId).claimOutbound(workspaceId, runtimeId, now, true, true, true, true);
@@ -2481,25 +2517,30 @@ runMigrations(this.db);
     supportsNativeCot = false,
     supportsAttachments = false,
     supportsKinds = false,
+    botId?: string,
   ): MultiremiFeishuBotOutboundDelivery | null {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).claimOutbound(workspaceId, runtimeId, now, supportsTaskStream, supportsNativeCot, supportsAttachments, supportsKinds);
+    const delivery = this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).claimOutbound(workspaceId, runtimeId, now, supportsTaskStream, supportsNativeCot, supportsAttachments, supportsKinds);
+    return delivery ? { ...delivery, botId: this.feishuBot.forDaemon(workspaceId, runtimeId, botId).botId } : null;
   }
 
-  pendingFeishuBotOutbound(workspaceId: string, runtimeId: string): MultiremiFeishuBotOutboundDelivery | null {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).claimOutbound(workspaceId, runtimeId, undefined, true, true, true, true, "peek");
+  pendingFeishuBotOutbound(workspaceId: string, runtimeId: string, botId?: string): MultiremiFeishuBotOutboundDelivery | null {
+    const delivery = this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).claimOutbound(workspaceId, runtimeId, undefined, true, true, true, true, "peek");
+    return delivery ? { ...delivery, botId: this.feishuBot.forDaemon(workspaceId, runtimeId, botId).botId } : null;
   }
 
   nextFeishuBotOutboundWakeAt(runtimeId: string): number | null {
     const workspaceId = this.runtimes.getRuntimeLite(runtimeId)?.workspaceId;
-    return workspaceId ? this.feishuBot.forRuntime(workspaceId, runtimeId).nextOutboundWakeAt(workspaceId, runtimeId) : null;
+    const times = workspaceId ? this.feishuBot.relatedBots(workspaceId, runtimeId)
+      .map(bot => bot.nextOutboundWakeAt(workspaceId, runtimeId)).filter((value): value is number => value !== null) : [];
+    return times.length ? Math.min(...times) : null;
   }
 
-  claimAcknowledgedFeishuBotOutbound(workspaceId: string, runtimeId: string, id: string, claimToken: string): void {
-    this.feishuBot.forRuntime(workspaceId, runtimeId).claimOutbound(workspaceId, runtimeId, undefined, true, true, true, true, { id, claimToken });
+  claimAcknowledgedFeishuBotOutbound(workspaceId: string, runtimeId: string, id: string, claimToken: string, botId?: string): void {
+    this.feishuBot.forDaemon(workspaceId, runtimeId, botId, true).claimOutbound(workspaceId, runtimeId, undefined, true, true, true, true, { id, claimToken });
   }
 
-  discardPendingFeishuBotOutbound(workspaceId: string, runtimeId: string, id: string): void {
-    this.feishuBot.forRuntime(workspaceId, runtimeId).discardPendingOutbound(workspaceId, runtimeId, id);
+  discardPendingFeishuBotOutbound(workspaceId: string, runtimeId: string, id: string, botId?: string): void {
+    this.feishuBot.forDaemon(workspaceId, runtimeId, botId, true).discardPendingOutbound(workspaceId, runtimeId, id);
   }
 
   getFeishuBotOutboundAttachment(
@@ -2508,8 +2549,9 @@ runMigrations(this.db);
     deliveryId: string,
     claimToken: string,
     attachmentId: string,
+    botId?: string,
   ): MultiremiAttachment | null {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).getOutboundAttachment(
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).getOutboundAttachment(
       workspaceId,
       runtimeId,
       deliveryId,
@@ -2521,12 +2563,13 @@ runMigrations(this.db);
   prepareFeishuBotOutboundMention(
     workspaceId: string, runtimeId: string, deliveryId: string, claimToken: string,
     openId: string | null, now?: string | Date,
+    botId?: string,
   ): { openId: string | null } | null {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).prepareOutboundMention(workspaceId, runtimeId, deliveryId, claimToken, openId, now);
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).prepareOutboundMention(workspaceId, runtimeId, deliveryId, claimToken, openId, now);
   }
 
-  getFeishuBotOutboundReportState(workspaceId: string, runtimeId: string, deliveryId: string, claimToken: string) {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).getOutboundReportState(workspaceId, runtimeId, deliveryId, claimToken);
+  getFeishuBotOutboundReportState(workspaceId: string, runtimeId: string, deliveryId: string, claimToken: string, botId?: string) {
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, true).getOutboundReportState(workspaceId, runtimeId, deliveryId, claimToken);
   }
 
   reportFeishuBotOutbound(
@@ -2535,8 +2578,9 @@ runMigrations(this.db);
     deliveryId: string,
     input: Parameters<FeishuBotRepo["reportOutbound"]>[3],
     now?: string | Date,
+    botId?: string,
   ): boolean {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).reportOutbound(workspaceId, runtimeId, deliveryId, input, now);
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, true).reportOutbound(workspaceId, runtimeId, deliveryId, input, now);
   }
 
   resetFeishuBotSession(
@@ -2544,8 +2588,9 @@ runMigrations(this.db);
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    botId?: string,
   ): boolean {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).resetSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).resetSession(workspaceId, runtimeId, revision, externalSessionKey);
   }
 
   cancelFeishuBotSessionTask(
@@ -2554,8 +2599,9 @@ runMigrations(this.db);
     revision: number,
     externalSessionKey: string,
     options: { chatId?: string | null; senderOpenId?: string | null; target?: string | null } = {},
+    botId?: string,
   ): import("@multiremi/contracts/types.js").FeishuBotCancelResult {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).cancelSessionTask(workspaceId, runtimeId, revision, externalSessionKey, options);
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).cancelSessionTask(workspaceId, runtimeId, revision, externalSessionKey, options);
   }
 
   inspectFeishuBotSession(
@@ -2563,20 +2609,22 @@ runMigrations(this.db);
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    botId?: string,
   ): ReturnType<FeishuBotRepo["inspectSession"]> {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).inspectSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).inspectSession(workspaceId, runtimeId, revision, externalSessionKey);
   }
 
-  feishuBotDirectiveForRuntime(workspaceId: string, runtimeId: string): MultiremiFeishuBotDirective | null {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).directiveForRuntime(workspaceId, runtimeId);
+  feishuBotDirectiveForRuntime(workspaceId: string, runtimeId: string, botId?: string): MultiremiFeishuBotDirective | null {
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, false).directiveForRuntime(workspaceId, runtimeId);
   }
 
   reportFeishuBotRuntimeStatus(
     workspaceId: string,
     runtimeId: string,
     input: ReportFeishuBotRuntimeStatusInput,
+    botId?: string,
   ): MultiremiFeishuBotRuntimeStatus {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).reportRuntimeStatus(workspaceId, runtimeId, input);
+    return this.feishuBot.forDaemon(workspaceId, runtimeId, botId, true).reportRuntimeStatus(workspaceId, runtimeId, input);
   }
 
   listFeishuBotRuntimeStatuses(workspaceId: string): MultiremiFeishuBotRuntimeStatus[] {
@@ -3718,6 +3766,7 @@ runMigrations(this.db);
     supportsBotMenu?: boolean;
     botMenuProtocol?: number;
     supportsFeishuBotConfig?: boolean;
+    supportsFeishuBotMulti?: boolean;
     supportsDecisionCard?: boolean;
     supportsIssueDecisionCard?: boolean;
   } = {}): MultiremiDaemonHeartbeatAck {

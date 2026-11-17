@@ -78,6 +78,16 @@ PR 6 的后台任务计数随同一帧、按同一规则写库。后台任务快
 `MULTIREMI_TEST_POSTGRES_URL` 则创建并清理独立 PostgreSQL 测试库，连接失败不回落。
 这是 SQL 成本与行为检查，不提供生产延迟、吞吐或恢复时间结论。
 
+## 认领候选与 offer 唤醒边界
+
+正常认领与陈旧 dispatch 恢复从 attempts/turns 基表选一次 ID，PG 锁候选时使用
+`SKIP LOCKED`；工作区生命周期锁继续保护并发上限与配置。随后按 ID 进入规范化变更器。
+活跃 attempt ID 集合物化一次供容量/lane/共享目录探针复用，保留当前 turn 的
+awaiting_human 状态覆盖。索引、完整谓词对照、查询数范围及隔离 PG 计划见
+[MUL-163 报告](../../reports/performance/MUL-163-claim.md)。默认 offer 不周期扫描在线 runtime，
+普通 ack/drain 只恢复背压等待；入队、终态、容量/配置变化及已有期限仍立即触发。
+显式 `sweepMs` 只用于诊断遗漏事件；线上延迟与一小时稳定性仍需部署后测量。
+
 ## Issue 详情首屏的工作区读取
 
 Issue 详情首屏的三个只读 GET 路由（详情、Sessions、timeline）启用请求级读取缓存。

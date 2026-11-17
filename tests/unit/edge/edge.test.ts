@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, spyOn, test } from 'bun:test';
 import { UpstreamSocket } from '../../../packages/edge/src/websocket';
 import { Edge } from '../../../packages/edge/src/index';
 import { connect } from 'node:net';
@@ -272,6 +272,7 @@ test('successful HTTP resets consecutive passive failures and header timeout is 
 test('validates listener port and health interval before starting', () => {
   for (const port of [NaN, -1, 65536, 1.5]) expect(() => edge({ port })).toThrow('Invalid port');
   for (const healthIntervalMs of [0, -1, NaN, Infinity]) expect(() => edge({ healthIntervalMs })).toThrow('Invalid healthIntervalMs');
+  for (const wsStallTimeoutMs of [0, -1, NaN, Infinity]) expect(() => edge({ wsStallTimeoutMs })).toThrow('Invalid wsStallTimeoutMs');
 });
 
 test('control socket restarts after SIGKILL but never replaces an active listener or file', async () => {
@@ -440,7 +441,7 @@ test('WS streams 64 x 1 MiB to a slow steady TCP reader without hanging', async 
     },
   } });
   cleanups.push(() => { void b.stop(true); });
-  const e = edge({ backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
+  const e = edge({ wsStallTimeoutMs: 500, backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
   await new Promise<void>((resolve, reject) => {
     const socket = connect(Number(e.server.port), '127.0.0.1'); cleanups.push(() => socket.destroy());
     let head = Buffer.alloc(0); let upgraded = false; let frameHeader = Buffer.alloc(0);
@@ -507,3 +508,50 @@ test('bodyless POST uses a fresh upstream connection and avoids stale keep-alive
   expect(connections).toBe(2); expect(requests).toBe(2);
   expect(e.status().backends[0].failures).toBe(0); expect(e.status().metrics.upstreamErrors).toBe(0);
 });
+
+test('WS stalled TCP reader closes with 1013 within a bounded time and queue', async () => {
+  const size = 1024 * 1024;
+  let sent = 0; let backendClose: { code: number; reason: string } | undefined;
+  let producer: ReturnType<typeof setInterval> | undefined;
+  const b = Bun.serve({ port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
+    maxPayloadLength: 4 * size, backpressureLimit: 4 * size, closeOnBackpressureLimit: false,
+    message(ws) {
+      producer = setInterval(() => {
+        if (ws.getBufferedAmount() < 4 * size && ws.send(new Uint8Array(size)) !== 0) sent++;
+      }, 1);
+    },
+    close(_ws, code, reason) { clearInterval(producer); backendClose = { code, reason }; },
+  } });
+  cleanups.push(() => { clearInterval(producer); void b.stop(true); });
+  const e = edge({ wsStallTimeoutMs: 250, backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
+  const socket = connect(Number(e.server.port), '127.0.0.1'); cleanups.push(() => socket.destroy());
+  await new Promise<void>((resolve, reject) => {
+    let head = '';
+    socket.on('error', reject);
+    socket.on('connect', () => socket.write('GET / HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n'));
+    socket.on('data', data => {
+      head += data.toString();
+      if (!head.includes('\r\n\r\n')) return;
+      expect(head).toStartWith('HTTP/1.1 101');
+      socket.pause(); // Stop consuming completely after the handshake.
+      socket.write(Buffer.from([0x81, 0x80, 0, 0, 0, 0]));
+      resolve();
+    });
+  });
+  // Observe the real Bun close call without replacing it: a peer that refuses
+  // all reads cannot be guaranteed delivery of the close frame before teardown.
+  const client = [...(e as unknown as { clients: Set<import('bun').ServerWebSocket<unknown>> }).clients][0];
+  const close = spyOn(client, 'close');
+  try {
+    await until(() => e.status().backends[0].websockets === 0);
+    expect(close).toHaveBeenCalledWith(1013, 'Downstream stalled');
+    await until(() => backendClose !== undefined);
+    socket.removeAllListeners('data');
+    const ended = new Promise<void>((resolve, reject) => { socket.once('end', resolve); socket.once('error', reject); });
+    socket.resume(); await ended;
+    // Bound admitted data even though the backend continuously produces messages.
+    expect(sent).toBeLessThan(64);
+    await sleep(100); const finalSent = sent; await sleep(100); expect(sent).toBe(finalSent);
+  } finally { close.mockRestore(); }
+
+}, 5000);

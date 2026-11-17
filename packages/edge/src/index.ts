@@ -15,10 +15,10 @@ interface Slot extends Backend {
 export interface EdgeOptions {
   hostname?: string; port?: number; controlSocket?: string; backends?: Backend[];
   holdMaxMs?: number; maxWaiting?: number; healthIntervalMs?: number;
-  healthTimeoutMs?: number; failureThreshold?: number; riseThreshold?: number; wsBufferLimit?: number; wsMaxMessageBytes?: number; wsQueueLimit?: number; responseHeaderTimeoutMs?: number;
+  healthTimeoutMs?: number; failureThreshold?: number; riseThreshold?: number; wsBufferLimit?: number; wsStallTimeoutMs?: number; wsMaxMessageBytes?: number; wsQueueLimit?: number; responseHeaderTimeoutMs?: number;
   log?: (line: string) => void;
 }
-interface Relay { upstream: UpstreamSocket; client?: ServerWebSocket<Relay>; slot: Slot; pending: (string | Buffer)[]; bytes: number; ended: boolean; earlyClose?: { code: number; reason: string }; blocked?: boolean; retryTimer?: ReturnType<typeof setTimeout> }
+interface Relay { upstream: UpstreamSocket; client?: ServerWebSocket<Relay>; slot: Slot; pending: (string | Buffer)[]; bytes: number; ended: boolean; earlyClose?: { code: number; reason: string }; blocked?: boolean; stalledSince?: number; lastBuffered?: number; retryTimer?: ReturnType<typeof setTimeout> }
 const hop = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'];
 export function cleanHeaders(input: Headers): Headers {
   const headers = new Headers(input);
@@ -47,12 +47,12 @@ export class Edge extends EventEmitter {
   readonly server: Bun.Server<Relay>;
   readonly metrics = { requests: 0, upstreamErrors: 0, wsRelays: 0, errors: { '502': 0, '503': 0, '504': 0 }, holds: 0, holdMs: 0,
     holdDurationBuckets: { le10: 0, le100: 0, le1000: 0, le10000: 0, infinity: 0 } };
-  private options: Required<Pick<EdgeOptions, 'holdMaxMs' | 'maxWaiting' | 'failureThreshold' | 'healthTimeoutMs' | 'healthIntervalMs' | 'riseThreshold' | 'responseHeaderTimeoutMs' | 'wsMaxMessageBytes' | 'wsQueueLimit' | 'wsBufferLimit'>> & EdgeOptions;
+  private options: Required<Pick<EdgeOptions, 'holdMaxMs' | 'maxWaiting' | 'failureThreshold' | 'healthTimeoutMs' | 'healthIntervalMs' | 'riseThreshold' | 'responseHeaderTimeoutMs' | 'wsMaxMessageBytes' | 'wsQueueLimit' | 'wsBufferLimit' | 'wsStallTimeoutMs'>> & EdgeOptions;
 
   constructor(options: EdgeOptions = {}) {
     super();
-    this.options = { holdMaxMs: 60_000, maxWaiting: 4096, failureThreshold: 3, healthTimeoutMs: 1000, wsBufferLimit: 1024 * 1024, wsMaxMessageBytes: 4 * 1024 * 1024, wsQueueLimit: 64 * 1024 * 1024, healthIntervalMs: 1000, riseThreshold: 2, responseHeaderTimeoutMs: 30_000, ...options };
-    for (const key of ['holdMaxMs', 'maxWaiting', 'failureThreshold', 'healthTimeoutMs', 'healthIntervalMs', 'riseThreshold', 'responseHeaderTimeoutMs', 'wsMaxMessageBytes', 'wsQueueLimit', 'wsBufferLimit'] as const) {
+    this.options = { holdMaxMs: 60_000, maxWaiting: 4096, failureThreshold: 3, healthTimeoutMs: 1000, wsBufferLimit: 1024 * 1024, wsStallTimeoutMs: 30_000, wsMaxMessageBytes: 4 * 1024 * 1024, wsQueueLimit: 64 * 1024 * 1024, healthIntervalMs: 1000, riseThreshold: 2, responseHeaderTimeoutMs: 30_000, ...options };
+    for (const key of ['holdMaxMs', 'maxWaiting', 'failureThreshold', 'healthTimeoutMs', 'healthIntervalMs', 'riseThreshold', 'responseHeaderTimeoutMs', 'wsMaxMessageBytes', 'wsQueueLimit', 'wsBufferLimit', 'wsStallTimeoutMs'] as const) {
       if (!Number.isFinite(this.options[key]) || this.options[key] <= 0) throw new Error(`Invalid ${key}`);
     }
     if (!Number.isInteger(options.port ?? 16120) || (options.port ?? 16120) < 0 || (options.port ?? 16120) > 65535) throw new Error('Invalid port');
@@ -296,6 +296,7 @@ export class Edge extends EventEmitter {
       upstream.binaryType = 'arraybuffer';
       upstream.onoverflow = () => this.closeRelay(relay, 1013, 'Backpressure limit');
       upstream.onmessage = event => {
+        if (relay.ended) return;
         const data = typeof event.data === 'string' ? event.data : Buffer.from(event.data as ArrayBuffer);
         relay.pending.push(data); relay.bytes += Buffer.byteLength(data);
         this.flush(relay);
@@ -338,10 +339,17 @@ export class Edge extends EventEmitter {
     if (!relay.client || relay.ended) return;
     relay.blocked = false;
     const pause = () => {
+      const buffered = relay.client!.getBufferedAmount();
+      const now = performance.now();
+      if (relay.stalledSince === undefined || buffered < (relay.lastBuffered ?? Infinity)) relay.stalledSince = now;
+      relay.lastBuffered = buffered;
+      if (now - relay.stalledSince >= this.options.wsStallTimeoutMs) {
+        this.closeRelay(relay, 1013, 'Downstream stalled'); return;
+      }
       relay.blocked = true; relay.upstream.pause();
       // Bun 1.3.14 can miss drain after send() returns -1 (accepted/queued).
       // Poll only congested relays, and use actual buffered bytes for admission.
-      relay.retryTimer = setTimeout(() => this.flush(relay), 10);
+      relay.retryTimer = setTimeout(() => this.flush(relay), 25);
       relay.retryTimer.unref();
     };
     while (relay.pending.length) {
@@ -355,6 +363,7 @@ export class Edge extends EventEmitter {
       // Positive and -1 both accept the entire message. Never enqueue it twice.
     }
     if (relay.client.getBufferedAmount() >= this.options.wsBufferLimit) { pause(); return; }
+    relay.stalledSince = undefined; relay.lastBuffered = undefined;
     relay.upstream.resume();
   }
   private closeRelay(relay: Relay, code: number, reason: string) {
@@ -369,7 +378,12 @@ export class Edge extends EventEmitter {
       const timer = setTimeout(() => { client.terminate(); this.clients.delete(client); }, 100);
       timer.unref();
     }
-    if (relay.upstream.readyState === WebSocket.OPEN) relay.upstream.close(wireCode, reason); else if (relay.upstream.readyState === WebSocket.CONNECTING) relay.upstream.close();
+    if (relay.upstream.readyState === WebSocket.OPEN) {
+      relay.upstream.close(wireCode, reason);
+      // Release TCP backpressure so the peer can finish its queued writes and
+      // exchange close frames before the upstream close deadline.
+      relay.upstream.resume();
+    } else if (relay.upstream.readyState === WebSocket.CONNECTING) relay.upstream.close();
     if (this.relays.delete(relay)) { relay.slot.websockets--; this.checkDrained(relay.slot); }
   }
   stop() {

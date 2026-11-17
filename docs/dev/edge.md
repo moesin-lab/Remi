@@ -27,7 +27,7 @@ For embedding, import `startEdge` or `Edge` from
 `holdMaxMs`, `maxWaiting`, `healthIntervalMs` (1000), `healthTimeoutMs` (1000),
 `failureThreshold` (3), `riseThreshold` (2), `responseHeaderTimeoutMs` (30000),
 `wsMaxMessageBytes` (4 MiB), `wsQueueLimit` (64 MiB upstream queue ceiling), `wsBufferLimit` (1 MiB downstream high-water mark),
-and an optional `log`. Port and positive numeric limits are validated before listening.
+`wsStallTimeoutMs` (30000), and an optional `log`. Port and positive numeric limits are validated before listening.
 The HTTP listener has a 120-second idle timeout and a 128 MiB request body limit,
 matching the slot's Bun default. While awaiting admission, upload prefixes share
 an 8 MiB global buffering budget (across all waiting uploads). Exhaustion cancels
@@ -95,9 +95,14 @@ or health penalties. Message size is limited separately from backpressure:
 2–4 MiB messages are accepted by default. Downstream backpressure pauses upstream
 TCP reads when `getBufferedAmount()` reaches the high-water mark. A queued
 `send()` result of -1 is accepted, not replayed. Client drain resumes reads, with
-a 10 ms timer fallback only while congested because Bun 1.3.14 may miss drain
+a 25 ms timer fallback only while congested because Bun 1.3.14 may miss drain
 notifications. Close/stop cancels that timer. Upstream writes resume on TCP drain;
-reaching the downstream high-water mark does not disconnect the relay.
+reaching the downstream high-water mark pauses the relay. If buffered bytes make
+no progress for `wsStallTimeoutMs`, edge closes both sides with 1013
+(`Downstream stalled`) and terminates the downstream socket after 100 ms, so a
+non-reading client cannot retain a relay indefinitely. Buffer decreases reset the
+progress deadline. A peer that refuses all reads may observe transport closure
+instead of receiving the queued 1013 frame before forced teardown.
 Bun ServerWebSocket exposes no input pause API: a client that produces faster
 than its upstream consumes accumulates an outgoing write queue. A separate
 `wsQueueLimit` hard safety ceiling closes with 1013 on sustained upstream overload;
@@ -124,7 +129,7 @@ npm run docs:check
 
 The suite includes 20 handovers under concurrent HTTP/SSE/WS, hold limits, handshake
 recovery, close codes, forwarding headers, private paths, health/draining, Unix
-control, 64 × 1 MiB frames to a slow TCP reader, and 100 MiB streaming with
+control, 64 × 1 MiB frames to a slow TCP reader, bounded closure for a stalled reader, and 100 MiB streaming with
 RSS sampling in an isolated edge subprocess. The memory source yields every MiB
 to let native I/O progress; upload and download share one peak and the unchanged
 80 MiB growth ceiling, with no GC during measurement. These tests are local transport

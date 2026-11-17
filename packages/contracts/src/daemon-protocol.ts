@@ -904,6 +904,7 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   "authority_revoked",
   "invalid_report",
   "cli_update_not_admitted",
+  "cli_update_not_runnable",
   "report_shape_retired",
   "turn_input_pending",
   "input_unread",

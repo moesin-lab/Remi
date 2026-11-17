@@ -2507,10 +2507,13 @@ export class RuntimesRepo {
     if (options.claimPending !== false) {
       const update = this.claimRuntimeUpdateRequest(runtimeId);
       if (update) {
-        const drain = update.scope === "cli"
-          ? this.getDaemonDrainStatus(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id) : null;
+        // Manual/deploy drains have their own deadline, which must not bound
+        // this update's admission window (including after they have drained).
+        const drain = update.scope === "cli" ? this.ctx.db.query(`SELECT deadline FROM multiremi_daemon_drains
+          WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`)
+          .get(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id, update.id) as Row | null : null;
         ack.pending_update = { id: update.id, target_version: update.targetVersion, scope: update.scope,
-          ...(drain?.deadline ? { drain_deadline: drain.deadline } : {}) };
+          ...(drain?.deadline ? { drain_deadline: String(drain.deadline) } : {}) };
       }
     }
     return ack;

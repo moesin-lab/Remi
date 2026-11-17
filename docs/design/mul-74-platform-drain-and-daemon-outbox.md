@@ -126,6 +126,10 @@ CLI running 回执只有 pending→running（通过上述准入）与 running→
 安装许可。daemon 收到此 code 立即释放暂停并抛出以释放下行去重键，不安装、不重启、
 不补报 failed，也不按未知结果重试；平台已有终态或已有执行者。终态的其它上报保持幂等成功。
 
+HTTP heartbeat 和 WS 下行仅在 drain 的 `update_request_id` 等于本请求 id 时携带
+`drain_deadline`；人工/部署 drain 的期限不约束更新准入，即使该期限已经过去。
+没有本请求持有的 deadline 时，daemon 使用本地默认排空期限和 30 秒准入确认窗口。
+
 running 准入确认使用非持久化同步 HTTP result，兼容没有准入逻辑的旧服务端；终态仍走
 持久化 outbox。接受后才安装。超时、断线、5xx 等结果未知时，每 250ms 幂等重试，
 窗口取平台剩余 drain 期限与 30 秒的较小值（旧服务端无 deadline 时取 30 秒），每次请求

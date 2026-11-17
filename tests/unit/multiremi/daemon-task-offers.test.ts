@@ -1,7 +1,7 @@
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it, spyOn, setSystemTime } from "bun:test";
 import { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
-import { DaemonTaskOffers, daemonTurnOfferPayload } from "@multiremi/api/daemon-protocol/task-offers.js";
+import { DAEMON_OFFER_SWEEP_MS, DaemonTaskOffers, daemonTurnOfferPayload } from "@multiremi/api/daemon-protocol/task-offers.js";
 import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
 import { DAEMON_MIN_CLI_VERSION, DAEMON_OFFER_COOLDOWN_MS, DAEMON_OFFER_TIMEOUT_MS } from "@multiremi/contracts/daemon-protocol.js";
 import type { MultiremiTaskWithAgent } from "@multiremi/contracts/types.js";
@@ -13,7 +13,7 @@ afterEach(async () => {
   resetMultiremiTestEnv();
 });
 
-function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<string, unknown> | null>, runtimeCount = 1, sweepMs?: number) {
+function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<string, unknown> | null>, runtimeCount = 1, sweepMs?: number, metrics = false) {
   const store = createLocalStore();
   const runtimeIds = Array.from({ length: runtimeCount }, (_, index) => {
     const id = `rt_offer_${index}`;
@@ -24,7 +24,8 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
   const agentIds = runtimeIds.map(runtimeId => store.createAgent({ name: runtimeId, runtimeId,
     provider: "claude", workspaceId: "local" }).id);
   const clock = new ManualDaemonProtocolClock(Date.now());
-  const layer = new DaemonProtocolLayer({ store });
+  const layer = new DaemonProtocolLayer({ store, metrics: metrics ? { enabled: true,
+    summaryIntervalMs: 2_147_483_647, summaryTopTypes: 20, bufferCapacity: 4096 } : undefined });
   layers.push(layer);
   const offers = new DaemonTaskOffers({ store, layer, clock, sweepMs,
     prepare: async task => {
@@ -182,14 +183,40 @@ describe("A-3 task offers", () => {
     expect(h.offered()).toHaveLength(2);
   });
 
-  it("keeps the sweep disabled by default so a missing direct trigger remains observable", async () => {
-    const h = fixture(); await h.hello(); h.task();
-    h.clock.advance(60_000); await h.layer.drain();
-    expect(h.offered()).toHaveLength(0);
+  it("recovers missed queue events with the production default sweep and increments the summary counter", async () => {
+    const previous = process.env.NODE_ENV;
+    let h: ReturnType<typeof fixture>;
+    try {
+      process.env.NODE_ENV = "production";
+      h = fixture(undefined, 1, undefined, true);
+    } finally {
+      if (previous === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previous;
+    }
+    await h.hello(); const task = h.task();
+    const metric = spyOn(h.layer, "recordOfferSweepRecovery");
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      h.clock.advance(DAEMON_OFFER_SWEEP_MS - 1); await h.layer.drain();
+      expect(h.offered()).toHaveLength(0); expect(metric).not.toHaveBeenCalled();
+      h.clock.advance(1); await h.layer.drain();
+      expect(h.offered().map(frame => frame.p.attempt_id)).toEqual([task.id]);
+      expect(metric).toHaveBeenCalledTimes(1);
+      h.layer.flushMetrics();
+      expect(JSON.parse(log.mock.calls[0]![0] as string)).toMatchObject({
+        event: "ws_minute_summary", offer_sweep_recovered: 1,
+      });
+      h.layer.flushMetrics();
+      expect(JSON.parse(log.mock.calls[1]![0] as string).offer_sweep_recovered).toBe(0);
+      expect(JSON.parse(warn.mock.calls[0]![0] as string)).toEqual({
+        event: "daemon_offer_sweep_recovered", runtime_id: h.runtimeIds[0], task_id: task.id,
+      });
+    } finally { metric.mockRestore(); warn.mockRestore(); log.mockRestore(); }
   });
 
   it("sweeps online runtimes at 60s, records recovered work and skips a pending offer", async () => {
-    const h = fixture(undefined, 1, 60_000); await h.hello(); const task = h.task();
+    const h = fixture(undefined, 1, DAEMON_OFFER_SWEEP_MS); await h.hello(); const task = h.task();
     const metric = spyOn(h.layer, "recordOfferSweepRecovery");
     const warn = spyOn(console, "warn").mockImplementation(() => {});
     try {

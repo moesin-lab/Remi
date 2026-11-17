@@ -595,9 +595,9 @@ Chat 恢复、Issue workspace 归属/清理、维护 drain 释放都在写入后
 终态释放 Agent 或执行 lane 容量时唤醒同 workspace 的在线 runtime，不只唤醒原 runtime。
 跨进程的写后事件统一经 MUL-462 实时扇出；v2 连接层不直接订阅 Store。
 
-默认不周期扫描在线 runtime，避免没有入队或资格变化时重复认领。普通 ack / socket drain
-只恢复因发送窗口或背压而等待的泵；其它 ack 不触发认领。事件和上述期限仍立即唤醒。
-诊断调用方可显式传入 `sweepMs`（建议 `DAEMON_OFFER_SWEEP_MS`，60 s）开启恢复扫描；泵运行、
+生产默认每 60 s（`DAEMON_OFFER_SWEEP_MS`）兜底扫描在线 runtime，防止漏接事件后任务长期排队。
+普通 ack / socket drain 只恢复因发送窗口或背压而等待的泵；其它 ack 不触发认领。
+事件和上述期限仍立即唤醒；测试环境默认禁用分钟扫描，可显式传入 `sweepMs`。泵运行、
 等应答、等窗口恢复或冷却中则跳过。扫描派出任务意味着遗漏直接触发，记带 task id 的 warn，
 并计入 `ws_minute_summary.offer_sweep_recovered`。
 

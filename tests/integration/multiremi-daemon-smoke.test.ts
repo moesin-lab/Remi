@@ -3056,8 +3056,9 @@ describe("Bun Multiremi daemon smoke", () => {
       expect(updateTargets).toEqual(["v9.9.9"]);
       expect(daemon.restartRequested()).toBe(true);
       expect(store.getTask(queuedTask.id)?.status).toBe("queued");
+      // The injected installer cannot confirm a new-process hello/self-check.
       expect(store.getRuntimeUpdateRequest(runtimeId, updateRequest.id)).toMatchObject({
-        status: "completed",
+        status: "restarting",
         output: "Updated to v9.9.9",
       });
       expect(store.getRuntimeModelListRequest(runtimeId, modelRequest.id)).toMatchObject({

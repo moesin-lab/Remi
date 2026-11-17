@@ -1,3 +1,4 @@
+import { DAEMON_STOP_TIMEOUT_MS } from "@shared/daemon-update.js";
 import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
 import { afterEach, describe, expect, it, jest } from "bun:test";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
@@ -61,6 +62,11 @@ function createLoopDaemon(options: {
   Object.assign(daemon, {
     stopped: false,
     ready: false,
+    runActive: false,
+    stopDeadlineTimer: null,
+    stopTimeoutMs: DAEMON_STOP_TIMEOUT_MS,
+    onStopTimeout: () => { throw new Error("cadence fixture failed to stop"); },
+    liveUpdateProviders: new Map(),
     // The workspace layout is not what these tests are about.
     sweepLegacyLayout: async () => {},
     startedAt: new Date(),
@@ -302,6 +308,15 @@ function track(probe: LoopProbe): LoopProbe {
 }
 
 describe("daemon poll cadence", () => {
+  it("clears the stop deadline when stopped before startup reaches the poll loop", async () => {
+    jest.useFakeTimers();
+    const probe = track(createLoopDaemon());
+    await probe.stop();
+    expect((probe.daemon as Record<string, unknown>).runActive).toBe(false);
+    expect((probe.daemon as Record<string, unknown>).stopDeadlineTimer).toBeNull();
+    jest.advanceTimersByTime(DAEMON_STOP_TIMEOUT_MS + 1);
+  });
+
   it("skips the desired RPC snapshot while the pushed revision is unchanged", async () => {
     jest.useFakeTimers();
     const probe = track(createLoopDaemon({ startLoop: false }));

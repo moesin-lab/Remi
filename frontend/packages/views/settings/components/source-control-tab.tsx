@@ -1,5 +1,7 @@
 "use client";
 
+import { DEFAULT_CO_AUTHORED_BY, formatCoAuthoredByTrailer, validateCoAuthoredByName, validateCoAuthoredByEmail } from "@multiremi/contracts/co-authored-by";
+import { Input } from "@multiremi/ui/components/ui/input";
 import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
 
 import { useState } from "react";
@@ -130,19 +132,12 @@ export function SourceControlTab() {
               id="scm-coauthor"
               icon={<GitCommitHorizontal className="size-4" />}
               label={t(($) => $.source_control.feature_co_author_label)}
-              description={
-                <span>
-                  {t(($) => $.source_control.feature_co_author_description_prefix)}{" "}
-                  <code className="rounded bg-muted px-1 py-0.5 text-xs">
-                    {"Co-authored-by: Remi <remi@openremi.fun>"}
-                  </code>{" "}
-                  {t(($) => $.source_control.feature_co_author_description_suffix)}
-                </span>
-              }
+              description={t(($) => $.source_control.co_author_description)}
               checked={settings.coAuthor}
               disabled={!canManage || savingKey === "co_authored_by_enabled"}
               onCheckedChange={(value) => persistSetting("co_authored_by_enabled", value)}
             />
+            <CoAuthorForm key={workspace.id} workspace={workspace} canManage={canManage} enabled={settings.coAuthor} />
           </CardContent>
         </Card>
       </section>
@@ -205,4 +200,46 @@ function FeatureRow({
       />
     </div>
   );
+}
+
+function CoAuthorForm({ workspace, canManage, enabled }: { workspace: Workspace; canManage: boolean; enabled: boolean }) {
+  const { t } = useT("settings");
+  const queryClient = useQueryClient();
+  const identity = deriveScmSettings(workspace);
+  const [draft, setDraft] = useState<{ name: string; email: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const name = draft?.name ?? identity.coAuthorName;
+  const email = draft?.email ?? identity.coAuthorEmail;
+  const validName = validateCoAuthoredByName(name);
+  const validEmail = validateCoAuthoredByEmail(email);
+  const dirty = name !== identity.coAuthorName || email !== identity.coAuthorEmail;
+  async function save(reset: boolean) {
+    if (!canManage || saving || (!reset && (!validName.ok || !validEmail.ok))) return;
+    setSaving(true);
+    try {
+      const updated = await api.updateWorkspace(workspace.id, { settings: {
+        ...workspace.settings,
+        co_authored_by_name: reset ? null : validName.ok ? validName.value : name,
+        co_authored_by_email: reset ? null : validEmail.ok ? validEmail.value : email,
+      } });
+      queryClient.setQueryData(workspaceKeys.list(), (old: Workspace[] | undefined) => old?.map((item) => item.id === updated.id ? updated : item));
+      setDraft(reset ? { ...DEFAULT_CO_AUTHORED_BY } : null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t(($) => $.source_control.toast_failed));
+    } finally { setSaving(false); }
+  }
+  return <div className="mt-4 space-y-3">
+    <Label htmlFor="coauthor-name">{t(($) => $.source_control.co_author_name)}</Label>
+    <Input id="coauthor-name" value={name} readOnly={!canManage} disabled={saving} aria-invalid={!validName.ok} onChange={(event) => setDraft({ name: event.target.value, email })} />
+    {!validName.ok && <p role="alert" className="text-sm text-destructive">{t(($) => $.source_control.co_author_invalid_name)}</p>}
+    <Label htmlFor="coauthor-email">{t(($) => $.source_control.co_author_email)}</Label>
+    <Input id="coauthor-email" value={email} readOnly={!canManage} disabled={saving} aria-invalid={!validEmail.ok} onChange={(event) => setDraft({ name, email: event.target.value })} />
+    {!validEmail.ok && <p role="alert" className="text-sm text-destructive">{t(($) => $.source_control.co_author_invalid_email)}</p>}
+    <code className={`block break-all text-xs ${enabled ? "" : "text-muted-foreground opacity-50"}`}>{formatCoAuthoredByTrailer({ name: validName.ok ? validName.value : name, email: validEmail.ok ? validEmail.value : email })}</code>
+    {!enabled && <p className="text-xs text-muted-foreground">{t(($) => $.source_control.co_author_disabled)}</p>}
+    <div className="flex gap-2">
+      <Button disabled={!canManage || saving || !dirty || !validName.ok || !validEmail.ok} onClick={() => save(false)}>{t(($) => $.source_control.co_author_save)}</Button>
+      <Button variant="outline" disabled={!canManage || saving} onClick={() => save(true)}>{t(($) => $.source_control.co_author_reset)}</Button>
+    </div>
+  </div>;
 }

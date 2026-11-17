@@ -248,3 +248,11 @@ CSR 详情在 sessions 解出 activeId 后即启动 useIssueLog 的 tail/head �
 服务 URL 只接受 HTTP(S)，不包含凭据、查询参数或片段。Magpie 使用自己的登录会话；Remi 不保存其登录密钥，也不代理其 API 或同步其资源。
 
 CLI：`remi workspace magpie get --workspace <id>`；配置使用 `remi workspace magpie set --workspace <id> --url <url>`，解除使用 `--clear`。
+
+## Agent 提交署名
+
+「设置 → 源代码管理」的 Commits 卡片支持修改 Co-authored-by 名称、邮箱和实时预览；关闭开关后仍可编辑，非管理员只读。校验、默认身份和读取旧设置的兜底由 [contracts](../../packages/contracts/src/co-authored-by.ts) 统一定义，四语言键保持一致。组件回归见 [source-control-tab.test.tsx](../../frontend/packages/views/settings/components/source-control-tab.test.tsx)。
+
+工作区 settings 的 `co_authored_by_name`、`co_authored_by_email` 写入时会 trim，传 null 删除对应键并恢复默认；非法值返回 400 且不写库。POST、PUT 和 PATCH 共享校验；PUT/PATCH 的 settings 整体替换，调用方需保留其他设置（CLI 可用 `remi workspace update <workspace> --file <file>` 提交完整 settings）。API 回归见 [workspace-co-authored-by.test.ts](../../tests/unit/multiremi/workspace-co-authored-by.test.ts)。
+
+daemon 在下一次 checkout 或复用 worktree 时，将身份写入 common Git config 的 `multiremi.coAuthoredBy`；hook 运行时读取，用户值不进入脚本源码。同一工作区同一 bare 仓库的 worktree 共用该配置，已提交历史保持原样。禁用时删除配置与自有 hook；只读快照不安装。真实 Git 回归见 [multiremi-repo-cache.test.ts](../../tests/unit/multiremi/multiremi-repo-cache.test.ts)。

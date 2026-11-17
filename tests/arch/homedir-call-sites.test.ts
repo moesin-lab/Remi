@@ -46,6 +46,9 @@ const HOME_CALL_LIMITS: Readonly<Record<string, number>> = {
   // Grok adds a read-only skill-root lookup; listing/import only read files and accept explicit roots.
   "packages/server/src/worker/local-skills.ts": 9,
   "packages/server/src/worker/progress-summarizer.ts": 3,
+  // Installer moved from apps/remi/cli/update.ts; homeDir/installRoot/launcherPath/launchdPath
+  // and MULTIREMI_INSTALL_ROOT/BIN_DIR preserve explicit isolated installation targets.
+  "packages/shared/src/cli-update.ts": 1,
   "packages/shared/src/config.ts": 2,
   "packages/shared/src/db/index.ts": 1,
   "packages/shared/src/home-paths.ts": 1,

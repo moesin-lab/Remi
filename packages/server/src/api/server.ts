@@ -1189,8 +1189,12 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       supportsWikiFetch, daemonTurnBridge.offerInput(task)),
     onRuntimeReady: (rt, ids) => downlinks.runtimeReady(rt, ids) });
   const downlinks: DaemonDownlinks = new DaemonDownlinks({ layer: daemonProtocol,
-    nextWakeAt: rt => store.nextFeishuBotOutboundWakeAt(rt),
+    nextWakeAt: rt => {
+      const deadlines = [store.nextFeishuBotOutboundWakeAt(rt), store.nextDaemonDrainWakeAt(rt)].filter((at): at is number => at !== null);
+      return deadlines.length ? Math.min(...deadlines) : null;
+    },
     snapshot: function* (rt, session, activeIds, mode) {
+      store.reconcileDaemonDrain(rt);
       yield* withRequestReadCache(() => taskInputSnapshot(store, rt, session.daemonId, activeIds,
         id => downlinks.forgetTask(rt, id), daemonTurnBridge));
       yield* withRequestReadCache(() => backgroundTaskSnapshot(store, rt, session));

@@ -1,3 +1,4 @@
+import { DEFAULT_DAEMON_DRAIN_MS, type DaemonDrainStatus, type DaemonDrainReason } from "@multiremi/contracts/daemon-drain.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import { executionEndpointGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
@@ -1560,6 +1561,7 @@ export class RuntimesRepo {
         ) VALUES (?, ?, 'pending', ?, ?, ?, ?)`,
         [id, runtimeId, scope, targetVersion, now, now],
       );
+      if (scope === "cli") this.beginDaemonDrain(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id, "cli_update", undefined, id);
       return this.getRuntimeUpdateRequest(runtimeId, id)!;
     });
   }
@@ -1576,7 +1578,7 @@ export class RuntimesRepo {
          ORDER BY created_at ASC
          LIMIT 1`,
       ).get(runtimeId) as { id?: string; scope?: string } | null;
-      if (pending?.scope === "cli" && this.hasExecutingTasksForDaemon(runtime)) {
+      if (pending?.scope === "cli" && !this.daemonReadyForUpdate(runtime)) {
         // Heartbeats are the lease renewal while the old daemon drains. The
         // request remains pending, so every provider on this daemon stays
         // fenced from claiming replacement work.
@@ -1590,30 +1592,123 @@ export class RuntimesRepo {
     });
   }
 
-  /** Whether Task dispatch must pause while this physical daemon drains/upgrades. */
+  /** Persisted physical-daemon admission fence (also used by CLI updates). */
   hasCliUpdateDrainForRuntime(runtimeId: string): boolean {
     const runtime = this.getRuntimeLite(runtimeId);
     if (!runtime) return false;
-    const runtimeIds = this.runtimeIdsForDaemon(runtime);
-    if (!runtimeIds.length) return false;
-    const activeRows = this.ctx.db.query(
-      `SELECT runtime_id FROM multiremi_runtime_update_requests
-       WHERE runtime_id IN (${runtimeIds.map(() => "?").join(", ")})
-         AND scope = 'cli'
-         AND status IN ('pending', 'running')`,
-    ).all(...runtimeIds) as Array<{ runtime_id?: unknown }>;
-    if (!activeRows.length) return false;
-    for (const id of new Set(activeRows.map((row) => String(row.runtime_id)))) {
-      this.updateQueue.expire(id);
-    }
-    const row = this.ctx.db.query(
-      `SELECT id FROM multiremi_runtime_update_requests
-       WHERE runtime_id IN (${runtimeIds.map(() => "?").join(", ")})
-         AND scope = 'cli'
-         AND status IN ('pending', 'running')
-       LIMIT 1`,
-    ).get(...runtimeIds) as { id?: string } | null;
-    return Boolean(row?.id);
+    return !!this.ctx.db.query(`SELECT 1 FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ?`)
+      .get(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id);
+  }
+
+  beginDaemonDrain(workspaceId: string, daemonId: string, reason: DaemonDrainReason = "manual", durationMs?: number, updateRequestId?: string): DaemonDrainStatus {
+    if (!["manual", "cli_update", "deploy"].includes(reason)) throw new Error("invalid drain reason");
+    const duration = durationMs ?? Number(process.env.MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS ?? DEFAULT_DAEMON_DRAIN_MS);
+    if (!Number.isSafeInteger(duration) || duration < 1 || duration > 86_400_000) throw new Error("drain deadline must be between 1ms and 24h");
+    this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      if (!this.daemonDrainRuntimeRows(workspaceId, daemonId).length) throw new Error("daemon not found");
+      const now = nowIso();
+      // Idempotent requests cannot extend a drain indefinitely or replace a manual fence.
+      this.ctx.db.run(`INSERT INTO multiremi_daemon_drains (workspace_id, daemon_id, started_at, deadline, reason, update_request_id)
+        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, daemon_id) DO NOTHING`,
+        [workspaceId, daemonId, now, new Date(Date.now() + duration).toISOString(), reason, updateRequestId ?? null]);
+    })();
+    this.notifyDaemonDrainChanged(workspaceId);
+    return this.getDaemonDrainStatus(workspaceId, daemonId);
+  }
+
+  undrainDaemon(workspaceId: string, daemonId: string): DaemonDrainStatus {
+    this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const runtimes = this.daemonDrainRuntimeRows(workspaceId, daemonId);
+      if (!runtimes.length) throw new Error("daemon not found");
+      const ids = runtimes.map(row => String(row.id));
+      if (this.ctx.db.query(`SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id IN (${ids.map(() => "?").join(",")})
+        AND scope = 'cli' AND status IN ('pending', 'running')`).get(...ids)) throw new Error("CLI update is still active");
+      this.ctx.db.run(`DELETE FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ?`, [workspaceId, daemonId]);
+    })();
+    this.notifyDaemonDrainChanged(workspaceId);
+    return this.getDaemonDrainStatus(workspaceId, daemonId);
+  }
+
+  /** Heartbeats and downlink wakeups enforce deadlines even without a status poll. */
+  reconcileDaemonDrain(runtimeId: string): void {
+    const runtime = this.getRuntimeLite(runtimeId);
+    if (!runtime) return;
+    const workspaceId = runtime.workspaceId ?? "local";
+    const daemonId = runtime.daemonId ?? runtime.id;
+    // Normal heartbeats need no workspace writer lock. Re-read under the lock
+    // below before mutating a drain that the initial probe found.
+    if (!this.hasCliUpdateDrainForRuntime(runtimeId)) return;
+    this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const drain = this.ctx.db.query(`SELECT * FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ?`)
+        .get(workspaceId, daemonId) as Row | null;
+      if (!drain) return;
+      const runtimes = this.daemonDrainRuntimeRows(workspaceId, daemonId);
+      const ids = runtimes.map(row => String(row.id));
+      // Terminal CLI updates release only their own fence, preserving manual/deploy drains.
+      if (drain.update_request_id) {
+        if (isRuntimeEffectivelyOnline(runtime)) {
+          this.ctx.db.run(`UPDATE multiremi_runtime_update_requests SET updated_at = ?
+            WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND scope = 'cli' AND status = 'pending'`, [nowIso(), ...ids]);
+        }
+        for (const id of ids) this.updateQueue.expire(id);
+        const active = this.ctx.db.query(`SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id IN (${ids.map(() => "?").join(",")})
+          AND scope = 'cli' AND status IN ('pending', 'running')`).get(...ids);
+        if (!active) {
+          this.ctx.db.run(`DELETE FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ?`, [workspaceId, daemonId]);
+          this.notifyDaemonDrainChanged(workspaceId);
+          return;
+        }
+      }
+      if (Date.parse(String(drain.deadline)) > Date.now() || drain.forced_at) return;
+      if (!this.daemonDrainTaskCount(ids)) return;
+      this.ctx.db.run(`UPDATE multiremi_daemon_drains SET forced_at = ? WHERE workspace_id = ? AND daemon_id = ?`,
+        [nowIso(), workspaceId, daemonId]);
+      // Existing MUL-45 recovery supplies lost/runtime_recovery, retry budgets and notifications.
+      for (const id of ids) this.ctx.tasks().recoverOrphans(id);
+    })();
+  }
+
+  getDaemonDrainStatus(workspaceId: string, daemonId: string): DaemonDrainStatus {
+    const runtimes = this.daemonDrainRuntimeRows(workspaceId, daemonId);
+    if (!runtimes.length) throw new Error("daemon not found");
+    const drain = this.ctx.db.query(`SELECT * FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ?`)
+      .get(workspaceId, daemonId) as Row | null;
+    const tasks = this.daemonDrainTaskCount(runtimes.map(row => String(row.id)));
+    // Counts are daemon-wide. Use the newest report, so a disabled provider's old
+    // nonzero count cannot hold a live daemon in drain forever.
+    const latestAck = runtimes.reduce((latest, row) => row.drain_ack_at && String(row.drain_ack_at) > latest ? String(row.drain_ack_at) : latest, "");
+    const reports = runtimes.filter(row => row.drain_ack_at === latestAck && row.drain_reported_active_tasks != null);
+    const reported = Math.max(0, ...reports.map(row => Number(row.drain_reported_active_tasks)));
+    const ackAfter = drain?.forced_at;
+    const awaitingAck = !!ackAfter && (!reports.length || latestAck <= String(ackAfter));
+    const remaining = Math.max(tasks, reported);
+    return { workspace_id: workspaceId, daemon_id: daemonId, mode: drain ? "draining" : "normal",
+      status: !drain ? "normal" : remaining || awaitingAck ? "draining" : drain.forced_at ? "drained_forced" : "drained",
+      started_at: drain ? String(drain.started_at) : null, deadline: drain ? String(drain.deadline) : null,
+      reason: drain?.reason as DaemonDrainReason ?? null, forced_at: drain?.forced_at ? String(drain.forced_at) : null,
+      remaining_tasks: remaining, awaiting_daemon_ack: awaitingAck, expiry_action: "runtime_recovery" };
+  }
+
+  private daemonDrainRuntimeRows(workspaceId: string, daemonId: string): Row[] {
+    return this.ctx.db.query(`SELECT id, drain_ack_at, drain_reported_active_tasks FROM multiremi_runtimes
+      WHERE COALESCE(workspace_id, 'local') = ? AND (daemon_id = ? OR (daemon_id IS NULL AND id = ?))`)
+      .all(workspaceId, daemonId, daemonId) as Row[];
+  }
+
+  private daemonDrainTaskCount(ids: string[]): number {
+    if (!ids.length) return 0;
+    const row = this.ctx.db.query(`SELECT COUNT(*) AS count FROM multiremi_turn_execution_records
+      WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`)
+      .get(...ids) as { count: number };
+    return Number(row.count);
+  }
+
+  private notifyDaemonDrainChanged(workspaceId: string): void {
+    this.ctx.emitWorkspaceEvent({ type: "daemon:dispatch_conditions_changed", workspaceId,
+      actorType: "system", actorId: null, payload: {} });
   }
 
   reportRuntimeUpdateResult(runtimeId: string, requestId: string, input: ReportRuntimeUpdateInput): MultiremiRuntimeUpdateRequest {
@@ -1638,7 +1733,9 @@ export class RuntimesRepo {
         [input.error ?? "runtime update failed", now, requestId],
       );
     }
-    return this.getRuntimeUpdateRequest(runtimeId, requestId)!;
+    const result = this.getRuntimeUpdateRequest(runtimeId, requestId)!;
+    this.reconcileDaemonDrain(runtimeId);
+    return result;
   }
 
   /**
@@ -2097,7 +2194,7 @@ export class RuntimesRepo {
     for (const kind of families.sweep) this.pendingRequestQueue(kind).expire(runtimeId);
     this.scrubRuntimeCommandRequests(runtimeId);
     for (const request of this.updateQueue.pending(runtimeId)) {
-      if (request.scope === "cli" && this.hasExecutingTasksForDaemon(runtime)) {
+      if (request.scope === "cli" && !this.daemonReadyForUpdate(runtime)) {
         this.ctx.db.run("UPDATE multiremi_runtime_update_requests SET updated_at = ? WHERE id = ? AND status = 'pending'",
           [nowIso(), request.id]);
         continue;
@@ -2593,6 +2690,12 @@ export class RuntimesRepo {
           OR legacy_daemon_id IN (${placeholders})`,
     ).all(...aliases, ...aliases, ...aliases) as Array<{ id?: unknown }>;
     return rows.map((row) => String(row.id));
+  }
+
+  private daemonReadyForUpdate(runtime: MultiremiRuntime): boolean {
+    this.reconcileDaemonDrain(runtime.id);
+    const state = this.getDaemonDrainStatus(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id);
+    return state.status === "drained" || state.status === "drained_forced";
   }
 
   private hasExecutingTasksForDaemon(runtime: MultiremiRuntime): boolean {

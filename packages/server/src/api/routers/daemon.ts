@@ -436,8 +436,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     }
     // Reading the maintenance row also enforces the drain lease TTL lazily,
     // so an expired lease flips back to normal on the very next heartbeat.
-    const maintenance = store.getPlatformMaintenance();
-    ack.drain = { mode: maintenance.mode, generation: maintenance.generation };
+    store.reconcileDaemonDrain(runtimeId);
+    ack.drain = store.daemonDrainDirective(runtimeId);
     const ackGeneration = Number(body.drain_ack_generation);
     if (Number.isSafeInteger(ackGeneration) && ackGeneration >= 0) {
       const activeCount = Number(body.active_task_count);

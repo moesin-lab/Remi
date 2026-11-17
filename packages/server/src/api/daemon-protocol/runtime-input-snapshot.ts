@@ -13,6 +13,7 @@ function config(type: string, payload: Record<string, unknown>): DaemonDownlinkE
 export function runtimeInputSnapshot(store: MultiremiStore, runtimeId: string, session?: DaemonProtocolSession, mode: "full" | "pending" = "full"): DaemonDownlinkEntity[] {
   const runtime = store.getRuntimeLite(runtimeId);
   if (!runtime) return [];
+  store.reconcileDaemonDrain(runtimeId);
   const requests = store.pendingRuntimeRequests(runtimeId);
   // A successful update restarts the daemon; offer it after maintenance that
   // was pending in the same snapshot so those requests can finish first.
@@ -26,10 +27,9 @@ export function runtimeInputSnapshot(store: MultiremiStore, runtimeId: string, s
   }));
   const entities: DaemonDownlinkEntity[] = [];
   const workspaceId = runtime.workspaceId ?? "local";
+  entities.push(config("platform.drain", store.daemonDrainDirective(runtimeId)));
   if (mode === "full") {
-    const maintenance = store.getPlatformMaintenance();
-    entities.push(config("platform.drain", { mode: maintenance.mode, generation: maintenance.generation }),
-      config("runtime.profile", { codex_profile: runtimeConnectionSnapshot(store.getRuntimeCodexProfile(runtimeId)),
+    entities.push(config("runtime.profile", { codex_profile: runtimeConnectionSnapshot(store.getRuntimeCodexProfile(runtimeId)),
         claude_profile: runtimeConnectionSnapshot(store.getRuntimeClaudeProfile(runtimeId)),
         runtime_bindings: store.getRuntimeExecutionBindings(runtimeId) }));
     if (Number(runtime.metadata.agent_plugin_protocol) >= 1) {

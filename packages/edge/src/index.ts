@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { exchange, HttpPool } from './http';
+import { WaitingBody } from './waiting-body';
 import { UpstreamSocket } from './websocket';
 import { chmodSync, lstatSync, unlinkSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -17,7 +18,7 @@ export interface EdgeOptions {
   healthTimeoutMs?: number; failureThreshold?: number; riseThreshold?: number; wsBufferLimit?: number; wsMaxMessageBytes?: number; wsQueueLimit?: number; responseHeaderTimeoutMs?: number;
   log?: (line: string) => void;
 }
-interface Relay { upstream: UpstreamSocket; client?: ServerWebSocket<Relay>; slot: Slot; pending: (string | Buffer)[]; bytes: number; ended: boolean; blocked?: boolean }
+interface Relay { upstream: UpstreamSocket; client?: ServerWebSocket<Relay>; slot: Slot; pending: (string | Buffer)[]; bytes: number; ended: boolean; earlyClose?: { code: number; reason: string }; blocked?: boolean }
 const hop = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'];
 export function cleanHeaders(input: Headers): Headers {
   const headers = new Headers(input);
@@ -37,6 +38,7 @@ export class Edge extends EventEmitter {
   private cursor = 0;
   private waiters = new Set<() => void>();
   private waiting = 0;
+  private waitingBodyBudget = { bytes: 0, limit: 8 * 1024 * 1024 };
   private healthTimer: ReturnType<typeof setInterval>;
   private probing = false;
   private control?: ReturnType<typeof Bun.listen>;
@@ -56,10 +58,11 @@ export class Edge extends EventEmitter {
     if (!Number.isInteger(options.port ?? 16120) || (options.port ?? 16120) < 0 || (options.port ?? 16120) > 65535) throw new Error('Invalid port');
     for (const backend of options.backends ?? []) this.addBackend(backend);
     this.server = Bun.serve<Relay>({ hostname: options.hostname ?? '127.0.0.1', port: options.port ?? 16120,
-      idleTimeout: 120, maxRequestBodySize: Number.MAX_SAFE_INTEGER,
+      // Match the slot (Bun.serve default); never accept an unlimited upload.
+      idleTimeout: 120, maxRequestBodySize: 128 * 1024 * 1024,
       fetch: (req, server) => this.handle(req, server),
       websocket: {
-        open: client => { const r = client.data; r.client = client; this.clients.add(client); this.flush(r); },
+        open: client => { const r = client.data; r.client = client; this.clients.add(client); if (r.earlyClose) this.closeRelay(r, r.earlyClose.code, r.earlyClose.reason); else this.flush(r); },
         message: (client, data) => {
           const r = client.data;
           if (r.upstream.readyState !== WebSocket.OPEN) return;
@@ -205,7 +208,7 @@ export class Edge extends EventEmitter {
   }
   private error(status: 502 | 503 | 504) {
     this.metrics.errors[status]++;
-    return new Response(status === 503 ? 'Service unavailable' : 'Bad gateway', { status, headers: status === 503 ? { 'Retry-After': '1' } : {} });
+    return new Response(status === 503 ? 'Service unavailable' : 'Bad gateway', { status, headers: status === 503 ? { 'Retry-After': '1', Connection: 'close' } : {} });
   }
   private headers(req: Request, server: Bun.Server<Relay>) {
     const headers = cleanHeaders(req.headers); headers.delete('host'); headers.delete('forwarded');
@@ -215,37 +218,61 @@ export class Edge extends EventEmitter {
   }
   private async handle(req: Request, server: Bun.Server<Relay>): Promise<Response | undefined> {
     const url = new URL(req.url);
-    let path: string; try { path = new URL('http://edge' + decodeURIComponent(url.pathname).replaceAll('\\', '/').replace(/\/+/g, '/')).pathname; } catch { return new Response('Not found', { status: 404 }); }
+    // Reject encoded separators/dots, including nested percent encoding, before
+    // normalization can turn a private prefix into a different checked path.
+    let path = url.pathname;
+    try {
+      let layers = 0;
+      while (path.includes('%')) {
+        if (++layers > 16 || /%(?:2e|2f|5c)/i.test(path)) return new Response('Not found', { status: 404 });
+        const decoded = decodeURIComponent(path);
+        if (decoded === path) break;
+        path = decoded;
+      }
+      path = new URL('http://edge' + path.replaceAll('\\', '/').replace(/\/+/g, '/')).pathname;
+    } catch { return new Response('Not found', { status: 404 }); }
     if (path === '/internal' || path.startsWith('/internal/')) return new Response('Not found', { status: 404 });
     const deadline = Date.now() + this.options.holdMaxMs;
     const headers = this.headers(req, server);
     if (req.headers.get('upgrade')?.toLowerCase() === 'websocket') return this.upgrade(req, server, headers, deadline);
+    const body = req.body ? new WaitingBody(req.body, this.waitingBodyBudget) : undefined;
+    const admission = new AbortController();
+    const signal = AbortSignal.any([req.signal, admission.signal]);
+    let forwarded = req;
+    let admitted = false;
     let retry = false;
     let safeRetries = 0; const excluded = new Set<string>();
     while (true) {
       let slot: Slot;
-      try { slot = await this.acquire(deadline, req.signal, excluded, retry); } catch { return this.error(503); }
+      try {
+        const acquiring = this.acquire(deadline, signal, excluded, retry);
+        slot = await (body ? Promise.race([acquiring, body.failed]) : acquiring);
+      } catch { admission.abort(); body?.dispose(); return this.error(503); }
+      if (body && !admitted) { forwarded = new Request(req, { body: body.admit(), signal }); admitted = true; }
       slot.requests++; this.metrics.requests++; slot.inFlight++;
       let sent = false; let finished = false;
       const finish = () => { if (!finished) { finished = true; slot.inFlight--; this.checkDrained(slot); } };
       try {
         const target = new URL(slot.url); target.pathname = url.pathname; target.search = url.search;
-        const response = await exchange(target, req, headers, {
+        const exchanging = exchange(target, forwarded, headers, {
           connectTimeoutMs: Math.max(1, Math.min(this.options.healthTimeoutMs, deadline - Date.now())),
           pool: this.httpPool, responseHeaderTimeoutMs: this.options.responseHeaderTimeoutMs,
           sent() { sent = true; }, done: finish,
           stopSignal: this.shutdown.signal,
           error: () => { if (!req.signal.aborted && !this.stopped) { slot.upstreamErrors++; this.metrics.upstreamErrors++; } },
         });
+        const response = await (body ? Promise.race([exchanging, body.failed]) : exchanging);
         slot.failures = 0;
+        body?.dispose();
         return response;
       } catch {
         finish();
-        if (req.signal.aborted || this.stopped) return new Response(null, { status: 499 });
+        if (body?.exhausted) { admission.abort(); body.dispose(); return this.error(503); }
+        if (req.signal.aborted || this.stopped) { body?.dispose(); return new Response(null, { status: 499 }); }
         this.failed(slot); retry = true;
-        if (!sent) { excluded.add(slot.id); if (![...this.slots.values()].some(s => s.state === 'live' && !excluded.has(s.id))) excluded.clear(); if (Date.now() < deadline) { continue; } return this.error(503); }
+        if (!sent) { excluded.add(slot.id); if (![...this.slots.values()].some(s => s.state === 'live' && !excluded.has(s.id))) excluded.clear(); if (Date.now() < deadline) { continue; } body?.dispose(); return this.error(503); }
         if (['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !req.body && safeRetries++ === 0) { if ([...this.slots.values()].some(s => s.state === 'live' && s.id !== slot.id)) excluded.add(slot.id); continue; }
-        return this.error(502);
+        body?.dispose(); return this.error(502);
       }
     }
   }
@@ -280,20 +307,25 @@ export class Edge extends EventEmitter {
         const timer = setTimeout(abort, Math.max(1, Math.min(this.options.healthTimeoutMs, deadline - Date.now())));
         req.signal.addEventListener('abort', abort, { once: true });
         upstream.onresponse = response => done(response);
-        upstream.onopen = () => done(true); upstream.onerror = () => done(false); upstream.onclose = () => done(false);
+        upstream.onopen = () => {
+          // Install close ownership synchronously: 101 and a close frame may be
+          // parsed in the same TCP callback, before this await resumes.
+          upstream.onclose = event => { relay.earlyClose = event; if (relay.client) this.closeRelay(relay, event.code, event.reason); };
+          done(true);
+        }; upstream.onerror = () => done(false); upstream.onclose = () => done(false);
       });
       if (req.signal.aborted || this.stopped) { upstream.terminate(); finish(); return new Response(null, { status: 499 }); }
       if (opened instanceof Response) {
         slot.failures = 0; this.checkDrained(slot);
         return new Response(opened.body, { status: opened.status, statusText: opened.statusText, headers: cleanHeaders(opened.headers) });
       }
-      if (!opened || relay.ended || upstream.readyState !== WebSocket.OPEN) {
+      if (!opened) {
         upstream.terminate(); this.failed(slot); retry = true; finish();
         continue;
       }
       slot.failures = 0;
       slot.websockets++; slot.wsTotal++; this.metrics.wsRelays++; this.relays.add(relay); finish();
-      upstream.onclose = event => this.closeRelay(relay, event.code, event.reason);
+      upstream.onclose = event => { relay.earlyClose = event; if (relay.client) this.closeRelay(relay, event.code, event.reason); };
       upstream.onerror = () => this.closeRelay(relay, 1011, 'Upstream error');
       const responseHeaders = new Headers(); if (upstream.protocol) responseHeaders.set('sec-websocket-protocol', upstream.protocol);
       if (server.upgrade(req, { data: relay, headers: responseHeaders })) return;

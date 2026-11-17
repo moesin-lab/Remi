@@ -1,5 +1,6 @@
 import { SlotLifecycle, resolveSlotConfiguration, type SlotConfiguration } from "./slot-lifecycle.js";
 import { startHubRoleGuard, locksForRole } from "./hub/hub-role-guard.js";
+import { reconcileCurrentDaemonBuild } from "../releases/current-daemon-build.js";
 import { isDatabaseConnectionError, withDatabaseTimeout } from "@shared/db/recovery.js";
 import { registerExecutionConfigRoutes } from "./routers/execution-config.js";
 import { Hono, type Handler } from "hono";
@@ -1318,6 +1319,10 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     if (backgroundJobs) repositoryWiki.startStorageWorker?.();
     if (backgroundJobs) refreshPreNativeCodexSnapshots(store);
     controlPlaneSshMesh?.start();
+    if (backgroundJobs && effectiveApiRole !== "ui") {
+      try { reconcileCurrentDaemonBuild(store); }
+      catch { log.warn("startup daemon build reconciliation failed; updater heartbeat may retry"); }
+    }
   };
   const stopJobs = async () => {
     const stopped = await Promise.allSettled([

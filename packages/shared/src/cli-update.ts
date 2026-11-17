@@ -1,8 +1,8 @@
 /**
  * `remi update` — install a verified Remi CLI release without restarting the daemon.
  *
- * GitHub's release metadata is the source of truth for both the archive URL and
- * its SHA-256 digest. The archive is completely validated in a staging
+ * Platform manifests or GitHub releases supply the archive URL and SHA-256 digest.
+ * The archive is completely validated in a staging
  * directory before the stable launcher or launchd file is changed.
  */
 
@@ -23,6 +23,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { assertUpdateServiceLauncher, type UpdateServiceRestart } from "./cli-update-service.js";
+import { resolveUpdateArtifact } from "./cli-update-source.js";
 import { VERSION } from "@shared/version.js";
 
 const DEFAULT_RELEASE_REPOSITORY = "moesin-lab/Remi";
@@ -49,6 +50,10 @@ export interface UpdateOptions {
   currentVersion?: string;
   serviceRestart?: UpdateServiceRestart;
   targetVersion?: string;
+  targetCommit?: string;
+  currentCommit?: string | null;
+  serverUrl?: string;
+  token?: string | null;
   rollbackExecutable?: string;
   beforeActivate?: (result: Extract<UpdateResult, { status: "installed" }>) => void | Promise<void>;
   platform?: UpdatePlatform;
@@ -62,10 +67,12 @@ export interface UpdateOptions {
 }
 
 export type UpdateResult =
-  | { status: "current"; version: string }
+  | { status: "current"; version: string; source?: "platform" | "github"; commit?: string }
   | {
     status: "installed";
     version: string;
+    source?: "platform" | "github";
+    commit?: string;
     assetName: string;
     digest: string;
     snapshotDir: string;
@@ -102,24 +109,40 @@ export function compareVersions(a: string, b: string): number {
   for (let i = 0; i < 3; i++) {
     if (pa[i] !== pb[i]) return pa[i]! - pb[i]!;
   }
-  return 0;
+  // Preserve build suffixes as identity: different builds must never compare equal.
+  const left = a.replace(/^v/, "");
+  const right = b.replace(/^v/, "");
+  if (left === right) return 0;
+  const preA = left.split("+")[0]!.split("-").slice(1).join("-");
+  const preB = right.split("+")[0]!.split("-").slice(1).join("-");
+  if (!!preA !== !!preB) return preA ? -1 : 1;
+  return left.localeCompare(right, "en", { numeric: true }) || (left < right ? -1 : 1);
 }
 
 export async function fetchLatestRelease(
   repository: string,
   fetchImpl: typeof fetch = fetch,
   targetVersion?: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<GithubRelease> {
-  const response = await fetchImpl(`https://api.github.com/repos/${repository}/releases/${targetVersion ? `tags/v${targetVersion.replace(/^v/, "")}` : "latest"}`, {
-    headers: {
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetchImpl(`https://api.github.com/repos/${repository}/releases/${targetVersion ? `tags/v${targetVersion.replace(/^v/, "")}` : "latest"}`, {
+      headers: {
+        ...(env.GITHUB_TOKEN?.trim() ? { Authorization: `Bearer ${env.GITHUB_TOKEN.trim()}` } : {}),
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      signal: AbortSignal.timeout(30_000),
+      redirect: "error",
+    });
+  } catch { throw new Error("GitHub release lookup failed: source unreachable"); }
   if (!response.ok) {
-    throw new Error(`GitHub release lookup failed for ${repository}: ${response.status} ${response.statusText}`);
+    throw new Error(`GitHub release lookup failed for ${repository}: ${response.status}`);
   }
-  const release = await response.json() as Partial<GithubRelease>;
+  let release: Partial<GithubRelease>;
+  try { release = await response.json() as Partial<GithubRelease>; }
+  catch { throw new Error("Invalid GitHub release metadata"); }
   if (!release.tag_name || !Array.isArray(release.assets)) {
     throw new Error(`GitHub release metadata for ${repository} is incomplete`);
   }
@@ -128,10 +151,21 @@ export async function fetchLatestRelease(
 
 export async function performUpdate(options: UpdateOptions = {}): Promise<UpdateResult> {
   const env = options.env ?? process.env;
+  const secrets = [options.token, env.GITHUB_TOKEN].filter((value): value is string => !!value?.trim()).map(value => value.trim());
+  const redact = (message: string) => secrets.reduce((text, secret) => text.split(secret).join("[REDACTED]"), message);
+  try {
+    return await installVerifiedUpdate({ ...options,
+      onProgress: options.onProgress ? message => options.onProgress!(redact(message)) : undefined });
+  } catch (error) {
+    throw new Error(redact(error instanceof Error ? error.message : "CLI update failed"));
+  }
+}
+
+async function installVerifiedUpdate(options: UpdateOptions): Promise<UpdateResult> {
+  const env = options.env ?? process.env;
   const currentVersion = options.currentVersion ?? VERSION;
   const platform = options.platform ?? detectUpdatePlatform();
   const fetchImpl = options.fetchImpl ?? fetch;
-  const repository = releaseRepository(env);
   const homeDir = options.homeDir ?? homedir();
   const installRoot = options.installRoot
     ?? env.MULTIREMI_INSTALL_ROOT?.trim()
@@ -143,35 +177,48 @@ export async function performUpdate(options: UpdateOptions = {}): Promise<Update
     ?? env.MULTIREMI_LAUNCHD_PLIST?.trim()
     ?? join(homeDir, "Library", "LaunchAgents", "dev.remi.multiremi.daemon.plist");
   assertUpdateServiceLauncher({ restart: options.serviceRestart, launcherPath });
-  const release = await fetchLatestRelease(repository, fetchImpl, options.targetVersion);
-  const latestVersion = release.tag_name.replace(/^v/, "");
+  const artifact = await resolveUpdateArtifact(options, platform);
+  const latestVersion = artifact.version;
   parseVersion(latestVersion);
   if (options.targetVersion && latestVersion !== options.targetVersion.replace(/^v/, "")) throw new Error("Release does not match target_version");
-
-  if (!options.targetVersion && compareVersions(latestVersion, currentVersion) <= 0) {
-    return { status: "current", version: currentVersion };
+  await options.onProgress?.(`Using ${artifact.source} update source`);
+  if (!options.targetVersion && !options.targetCommit && (artifact.commit
+    ? latestVersion === currentVersion && artifact.commit === options.currentCommit
+    : compareVersions(latestVersion, currentVersion) <= 0)) {
+    return { status: "current", version: currentVersion, source: artifact.source, commit: artifact.commit };
   }
-
-  const assetName = releaseAssetName(latestVersion, platform);
-  const asset = release.assets.find((candidate) => candidate.name === assetName);
-  if (!asset) {
-    const available = release.assets.map((candidate) => candidate.name).sort().join(", ") || "none";
-    throw new Error(`Release ${release.tag_name} has no ${platform.os}-${platform.arch} asset (${assetName}); available: ${available}`);
-  }
-  const expectedDigest = parseSha256Digest(asset.digest, assetName);
+  const assetName = artifact.assetName;
+  const expectedDigest = parseSha256Digest(artifact.sha256, assetName);
   const progress = options.onProgress ?? (() => {});
   const tempRoot = mkdtempSync(join(tmpdir(), "remi-update-"));
 
   try {
-    progress(`Downloading ${assetName}`);
-    const response = await fetchImpl(asset.browser_download_url, {
-      headers: { Accept: "application/octet-stream" },
-      redirect: "follow",
-    });
-    if (!response.ok) throw new Error(`Release download failed: ${response.status} ${response.statusText}`);
+    await progress(`Downloading ${assetName}`);
+    const fallback = async (): Promise<UpdateResult> => {
+      const sources = (env.MULTIREMI_UPDATE_SOURCES ?? "platform,github").split(",").map(s => s.trim());
+      const remaining = sources.slice(sources.indexOf("platform") + 1);
+      if (artifact.source !== "platform" || options.targetCommit || !remaining.includes("github")) {
+        throw new Error("Release download failed: platform artifact unavailable");
+      }
+      await progress("Platform artifact unavailable; trying GitHub fallback");
+      return performUpdate({ ...options, env: { ...env, MULTIREMI_UPDATE_SOURCES: remaining.join(",") } });
+    };
+    let response: Response;
+    try {
+      response = await fetchImpl(artifact.url, {
+        headers: artifact.headers,
+        redirect: artifact.source === "platform" ? "manual" : "follow",
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch {
+      if (artifact.source === "platform") return await fallback();
+      throw new Error("Release download failed: source unreachable");
+    }
+    if (artifact.source === "platform" && response.status === 404) return await fallback();
+    if (!response.ok) throw new Error(`Release download failed: ${response.status}`);
     const archiveBytes = Buffer.from(await response.arrayBuffer());
-    if (typeof asset.size === "number" && asset.size >= 0 && archiveBytes.byteLength !== asset.size) {
-      throw new Error(`Downloaded size mismatch for ${assetName}: expected ${asset.size}, got ${archiveBytes.byteLength}`);
+    if (typeof artifact.size === "number" && artifact.size >= 0 && archiveBytes.byteLength !== artifact.size) {
+      throw new Error(`Downloaded size mismatch for ${assetName}: expected ${artifact.size}, got ${archiveBytes.byteLength}`);
     }
     const actualDigest = createHash("sha256").update(archiveBytes).digest("hex");
     if (actualDigest !== expectedDigest) {
@@ -188,17 +235,23 @@ export async function performUpdate(options: UpdateOptions = {}): Promise<Update
     const stagedBinary = join(extractDir, "remi");
     if (!existsSync(stagedBinary)) throw new Error(`${assetName} does not contain remi`);
     chmodSync(stagedBinary, 0o755);
-    const reportedVersion = execFileSync(stagedBinary, ["--version"], { encoding: "utf8" }).trim().replace(/^v/, "");
+    const reportedVersion = execFileSync(stagedBinary, ["--version"], { encoding: "utf8", stdio: "pipe", timeout: 30_000 }).trim().replace(/^v/, "");
     if (reportedVersion !== latestVersion) {
       throw new Error(`Downloaded remi reports ${reportedVersion || "no version"}; expected ${latestVersion}`);
+    }
+    if (artifact.commit) {
+      let identity: { commit?: string; version?: string };
+      try { identity = JSON.parse(execFileSync(stagedBinary, ["--build-info"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 })); }
+      catch { throw new Error("Downloaded remi cannot report build identity"); }
+      if (identity.commit !== artifact.commit || identity.version !== latestVersion) throw new Error("Downloaded remi build identity does not match manifest commit/version");
     }
     const stagedWrapper = join(extractDir, "remi-claude-agent-acp");
     if (existsSync(stagedWrapper)) chmodSync(stagedWrapper, 0o755);
 
     if (existsSync(join(extractDir, "runtime-bundle.json"))) {
-      progress("Preparing and verifying bundled runtimes");
+      await progress("Preparing and verifying bundled runtimes");
       try {
-        execFileSync(stagedBinary, ["runtime", "prepare"], { stdio: "inherit", env: { ...env } });
+        execFileSync(stagedBinary, ["runtime", "prepare"], { stdio: "pipe", env: { ...env } });
       } catch {
         throw new Error("Runtime preparation failed; existing executable was not replaced");
       }
@@ -244,7 +297,10 @@ export async function performUpdate(options: UpdateOptions = {}): Promise<Update
     }
 
     if (existsSync(snapshotDir)) {
-      const existingVersion = execFileSync(join(snapshotDir, "remi"), ["--version"], { encoding: "utf8" }).trim().replace(/^v/, "");
+      if (!readFileSync(join(snapshotDir, "remi")).equals(readFileSync(stagedBinary))) {
+        throw new Error("Existing snapshot binary does not match verified archive");
+      }
+      const existingVersion = execFileSync(join(snapshotDir, "remi"), ["--version"], { encoding: "utf8", stdio: "pipe", timeout: 30_000 }).trim().replace(/^v/, "");
       if (existingVersion !== latestVersion) {
         throw new Error(`Snapshot ${snapshotDir} already exists with version ${existingVersion}; refusing to overwrite it`);
       }
@@ -259,7 +315,7 @@ export async function performUpdate(options: UpdateOptions = {}): Promise<Update
       renameSync(snapshotStaging, snapshotDir);
     }
 
-    await options.beforeActivate?.({ status: "installed", version: latestVersion, assetName,
+    await options.beforeActivate?.({ status: "installed", version: latestVersion, source: artifact.source, commit: artifact.commit, assetName,
       digest: expectedDigest, snapshotDir, launcherPath, launchdUpdated });
 
     // Point launchd at the stable launcher first. Until the following atomic
@@ -275,6 +331,8 @@ export async function performUpdate(options: UpdateOptions = {}): Promise<Update
     return {
       status: "installed",
       version: latestVersion,
+      source: artifact.source,
+      commit: artifact.commit,
       assetName,
       digest: expectedDigest,
       snapshotDir,
@@ -288,7 +346,7 @@ export async function performUpdate(options: UpdateOptions = {}): Promise<Update
 
 
 function parseVersion(value: string): [number, number, number] {
-  const match = value.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)/);
+  const match = value.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
   if (!match) throw new Error(`Invalid release version: ${value}`);
   return [Number(match[1]), Number(match[2]), Number(match[3])];
 }

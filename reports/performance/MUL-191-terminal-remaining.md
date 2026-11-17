@@ -23,9 +23,9 @@
 
 `MULTIREMI_TEST_QUERY_PROFILE=/tmp/profile.json MULTIREMI_TEST_SQL_TRACE=audit bun run test tests/unit/multiremi/daemon-report-scale-budget.test.ts`；原始 SQL trace 输出在 `/tmp/mul182-sql-audit-<frame>-<scale>.json`。本报告 JSON 固化了对应参数/代际；随机 fixture ID 已稳定化为占位符。
 
-CI 反馈后的本地 PostgreSQL 17.6 复测：规模套件 10 pass，七类帧 small/stable 一致，终态与上表相同；独立 SQL 明细仍以本报告的 SQLite trace 为准。两个 PG 迁移套件在窄字段读取修复后通过，拒绝帧用持久化任务/usage/日志及通知状态核验，无副作用。offer/downlink/旧预算回归 73 pass，SQLite 规模/共享读取 11 pass。
+CI 反馈修复：无缓存的 attempt→turn 保留窄字段读取，避免 PG 迁移前后 prepared SELECT * 结果类型冲突。拒绝帧按任务/usage/日志和通知验证无副作用。规模夹具给连接、offer/downlink 使用手动时钟并固定业务时间；计数前通过真实 Hub 的 applyRemoteHead 补齐批量 SQL seed 绕过通知形成的日志缺口，保留填充器和通知，避免后台补洞分页混入帧计数。生产默认时钟与期限未改。
 
-规模夹具固定业务时间，并把现有手动时钟接入服务端 offer/downlink 调度器与连接；否则 PG 慢 seed 会让先创建的小档 offer 真实超时回收，测成不同状态。没有放宽预算或删去规模断言。生产时钟/15 秒 ACK/offer 期限未改。无缓存的 attempt→turn 读取保留窄字段，避免迁移前后 `SELECT *` 的 PG prepared result type 改变。
+SQLite 三文件规模/旧预算/共享读取回归 38 pass；本地 PG 17.6 规模、两个迁移套件通过；额外每条 SQL 人为延迟 10ms 的 PG 规模 10 pass（终态仍 227/141），验证慢帧不会再混入准备阶段补洞。该临时延迟诊断已从代码移除。决策/状态页按顺序联合复测 18 pass，原 SQL 恒定断言保留。最终完整 CI 结论以 PR 描述及交付评论为准。PG 决策窗口用例需要创建并读取 52 条历史问答，原 15 秒在本地/CI 均超时；按契约测试设显式 60 秒，使异步工作在 teardown 前完成，不修改 SQL 预算或业务期限。
 
 相关行为回归：10 文件 168 pass / 53 skip / 0 fail；skip 是未配置真实 PG 等前提，不能算 PG 通过。完整 CI 及最终 head 结论以 PR 描述/交付评论为准。
 
@@ -1349,7 +1349,7 @@ SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multir
 
 检查出站租约、重试、去重及待投递实体，保持重放、消息顺序与最终状态。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3551、packages/server/src/api/server.ts:1238。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3551、packages/server/src/api/server.ts:1241。
 
 执行位置 / scope:generation：169 / None:None。参数见相邻 JSON。
 
@@ -1361,7 +1361,7 @@ SELECT request.created_at, request.expires_at FROM multiremi_message_question_re
 
 读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3560、packages/server/src/api/server.ts:1238。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3560、packages/server/src/api/server.ts:1241。
 
 执行位置 / scope:generation：170 / None:None。参数见相邻 JSON。
 
@@ -1373,7 +1373,7 @@ SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records 
 
 读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3578、packages/server/src/api/server.ts:1238。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3578、packages/server/src/api/server.ts:1241。
 
 执行位置 / scope:generation：171 / None:None。参数见相邻 JSON。
 
@@ -1385,7 +1385,7 @@ SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drai
 
 确认当前宿主身份、物理 daemon 和 drain fence；异步下行每次同步段重新取快照。
 
-来源：packages/server/src/store/store.ts:3507、packages/server/src/api/server.ts:1238。
+来源：packages/server/src/store/store.ts:3507、packages/server/src/api/server.ts:1241。
 
 执行位置 / scope:generation：172 / None:None, 187 / None:None。参数见相邻 JSON。
 
@@ -2553,7 +2553,7 @@ SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drai
 
 确认当前宿主身份、物理 daemon 和 drain fence；异步下行每次同步段重新取快照。
 
-来源：packages/server/src/store/store.ts:3507、packages/server/src/api/server.ts:1238。
+来源：packages/server/src/store/store.ts:3507、packages/server/src/api/server.ts:1241。
 
 执行位置 / scope:generation：91 / None:None, 101 / None:None。参数见相邻 JSON。
 
@@ -2589,7 +2589,7 @@ SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multir
 
 检查出站租约、重试、去重及待投递实体，保持重放、消息顺序与最终状态。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3551、packages/server/src/api/server.ts:1238。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3551、packages/server/src/api/server.ts:1241。
 
 执行位置 / scope:generation：98 / None:None。参数见相邻 JSON。
 
@@ -2601,7 +2601,7 @@ SELECT request.created_at, request.expires_at FROM multiremi_message_question_re
 
 读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3560、packages/server/src/api/server.ts:1238。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3560、packages/server/src/api/server.ts:1241。
 
 执行位置 / scope:generation：99 / None:None。参数见相邻 JSON。
 
@@ -2613,7 +2613,7 @@ SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records 
 
 读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3578、packages/server/src/api/server.ts:1238。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3578、packages/server/src/api/server.ts:1241。
 
 执行位置 / scope:generation：100 / None:None。参数见相邻 JSON。
 

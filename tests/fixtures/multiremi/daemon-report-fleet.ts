@@ -1,5 +1,6 @@
 import { activeRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
+import type { HubImpl } from "@multiremi/api/hub/hub-core.js";
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
 import {
   afterEach,
@@ -108,7 +109,7 @@ export async function countSql(
     },
   );
   const execSpy = spyOn(database, "exec").mockImplementation((sql) => {
-    statements.push(sql);
+    record(sql);
     exec(sql);
   });
   try {
@@ -185,7 +186,9 @@ export async function fleet(opened?: Awaited<ReturnType<typeof openFleetDatabase
     store.reportFeishuBotRuntimeStatus("local", id, status(index)),
   );
   let layer!: DaemonProtocolLayer;
+  let hub!: HubImpl;
   const server = startMultiremiServer({
+    onLiveHub: value => { hub = value as HubImpl; },
     store,
     peerChannel: null,
     apiRole: "runtime",
@@ -291,6 +294,7 @@ export async function fleet(opened?: Awaited<ReturnType<typeof openFleetDatabase
     agent,
     config,
     database: database.db,
+    hub,
   };
 }
 
@@ -385,6 +389,12 @@ export async function loadedFleet(size: number, runtimeCount = 8, startTarget = 
 /** Acknowledge all setup downlinks, including frames emitted by acknowledgement.
  * Large fleets otherwise fill the socket window and silently skip later work. */
 export async function settleReportFleet(f: Awaited<ReturnType<typeof fleet>>) {
+  // Bulk SQL history bypasses live append notifications. Reconcile that setup
+  // gap before counting a frame, rather than racing Hub's hole-repair timer.
+  // Keep the real fill reader, Hub and notifications enabled.
+  for (const row of f.database.query('SELECT session_id,head_seq,log_version FROM multiremi_conversation_heads').all())
+    await f.hub.applyRemoteHead(`log:${row.session_id}`, Number(row.head_seq), Number(row.log_version));
+  await f.hub.warmUpSettled();
   const acknowledged = new Map<object, number>();
   for (let pass = 0; pass < 100; pass++) {
     await f.layer.drain();

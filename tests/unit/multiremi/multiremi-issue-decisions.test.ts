@@ -534,14 +534,15 @@ describe.skipIf(!pgAvailable)("MUL-400 S4 decisions on PostgreSQL", () => {
     }
     expect(outerOpen).toBe(false);
     expect(savepoints).toHaveLength(0);
-  });
+  }, 30_000);
 
-  // The 55-answer PG fixture also persists an inbox entry and wake for each reply.
+  // Contract checks rather than wall-time budgets: the 55-answer PG fixture
+  // persists inbox entries and wakes; let all async work finish before teardown.
   it("windows recently answered decisions by answered_at and exposes history", async () => {
     await exerciseAnsweredWindow(store);
-  }, 15_000);
+  }, 60_000);
 
   it("reminds the root creator and source subscribers at the human stage while any active member acts", async () => {
     await exerciseHumanStageReminders(store);
-  });
+  }, 30_000);
 });

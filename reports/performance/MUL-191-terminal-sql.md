@@ -16,3 +16,5 @@
 尚待：所有者接受超过 60/40 的剩余清单、最终 SHA 的真实 PG/完整 CI、独立审阅、获授权后合并/部署与 8+ 并行一小时 lag<1s 现场验证。本轮没有合并、部署或置 done。
 
 CI 反馈修复后：本地 PG 17.6 规模 10 pass，七帧 small/stable 一致（终态同上）；SQLite 规模/共享读取 11 pass，offer/downlink/旧预算 73 pass。夹具给连接与服务端 offer/downlink 共用手动时钟机制，避免慢 seed 导致 offer 超时回收；业务时间固定。两个 PG 迁移回归通过；无缓存窄投影避免 prepared SELECT * 跨 DDL 结果类型改变。最终完整 CI 以 PR 描述/交付评论为准。
+
+批量 SQL 播种历史不触发 Hub 追加通知；夹具现于计数前通过真实 Hub 的 applyRemoteHead 补齐准备阶段的序号缺口，保留真实 Hub/填充器/通知。否则慢 PG 帧会混入 100 条一页的历史补洞查询。该准备开销不作为当前帧开销；帧产生的 ACK、派活、下行仍完整计数。

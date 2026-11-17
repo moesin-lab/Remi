@@ -328,6 +328,8 @@ export interface MultiremiApiOptions {
   daemonTurnBridge?: DaemonTurnBridge;
   /** Transport injection for protocol integration tests; no store subscriptions. */
   onDaemonProtocol?: (layer: DaemonProtocolLayer) => void;
+  /** Observe the real server Hub for integration setup/diagnostics. */
+  onLiveHub?: (hub: LiveHub) => void;
   /**
    * PR 6: the caps `welcome` echoes (default `["lane.background"]`). `[]`
    * starts a server that daemons treat as older, for mixed-version tests.
@@ -1125,6 +1127,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   const liveHub = resolveAppHub(options, effectiveApiRole,
     createConversationLogFillReader(store, readPool), peer);
   if (!liveHub) throw new Error("hub: null is only supported by createMultiremiApp; inject EmptyLiveHub for socket tests");
+  options.onLiveHub?.(liveHub);
   // MUL-461: `apiRole` rides the effective config so a typo is visible next to the
   // setting that produced it (the resolver falls back to `all`).
   log.info(`[effective-config] ${JSON.stringify(startupConfig.effective)}`);

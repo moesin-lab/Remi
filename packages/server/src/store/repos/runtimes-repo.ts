@@ -1585,7 +1585,7 @@ export class RuntimesRepo {
          ORDER BY created_at ASC
          LIMIT 1`,
       ).get(runtimeId) as { id?: string; scope?: string } | null;
-      if (pending?.scope === "cli" && !this.daemonReadyForUpdate(runtime)) {
+      if (pending?.scope === "cli" && !this.admitCliUpdate(runtime, String(pending.id))) {
         // Heartbeats are the lease renewal while the old daemon drains. The
         // request remains pending, so every provider on this daemon stays
         // fenced from claiming replacement work.
@@ -1654,6 +1654,8 @@ export class RuntimesRepo {
       if (!drain) return;
       const runtimes = this.daemonDrainRuntimeRows(workspaceId, daemonId);
       const ids = runtimes.map(row => String(row.id));
+      // Admission permits only the update owner to leave pending, so a terminal
+      // owner can safely hand off before the restarting/verifying guard below.
       // Terminal owners hand their fence to the oldest pending CLI sibling; manual/deploy drains remain isolated.
       if (drain.update_request_id) {
         if (isRuntimeEffectivelyOnline(runtime)) {
@@ -1696,7 +1698,10 @@ export class RuntimesRepo {
     })();
   }
 
-  /** Called under the workspace lifecycle lock, after the previous owner is terminal. */
+  /** Called under the workspace lifecycle lock, after the previous owner is terminal.
+   * Admission guarantees all CLI siblings are still pending; none can be running
+   * behind this owner when its fence is handed off or released.
+   */
   private handoffOrReleaseUpdateDrain(workspaceId: string, daemonId: string, ownerId: string, runtimeIds: string[]): void {
     const sibling = this.ctx.db.query(`SELECT id FROM multiremi_runtime_update_requests
       WHERE runtime_id IN (${runtimeIds.map(() => "?").join(",")}) AND scope = 'cli' AND status = 'pending'
@@ -1758,13 +1763,16 @@ export class RuntimesRepo {
   }
 
   reportRuntimeUpdateResult(runtimeId: string, requestId: string, input: ReportRuntimeUpdateInput): MultiremiRuntimeUpdateRequest {
-    return this.withRuntimeLifecycleLock(runtimeId, () => {
+    return this.withRuntimeLifecycleLock(runtimeId, (runtime) => {
       const current = this.getRuntimeUpdateRequest(runtimeId, requestId);
       if (!current) throw new Error("update not found");
       const status = normalizeRuntimeUpdateStatus(input.status);
       const now = nowIso();
       if (isTerminalRuntimeRequestStatus(current.status)) return current;
       if (current.scope === "cli") {
+        if (current.status === "pending" && status === "running" && !this.admitCliUpdate(runtime, requestId)) {
+          throw new Error("CLI update admission denied; request remains pending");
+        }
         if (status === "completed" && (current.status !== "verifying" || input.self_check !== true)) {
           throw new Error("CLI completion requires target-version hello and startup self-check");
         }
@@ -2254,18 +2262,20 @@ export class RuntimesRepo {
     const families = this.probePendingRequestFamilies(runtimeId, { supportsBotMenu: true, supportsDirectoryScan: true });
     for (const kind of families.sweep) this.pendingRequestQueue(kind).expire(runtimeId);
     this.scrubRuntimeCommandRequests(runtimeId);
-    for (const request of this.updateQueue.pending(runtimeId)) {
-      if (request.scope === "cli" && !this.daemonReadyForUpdate(runtime)) {
-        this.ctx.db.run("UPDATE multiremi_runtime_update_requests SET updated_at = ? WHERE id = ? AND status = 'pending'",
-          [nowIso(), request.id]);
-        continue;
+    this.withRuntimeLifecycleLock(runtimeId, (lockedRuntime) => {
+      for (const request of this.updateQueue.pending(runtimeId)) {
+        if (request.scope === "cli" && !this.admitCliUpdate(lockedRuntime, request.id)) {
+          this.ctx.db.run("UPDATE multiremi_runtime_update_requests SET updated_at = ? WHERE id = ? AND status = 'pending'",
+            [nowIso(), request.id]);
+          continue;
+        }
+        const drain = request.scope === "cli" ? this.ctx.db.query(`SELECT deadline FROM multiremi_daemon_drains
+          WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`)
+          .get(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id, request.id) as Row | null : null;
+        add("update", request.id, { id: request.id, target_version: request.targetVersion, scope: request.scope,
+          ...(drain?.deadline ? { drain_deadline: String(drain.deadline) } : {}) });
       }
-      const drain = request.scope === "cli" ? this.ctx.db.query(`SELECT deadline FROM multiremi_daemon_drains
-        WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`)
-        .get(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id, request.id) as Row | null : null;
-      add("update", request.id, { id: request.id, target_version: request.targetVersion, scope: request.scope,
-        ...(drain?.deadline ? { drain_deadline: String(drain.deadline) } : {}) });
-    }
+    });
     for (const request of this.modelListQueue.pending(runtimeId)) add("model_list", request.id, { id: request.id });
     for (const request of this.localSkillListQueue.pending(runtimeId)) add("local_skills", request.id,
       { id: request.id, ...(request.root ? { root: request.root } : {}) });
@@ -2310,7 +2320,15 @@ export class RuntimesRepo {
   }
 
   claimAcknowledgedRuntimeRequest(runtimeId: string, kind: string, id: string): void {
-    this.withRuntimeLifecycleLock(runtimeId, () => { this.pendingRequestQueue(kind).claimAcknowledged(runtimeId, id); });
+    this.withRuntimeLifecycleLock(runtimeId, runtime => {
+      if (kind === "update") {
+        const request = this.getRuntimeUpdateRequest(runtimeId, id);
+        // A snapshot may have been sent before another manual-drain request's
+        // ACK arrived. Recheck admission before this ACK changes pending state.
+        if (request?.scope === "cli" && request.status === "pending" && !this.admitCliUpdate(runtime, id)) return;
+      }
+      this.pendingRequestQueue(kind).claimAcknowledged(runtimeId, id);
+    });
   }
 
   discardRuntimePendingRequest(runtimeId: string, kind: string, id: string): void {
@@ -2763,10 +2781,21 @@ export class RuntimesRepo {
     return rows.map((row) => String(row.id));
   }
 
-  private daemonReadyForUpdate(runtime: MultiremiRuntime): boolean {
+  /** Called under the workspace lifecycle lock by every pending CLI admission path. */
+  private admitCliUpdate(runtime: MultiremiRuntime, requestId: string): boolean {
     this.reconcileDaemonDrain(runtime.id);
     const state = this.getDaemonDrainStatus(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id);
-    return state.status === "drained" || state.status === "drained_forced";
+    if (state.status !== "drained" && state.status !== "drained_forced") return false;
+    const workspaceId = runtime.workspaceId ?? "local";
+    const daemonId = runtime.daemonId ?? runtime.id;
+    const drain = this.ctx.db.query(`SELECT update_request_id FROM multiremi_daemon_drains
+      WHERE workspace_id = ? AND daemon_id = ?`).get(workspaceId, daemonId) as Row | null;
+    if (!drain) return false;
+    if (drain.update_request_id) return drain.update_request_id === requestId;
+    const ids = this.daemonDrainRuntimeRows(workspaceId, daemonId).map(row => String(row.id));
+    return !this.ctx.db.query(`SELECT 1 FROM multiremi_runtime_update_requests
+      WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND scope = 'cli' AND id != ?
+        AND status IN ('running', 'restarting', 'verifying')`).get(...ids, requestId);
   }
 
   private hasExecutingTasksForDaemon(runtime: MultiremiRuntime): boolean {

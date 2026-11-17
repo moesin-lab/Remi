@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MultiremiRuntimeUpdateScope } from "@multiremi/contracts/types.js";
+import { MultiremiDaemonClient } from "@multiremi/client.js";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
 import { MultiremiCliUpdateCoordinator } from "@multiremi/worker/cli-update-coordinator.js";
 import { instantiateCoResidentWorkerDaemons } from "../../../apps/remi/cli/multiremi.js";
@@ -120,6 +121,32 @@ describe("co-resident CLI update coordination", () => {
     expect(claudeState.claimsPaused).toBe(true);
     expect(codexState.claimsPaused).toBe(true);
     expect(claude.restartRequested()).toBe(true);
+  });
+
+  it("does not install or restart after running admission is rejected", async () => {
+    const [daemon, sibling] = createDaemons();
+    const owner = state(daemon);
+    const reports: UpdateReport[] = [];
+    let installed = false;
+    owner.updateRunner = () => { installed = true; return "unexpected"; };
+    const client = new MultiremiDaemonClient("http://unused");
+    client.setReportTransport({
+      report: async (type, _partition, payload, wait) => {
+        expect(type).toBe("runtime.update_result");
+        reports.push({ status: payload.status as UpdateReport["status"] });
+        expect(wait).toBe(true);
+        if (wait) throw new Error("CLI update admission denied; request remains pending");
+        return { ok: true };
+      },
+      rpc: async () => ({}), bestEffort: () => {}, upgradeWaiting: () => false,
+    });
+    owner.client = client;
+    await owner.handleRuntimeUpdate("rt_claude", "upd_denied", "9.9.9", "cli");
+    expect(reports).toEqual([{ status: "running" }]);
+    expect(installed).toBe(false);
+    expect(daemon.restartRequested()).toBe(false);
+    expect(owner.claimsPaused).toBe(false);
+    expect(state(sibling).claimsPaused).toBe(false);
   });
 
   it("does not treat a sibling's durable report drain as active agent execution", async () => {

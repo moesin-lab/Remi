@@ -2436,6 +2436,14 @@ export class MultiremiDaemon {
     }
     try {
       await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "running" });
+    } catch (error) {
+      // A rejected admission must remain pending on the platform. Do not install,
+      // switch the launcher, or turn a retryable admission into a failed update.
+      this.releaseUpdateClaimPause(scope);
+      log.warn(`Runtime update admission failed: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    try {
       const output = scope === "acp"
         ? await this.reinstallAcpBridge()
         : scope === "agent"

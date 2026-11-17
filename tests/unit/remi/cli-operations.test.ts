@@ -49,13 +49,15 @@ describe("operations CLI contracts", () => {
       { id: "2", name: "running job", status: "in_progress", conclusion: null, url: null },
       { id: "3", name: "failed job", status: "completed", conclusion: "failure", url: null },
       { id: "4", name: "cancelled job", status: "completed", conclusion: "cancelled", url: null },
+      { id: "5", name: "skipped job", status: "completed", conclusion: "skipped", url: null },
+      { id: "6", name: "neutral job", status: "completed", conclusion: "neutral", url: null },
     ] };
     globalThis.fetch = capabilityFetch(spec.id, () => Response.json({ summary }));
     const run = (...args: string[]) => capture(() => registryFor([spec]).execute(["scm", "change-request", "checks", "repo_widgets", "42", ...args]));
     const lines = (await run()).stdout.split("\n");
     expect(lines[0]).toBe(`Head SHA: ${summary.headSha}  Conclusion: failure  Observed at: ${summary.observedAt}`);
     expect(lines[1]).toMatch(/NAME\s+STATUS\s+CONCLUSION\s+LINK \/ ID/);
-    expect(lines).toHaveLength(6);
+    expect(lines).toHaveLength(8);
     for (const [index, check] of summary.checks.entries()) {
       expect(lines[index + 2]).toContain(check.name);
       expect(lines[index + 2]).toContain(check.status);

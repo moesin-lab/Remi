@@ -45,7 +45,11 @@
    - systemd 按文件名的字典序应用 drop-in，后面的覆盖前面的。新文件名必须排在所有已有文件之后；数字前缀用到 99 之后，用 `99z-…`、`99zz-…` 之类。
    - `daemon-reload` 后用 `systemctl --user show multiremi-daemon.service -p ExecStart` 确认生效的是新路径，再重启。
    - 每次部署都叠一个 drop-in 只是过渡做法，改为稳定 launcher 由 MUL-26 跟进。
-3. 重启前先排空 daemon（MUL-68）：用新版本的二进制执行 `remi daemon drain --daemon-id <daemon_id> --deadline 10m --reason deploy`，`<daemon_id>` 取自 daemon 配置文件。排空期间 daemon 不再接新任务，在跑的任务继续运行。用 `remi daemon drain status --daemon-id <daemon_id> --output json` 观察，`status` 变为 `drained`、`remaining_tasks` 为 0 后再重启。到期仍有任务时，按 `expiry_action`（`runtime_recovery`）交给重启后的 daemon 续接。重启后排空状态仍然保留，确认新版本已在运行后执行 `remi daemon undrain --daemon-id <daemon_id>` 恢复接单。旧版本 daemon 没有这条命令时，只能等空闲或直接重启。
+3. 重启前先排空 daemon（MUL-68）：用新版本的二进制执行 `remi daemon drain --daemon-id <daemon_id> --deadline 10m --reason deploy`，`<daemon_id>` 取自 daemon 配置文件。排空期间 daemon 不再接新任务，在跑的任务继续运行。用 `remi daemon drain status --daemon-id <daemon_id> --output json` 观察，满足以下任一条件再重启：
+   - 任务自然结束：`status` 为 `drained`，`remaining_tasks` 为 0。
+   - 到期强制恢复：期限一到，服务端按 `expiry_action`（`runtime_recovery`）立即对剩余任务发起恢复，daemon 确认本地任务已取消后，`status` 为 `drained_forced`，`remaining_tasks` 为 0，`awaiting_daemon_ack` 为 `false`。被恢复的任务同样受排空闸门约束，要等 undrain 后才会重新派给这台 daemon。
+
+   重启后排空状态仍然保留，确认新版本已在运行后执行 `remi daemon undrain --daemon-id <daemon_id>` 恢复接单。旧版本 daemon 没有这条命令时，只能等空闲或直接重启。
 4. 重启后确认每条 lane 的 `Version` 都是新版本。重启前先用 `remi turn list --status running` 记下在跑的轮次；重启后逐个看 `remi turn get <turn>`：大多数会自动换成新尝试继续运行（`current_attempt_id` 变了）；以 `runtime_recovery` 等原因结束的，用 `remi turn retry <turn> --yes` 重试。报 already has an active run 的，说明服务端已经续上，可以忽略。
 
 ## 3. 验证

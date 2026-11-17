@@ -123,8 +123,10 @@ export function assertOfferedInputRead(ctx:StoreContext,turn:any,toSeq:number):v
   const attempt=ctx.db.query('SELECT session_id,attempt_no,input_trigger_ack FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);
   const replay=Number(attempt.attempt_no)>1&&!attempt.session_id&&!attempt.input_trigger_ack;
   const from=replay?Math.min(state.read,Number(turn.input_from_seq??0)):Math.max(state.read,state.ack);
-  const entries=ctx.db.query("SELECT id FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND visibility='shown' AND deleted_at IS NULL").all(turn.session_id,from,replay?Math.max(Math.min(state.ack,Number(turn.input_to_seq??turn.wake_seq)),toSeq):toSeq);
-  for(const entry of entries){const m=ctx.inbox().getMessage(entry.id)!;
+  // Validate the offered interval from its canonical rows in one read. Fetching
+  // each id through getMessage made completion proportional to inline inputs.
+  const entries=ctx.db.query("SELECT seq,sender_type,sender_id,body_md,to_agent_id,wake_applied,metadata FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND visibility='shown' AND deleted_at IS NULL").all(turn.session_id,from,replay?Math.max(Math.min(state.ack,Number(turn.input_to_seq??turn.wake_seq)),toSeq):toSeq);
+  for(const entry of entries){const m={...entry,metadata:typeof entry.metadata==='string'?JSON.parse(entry.metadata):entry.metadata??{}};
     if(m.seq<=state.read)continue;
     if(m.sender_type==='agent'&&m.sender_id===turn.agent_id||!m.body_md)continue;
     if(m.body_md.length>TRIGGER_MESSAGE_INLINE_CHARS||m.to_agent_id!==turn.agent_id||m.wake_applied!=='now'||(m.metadata.execution_scope??'')!==turn.execution_scope)throw new Error('input_gap');

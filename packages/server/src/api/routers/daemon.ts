@@ -603,7 +603,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     const runtimeId = c.req.param("runtimeId");
     const denied = denyDaemonTokenRuntimeIdentity(c, store, runtimeId);
     if (denied) return denied;
-    const runtime = store.getRuntime(runtimeId);
+    const runtime = store.getRuntimeLite(runtimeId);
     if (!runtime) return c.json({ error: "runtime not found", code: "runtime_not_found" }, 404);
     const body = await readJsonStrict<{
       revision?: unknown;

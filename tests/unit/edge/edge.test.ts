@@ -2,20 +2,22 @@ import { afterEach, expect, test } from 'bun:test';
 import { UpstreamSocket } from '../../../packages/edge/src/websocket';
 import { Hono } from 'hono';
 import { Edge } from '../../../packages/edge/src/index';
+import { testHostname } from '../../helpers/edge/hostname';
 import { connect } from 'node:net';
 import { statSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => { for (const stop of cleanups.splice(0).reverse()) await stop(); });
+// Never expose ephemeral fixtures on the host's external interfaces.
 function backend(handler: (req: Request) => Response | Promise<Response> = () => new Response('ok')) {
-  const server = Bun.serve({ port: 0, fetch: handler }); cleanups.push(() => server.stop(true)); return server;
+  const server = Bun.serve({ hostname: testHostname, port: 0, fetch: handler }); cleanups.push(() => server.stop(true)); return server;
 }
 function edge(options: ConstructorParameters<typeof Edge>[0] = {}) {
-  const e = new Edge({ port: 0, log: () => {}, healthIntervalMs: 100000, holdMaxMs: 300, ...options }); cleanups.push(() => e.stop()); return e;
+  const e = new Edge({ hostname: testHostname, port: 0, log: () => {}, healthIntervalMs: 100000, holdMaxMs: 300, ...options }); cleanups.push(() => e.stop()); return e;
 }
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 async function until(predicate: () => boolean) { for (let i = 0; i < 200; i++) { if (predicate()) return; await sleep(5); } throw new Error('Timed out'); }
 function wsBackend() {
-  const s = Bun.serve({ port: 0, fetch(req, server) {
+  const s = Bun.serve({ hostname: testHostname, port: 0, fetch(req, server) {
     if (req.headers.get('upgrade')) {
       if (new URL(req.url).searchParams.has('fail')) return new Response('no', { status: 503 });
       if (server.upgrade(req)) return;
@@ -84,7 +86,7 @@ test('Unix JSON lines control is private and mode 0600', async () => {
 test('20 live handovers under concurrent HTTP, SSE and WS have zero failures', async () => {
   const e = edge({ holdMaxMs: 2000 });
   const make = (id: string) => {
-    const s = Bun.serve({ port: 0, fetch(req, server) {
+    const s = Bun.serve({ hostname: testHostname, port: 0, fetch(req, server) {
       if (req.headers.get('upgrade') && server.upgrade(req)) return;
       if (new URL(req.url).pathname === '/sse') return new Response(new ReadableStream({ async start(c) { c.enqueue(new TextEncoder().encode('data: start\n\n')); await sleep(10); c.enqueue(new TextEncoder().encode('data: end\n\n')); c.close(); } }), { headers: { 'content-type': 'text/event-stream' } });
       return new Response(id);
@@ -137,16 +139,16 @@ test('client abort removes hold waiter', async () => {
 
 test('sent GET retries once, sent POST never replays', async () => {
   let attempts = 0;
-  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data(socket) { attempts++; if (attempts % 2) socket.end(); else socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok'); } } });
+  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: { data(socket) { attempts++; if (attempts % 2) socket.end(); else socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok'); } } });
   cleanups.push(() => raw.stop(true));
-  const e = edge({ backends: [{ id: 'raw', url: `http://127.0.0.1:${raw.port}`, state: 'live' }] });
+  const e = edge({ backends: [{ id: 'raw', url: `http://${testHostname}:${raw.port}`, state: 'live' }] });
   const response = await fetch(e.server.url); expect(response.status).toBe(200); expect(await response.text()).toBe('ok'); expect(attempts).toBe(2);
   expect((await fetch(e.server.url, { method: 'POST', body: 'do not replay' })).status).toBe(502); expect(attempts).toBe(3);
 });
 
 test('WS forwards auth, cookies, query, protocol and client close', async () => {
   let receivedHeaders: Headers | undefined; let receivedUrl = ''; let closeCode = 0; let closeReason = '';
-  const b = Bun.serve({ port: 0, fetch(req, server) {
+  const b = Bun.serve({ hostname: testHostname, port: 0, fetch(req, server) {
     receivedHeaders = req.headers; receivedUrl = req.url;
     if (server.upgrade(req, { headers: { 'sec-websocket-protocol': 'edge-test' } })) return;
     return new Response('no', { status: 400 });
@@ -160,12 +162,12 @@ test('WS forwards auth, cookies, query, protocol and client close', async () => 
 
 test('HTTP informational headers, fragmented chunk framing and EOF failures', async () => {
   let truncated = false;
-  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data(socket) {
+  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: { data(socket) {
     if (truncated) { socket.end('HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort'); return; }
     socket.write('HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3;ext=yes\r\na');
     setTimeout(() => { socket.write('bc\r'); setTimeout(() => socket.end('\n2\r\nde\r\n0\r\n\r\n'), 5); }, 5);
   } } }); cleanups.push(() => raw.stop(true));
-  const e = edge({ backends: [{ id: 'raw', url: `http://127.0.0.1:${raw.port}`, state: 'live' }] });
+  const e = edge({ backends: [{ id: 'raw', url: `http://${testHostname}:${raw.port}`, state: 'live' }] });
   expect(await (await fetch(e.server.url)).text()).toBe('abcde');
   truncated = true;
   // Bun's fetch tolerates EOF before Content-Length; verify it cannot invent
@@ -191,12 +193,12 @@ test('cumulative counters survive backend removal and stop cancels upstream HTTP
   expect(e.status().metrics.requests).toBe(1);
   expect(e.status().metrics.upstreamErrors).toBe(1);
   let disconnected = false;
-  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: {
+  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: {
     data(socket) { socket.write('HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\na\r\n'); },
     close() { disconnected = true; },
   } });
   cleanups.push(() => raw.stop(true));
-  e.addBackend({ id: 'stream', url: `http://127.0.0.1:${raw.port}`, state: 'live' });
+  e.addBackend({ id: 'stream', url: `http://${testHostname}:${raw.port}`, state: 'live' });
   const response = await fetch(e.server.url);
   const body = response.text().catch(() => '');
   e.stop(); await until(() => disconnected); await body;
@@ -223,7 +225,7 @@ test('WS application rejection preserves status, headers and body without retrie
 });
 
 test('server contract permits 2 and 4 MiB frames in both relay directions', async () => {
-  const b = Bun.serve({ port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); },
+  const b = Bun.serve({ hostname: testHostname, port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); },
     websocket: { maxPayloadLength: 4 * 1024 * 1024, closeOnBackpressureLimit: false,
       message(ws, data) { ws.send(data); } },
   });
@@ -241,9 +243,9 @@ test('server contract permits 2 and 4 MiB frames in both relay directions', asyn
 
 test('client aborts before HTTP headers and during WS handshake do not affect backend health', async () => {
   let attempts = 0;
-  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() { attempts++; } } });
+  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: { data() { attempts++; } } });
   cleanups.push(() => raw.stop(true));
-  const e = edge({ holdMaxMs: 1000, healthTimeoutMs: 1000, backends: [{ id: 'b', url: `http://127.0.0.1:${raw.port}`, state: 'live' }] });
+  const e = edge({ holdMaxMs: 1000, healthTimeoutMs: 1000, backends: [{ id: 'b', url: `http://${testHostname}:${raw.port}`, state: 'live' }] });
   for (const upgrade of [false, true]) for (let i = 0; i < 3; i++) {
     const before = attempts; const controller = new AbortController();
     const pending = fetch(e.server.url, { signal: controller.signal, headers: upgrade ? { connection: 'Upgrade', upgrade: 'websocket' } : {} }).catch(() => null);
@@ -256,17 +258,17 @@ test('client aborts before HTTP headers and during WS handshake do not affect ba
 
 test('successful HTTP resets consecutive passive failures and header timeout is bounded', async () => {
   let fail = true;
-  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data(socket) {
+  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: { data(socket) {
     if (fail) socket.end(); else socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok');
   } } });
   cleanups.push(() => raw.stop(true));
-  const e = edge({ backends: [{ id: 'b', url: `http://127.0.0.1:${raw.port}`, state: 'live' }] });
+  const e = edge({ backends: [{ id: 'b', url: `http://${testHostname}:${raw.port}`, state: 'live' }] });
   expect((await fetch(e.server.url, { method: 'POST', body: 'x' })).status).toBe(502);
   expect(e.status().backends[0].failures).toBe(1); fail = false;
   expect(await (await fetch(e.server.url)).text()).toBe('ok'); expect(e.status().backends[0].failures).toBe(0);
-  const silent = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data() {} } });
+  const silent = Bun.listen({ hostname: testHostname, port: 0, socket: { data() {} } });
   cleanups.push(() => silent.stop(true));
-  const timed = edge({ responseHeaderTimeoutMs: 30, backends: [{ id: 'b', url: `http://127.0.0.1:${silent.port}`, state: 'live' }] });
+  const timed = edge({ responseHeaderTimeoutMs: 30, backends: [{ id: 'b', url: `http://${testHostname}:${silent.port}`, state: 'live' }] });
   expect((await fetch(timed.server.url, { method: 'POST', body: 'x' })).status).toBe(502);
 });
 
@@ -290,12 +292,12 @@ test('control socket restarts after SIGKILL but never replaces an active listene
 
 test('HTTP keep-alive reuses a fully framed upstream connection', async () => {
   let connections = 0; let requests = 0;
-  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: {
+  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: {
     open() { connections++; },
     data(socket, bytes) { requests++; expect(bytes.toString().toLowerCase()).toContain('connection: keep-alive'); socket.write('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'); },
   } });
   cleanups.push(() => raw.stop(true));
-  const e = edge({ backends: [{ id: 'b', url: `http://127.0.0.1:${raw.port}`, state: 'live' }] });
+  const e = edge({ backends: [{ id: 'b', url: `http://${testHostname}:${raw.port}`, state: 'live' }] });
   for (let i = 0; i < 5; i++) expect(await (await fetch(e.server.url)).text()).toBe('ok');
   expect(requests).toBe(5); expect(connections).toBe(1);
 });
@@ -314,7 +316,7 @@ test('health recovery needs consecutive rise probes and a failure resets the ris
 
 test('WS slow downstream resumes via drain without disconnecting or losing messages', async () => {
   const count = 20; const size = 2 * 1024 * 1024;
-  const b = Bun.serve({ port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
+  const b = Bun.serve({ hostname: testHostname, port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
     maxPayloadLength: 4 * 1024 * 1024, backpressureLimit: 64 * 1024 * 1024, closeOnBackpressureLimit: false,
     message(ws) { for (let i = 0; i < count; i++) ws.send(new Uint8Array(size).fill(i)); },
   } });
@@ -348,7 +350,7 @@ test('rejected upgrade body streams and remains in flight until drained', async 
 });
 
 async function regressionProcess(url: string, wsStallTimeoutMs = 30000) {
-  type Report = { baseline: number; peak: number; closeCalls: { code: number; reason: string }[]; relayTimers: number; activeRelays: number; status: ReturnType<Edge['status']> };
+  type Report = { waitingBytes: number; baseline: number; peak: number; closeCalls: { code: number; reason: string }[]; relayTimers: number; activeRelays: number; status: ReturnType<Edge['status']> };
   let receive: ((data: Report) => void) | undefined;
   const child = Bun.spawn([process.execPath, 'tests/helpers/edge/regression-process.ts', url, String(wsStallTimeoutMs)], {
     stdout: 'pipe', stderr: 'inherit', ipc(data) { receive?.(data as Report); },
@@ -361,12 +363,15 @@ async function regressionProcess(url: string, wsStallTimeoutMs = 30000) {
 
 test('isolated edge bounds held uploads with a global byte budget and slot body limit', async () => {
   let received = 0;
-  const b = backend(async req => { let count = 0; for await (const bytes of req.body!) count += bytes.length; received += count; return new Response(String(count)); });
+  const b = backend(async req => {
+    if (req.method !== 'POST' || !req.body) throw new Error(`Unexpected held-upload backend request: ${req.method} ${req.url}`);
+    let count = 0; for await (const bytes of req.body) count += bytes.length; received += count; return new Response(String(count));
+  });
   const child = await regressionProcess(b.url.href);
   for (const mode of ['hold', 'standby']) {
     await child.query(mode); await child.query('start');
     for (const mib of [25, 50, 100]) {
-      const response = await fetch(child.url, { keepalive: false, method: 'POST', body: new Uint8Array(mib * 1024 * 1024) });
+      const response = await fetch(`${child.url}?mode=${mode}&mib=${mib}`, { keepalive: false, method: 'POST', body: new Uint8Array(mib * 1024 * 1024) });
       expect(response.status).toBe(503); expect(response.headers.get('retry-after')).toBe('1'); await response.text();
     }
     const report = await child.query('report');
@@ -375,19 +380,51 @@ test('isolated edge bounds held uploads with a global byte budget and slot body 
     expect(report.peak - report.baseline).toBeLessThan(40 * 1024 * 1024);
     // A buffered prefix within budget survives admission, and its reservation
     // is released so the second hold cycle has the full budget again.
-    const pending = fetch(child.url, { keepalive: false, method: 'POST', body: new Uint8Array(4 * 1024 * 1024) });
-    await sleep(100); expect((await child.query('report')).status.waiting).toBe(1);
-    const overflow = await fetch(child.url, { keepalive: false, method: 'POST', body: new Uint8Array(6 * 1024 * 1024) });
-    expect(overflow.status).toBe(503); await overflow.text();
-    expect((await child.query('report')).status.waiting).toBe(1);
-    await child.query('live'); expect(await (await pending).text()).toBe(String(4 * 1024 * 1024));
+    const controller = new AbortController();
+    // Delay the remainder to exercise slow clients / scheduling under load.
+    // A waiter exists before its full prefix has reserved the shared budget.
+    const pending = fetch(child.url, { keepalive: false, method: 'POST', signal: controller.signal,
+      body: new ReadableStream<Uint8Array>({ async start(body) {
+        body.enqueue(new Uint8Array(1024));
+        await sleep(200);
+        if (!controller.signal.aborted) { body.enqueue(new Uint8Array(4 * 1024 * 1024 - 1024)); body.close(); }
+      } }),
+    }).then(response => ({ response, error: undefined }), error => ({ response: undefined, error }));
+    try {
+      const deadline = performance.now() + 2000;
+      let ready = await child.query('report');
+      while (ready.waitingBytes !== 4 * 1024 * 1024 && performance.now() < deadline) {
+        await sleep(5); ready = await child.query('report');
+      }
+      expect(ready.status.waiting).toBe(1);
+      expect(ready.waitingBytes).toBe(4 * 1024 * 1024);
+      const overflow = await fetch(child.url, { keepalive: false, method: 'POST', body: new Uint8Array(6 * 1024 * 1024) });
+      expect(overflow.status).toBe(503); expect(overflow.headers.get('retry-after')).toBe('1'); await overflow.text();
+      const held = await child.query('report');
+      expect(held.status.waiting).toBe(1); expect(held.waitingBytes).toBe(4 * 1024 * 1024);
+      expect(received).toBe(0);
+      await child.query('live');
+      const result = await pending;
+      if (result.error) throw result.error;
+      expect(result.response!.status).toBe(200);
+      expect(await result.response!.text()).toBe(String(4 * 1024 * 1024));
+      expect((await child.query('report')).waitingBytes).toBe(0);
+    } finally {
+      // Observe the request before the edge process is stopped even when a
+      // preceding assertion fails. Success still requires the real 200 above.
+      controller.abort();
+      const result = await pending;
+      if (result.error && result.error.name !== 'AbortError') throw result.error;
+    }
     received = 0;
   }
   // Bun rejects a declared body beyond the same 128 MiB default used by slot.
-  const response = await new Promise<string>(resolve => {
-    const socket = connect(Number(new URL(child.url).port), '127.0.0.1', () => {
+  const response = await new Promise<string>((resolve, reject) => {
+    const socket = connect(Number(new URL(child.url).port), testHostname, () => {
       socket.write('POST / HTTP/1.1\r\nHost: edge\r\nContent-Length: 135266304\r\n\r\n');
     });
+    socket.once('error', reject);
+    socket.once('close', () => reject(new Error('Body-limit connection closed before a response')));
     socket.once('data', bytes => { resolve(bytes.toString()); socket.destroy(); });
   });
   expect(response).toContain('413');
@@ -428,8 +465,11 @@ test('isolated edge preserves public encoded paths and literal percent signs for
         'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } : {};
       const direct = await fetch(b.url.origin + path + '?keep=%2F', { headers });
       const proxied = await fetch(new URL(child.url).origin + path + '?keep=%2F', { headers });
-      expect(direct.status).toBe(200); expect(proxied.status).toBe(200);
-      expect(await proxied.text()).toBe(await direct.text());
+      const context = `${upgrade ? 'Upgrade' : 'HTTP'} ${path}`;
+      expect(direct.status, `direct ${context}`).toBe(200); expect(proxied.status, `edge ${context}`).toBe(200);
+      const expected = { path, query: '?keep=%2F' };
+      expect(await direct.json(), `direct ${context}`).toEqual(expected);
+      expect(await proxied.json(), `edge ${context}`).toEqual(expected);
     }
   }
   expect(attempts).toBe(28);
@@ -437,7 +477,7 @@ test('isolated edge preserves public encoded paths and literal percent signs for
 
 test('isolated edge relays an immediate Bun backend WS close after 101', async () => {
   let attempts = 0; let code = 4001;
-  const b = Bun.serve({ port: 0, fetch(req, server) { attempts++; if (server.upgrade(req)) return; return new Response('no'); },
+  const b = Bun.serve({ hostname: testHostname, port: 0, fetch(req, server) { attempts++; if (server.upgrade(req)) return; return new Response('no'); },
     websocket: { open(ws) { ws.close(code, 'restart'); }, message() {} } });
   cleanups.push(() => { void b.stop(true); });
   const child = await regressionProcess(b.url.href);
@@ -457,7 +497,7 @@ test('isolated edge relays an immediate Bun backend WS close after 101', async (
 
 test.each([[64, 4 * 1024 * 1024], [64, 1024 * 1024], [192, 512 * 1024]])(
   'isolated WS streams %i x %i bytes to a slow steady TCP reader without hanging', async (count, size) => {
-  const b = Bun.serve({ port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
+  const b = Bun.serve({ hostname: testHostname, port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
     maxPayloadLength: 4 * 1024 * 1024, backpressureLimit: 4 * 1024 * 1024, closeOnBackpressureLimit: false,
     message(ws) {
       let sent = 0;
@@ -471,7 +511,7 @@ test.each([[64, 4 * 1024 * 1024], [64, 1024 * 1024], [192, 512 * 1024]])(
   cleanups.push(() => { void b.stop(true); });
   const child = await regressionProcess(b.url.href, 1500);
   await new Promise<void>((resolve, reject) => {
-    const socket = connect(Number(new URL(child.url).port), '127.0.0.1'); cleanups.push(() => socket.destroy());
+    const socket = connect(Number(new URL(child.url).port), testHostname); cleanups.push(() => socket.destroy());
     let head = Buffer.alloc(0); let upgraded = false; let frameHeader = Buffer.alloc(0);
     let remaining = 0; let received = 0; let resume: ReturnType<typeof setTimeout>;
     cleanups.push(() => clearTimeout(resume));
@@ -527,7 +567,7 @@ test('standalone edge rejects an empty EDGE_PORT instead of binding an ephemeral
 
 test('bodyless POST uses a fresh upstream connection and avoids stale keep-alive failures', async () => {
   let connections = 0; let requests = 0;
-  const raw = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: {
+  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: {
     open() { connections++; },
     data(socket, bytes) {
       requests++;
@@ -537,7 +577,7 @@ test('bodyless POST uses a fresh upstream connection and avoids stale keep-alive
     },
   } });
   cleanups.push(() => raw.stop(true));
-  const e = edge({ backends: [{ id: 'b', url: `http://127.0.0.1:${raw.port}`, state: 'live' }] });
+  const e = edge({ backends: [{ id: 'b', url: `http://${testHostname}:${raw.port}`, state: 'live' }] });
   expect(await (await fetch(e.server.url)).text()).toBe('ok');
   const post = await fetch(e.server.url, { method: 'POST' });
   expect(post.status).toBe(200); expect(await post.text()).toBe('ok');
@@ -549,7 +589,7 @@ test('isolated WS stalled TCP reader closes with 1013 within a bounded time and 
   const size = 1024 * 1024;
   let sent = 0; let backendClose: { code: number; reason: string } | undefined;
   let producer: ReturnType<typeof setInterval> | undefined;
-  const b = Bun.serve({ port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
+  const b = Bun.serve({ hostname: testHostname, port: 0, fetch(req, server) { if (server.upgrade(req)) return; return new Response('no'); }, websocket: {
     maxPayloadLength: 4 * size, backpressureLimit: 4 * size, closeOnBackpressureLimit: false,
     message(ws) {
       producer = setInterval(() => {
@@ -560,7 +600,7 @@ test('isolated WS stalled TCP reader closes with 1013 within a bounded time and 
   } });
   cleanups.push(() => { clearInterval(producer); void b.stop(true); });
   const child = await regressionProcess(b.url.href, 250);
-  const socket = connect(Number(new URL(child.url).port), '127.0.0.1'); cleanups.push(() => socket.destroy());
+  const socket = connect(Number(new URL(child.url).port), testHostname); cleanups.push(() => socket.destroy());
   await new Promise<void>((resolve, reject) => {
     let head = '';
     socket.on('error', reject);

@@ -1,5 +1,6 @@
 import { Edge } from '../../../packages/edge/src/index';
-const edge = new Edge({ wsStallTimeoutMs: Number(process.argv[3] ?? 30000), port: 0, holdMaxMs: 5000, healthIntervalMs: 100000,
+import { testHostname } from './hostname';
+const edge = new Edge({ hostname: testHostname, wsStallTimeoutMs: Number(process.argv[3] ?? 30000), port: 0, holdMaxMs: 5000, healthIntervalMs: 100000,
   backends: [{ id: 'b', url: process.argv[2], state: 'live' }], log: () => {} });
 let baseline = process.memoryUsage().rss; let peak = baseline;
 // Retain observed relays to check that timers clear even after removal from Edge.
@@ -27,6 +28,6 @@ process.on('message', message => {
   if (message === 'live') { edge.setState('b', 'live'); edge.unhold(); }
   if (message === 'start') { Bun.gc(true); baseline = process.memoryUsage().rss; peak = baseline; }
   if (message === 'stop') { clearInterval(timer); edge.stop(); process.exit(0); }
-  process.send?.({ baseline, peak, closeCalls, activeRelays: relays.size, relayTimers: [...observed].filter(r => r.retryTimer !== undefined).length, status: edge.status() });
+  process.send?.({ waitingBytes: (edge as unknown as { waitingBodyBudget: { bytes: number } }).waitingBodyBudget.bytes, baseline, peak, closeCalls, activeRelays: relays.size, relayTimers: [...observed].filter(r => r.retryTimer !== undefined).length, status: edge.status() });
 });
 console.log(edge.server.url.href);

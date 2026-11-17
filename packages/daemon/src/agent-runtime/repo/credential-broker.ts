@@ -1,3 +1,4 @@
+import { proxyFetch } from "@shared/proxy-fetch.js";
 import { spawnSync } from "node:child_process";
 import { basename } from "node:path";
 import { resolveTaskContext, TASK_CONTEXT_PARKED_MESSAGE } from "@shared/task-context-file.js";
@@ -169,7 +170,7 @@ export async function runGitCredentialHelper(
     if (context.parked) throw new Error(TASK_CONTEXT_PARKED_MESSAGE);
     const token = context.token ?? "";
     if (token) headers.Authorization = `Bearer ${token}`;
-    const response = await (options.fetchImpl ?? fetch)(`${serverUrl}${MULTIREMI_GIT_CREDENTIAL_ENDPOINT}`, {
+    const response = await (options.fetchImpl ?? proxyFetch)(`${serverUrl}${MULTIREMI_GIT_CREDENTIAL_ENDPOINT}`, {
       method: "POST",
       headers,
       body: JSON.stringify({

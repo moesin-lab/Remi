@@ -299,6 +299,7 @@ launcher 与完整前台参数作为重启入口；后继进程不再重新选�
 
 systemd 模板明确 `TimeoutStopSec=45`、`KillMode=control-group`；launchd 模板对应
 `ExitTimeOut=45`、`AbandonProcessGroup=false`。daemon 的优雅停止预算为 30 秒，
-超时中止任务、SIGKILL 所有已跟踪 bridge 进程组，然后以非零状态退出，留下 15 秒
+超时中止任务、SIGKILL 所有已跟踪 bridge 进程组；共进程的 provider 由 supervisor
+在任一超时回调退出前同步清理全部 lane 的进程组，然后以非零状态退出，留下 15 秒
 供管理器清理。该契约适用于新生成的 unit/plist；既有服务需由维护者重新安装模板
 才会取得模板参数。本改动不会自动写用户的 drop-in 或重启线上服务。

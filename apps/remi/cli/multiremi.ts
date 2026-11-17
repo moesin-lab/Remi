@@ -489,13 +489,21 @@ export function instantiateCoResidentWorkerDaemons(
     ...first.protocolClientOptions,
   }) : undefined);
   const gcLeaderIndex = options.findIndex((daemonOptions) => daemonOptions.gcEnabled !== false);
-  return options.map((daemonOptions, index) => {
+  const daemons: MultiremiDaemon[] = [];
+  daemons.push(...options.map((daemonOptions, index) => {
     const extraReadyCheck = daemonOptions.supervisorReady;
     const notifyReadyChange = daemonOptions.onReadyChange;
     return new MultiremiDaemon({
       ...daemonOptions,
       protocolClient,
       issueWorkspaceLifecycleLocker,
+      onStopTimeout: () => {
+        // ACP bridges are detached. Clean every co-resident lane synchronously
+        // before the first deadline callback can terminate their shared process.
+        for (const daemon of daemons) daemon.forceStopProcesses();
+        if (daemonOptions.onStopTimeout) daemonOptions.onStopTimeout();
+        else process.exit(1);
+      },
       ...(cliUpdateCoordinator ? { cliUpdateCoordinator } : {}),
       // Provider lanes share one Issue workspace tree. A single lane owns its
       // periodic GC so Claude and Codex cannot duplicate the same reclaim and
@@ -509,7 +517,8 @@ export function instantiateCoResidentWorkerDaemons(
         notifyReadyChange?.(ready);
       },
     });
-  });
+  }));
+  return daemons;
 }
 
 /** Each provider can own the transport; the control plane selects one Runtime

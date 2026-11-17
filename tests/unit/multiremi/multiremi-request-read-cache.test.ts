@@ -17,6 +17,7 @@ import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 import {
   activeRequestReadCache,
   withRequestReadCache,
+  withSynchronousRequestReadCache,
   invalidatingDatabase,
   cacheKey,
   markRequestReadCacheLockTaken,
@@ -35,6 +36,45 @@ describe("request-scoped read cache", () => {
       expect(activeRequestReadCache()).not.toBeNull();
     });
     expect(activeRequestReadCache()).toBeNull();
+  });
+
+  it("closes heartbeat cache inherited by workspace event promises and timers", async () => {
+    const store = createStore();
+    store.ensureLocalWorkspace();
+    const runtime = store.registerRuntime({
+      id: "rt_event_cache", name: "Event cache", provider: "codex",
+      daemonId: "daemon-event-cache", workspaceId: "local", ownerId: "local", status: "online",
+    });
+    const callbacks: Promise<void>[] = [];
+    const readAfterEvent = () => {
+      expect(activeRequestReadCache()).toBeNull();
+      expect(store.getWorkspace("local")?.settings).toMatchObject({ afterEvent: true });
+      withRequestReadCache(() => {
+        expect(activeRequestReadCache()).not.toBeNull();
+        expect(store.getWorkspace("local")?.settings).toMatchObject({ afterEvent: true });
+      });
+    };
+    const unsubscribe = store.onWorkspaceEvent(event => {
+      if (event.type !== "daemon:models_updated") return;
+      expect(activeRequestReadCache()).not.toBeNull();
+      callbacks.push(Promise.resolve().then(readAfterEvent));
+      callbacks.push(new Promise<void>((resolve, reject) => setTimeout(() => {
+        try { readAfterEvent(); resolve(); } catch (error) { reject(error); }
+      }, 0)));
+    });
+    try {
+      withSynchronousRequestReadCache(() => {
+        store.getWorkspace("local");
+        store.updateRuntimeModels(runtime.id, []);
+        store.getWorkspace("local");
+      });
+      // Outside the inherited scope: its cached workspace would survive this write.
+      store.updateWorkspace("local", { settings: { afterEvent: true } });
+      expect(callbacks).toHaveLength(2);
+      await Promise.all(callbacks);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("does not leak entries from one request into the next", async () => {

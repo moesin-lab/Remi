@@ -16,7 +16,7 @@
  * answers `{}` until A-6 fills it.
  */
 
-import { withRequestReadCache } from "@multiremi/store/request-read-cache.js";
+import { withSynchronousRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import {
   DAEMON_PROTOCOL_CLOSE_CODES,
   DAEMON_PROTOCOL_VERSION,
@@ -180,7 +180,7 @@ export class DaemonProtocolLayer {
         for (const hooks of this.sessionHooks) hooks.hello?.(session, hello);
       },
       onHeartbeat: heartbeat => {
-        const reply = withRequestReadCache(() => this.handleHeartbeat(heartbeat));
+        const reply = withSynchronousRequestReadCache(() => this.handleHeartbeat(heartbeat));
         for (const hooks of this.sessionHooks) hooks.heartbeat?.(session, heartbeat);
         return reply;
       },

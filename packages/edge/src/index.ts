@@ -29,14 +29,20 @@ export function cleanHeaders(input: Headers): Headers {
 // Inspect every interpretation without rewriting the path forwarded to the slot.
 function isPrivatePath(path: string): boolean {
   while (true) {
+    // Hono does not resolve decoded dot segments. Keep its literal private
+    // prefix covered even when normalization would remove that segment.
+    if (path === '/internal' || path.startsWith('/internal/')) return true;
     const segments: string[] = [];
     for (const segment of path.replaceAll('\\', '/').split('/')) {
       if (segment === '..') segments.pop();
       else if (segment && segment !== '.') segments.push(segment);
     }
     if (segments[0] === 'internal') return true;
-    let decoded: string;
-    try { decoded = decodeURIComponent(path); } catch { return false; }
+    // Decode ASCII structural bytes independently: a stray '%' or invalid
+    // UTF-8 byte elsewhere must not conceal a valid private-prefix escape.
+    // This deliberately covers more interpretations than Hono's tolerant
+    // decodeURI (which preserves reserved escapes and invalid UTF-8 runs).
+    const decoded = path.replace(/%([0-9a-f]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16)));
     if (decoded === path) return false;
     // Every successful changed decoding shortens the string, so nested percent
     // encoding terminates without a depth cutoff that rejects public paths.

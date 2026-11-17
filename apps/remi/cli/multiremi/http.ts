@@ -4,6 +4,7 @@
  * Extracted verbatim from the former single-file `cli/multiremi.ts`.
  */
 
+import { cliFetch } from "../core/proxy-fetch.js";
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import { loadMultiremiConfig } from "@multiremi/config.js";
@@ -60,7 +61,7 @@ export async function multiremiApiUploadFile(attachmentFile: CliAttachmentFile, 
   const headers: Record<string, string> = {};
   headers["User-Agent"] = remiCliUserAgent();
   if (connection.token) headers.Authorization = `Bearer ${connection.token}`;
-  const response = await fetch(`${connection.serverUrl}/api/upload-file`, {
+  const response = await cliFetch(`${connection.serverUrl}/api/upload-file`, {
     method: "POST",
     headers,
     body: form,
@@ -77,7 +78,7 @@ export async function multiremiApiDownloadFile(downloadUrl: string, options: Cli
   const headers: Record<string, string> = {};
   headers["User-Agent"] = remiCliUserAgent();
   if (isRelative && connection.token) headers.Authorization = `Bearer ${connection.token}`;
-  const response = await fetch(url, { method: "GET", headers });
+  const response = await cliFetch(url, { method: "GET", headers });
   if (!response.ok) {
     const text = await response.text();
     throw new MultiremiCliHttpError("GET", downloadUrl, response.status, text);
@@ -185,7 +186,7 @@ export async function multiremiApiFetch<T = unknown>(
   headers["User-Agent"] = remiCliUserAgent();
   if (connection.token) headers.Authorization = `Bearer ${connection.token}`;
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(connection.serverUrl + path, {
+  const response = await cliFetch(connection.serverUrl + path, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),

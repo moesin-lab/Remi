@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createLogger } from "../logger.js";
 
-/** Only transport/server-availability failures are safe to retry at a loop boundary. */
+/** Only transport/server-availability failures count toward database outage backoff. */
 export function isDatabaseConnectionError(error: unknown): boolean {
   if (error instanceof DatabaseUnavailableError) return true;
   const code = (error as { code?: unknown } | null)?.code;
@@ -26,7 +26,11 @@ export function databaseTimeoutMs(): number | undefined { return timeoutContext.
 
 const log = createLogger("db-recovery");
 
-/** Single-flight timer. A failed tick is retried, never an individual SQL statement/commit. */
+/**
+ * Single-flight timer; never replays an individual SQL statement/commit.
+ * Unexpected action/interval errors are reported at ERROR and the next tick runs
+ * after retryMaxMs, without changing database outage backoff/recovery state.
+ */
 export class DatabaseRetryLoop {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
@@ -71,13 +75,20 @@ export class DatabaseRetryLoop {
       this.failures = 0;
       this.lastWarning = -Infinity;
     } catch (error) {
-      if (!isDatabaseConnectionError(error)) throw error;
-      if (this.stopped || generation !== this.generation) return;
-      delay = Math.min(this.retryMaxMs, this.retryBaseMs * 2 ** Math.min(this.failures++, 16));
-      if (Date.now() - this.lastWarning >= 30_000) {
-        // Never include SQL, connection URLs, or driver error text.
-        log.warn(`${this.name}: database unavailable; retry in ${delay}ms`);
-        this.lastWarning = Date.now();
+      if (!isDatabaseConnectionError(error)) {
+        // Report even a late failure, but never let an obsolete tick rearm.
+        log.error(`${this.name}: unexpected maintenance error`, error);
+        if (this.stopped || generation !== this.generation) return;
+        // Do not consult a possibly broken interval callback or call this an outage.
+        delay = this.retryMaxMs;
+      } else {
+        if (this.stopped || generation !== this.generation) return;
+        delay = Math.min(this.retryMaxMs, this.retryBaseMs * 2 ** Math.min(this.failures++, 16));
+        if (Date.now() - this.lastWarning >= 30_000) {
+          // Never include SQL, connection URLs, or driver error text.
+          log.warn(`${this.name}: database unavailable; retry in ${delay}ms`);
+          this.lastWarning = Date.now();
+        }
       }
     }
     if (delay <= 0) { this.stopped = true; return; }

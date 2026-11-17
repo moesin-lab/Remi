@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { DatabaseRetryLoop, DatabaseUnavailableError, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 
@@ -65,15 +65,95 @@ describe("database recovery boundaries", () => {
     listener.stop(true);
     expect(() => new PostgresSyncDatabase(`postgres://test:test@127.0.0.1:${port}/test`)).toThrow(DatabaseUnavailableError);
   });
-  test("timer programming errors remain fatal instead of becoming retries", async () => {
+  test("timer TypeError rejections are visible and later ticks run without an unhandled rejection", async () => {
     const child = Bun.spawn([process.execPath, "-e", `
       import { DatabaseRetryLoop } from "./packages/shared/src/db/recovery.ts";
-      new DatabaseRetryLoop("bug", () => { throw new TypeError("programming-error-sentinel"); }, 1).start();
-      setTimeout(() => process.exit(0), 1000);
+      let calls = 0;
+      const loop = new DatabaseRetryLoop("bug", async () => {
+        if (++calls === 1) throw new TypeError("programming-error-sentinel");
+        loop.stop();
+      }, 1, 5, 15);
+      loop.start(1);
+      setTimeout(() => process.exit(calls === 2 ? 0 : 1), 200);
     `], { stdout: "pipe", stderr: "pipe" });
     const stderr = new Response(child.stderr).text();
-    expect(await child.exited).not.toBe(0);
-    expect(await stderr).toContain("programming-error-sentinel");
+    expect(await child.exited).toBe(0);
+    const output = await stderr;
+    expect(output).toContain("ERROR");
+    expect(output).toContain("bug: unexpected maintenance error");
+    expect(output).toContain("TypeError: programming-error-sentinel");
+    expect(output).not.toContain("database unavailable");
   });
+
+  test("unexpected errors preserve database backoff until a successful tick resets it", async () => {
+    const bug = new TypeError("bug");
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    const timers = spyOn(globalThis, "setTimeout");
+    let calls = 0;
+    const loop = new DatabaseRetryLoop("mixed", () => {
+      calls++;
+      if ([1, 3, 5].includes(calls)) throw new DatabaseUnavailableError();
+      if (calls === 2) throw bug;
+      if (calls === 6) loop.stop();
+    }, 7, 11, 55);
+    try {
+      loop.start();
+      await until(() => calls === 6);
+      // Ignore until()'s 2ms polling timer. The bug neither increments nor
+      // resets the outage counter; success on tick 4 resets it for tick 5.
+      expect(timers.mock.calls.map(call => call[1]).filter(delay => delay !== 2)).toEqual([11, 55, 22, 7, 11]);
+      expect(errors.mock.calls).toHaveLength(1);
+      expect(errors.mock.calls[0]![0]).toContain("mixed: unexpected maintenance error");
+      expect(errors.mock.calls[0]![1]).toBe(bug);
+    } finally { loop.stop(); timers.mockRestore(); errors.mockRestore(); }
+  });
+
+  test("a broken interval callback is reported and retried without consulting it again", async () => {
+    const errors = spyOn(console, "error").mockImplementation(() => {});
+    const timers = spyOn(globalThis, "setTimeout");
+    let calls = 0;
+    let intervalCalls = 0;
+    const bug = new TypeError("interval bug");
+    const loop = new DatabaseRetryLoop("interval", () => {
+      if (++calls === 2) loop.stop();
+    }, () => { intervalCalls++; throw bug; }, 5, 25);
+    try {
+      loop.start();
+      await until(() => calls === 2);
+      expect(intervalCalls).toBe(1);
+      expect(timers.mock.calls.map(call => call[1]).filter(delay => delay !== 2)).toEqual([25]);
+      expect(errors.mock.calls[0]![1]).toBe(bug);
+    } finally { loop.stop(); timers.mockRestore(); errors.mockRestore(); }
+  });
+
+  for (const restart of [false, true]) {
+    test(`a late TypeError after stop${restart ? "/restart" : ""} is reported without rearming`, async () => {
+      const errors = spyOn(console, "error").mockImplementation(() => {});
+      let reject!: (reason: unknown) => void;
+      let calls = 0;
+      const bug = new TypeError("late bug");
+      const loop = new DatabaseRetryLoop("late", () => {
+        calls++;
+        return new Promise<void>((_resolve, fail) => { reject = fail; });
+      }, 1, 5, 15);
+      try {
+        loop.start();
+        loop.stop();
+        if (restart) loop.start(100);
+        reject(bug);
+        await Bun.sleep(40);
+        expect(calls).toBe(1);
+        expect(errors.mock.calls).toHaveLength(1);
+        expect(errors.mock.calls[0]![1]).toBe(bug);
+        if (restart) {
+          await until(() => calls === 2);
+          loop.stop();
+          reject(bug);
+          await Bun.sleep(25);
+          expect(calls).toBe(2);
+        }
+      } finally { loop.stop(); errors.mockRestore(); }
+    });
+  }
 
 });

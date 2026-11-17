@@ -1,5 +1,6 @@
 import { Edge } from '../../../packages/edge/src/index';
-const edge = new Edge({ port: 0, backends: [{ id: 'b', url: process.argv[2], state: 'live' }], log: () => {} });
+import { testHostname } from './hostname';
+const edge = new Edge({ hostname: testHostname, port: 0, backends: [{ id: 'b', url: process.argv[2], state: 'live' }], log: () => {} });
 let baseline = 0; let peak = 0;
 const timer = setInterval(() => { peak = Math.max(peak, process.memoryUsage().rss); }, 2);
 process.on('message', message => {

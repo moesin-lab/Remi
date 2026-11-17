@@ -3785,7 +3785,7 @@ export class FeishuBotRepo {
         return true;
       })();
       this.ctx.emitCommitEvents(deferredEvents);
-      if (sent) this.publishDownlinkChange(workspaceId);
+      if (sent) this.publishDownlinkChange(workspaceId, runtimeId, true);
       return sent;
     }
     const failed = this.ctx.db.transaction(() => {
@@ -3845,7 +3845,7 @@ export class FeishuBotRepo {
       }
       return true;
     })();
-    if (failed) this.publishDownlinkChange(workspaceId);
+    if (failed) this.publishDownlinkChange(workspaceId, runtimeId, true);
     return failed;
   }
 
@@ -4234,9 +4234,9 @@ export class FeishuBotRepo {
     return current;
   }
 
-  private publishDownlinkChange(workspaceId: string, runtimeId?: string): void {
+  private publishDownlinkChange(workspaceId: string, runtimeId?: string, pendingOnly = false): void {
     this.ctx.emitWorkspaceEvent({ type: "daemon:feishu_changed", workspaceId,
-      actorType: "system", actorId: null, payload: runtimeId ? { runtime_id: runtimeId } : {} });
+      actorType: "system", actorId: null, payload: { ...(runtimeId ? { runtime_id: runtimeId } : {}), ...(pendingOnly ? { pending_only: true } : {}) } });
   }
 
   /**

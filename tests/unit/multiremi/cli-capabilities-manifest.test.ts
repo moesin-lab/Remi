@@ -265,8 +265,15 @@ describe("CLI capabilities manifest", () => {
       missing: 0,
       total: 842,
     });
+    // PR #97 (MUL-168): these four loopback-only, dedicated-token endpoints are
+    // the supervisor's slot lifecycle protocol, not user-facing CLI capabilities.
     for (const route of ["GET /internal/slot/status", "POST /internal/slot/activate",
       "POST /internal/slot/release", "POST /internal/slot/exit"]) {
+      expect(manifest.routes[route]).toEqual({
+        cli_exempt: true,
+        category: "platform_updater_internal",
+        reason: "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token.",
+      });
       expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "platform_updater_internal" });
     }
     // ADR 0025: the Chat composer's slash-command menu is Web state; a CLI sender types the command.

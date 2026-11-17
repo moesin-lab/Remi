@@ -1,3 +1,4 @@
+import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
 import {
   afterEach,
@@ -225,6 +226,9 @@ export async function fleet(opened?: Awaited<ReturnType<typeof openFleetDatabase
         close() {},
       },
       { accessToken: null, masterToken: true },
+      // SQL-cost fixtures drive ACK explicitly. Slow PG seeding is not a
+      // daemon outage; timeout behavior belongs to the protocol clock tests.
+      new ManualDaemonProtocolClock(Date.now()),
     );
     sessions.push(session);
     await session.handleMessage(

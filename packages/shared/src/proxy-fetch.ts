@@ -36,22 +36,9 @@ export async function proxyFetch(input: string | URL | Request, init?: RequestIn
     const url = target instanceof Request ? target.url : String(target);
     // Clone before sending so a 307/308 can replay a Request body.
     const replay = target instanceof Request && target.body && mode === "follow" ? target.clone() : target;
-    // Materialize user getters and string conversions before changing env. Preserve the
-    // two-argument transport contract used by injected fetch implementations.
-    const prepared: RequestInit = { ...options, redirect: "manual" };
-    if (prepared.headers !== undefined) prepared.headers = new Headers(prepared.headers);
-    const body = prepared.body;
-    if (body instanceof URLSearchParams) {
-      const headers = new Headers(prepared.headers ?? (target instanceof Request ? target.headers : undefined));
-      if (!headers.has("content-type")) headers.set("content-type", "application/x-www-form-urlencoded;charset=UTF-8");
-      prepared.headers = headers;
-      prepared.body = body.toString();
-    } else if (body != null && typeof body !== "string" && !(body instanceof Blob)
-      && !(body instanceof FormData) && !(body instanceof ArrayBuffer)
-      && !ArrayBuffer.isView(body) && !(body instanceof ReadableStream)) {
-      prepared.body = String(body);
-    }
-    const response = await withNoProxyRoute(url, () => fetch(target, prepared));
+    // Materialize getters, headers/body and WebIDL conversions before changing env.
+    const prepared = new Request(target, { ...options, redirect: "manual" });
+    const response = await withNoProxyRoute(url, () => fetch(prepared));
     if (![301, 302, 303, 307, 308].includes(response.status) || mode === "manual") {
       if (hops > 0) Object.defineProperty(response, "redirected", { value: true });
       return response;
@@ -70,7 +57,7 @@ export async function proxyFetch(input: string | URL | Request, init?: RequestIn
     if (!["http:", "https:"].includes(next.protocol) || next.username || next.password) {
       throw new TypeError("Invalid redirect URL");
     }
-    const method = (options?.method ?? (target instanceof Request ? target.method : "GET")).toUpperCase();
+    const method = prepared.method;
     const headers = new Headers(options?.headers ?? (target instanceof Request ? target.headers : undefined));
     const dropBody = ((response.status === 301 || response.status === 302) && method === "POST")
       || (response.status === 303 && method !== "GET" && method !== "HEAD");
@@ -82,7 +69,7 @@ export async function proxyFetch(input: string | URL | Request, init?: RequestIn
     } else if (options?.body instanceof ReadableStream) {
       throw new TypeError("Cannot replay a streaming body across a redirect");
     }
-    options = { ...options, headers, ...(dropBody ? { method: "GET", body: null } : {}) };
+    options = { ...options, method, headers, ...(dropBody ? { method: "GET", body: null } : {}) };
     target = replay instanceof Request
       ? new Request(new Request(next, replay), { method: dropBody ? "GET" : method, headers,
           body: dropBody || method === "GET" || method === "HEAD" ? null : replay.body,

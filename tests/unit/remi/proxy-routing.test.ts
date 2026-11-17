@@ -219,7 +219,8 @@ it("prepares init getters and coercions before routing and preserves original ru
       };
       const response = await proxyFetch(a, {
         get headers() { reenter(); return { "x-test": { toString() { reenter(); return "ok"; } } }; },
-        method: "POST", body: { toString() { reenter(); return "body"; } },
+        method: { toString() { reenter(); return "POST"; } },
+        body: { toString() { reenter(); return "body"; } },
       });
       assert.equal(await response.text(), "direct");
       const nested = withNoProxyRoute(a, () => {

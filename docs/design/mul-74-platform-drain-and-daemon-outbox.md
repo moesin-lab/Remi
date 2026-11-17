@@ -108,6 +108,14 @@ provider 接单，在剩余期限内等待。到期仍繁忙时更新失败，�
 解除该更新持有的 drain，已有轮次继续运行，不执行 runtime recovery。
 人工和部署 drain 保持原有超时回收契约，不能被更新接管或释放。
 
+准入在 workspace lifecycle 锁内串行：同一物理 daemon 同时最多一个 CLI 请求离开
+pending。有 update owner 时只有该 owner 可准入；人工/部署 drain 没有 owner 时，
+必须没有其他 running/restarting/verifying CLI 请求。所有准入均要求 drained 或
+drained_forced。HTTP claim、WebSocket 下行及其迟到 ACK、pending→running 上报共用此判定；
+未准入的请求保持 pending，下行不发送，上报明确拒绝。daemon 收到 running 上报
+拒绝后释放本地暂停并返回，不安装或切换 launcher，也不把请求改为 failed。
+因此 owner 终态交接只需寻找 pending sibling，可在 restarting/verifying 保护之前处理。
+
 下载或校验失败的终态立即释放本次 requestId 的 drain；重启期间 drain 保持持久化，
 新进程完成版本注册和启动自检、确认 completed 后释放。恢复旧版本确认 rolled_back
 同样释放。owner 进入终态（含排空超时）时，若同一物理 daemon 仍有 pending CLI 更新，

@@ -940,7 +940,8 @@ export class MultiremiDaemonClient {
       return;
     }
     await this.report("runtime.update_result", `rt:${runtimeId}`, { ...result, request_id: requestId, runtime_id: runtimeId },
-      result.status === "completed" || result.status === "rolled_back");
+      // Running is an admission barrier: never install before the platform accepts it.
+      result.status === "running" || result.status === "completed" || result.status === "rolled_back");
   }
 
   async reportRuntimeCommandResult(runtimeId: string, requestId: string, result: {

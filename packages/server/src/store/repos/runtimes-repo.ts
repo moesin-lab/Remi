@@ -1858,7 +1858,10 @@ export class RuntimesRepo {
           let issueId: string | null = null;
           if (target && (project || (assigneeType && assigneeId))) {
             // Redact before truncating, so a cut cannot expose part of a matched secret.
-            const summary = (value: unknown) => redactRuntimeCommandText(String(value ?? ""))
+            // Consume complete quoted values (including spaces and escaped quotes) before
+            // the command redactor can partially replace them and lose their boundaries.
+            const summary = (value: unknown) => redactRuntimeCommandText(String(value ?? "")
+              .replace(/(\b(?:authorization|proxy-authorization|cookie|set-cookie|api[_-]?key|secret|credential|password|token)[\w-]*["']?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$))/gi, "$1[REDACTED]"))
               .replace(/(\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n]+/gi, "$1[REDACTED]")
               .replace(/\b(?:github_pat_|gh[ousr]_)[A-Za-z0-9_]+\b/g, "[REDACTED]")
               .replace(/((?:api[_-]?key|secret|credential|password|token)[\w-]*["']?\s*[:=]\s*["']?)[^\s"',;]+/gi, "$1[REDACTED]")

@@ -99,7 +99,7 @@ awaiting_human 状态覆盖及 unknown offer 保留的共享目录租约。索�
 
 ## Daemon 报告和消息接口的历史放大
 
-Daemon turn 输入范围直接批量读取消息；Chat retry ancestry 在 attempts 基表中一次回溯，
+Daemon turn 输入范围和终态 input-read 校验均直接批量读取消息所需列；Chat retry ancestry 在 attempts 基表中一次回溯，
 历史消息的来源任务只批量读取 queue status。批量 task 水合对整个批次求 usage，
 workspace offer 扇出批量读取 Runtime 和 drain 围栏。会话 messages 的分页和 from/to 范围
 复用当前页的 related-message/source-subject 预取及原权限判定。

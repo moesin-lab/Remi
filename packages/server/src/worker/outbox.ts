@@ -98,6 +98,7 @@ const DISCARDED_TASK_TTL_MS = 24 * 60 * 60 * 1_000;
  */
 export class MultiremiTaskReportOutbox {
   private readonly db: Database;
+  private readonly statements = new Map<string, ReturnType<Database["query"]>>();
   private readonly deliver: MultiremiTaskReportOutboxOptions["deliver"];
   private readonly backoff: number[];
   private readonly maxBytes: number;
@@ -153,7 +154,7 @@ export class MultiremiTaskReportOutbox {
         discarded_at TEXT NOT NULL
       );
     `);
-    const discardedColumns = this.db.query("PRAGMA table_info(outbox_discarded_tasks)").all() as Array<{ name: string }>;
+    const discardedColumns = this.query("PRAGMA table_info(outbox_discarded_tasks)").all() as Array<{ name: string }>;
     if (!discardedColumns.some(column => column.name === "keep_usage")) {
       this.db.exec("ALTER TABLE outbox_discarded_tasks ADD COLUMN keep_usage INTEGER NOT NULL DEFAULT 0");
     }
@@ -173,17 +174,17 @@ export class MultiremiTaskReportOutbox {
     // Older versions parked late usage behind a rejected execution report.
     // Recovered usage must still pass the server's immutable-run AND current
     // daemon authorization; this only removes the local delivery obstruction.
-    const revoked = this.db.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked-code:%' AND value='authority_revoked'").all() as Array<{ key: string }>;
+    const revoked = this.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked-code:%' AND value='authority_revoked'").all() as Array<{ key: string }>;
     for (const row of revoked) {
       const taskId = row.key.slice("blocked-code:".length);
-      if (!this.db.query("SELECT id FROM outbox_events WHERE task_id=? AND kind='usage' LIMIT 1").get(taskId)) continue;
+      if (!this.query("SELECT id FROM outbox_events WHERE task_id=? AND kind='usage' LIMIT 1").get(taskId)) continue;
       this.purgeTask(taskId, { keepUsage: true });
       this.db.run("UPDATE outbox_events SET status='pending',last_error=NULL,next_attempt_at=NULL WHERE task_id=? AND kind='usage'", [taskId]);
     }
     // Old daemons persistently blocked the whole runtime partition on these
     // admission rejections. Recover once at startup; never replay their running
     // reports as admission now that their original executor is gone.
-    const rejectedUpdates = this.db.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked-code:%' AND value IN ('cli_update_not_admitted','cli_update_not_runnable')").all() as Array<{ key: string }>;
+    const rejectedUpdates = this.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked-code:%' AND value IN ('cli_update_not_admitted','cli_update_not_runnable')").all() as Array<{ key: string }>;
     this.db.transaction(() => {
       for (const row of rejectedUpdates) {
         const taskId = row.key.slice("blocked-code:".length);
@@ -192,7 +193,7 @@ export class MultiremiTaskReportOutbox {
         this.db.run("DELETE FROM outbox_meta WHERE key IN (?,?)", [`blocked:${taskId}`, `blocked-code:${taskId}`]);
       }
     })();
-    const invalid = this.db.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked-code:%' AND value='invalid_report'").all() as Array<{ key: string }>;
+    const invalid = this.query("SELECT key FROM outbox_meta WHERE key LIKE 'blocked-code:%' AND value='invalid_report'").all() as Array<{ key: string }>;
     for (const row of invalid) {
       const taskId = row.key.slice("blocked-code:".length);
       // Older generic HTTP authority failures used the same fallback code.
@@ -217,7 +218,7 @@ export class MultiremiTaskReportOutbox {
       }
     }
     const terminal = TERMINAL_KINDS.has(kind);
-    const discarded = this.db.query(
+    const discarded = this.query(
       "SELECT keep_terminal, keep_usage FROM outbox_discarded_tasks WHERE task_id = ?",
     ).get(taskId) as { keep_terminal: number; keep_usage: number } | null;
     if (discarded && !(Number(discarded.keep_terminal) === 1 && terminal)
@@ -227,7 +228,7 @@ export class MultiremiTaskReportOutbox {
       log.debug(`outbox discarded ${kind} report for tombstoned task ${taskId}`);
       return null;
     }
-    const idRow = this.db.query("SELECT seq FROM sqlite_sequence WHERE name = 'outbox_events'").get() as { seq: number } | null;
+    const idRow = this.query("SELECT seq FROM sqlite_sequence WHERE name = 'outbox_events'").get() as { seq: number } | null;
     const id = Number(idRow?.seq ?? 0) + 1;
     const oversized = outboxRecordBytes({ id, taskId, kind, payload, seq: id, terminal, attempts: 0 }) > DAEMON_FRAME_MAX_BYTES;
     const blocked = this.readMeta(`blocked:${taskId}`) !== null || oversized;
@@ -335,21 +336,21 @@ export class MultiremiTaskReportOutbox {
 
   /** Restart recovery: pump every task with pending rows and wait for the queues to settle. */
   async flushAll(signal?: AbortSignal): Promise<void> {
-    const rows = this.db.query(
+    const rows = this.query(
       "SELECT DISTINCT task_id FROM outbox_events WHERE status = 'pending'",
     ).all() as Array<{ task_id: string }>;
     await Promise.all(rows.map((row) => this.waitForTaskDrain(String(row.task_id), signal)));
   }
 
   pendingTaskIds(): string[] {
-    const rows = this.db.query(
+    const rows = this.query(
       "SELECT DISTINCT task_id FROM outbox_events WHERE status = 'pending'",
     ).all() as Array<{ task_id: string }>;
     return rows.map((row) => String(row.task_id));
   }
 
   taskIdsWithPendingTerminal(runtimeId?: string): string[] {
-    const rows = this.db.query(
+    const rows = this.query(
       `SELECT DISTINCT task_id FROM outbox_events WHERE status IN ('pending', 'input_unread') AND terminal = 1
        AND (? IS NULL OR json_extract(payload, '$.runtime_id') = ?)`,
     ).all(runtimeId ?? null, runtimeId ?? null) as Array<{ task_id: string }>;
@@ -378,7 +379,7 @@ export class MultiremiTaskReportOutbox {
            discarded_at = excluded.discarded_at`,
         [taskId, keepTerminal ? 1 : 0, keepUsage ? 1 : 0, discardedAt],
       );
-      const tombstone = this.db.query(
+      const tombstone = this.query(
         "SELECT keep_terminal, keep_usage FROM outbox_discarded_tasks WHERE task_id = ?",
       ).get(taskId) as { keep_terminal: number; keep_usage: number };
       const result = this.db.run("DELETE FROM outbox_events WHERE task_id = ? AND NOT (terminal = 1 AND ? = 1) AND NOT (kind = 'usage' AND ? = 1)",
@@ -387,7 +388,7 @@ export class MultiremiTaskReportOutbox {
     });
     const purged = purge();
     for (const [id, waiter] of this.recordWaiters) {
-      if (waiter.taskId === taskId && !this.db.query("SELECT id FROM outbox_events WHERE id = ?").get(id)) {
+      if (waiter.taskId === taskId && !this.query("SELECT id FROM outbox_events WHERE id = ?").get(id)) {
         waiter.resolve({ ok: true, discarded: true });
         this.recordWaiters.delete(id);
       }
@@ -403,19 +404,19 @@ export class MultiremiTaskReportOutbox {
   }
 
   stats(): MultiremiOutboxStats {
-    const pending = this.db.query("SELECT COUNT(*) AS n FROM outbox_events WHERE status IN ('pending', 'input_unread')").get() as { n: number };
-    const blocked = this.db.query("SELECT COUNT(*) AS n FROM outbox_events WHERE status = 'blocked'").get() as { n: number };
-    const pendingTerminal = this.db.query(
+    const pending = this.query("SELECT COUNT(*) AS n FROM outbox_events WHERE status IN ('pending', 'input_unread')").get() as { n: number };
+    const blocked = this.query("SELECT COUNT(*) AS n FROM outbox_events WHERE status = 'blocked'").get() as { n: number };
+    const pendingTerminal = this.query(
       "SELECT COUNT(*) AS n FROM outbox_events WHERE status IN ('pending', 'input_unread') AND terminal = 1",
     ).get() as { n: number };
-    const pendingTasks = this.db.query(
+    const pendingTasks = this.query(
       "SELECT COUNT(DISTINCT task_id) AS n FROM outbox_events WHERE status IN ('pending', 'input_unread')",
     ).get() as { n: number };
-    const oldest = this.db.query(
+    const oldest = this.query(
       "SELECT MIN(created_at) AS at FROM outbox_events WHERE status IN ('pending', 'input_unread')",
     ).get() as { at: string | null };
-    const pages = this.db.query("PRAGMA page_count").get() as { page_count: number };
-    const pageSize = this.db.query("PRAGMA page_size").get() as { page_size: number };
+    const pages = this.query("PRAGMA page_count").get() as { page_count: number };
+    const pageSize = this.query("PRAGMA page_size").get() as { page_size: number };
     const fileBytes = Number(pages.page_count) * Number(pageSize.page_size);
     return {
       pending: Number(pending.n),
@@ -444,14 +445,18 @@ export class MultiremiTaskReportOutbox {
     this.recordWaiters.clear();
     for (const [taskId] of this.drainWaiters) this.settleDrainWaiters(taskId, "aborted");
     await Promise.allSettled([...this.inFlight.values()].map(item => item.done));
-    this.db.close();
+    // Bun 1.3.14 only caches the first 20 db.query() statements. Statements
+    // beyond that limit survive db.close() until GC, retaining Windows locks.
+    for (const statement of this.statements.values()) statement.finalize();
+    this.statements.clear();
+    this.db.close(true);
   }
 
   private taskDrainState(taskId: string): MultiremiOutboxDrainResult | null {
     if (this.closed) return "aborted";
     if (this.readMeta(`blocked:${taskId}`) !== null) return "blocked";
-    if (this.db.query("SELECT id FROM outbox_events WHERE task_id=? AND status='pending' LIMIT 1").get(taskId)) return null;
-    const row = this.db.query(
+    if (this.query("SELECT id FROM outbox_events WHERE task_id=? AND status='pending' LIMIT 1").get(taskId)) return null;
+    const row = this.query(
       "SELECT status FROM outbox_events WHERE task_id = ? ORDER BY seq ASC LIMIT 1",
     ).get(taskId) as { status: string } | null;
     if (!row) return "delivered";
@@ -478,7 +483,7 @@ export class MultiremiTaskReportOutbox {
   private runPump(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    const rows = this.db.query(`SELECT task_id, MIN(id) AS id FROM outbox_events
+    const rows = this.query(`SELECT task_id, MIN(id) AS id FROM outbox_events
       GROUP BY task_id ORDER BY id`).all() as Array<{ task_id: string; id: number }>;
     let bytes = [...this.inFlight.values()].reduce((total, item) => total + item.bytes, 0);
     let nextWake = Number.POSITIVE_INFINITY;
@@ -488,7 +493,7 @@ export class MultiremiTaskReportOutbox {
       if (this.inFlight.has(taskId)) continue;
       const delivery = this.nextDelivery(taskId);
       if (!delivery || delivery.blocked || this.readMeta(`blocked:${taskId}`) !== null) continue;
-      const retry = this.db.query("SELECT next_attempt_at FROM outbox_events WHERE id = ?").get(delivery.record.id) as { next_attempt_at: number | null };
+      const retry = this.query("SELECT next_attempt_at FROM outbox_events WHERE id = ?").get(delivery.record.id) as { next_attempt_at: number | null };
       const delay = Number(retry.next_attempt_at ?? 0) - Date.now();
       if (delay > 0) { nextWake = Math.min(nextWake, delay); continue; }
       delivery.record = this.prepareDelivery(delivery.record);
@@ -517,7 +522,7 @@ export class MultiremiTaskReportOutbox {
 
   private async deliverRecord({ record, recordIds }: OutboxDelivery): Promise<void> {
     const taskId = record.taskId;
-    if (!this.db.query("SELECT id FROM outbox_events WHERE id = ? AND status = 'pending'").get(record.id)) return;
+    if (!this.query("SELECT id FROM outbox_events WHERE id = ? AND status = 'pending'").get(record.id)) return;
     try {
       const reply = await this.deliver(record);
       this.deleteRecords(recordIds);
@@ -660,7 +665,7 @@ export class MultiremiTaskReportOutbox {
   }
 
   private nextDelivery(taskId: string): OutboxDelivery | null {
-    const rows = this.db.query(
+    const rows = this.query(
       "SELECT * FROM outbox_events WHERE task_id = ? AND status = 'pending' ORDER BY id ASC LIMIT ?",
     ).all(taskId, this.deliveryBatchSize) as Array<Record<string, unknown>>;
     const firstRow = rows[0];
@@ -711,8 +716,8 @@ export class MultiremiTaskReportOutbox {
 
   /** Capacity pressure may compact only pending overwrite rows already covered by a newer row. */
   private enforceSizeCap(): void {
-    const pages = this.db.query("PRAGMA page_count").get() as { page_count: number };
-    const pageSize = this.db.query("PRAGMA page_size").get() as { page_size: number };
+    const pages = this.query("PRAGMA page_count").get() as { page_count: number };
+    const pageSize = this.query("PRAGMA page_size").get() as { page_size: number };
     const bytes = Number(pages.page_count) * Number(pageSize.page_size);
     if (bytes <= this.maxBytes) return;
     const dropped = Number(this.db.run(`DELETE FROM outbox_events AS old
@@ -729,8 +734,17 @@ export class MultiremiTaskReportOutbox {
     log.warn(`outbox remains over its ${this.maxBytes} byte soft cap; retaining reliable reports`);
   }
 
+  private query(sql: string): ReturnType<Database["query"]> {
+    let statement = this.statements.get(sql);
+    if (!statement) {
+      statement = this.db.prepare(sql);
+      this.statements.set(sql, statement);
+    }
+    return statement;
+  }
+
   private readMeta(key: string): string | null {
-    const row = this.db.query("SELECT value FROM outbox_meta WHERE key = ?").get(key) as { value: string } | null;
+    const row = this.query("SELECT value FROM outbox_meta WHERE key = ?").get(key) as { value: string } | null;
     return row?.value ?? null;
   }
 

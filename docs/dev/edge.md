@@ -27,7 +27,12 @@ For embedding, import `startEdge` or `Edge` from
 `failureThreshold` (3), `riseThreshold` (2), `responseHeaderTimeoutMs` (30000),
 `wsMaxMessageBytes` (4 MiB), `wsQueueLimit` (64 MiB upstream queue ceiling), `wsBufferLimit` (1 MiB downstream high-water mark),
 and an optional `log`. Port and positive numeric limits are validated before listening.
-The HTTP listener has a 120-second idle timeout.
+The HTTP listener has a 120-second idle timeout and a 128 MiB request body limit,
+matching the slot's Bun default. While awaiting admission, upload prefixes share
+an 8 MiB global buffering budget (across all waiting uploads). Exhaustion cancels
+the upload and returns 503 with `Retry-After: 1`; admission hands the buffered
+prefix and remaining stream to the upstream. This explicitly bounds buffering
+because Bun otherwise buffers unread bodies while the fetch handler awaits.
 Call `stop()` to close the listener and terminate active connections. Bun 1.3.14 can
 leave the promise returned by `server.stop(true)` pending after a server-initiated
 WebSocket close; `Edge.stop()` therefore invokes it without exposing that promise.
@@ -55,7 +60,9 @@ The optional Unix socket is created under umask 0177 (mode 0600 from creation). 
 
 Each line receives `{ok:true,result:…}` or `{ok:false,error:…}`. On startup, an existing socket is probed: only a refused/missing endpoint with
 an unchanged socket inode is removed. Active listeners and non-socket files are preserved. There is no public control route. Public
-`/internal` and `/internal/*` return 404. Forwarding headers are overwritten from
+`/internal` and `/internal/*` return 404. Paths containing encoded dots or
+separators (`%2e`, `%2f`, `%5c`, case insensitive, including nested `%25`
+encoding) also return 404 for both HTTP and WebSocket upgrades. Forwarding headers are overwritten from
 the accepted client connection; `Forwarded` is removed. The API must explicitly
 trust the edge's IP before using `X-Real-IP` for rate limiting.
 
@@ -89,7 +96,8 @@ Bun ServerWebSocket exposes no input pause API: a client that produces faster
 than its upstream consumes accumulates an outgoing write queue. A separate
 `wsQueueLimit` hard safety ceiling closes with 1013 on sustained upstream overload;
 normal backpressure and valid 4 MiB frames do not hit this ceiling.
-Messages exceeding `wsMaxMessageBytes` close with 1013. Application close codes/reasons pass through; reserved transport
+Messages exceeding `wsMaxMessageBytes` close with 1013. Application close codes/reasons pass through, including a close immediately after
+the upstream 101 handshake (without retry or health penalty); reserved transport
 codes 1006/1015 map to 1011 because they cannot be sent in a close frame.
 
 `status()` exposes per-backend attempts, active HTTP, active/total WebSockets,

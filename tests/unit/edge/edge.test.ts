@@ -338,3 +338,84 @@ test('rejected upgrade body streams and remains in flight until drained', async 
   const body = response.text(); expect(drained).toBe(false); end();
   expect(await body).toBe('protocol:upgrade required'); await until(() => drained);
 });
+
+async function regressionProcess(url: string) {
+  type Report = { baseline: number; peak: number; status: ReturnType<Edge['status']> };
+  let receive: ((data: Report) => void) | undefined;
+  const child = Bun.spawn([process.execPath, 'tests/helpers/edge/regression-process.ts', url], {
+    stdout: 'pipe', stderr: 'inherit', ipc(data) { receive?.(data as Report); },
+  });
+  cleanups.push(async () => { child.send('stop'); await child.exited; });
+  const reader = child.stdout.getReader(); const line = await reader.read(); reader.releaseLock();
+  return { url: new TextDecoder().decode(line.value).trim(),
+    query: (message: string): Promise<Report> => new Promise(resolve => { receive = resolve; child.send(message); }) };
+}
+
+test('isolated edge bounds held uploads with a global byte budget and slot body limit', async () => {
+  let received = 0;
+  const b = backend(async req => { let count = 0; for await (const bytes of req.body!) count += bytes.length; received += count; return new Response(String(count)); });
+  const child = await regressionProcess(b.url.href);
+  for (const mode of ['hold', 'standby']) {
+    await child.query(mode); await child.query('start');
+    for (const mib of [25, 50, 100]) {
+      const response = await fetch(child.url, { keepalive: false, method: 'POST', body: new Uint8Array(mib * 1024 * 1024) });
+      expect(response.status).toBe(503); expect(response.headers.get('retry-after')).toBe('1'); await response.text();
+    }
+    const report = await child.query('report');
+    console.log(`held uploads ${mode}: RSS growth=${report.peak - report.baseline}`);
+    expect(report.status.waiting).toBe(0); expect(received).toBe(0);
+    expect(report.peak - report.baseline).toBeLessThan(40 * 1024 * 1024);
+    // A buffered prefix within budget survives admission, and its reservation
+    // is released so the second hold cycle has the full budget again.
+    const pending = fetch(child.url, { keepalive: false, method: 'POST', body: new Uint8Array(4 * 1024 * 1024) });
+    await sleep(100); expect((await child.query('report')).status.waiting).toBe(1);
+    const overflow = await fetch(child.url, { keepalive: false, method: 'POST', body: new Uint8Array(6 * 1024 * 1024) });
+    expect(overflow.status).toBe(503); await overflow.text();
+    expect((await child.query('report')).status.waiting).toBe(1);
+    await child.query('live'); expect(await (await pending).text()).toBe(String(4 * 1024 * 1024));
+    received = 0;
+  }
+  // Bun rejects a declared body beyond the same 128 MiB default used by slot.
+  const response = await new Promise<string>(resolve => {
+    const socket = connect(Number(new URL(child.url).port), '127.0.0.1', () => {
+      socket.write('POST / HTTP/1.1\r\nHost: edge\r\nContent-Length: 135266304\r\n\r\n');
+    });
+    socket.once('data', bytes => { resolve(bytes.toString()); socket.destroy(); });
+  });
+  expect(response).toContain('413');
+}, 20000);
+
+test('isolated edge rejects nested encoded private paths for HTTP and WS', async () => {
+  let attempts = 0;
+  const b = backend(() => { attempts++; return new Response('must not reach backend'); });
+  const child = await regressionProcess(b.url.href);
+  for (const path of ['/internal/%252e%252e/api', '/internal/%2e%2e%2fapi', '/internal/%25252E%25252e%255capi', '/internal/%25%32%65%25%32%65%252fapi']) {
+    for (const upgrade of [false, true]) {
+      const response = await fetch(child.url.replace(/\/$/, '') + path, { headers: upgrade ? {
+        connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+      } : {} });
+      expect(response.status).toBe(404);
+    }
+  }
+  expect(attempts).toBe(0);
+});
+
+test('isolated edge relays an immediate Bun backend WS close after 101', async () => {
+  let attempts = 0; let code = 4001;
+  const b = Bun.serve({ port: 0, fetch(req, server) { attempts++; if (server.upgrade(req)) return; return new Response('no'); },
+    websocket: { open(ws) { ws.close(code, 'restart'); }, message() {} } });
+  cleanups.push(() => { void b.stop(true); });
+  const child = await regressionProcess(b.url.href);
+  for (code of [4001, 1012]) {
+    const result = await new Promise<{ code: number; reason: string }>((resolve, reject) => {
+      const ws = new UpstreamSocket(new URL(child.url.replace('http:', 'ws:')), { headers: {}, protocols: [], limit: 4 * 1024 * 1024 });
+      ws.onclose = resolve; ws.onerror = () => reject(new Error('Unexpected WS error'));
+    });
+    expect(result).toEqual({ code, reason: 'restart' });
+  }
+  expect(attempts).toBe(2);
+  const { status } = await child.query('report');
+  expect(status.backends[0].failures).toBe(0); expect(status.backends[0].state).toBe('live');
+  expect(status.metrics.errors).toEqual({ '502': 0, '503': 0, '504': 0 });
+  expect(status.metrics.wsRelays).toBe(2);
+});

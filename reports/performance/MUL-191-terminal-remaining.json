@@ -1266,7 +1266,7 @@
           {
             "index": 98,
             "parameters": [
-              "sevt_eult8bwocyi6"
+              "sevt_ofygkx41vekt"
             ],
             "scope": 1,
             "generation": 2,
@@ -1368,7 +1368,7 @@
               [
                 "ises_<2>",
                 10,
-                "sevt_eult8bwocyi6",
+                "sevt_ofygkx41vekt",
                 "task_completed",
                 "hidden",
                 "agent",
@@ -1381,7 +1381,7 @@
                 null,
                 null,
                 null,
-                "{\"status\":\"completed\",\"assignee_agent_id\":\"agt_saup0k76gs93\",\"result_available\":true,\"failure_reason\":null,\"target_seq\":2}",
+                "{\"status\":\"completed\",\"assignee_agent_id\":\"agt_b7p3jd61h086\",\"result_available\":true,\"failure_reason\":null,\"target_seq\":2}",
                 1,
                 "2026-11-17T12:00:00.000Z",
                 "2026-11-17T12:00:00.000Z",
@@ -1702,14 +1702,14 @@
             "index": 53,
             "parameters": [
               [
-                "act_be8rztfate5u",
+                "act_7pfyp3pjdaa8",
                 "iss_<4>",
                 "local",
                 "agent",
                 "agt_<3>",
                 "task_completed",
                 "finished",
-                "{\"taskId\":\"tsk_ey515wk05t6h\",\"runtimeId\":\"rt_cost_0\"}",
+                "{\"taskId\":\"tsk_l4nl0shueyef\",\"runtimeId\":\"rt_cost_0\"}",
                 "2026-11-17T12:00:00.000Z"
               ]
             ],
@@ -1721,14 +1721,14 @@
             "index": 87,
             "parameters": [
               [
-                "act_1gzw2w625l13",
+                "act_j8ws9sevmz08",
                 "iss_<4>",
                 "local",
                 "agent",
                 "agt_<3>",
                 "comment_created",
                 "finished",
-                "{\"commentId\":\"cmt_56dlx9x9sqtp\",\"sourceTaskId\":\"tsk_ey515wk05t6h\"}",
+                "{\"commentId\":\"cmt_0w373zxmm6wb\",\"sourceTaskId\":\"tsk_l4nl0shueyef\"}",
                 "2026-11-17T12:00:00.000Z"
               ]
             ],
@@ -1944,7 +1944,7 @@
           {
             "index": 61,
             "parameters": [
-              "[\"skl_kl9x8u4bftuh\"]"
+              "[\"skl_l9dd3dly84qd\"]"
             ],
             "scope": 1,
             "generation": 2,
@@ -2014,7 +2014,7 @@
             "index": 66,
             "parameters": [
               [
-                "spart_k0ig4xna30c0",
+                "spart_h9l9kxu6vngm",
                 "ises_<2>",
                 "agent",
                 "agt_<3>",
@@ -2181,7 +2181,7 @@
             "index": 81,
             "parameters": [
               [
-                "{\"task_result\":{\"pr_url\":\"\",\"session_id\":\"\",\"work_dir\":\"\"},\"pending_completion\":false,\"execution_scope\":\"\",\"parent_comment_id\":\"cmt_nvrsee2kwx9x\"}",
+                "{\"task_result\":{\"pr_url\":\"\",\"session_id\":\"\",\"work_dir\":\"\"},\"pending_completion\":false,\"execution_scope\":\"\",\"parent_comment_id\":\"cmt_uofihh390ec0\"}",
                 "2026-11-17T12:00:00.000Z",
                 "ises_<2>",
                 9
@@ -2268,7 +2268,7 @@
                 "comment_dispatch",
                 "cmt_<5>",
                 null,
-                "{\"commentId\":\"cmt_56dlx9x9sqtp\",\"issueId\":\"iss_t6fc4if428b0\",\"issueSessionId\":\"ises_d2wnmj21lp11\"}",
+                "{\"commentId\":\"cmt_0w373zxmm6wb\",\"issueId\":\"iss_l9l2leal517h\",\"issueSessionId\":\"ises_2202j3nmpmqy\"}",
                 "2026-11-17T12:01:00.000Z",
                 "2026-11-17T12:00:00.000Z"
               ]
@@ -2620,7 +2620,7 @@
             "index": 121,
             "parameters": [
               [
-                "sev_5hx29mhqklcu",
+                "sev_dw7vk53cx0y4",
                 "local",
                 "iss_<4>",
                 null,
@@ -2650,7 +2650,7 @@
           {
             "index": 122,
             "parameters": [
-              "sev_5hx29mhqklcu"
+              "sev_dw7vk53cx0y4"
             ],
             "scope": 1,
             "generation": 2,
@@ -3450,7 +3450,7 @@
         "sql": "SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'pending' AND available_at > ? UNION ALL SELECT leased_until AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'sending' AND leased_until > ? ) deadlines",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3551",
-          "packages/server/src/api/server.ts:1238"
+          "packages/server/src/api/server.ts:1241"
         ],
         "reason": "检查出站租约、重试、去重及待投递实体，保持重放、消息顺序与最终状态。",
         "executions": [
@@ -3475,7 +3475,7 @@
         "sql": "SELECT request.created_at, request.expires_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id WHERE task.workspace_id = ? AND task.issue_id IS NOT NULL AND request.status = 'pending' AND request.reminder_sent_at IS NULL AND request.expires_at IS NOT NULL AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries delivery WHERE delivery.human_request_id = request.id AND delivery.kind = 'decision_card' AND delivery.status = 'sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL)",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3560",
-          "packages/server/src/api/server.ts:1238"
+          "packages/server/src/api/server.ts:1241"
         ],
         "reason": "读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。",
         "executions": [
@@ -3497,7 +3497,7 @@
         "sql": "SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id=request.task_id JOIN multiremi_conversation_log message ON message.id=request.id JOIN multiremi_feishu_bot_outbound_deliveries delivery ON delivery.human_request_id=request.id JOIN multiremi_feishu_bot_chat_bindings binding ON binding.id=delivery.binding_id AND binding.workspace_id=delivery.workspace_id WHERE task.workspace_id=? AND task.issue_id IS NOT NULL AND request.status='pending' AND binding.bot_id=? AND binding.app_id=? AND request.reminder_sent_at IS NULL AND request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND delivery.kind='decision_card' AND delivery.status='sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL GROUP BY request.id",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3578",
-          "packages/server/src/api/server.ts:1238"
+          "packages/server/src/api/server.ts:1241"
         ],
         "reason": "读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。",
         "executions": [
@@ -3521,7 +3521,7 @@
         "sql": "SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) WHERE runtime.id = ?",
         "sources": [
           "packages/server/src/store/store.ts:3507",
-          "packages/server/src/api/server.ts:1238"
+          "packages/server/src/api/server.ts:1241"
         ],
         "reason": "确认当前宿主身份、物理 daemon 和 drain fence；异步下行每次同步段重新取快照。",
         "executions": [
@@ -3598,7 +3598,7 @@
           {
             "index": 175,
             "parameters": [
-              "[\"tsk_ey515wk05t6h\",\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]"
+              "[\"tsk_l4nl0shueyef\",\"tsk_ds0s6mo22sej\",\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\"]"
             ],
             "scope": 2,
             "generation": 0,
@@ -3607,7 +3607,7 @@
           {
             "index": 190,
             "parameters": [
-              "[\"tsk_iatsdqrm922v\"]"
+              "[\"tsk_k7lrg60px98p\"]"
             ],
             "scope": 3,
             "generation": 0,
@@ -3632,7 +3632,7 @@
               [
                 "2026-11-17T12:00:00.000Z",
                 "2026-11-17T12:00:00.000Z",
-                "[\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]",
+                "[\"tsk_ds0s6mo22sej\",\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\"]",
                 "local",
                 "rt_cost_0"
               ]
@@ -3647,7 +3647,7 @@
               [
                 "2026-11-17T12:00:00.000Z",
                 "2026-11-17T12:00:00.000Z",
-                "[\"tsk_iatsdqrm922v\"]",
+                "[\"tsk_k7lrg60px98p\"]",
                 "local",
                 "rt_cost_2"
               ]
@@ -3672,7 +3672,7 @@
           {
             "index": 179,
             "parameters": [
-              "[\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]",
+              "[\"tsk_ds0s6mo22sej\",\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\"]",
               "local",
               "rt_cost_0"
             ],
@@ -3683,7 +3683,7 @@
           {
             "index": 194,
             "parameters": [
-              "[\"tsk_iatsdqrm922v\"]",
+              "[\"tsk_k7lrg60px98p\"]",
               "local",
               "rt_cost_2"
             ],
@@ -3708,7 +3708,7 @@
             "index": 180,
             "parameters": [
               [
-                "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
+                "[\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\",\"tsk_ds0s6mo22sej\"]"
               ]
             ],
             "scope": 2,
@@ -3719,7 +3719,7 @@
             "index": 195,
             "parameters": [
               [
-                "[\"tsk_iatsdqrm922v\"]"
+                "[\"tsk_k7lrg60px98p\"]"
               ]
             ],
             "scope": 3,
@@ -3742,7 +3742,7 @@
           {
             "index": 181,
             "parameters": [
-              "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
+              "[\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\",\"tsk_ds0s6mo22sej\"]"
             ],
             "scope": 2,
             "generation": 2,
@@ -3751,7 +3751,7 @@
           {
             "index": 196,
             "parameters": [
-              "[\"tsk_iatsdqrm922v\"]"
+              "[\"tsk_k7lrg60px98p\"]"
             ],
             "scope": 3,
             "generation": 2,
@@ -3774,7 +3774,7 @@
             "index": 182,
             "parameters": [
               [
-                "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
+                "[\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\",\"tsk_ds0s6mo22sej\"]"
               ]
             ],
             "scope": 2,
@@ -3785,7 +3785,7 @@
             "index": 197,
             "parameters": [
               [
-                "[\"tsk_iatsdqrm922v\"]"
+                "[\"tsk_k7lrg60px98p\"]"
               ]
             ],
             "scope": 3,
@@ -4178,9 +4178,9 @@
             "index": 224,
             "parameters": [
               [
-                "fbo_f5rvtxcigl9m",
+                "fbo_lif5wjkql7cq",
                 "local",
-                "fcb_v2770u3k72s7",
+                "fcb_l783k08eva63",
                 "tsk_<8>",
                 "oc_scale",
                 null,
@@ -5066,7 +5066,7 @@
           {
             "index": 32,
             "parameters": [
-              "msg_mya9i3xdb80c"
+              "msg_lwcodikk4mty"
             ],
             "scope": 1,
             "generation": 2,
@@ -5075,7 +5075,7 @@
           {
             "index": 46,
             "parameters": [
-              "msg_mya9i3xdb80c"
+              "msg_lwcodikk4mty"
             ],
             "scope": 1,
             "generation": 2,
@@ -5265,7 +5265,7 @@
           {
             "index": 40,
             "parameters": [
-              "msg_5yufh82l6rmk"
+              "msg_sfdckffm7jtt"
             ],
             "scope": 1,
             "generation": 2,
@@ -5312,7 +5312,7 @@
           {
             "index": 42,
             "parameters": [
-              "msg_mya9i3xdb80c"
+              "msg_lwcodikk4mty"
             ],
             "scope": 1,
             "generation": 2,
@@ -5321,7 +5321,7 @@
           {
             "index": 48,
             "parameters": [
-              "msg_mya9i3xdb80c"
+              "msg_lwcodikk4mty"
             ],
             "scope": 1,
             "generation": 2,
@@ -5369,7 +5369,7 @@
               [
                 "chat_<2>",
                 9,
-                "msg_mya9i3xdb80c",
+                "msg_lwcodikk4mty",
                 "message",
                 "shown",
                 "agent",
@@ -5493,7 +5493,7 @@
             "index": 49,
             "parameters": [
               [
-                "msg_mya9i3xdb80c",
+                "msg_lwcodikk4mty",
                 "tsk_<1>"
               ]
             ],
@@ -5732,7 +5732,7 @@
                 0,
                 "claude",
                 0,
-                "chat-workspace:68562c53c92ba7055897f8628631e09e27c9dabca1ff3ed44b55267d5545b303:managed:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "chat-workspace:f214f95fc4a3552c826ae737391ac4218747a03675f097b6a9066af0abff9c4f:managed:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
                 "tsk_<1>",
                 "2026-11-17T12:00:00.000Z",
                 "2026-11-17T12:00:00.000Z",
@@ -5887,7 +5887,7 @@
           {
             "index": 70,
             "parameters": [
-              "msg_5yufh82l6rmk"
+              "msg_sfdckffm7jtt"
             ],
             "scope": 1,
             "generation": 2,
@@ -6085,7 +6085,7 @@
           {
             "index": 79,
             "parameters": [
-              "msg_mya9i3xdb80c"
+              "msg_lwcodikk4mty"
             ],
             "scope": 1,
             "generation": 2,
@@ -6378,7 +6378,7 @@
         "sql": "SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) WHERE runtime.id = ?",
         "sources": [
           "packages/server/src/store/store.ts:3507",
-          "packages/server/src/api/server.ts:1238"
+          "packages/server/src/api/server.ts:1241"
         ],
         "reason": "确认当前宿主身份、物理 daemon 和 drain fence；异步下行每次同步段重新取快照。",
         "executions": [
@@ -6455,7 +6455,7 @@
           {
             "index": 94,
             "parameters": [
-              "[\"tsk_iatsdqrm922v\"]"
+              "[\"tsk_k7lrg60px98p\"]"
             ],
             "scope": 2,
             "generation": 0,
@@ -6464,7 +6464,7 @@
           {
             "index": 104,
             "parameters": [
-              "[\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]"
+              "[\"tsk_ds0s6mo22sej\",\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\"]"
             ],
             "scope": 3,
             "generation": 0,
@@ -6479,7 +6479,7 @@
         "sql": "SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'pending' AND available_at > ? UNION ALL SELECT leased_until AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'sending' AND leased_until > ? ) deadlines",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3551",
-          "packages/server/src/api/server.ts:1238"
+          "packages/server/src/api/server.ts:1241"
         ],
         "reason": "检查出站租约、重试、去重及待投递实体，保持重放、消息顺序与最终状态。",
         "executions": [
@@ -6504,7 +6504,7 @@
         "sql": "SELECT request.created_at, request.expires_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id WHERE task.workspace_id = ? AND task.issue_id IS NOT NULL AND request.status = 'pending' AND request.reminder_sent_at IS NULL AND request.expires_at IS NOT NULL AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries delivery WHERE delivery.human_request_id = request.id AND delivery.kind = 'decision_card' AND delivery.status = 'sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL)",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3560",
-          "packages/server/src/api/server.ts:1238"
+          "packages/server/src/api/server.ts:1241"
         ],
         "reason": "读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。",
         "executions": [
@@ -6526,7 +6526,7 @@
         "sql": "SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id=request.task_id JOIN multiremi_conversation_log message ON message.id=request.id JOIN multiremi_feishu_bot_outbound_deliveries delivery ON delivery.human_request_id=request.id JOIN multiremi_feishu_bot_chat_bindings binding ON binding.id=delivery.binding_id AND binding.workspace_id=delivery.workspace_id WHERE task.workspace_id=? AND task.issue_id IS NOT NULL AND request.status='pending' AND binding.bot_id=? AND binding.app_id=? AND request.reminder_sent_at IS NULL AND request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND delivery.kind='decision_card' AND delivery.status='sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL GROUP BY request.id",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3578",
-          "packages/server/src/api/server.ts:1238"
+          "packages/server/src/api/server.ts:1241"
         ],
         "reason": "读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。",
         "executions": [
@@ -6560,7 +6560,7 @@
               [
                 "2026-11-17T12:00:00.000Z",
                 "2026-11-17T12:00:00.000Z",
-                "[\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]",
+                "[\"tsk_ds0s6mo22sej\",\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\"]",
                 "local",
                 "rt_cost_0"
               ]
@@ -6585,7 +6585,7 @@
           {
             "index": 108,
             "parameters": [
-              "[\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]",
+              "[\"tsk_ds0s6mo22sej\",\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\"]",
               "local",
               "rt_cost_0"
             ],
@@ -6610,7 +6610,7 @@
             "index": 109,
             "parameters": [
               [
-                "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
+                "[\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\",\"tsk_ds0s6mo22sej\"]"
               ]
             ],
             "scope": 3,
@@ -6633,7 +6633,7 @@
           {
             "index": 110,
             "parameters": [
-              "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
+              "[\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\",\"tsk_ds0s6mo22sej\"]"
             ],
             "scope": 3,
             "generation": 2,
@@ -6656,7 +6656,7 @@
             "index": 111,
             "parameters": [
               [
-                "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
+                "[\"tsk_vefvnatio95l\",\"tsk_iwoeg0t0njsi\",\"tsk_ds0s6mo22sej\"]"
               ]
             ],
             "scope": 3,
@@ -7015,9 +7015,9 @@
             "index": 131,
             "parameters": [
               [
-                "fbo_qjvllpfbquuc",
+                "fbo_8c3botlg7wbt",
                 "local",
-                "fcb_v2770u3k72s7",
+                "fcb_l783k08eva63",
                 "tsk_<6>",
                 "oc_scale",
                 null,

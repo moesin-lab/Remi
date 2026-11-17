@@ -841,4 +841,4 @@ CHAT_PANEL_TOKEN=<token> CHAT_PANEL_CHAT=<第一个 chat> CHAT_PANEL_ROUNDS=5 bu
 本次定位、同规模对照、N/M 敏感性及未完成的生产验收见
 [MUL-85 混合负载报告](../../reports/performance/MUL-85-mixed-load.md)。
 
-MUL-191 的 daemon 终态测量与逐语句边界见[剩余 SQL 审计](../../reports/performance/MUL-191-terminal-remaining.md)。共享执行读取在单个同步帧内复用 turn/attempt 行；事务入口、取得新锁、依赖表写入和回滚仍使缓存失效。异步下行快照每个同步段使用独立缓存，不借用上一帧或 yield 前的行。报告中的 SQLite 数字不能作为 PG 或线上 lag 验收。
+MUL-191 的 daemon 终态测量与逐语句边界见[剩余 SQL 审计](../../reports/performance/MUL-191-terminal-remaining.md)。共享执行读取在单个同步帧内复用 turn/attempt 行；事务入口、取得新锁、依赖表写入和回滚仍使缓存失效。异步下行快照每个同步段使用独立缓存，不借用上一帧或 yield 前的行。规模夹具在计数前通过真实 Hub 对齐批量 SQL 历史的 head，避免准备阶段跳过通知产生的日志补洞分页混入当前帧；ACK 后的下行和派活仍计到 layer.drain()。报告中的 SQLite 数字不能作为 PG 或线上 lag 验收。

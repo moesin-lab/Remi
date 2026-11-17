@@ -98,6 +98,12 @@ for (const type of ['hb','task.start','task.progress','task.workspace','turn.inp
         if (f.database.dialect === 'sqlite') expect(measured).toEqual(expected);
         if (name === 'stable') {
           const { statements: _, ...small } = costs[`${type}:small`]!;
+          if (JSON.stringify(measured) !== JSON.stringify(small)) {
+            const prior = costs[`${type}:small`]!.statements;
+            console.info('SCALE_SQL_DIFF', type, JSON.stringify([...new Set([...Object.keys(prior), ...Object.keys(profile)])]
+              .filter(sql => (prior[sql] ?? 0) !== (profile[sql] ?? 0))
+              .map(sql => ({ sql, small: prior[sql] ?? 0, stable: profile[sql] ?? 0 }))));
+          }
           expect(measured).toEqual(small);
         }
       }

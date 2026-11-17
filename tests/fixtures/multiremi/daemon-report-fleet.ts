@@ -189,6 +189,9 @@ export async function fleet(opened?: Awaited<ReturnType<typeof openFleetDatabase
     store,
     peerChannel: null,
     apiRole: "runtime",
+    // Sessions and server-side offers/downlinks must all avoid wall timers:
+    // seeding another PG tier can take longer than an offer's timeout.
+    daemonWorkClock: new ManualDaemonProtocolClock(Date.now()),
     authToken: "fixture-cost",
     hostname: "127.0.0.1",
     port: 0,

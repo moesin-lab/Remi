@@ -23,6 +23,10 @@
 
 `MULTIREMI_TEST_QUERY_PROFILE=/tmp/profile.json MULTIREMI_TEST_SQL_TRACE=audit bun run test tests/unit/multiremi/daemon-report-scale-budget.test.ts`；原始 SQL trace 输出在 `/tmp/mul182-sql-audit-<frame>-<scale>.json`。本报告 JSON 固化了对应参数/代际；随机 fixture ID 已稳定化为占位符。
 
+CI 反馈后的本地 PostgreSQL 17.6 复测：规模套件 10 pass，七类帧 small/stable 一致，终态与上表相同；独立 SQL 明细仍以本报告的 SQLite trace 为准。两个 PG 迁移套件在窄字段读取修复后通过，拒绝帧用持久化任务/usage/日志及通知状态核验，无副作用。offer/downlink/旧预算回归 73 pass，SQLite 规模/共享读取 11 pass。
+
+规模夹具固定业务时间，并把现有手动时钟接入服务端 offer/downlink 调度器与连接；否则 PG 慢 seed 会让先创建的小档 offer 真实超时回收，测成不同状态。没有放宽预算或删去规模断言。生产时钟/15 秒 ACK/offer 期限未改。无缓存的 attempt→turn 读取保留窄字段，避免迁移前后 `SELECT *` 的 PG prepared result type 改变。
+
 相关行为回归：10 文件 168 pass / 53 skip / 0 fail；skip 是未配置真实 PG 等前提，不能算 PG 通过。完整 CI 及最终 head 结论以 PR 描述/交付评论为准。
 
 ## turn.complete: 227 executions
@@ -133,7 +137,7 @@ SELECT * FROM multiremi_turns WHERE current_attempt_id=?
 
 核对 turn/current attempt、终态状态、输入水位或派生轮卡；写入后、取得新锁后及异步新快照必须重读。
 
-来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/execution-reads.ts:29。
+来源：packages/server/src/store/request-read-cache.ts:182、packages/server/src/store/execution-reads.ts:33。
 
 执行位置 / scope:generation：11 / 1:2。参数见相邻 JSON。
 
@@ -1345,7 +1349,7 @@ SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multir
 
 检查出站租约、重试、去重及待投递实体，保持重放、消息顺序与最终状态。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3551、packages/server/src/api/server.ts:1235。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3551、packages/server/src/api/server.ts:1238。
 
 执行位置 / scope:generation：169 / None:None。参数见相邻 JSON。
 
@@ -1357,7 +1361,7 @@ SELECT request.created_at, request.expires_at FROM multiremi_message_question_re
 
 读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3560、packages/server/src/api/server.ts:1235。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3560、packages/server/src/api/server.ts:1238。
 
 执行位置 / scope:generation：170 / None:None。参数见相邻 JSON。
 
@@ -1369,7 +1373,7 @@ SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records 
 
 读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3578、packages/server/src/api/server.ts:1235。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3578、packages/server/src/api/server.ts:1238。
 
 执行位置 / scope:generation：171 / None:None。参数见相邻 JSON。
 
@@ -1381,7 +1385,7 @@ SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drai
 
 确认当前宿主身份、物理 daemon 和 drain fence；异步下行每次同步段重新取快照。
 
-来源：packages/server/src/store/store.ts:3507、packages/server/src/api/server.ts:1235。
+来源：packages/server/src/store/store.ts:3507、packages/server/src/api/server.ts:1238。
 
 执行位置 / scope:generation：172 / None:None, 187 / None:None。参数见相邻 JSON。
 
@@ -1481,17 +1485,17 @@ SELECT bot_id FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AN
 
 执行位置 / scope:generation：185 / None:None, 202 / 4:0。参数见相邻 JSON。
 
-### turn.complete-122 · 1 次 · 其他
+### turn.complete-122 · 2 次 · 其他
 
 ```sql
-SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.679Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.679Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping
+SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T11:58:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T11:58:00.000Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:40:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:59:30.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:59:30.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:40:00.000Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:50:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:50:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:50:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:55:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping
 ```
 
 一次 union/EXISTS 读取所有 runtime 命令族的可领取状态；查询含当前时间边界，不与不同时间的快照合并。
 
 来源：packages/server/src/store/repos/runtimes-repo.ts:2750、packages/server/src/store/repos/runtimes-repo.ts:2418。
 
-执行位置 / scope:generation：199 / 4:0。参数见相邻 JSON。
+执行位置 / scope:generation：199 / 4:0, 206 / 5:0。参数见相邻 JSON。
 
 ### turn.complete-123 · 2 次 · 校验
 
@@ -1520,18 +1524,6 @@ SELECT * FROM multiremi_feishu_bot_runtime_states WHERE workspace_id = ? AND bot
 ### turn.complete-125 · 1 次 · 其他
 
 ```sql
-SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.691Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.691Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping
-```
-
-一次 union/EXISTS 读取所有 runtime 命令族的可领取状态；查询含当前时间边界，不与不同时间的快照合并。
-
-来源：packages/server/src/store/repos/runtimes-repo.ts:2750、packages/server/src/store/repos/runtimes-repo.ts:2418。
-
-执行位置 / scope:generation：206 / 5:0。参数见相邻 JSON。
-
-### turn.complete-126 · 1 次 · 其他
-
-```sql
 SELECT id, operation FROM multiremi_feishu_bot_outbound_operations WHERE workspace_id = ? AND ((status = 'pending' AND available_at <= ?) OR (status = 'processing' AND leased_until <= ?)) ORDER BY created_at, CASE kind WHEN 'topic' THEN 0 WHEN 'round' THEN 1 WHEN 'retarget' THEN 2 WHEN 'human_request' THEN 3 WHEN 'round_delivery' THEN 4 ELSE 5 END, id LIMIT 32
 ```
 
@@ -1541,7 +1533,7 @@ SELECT id, operation FROM multiremi_feishu_bot_outbound_operations WHERE workspa
 
 执行位置 / scope:generation：211 / 5:0。参数见相邻 JSON。
 
-### turn.complete-127 · 1 次 · 校验
+### turn.complete-126 · 1 次 · 校验
 
 ```sql
 SELECT decision.id, decision.issue_id FROM multiremi_message_decision_records decision JOIN multiremi_issues issue ON issue.id = decision.issue_id WHERE decision.status = 'escalated' AND decision.reminder_sent_at IS NULL AND issue.workspace_id = ? AND ( SELECT o.sent_at FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.kind = 'decision_card' AND o.decision_id = decision.id AND b.bot_id = ? AND o.status = 'sent' AND o.external_message_id IS NOT NULL AND o.degraded IS NULL AND o.sent_at IS NOT NULL ORDER BY o.created_at DESC, o.id DESC LIMIT 1 ) <= ? ORDER BY decision.id ASC
@@ -1553,7 +1545,7 @@ SELECT decision.id, decision.issue_id FROM multiremi_message_decision_records de
 
 执行位置 / scope:generation：213 / 5:2。参数见相邻 JSON。
 
-### turn.complete-128 · 1 次 · 其他
+### turn.complete-127 · 1 次 · 其他
 
 ```sql
 SELECT id, kind FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND delivery_mode = 'split' AND attempt_count >= 6 AND binding_id IN (SELECT id FROM multiremi_feishu_bot_chat_bindings WHERE workspace_id = ? AND bot_id = ?) AND ((status = 'pending' AND available_at <= ?) OR (status = 'sending' AND leased_until <= ?))
@@ -1565,7 +1557,7 @@ SELECT id, kind FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id
 
 执行位置 / scope:generation：214 / 5:2。参数见相邻 JSON。
 
-### turn.complete-129 · 1 次 · 校验
+### turn.complete-128 · 1 次 · 校验
 
 ```sql
 SELECT request.id, request.task_id, request.expires_at, request.created_at, (SELECT MAX(card.sent_at) FROM multiremi_feishu_bot_outbound_deliveries card WHERE card.human_request_id=request.id AND card.kind='decision_card' AND card.status='sent' AND card.external_message_id IS NOT NULL AND card.degraded IS NULL) AS card_sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id JOIN multiremi_conversation_log message ON message.id=request.id WHERE request.status = 'pending' AND request.reminder_sent_at IS NULL -- A reminder is worth sending only while it still leaves the reader -- time to act: under a minute of lifetime left, the nudge would arrive -- as the request expires. The bound is the same expression the CAS and -- the claim use, so SQLite and Postgres agree. AND (request.expires_at >= ? OR (request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries card WHERE card.human_request_id=request.id AND card.kind='decision_card' AND card.status='sent' AND card.external_message_id IS NOT NULL AND card.degraded IS NULL AND card.sent_at<=?))) AND task.issue_id IS NOT NULL AND task.workspace_id = ? AND ( SELECT COUNT(*) FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.kind = 'decision_card' AND o.human_request_id = request.id AND b.bot_id = ? AND o.status = 'sent' AND o.external_message_id IS NOT NULL AND o.degraded IS NULL ) > 0 ORDER BY request.expires_at ASC, request.id ASC
@@ -1577,7 +1569,7 @@ SELECT request.id, request.task_id, request.expires_at, request.created_at, (SEL
 
 执行位置 / scope:generation：215 / 5:2。参数见相邻 JSON。
 
-### turn.complete-130 · 1 次 · 其他
+### turn.complete-129 · 1 次 · 其他
 
 ```sql
 SELECT d.*, COALESCE(d.outbound_task_id, d.task_id) AS target_task_id, b.chat_id, b.thread_id, s.open_id FROM multiremi_feishu_bot_deliveries d JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id AND b.workspace_id = d.workspace_id LEFT JOIN multiremi_feishu_bot_senders s ON s.id = d.sender_id WHERE d.workspace_id = ? AND d.outbound_requested = 1 AND b.chat_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries carrier WHERE carrier.task_id = COALESCE(d.outbound_task_id, d.task_id) AND (carrier.kind IS NULL OR carrier.kind = 'cot') AND carrier.unit_key = '') AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_deliveries earlier WHERE COALESCE(earlier.outbound_task_id, earlier.task_id) = COALESCE(d.outbound_task_id, d.task_id) AND earlier.outbound_requested = 1 AND (earlier.created_at < d.created_at OR (earlier.created_at = d.created_at AND earlier.external_message_id < d.external_message_id))) ORDER BY d.created_at, d.external_message_id LIMIT 32
@@ -1589,7 +1581,7 @@ SELECT d.*, COALESCE(d.outbound_task_id, d.task_id) AS target_task_id, b.chat_id
 
 执行位置 / scope:generation：216 / 5:2。参数见相邻 JSON。
 
-### turn.complete-131 · 1 次 · 校验
+### turn.complete-130 · 1 次 · 校验
 
 ```sql
 SELECT o.task_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_turn_execution_records t ON t.id = o.task_id WHERE o.workspace_id = ? AND o.kind = 'cot' AND o.delivery_mode = 'split' AND (t.status NOT IN ('completed', 'failed', 'cancelled') OR NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries r WHERE r.task_id = o.task_id AND r.kind = 'result_card'))
@@ -1601,7 +1593,7 @@ SELECT o.task_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_
 
 执行位置 / scope:generation：217 / 5:2。参数见相邻 JSON。
 
-### turn.complete-132 · 1 次 · 其他
+### turn.complete-131 · 1 次 · 其他
 
 ```sql
 SELECT o.*, b.bot_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id=o.binding_id AND b.workspace_id=o.workspace_id WHERE o.task_id = ? AND o.kind = 'cot' AND o.delivery_mode = 'split'
@@ -1613,7 +1605,7 @@ SELECT o.*, b.bot_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multir
 
 执行位置 / scope:generation：218 / 5:2。参数见相邻 JSON。
 
-### turn.complete-133 · 1 次 · 校验
+### turn.complete-132 · 1 次 · 校验
 
 ```sql
 SELECT * FROM multiremi_message_question_records WHERE task_id = ? ORDER BY created_at ASC, id ASC
@@ -1625,7 +1617,7 @@ SELECT * FROM multiremi_message_question_records WHERE task_id = ? ORDER BY crea
 
 执行位置 / scope:generation：222 / 5:2。参数见相邻 JSON。
 
-### turn.complete-134 · 1 次 · 其他
+### turn.complete-133 · 1 次 · 其他
 
 ```sql
 SELECT d.external_message_id FROM multiremi_feishu_bot_deliveries d JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id AND c.bot_id = b.bot_id AND c.app_id = b.app_id WHERE d.workspace_id = ? AND COALESCE(d.outbound_task_id, d.task_id) = ? ORDER BY d.created_at, d.external_message_id
@@ -1637,7 +1629,7 @@ SELECT d.external_message_id FROM multiremi_feishu_bot_deliveries d JOIN multire
 
 执行位置 / scope:generation：223 / 5:2。参数见相邻 JSON。
 
-### turn.complete-135 · 1 次 · 必要写入
+### turn.complete-134 · 1 次 · 必要写入
 
 ```sql
 INSERT INTO multiremi_feishu_bot_outbound_deliveries (id, workspace_id, binding_id, task_id, chat_id, thread_id, reply_to_message_id, body, kind, unit_key, cascade_failure, delivery_mode, previous_delivery_id, human_request_id, human_request_task_id, target_message_id, mention_snapshot, interaction_open_id, degraded, status, available_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'split', ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?) ON CONFLICT DO NOTHING
@@ -1649,7 +1641,7 @@ INSERT INTO multiremi_feishu_bot_outbound_deliveries (id, workspace_id, binding_
 
 执行位置 / scope:generation：224 / 5:2。参数见相邻 JSON。
 
-### turn.complete-136 · 1 次 · 其他
+### turn.complete-135 · 1 次 · 其他
 
 ```sql
 SELECT id FROM multiremi_feishu_bot_outbound_deliveries WHERE task_id = ? AND kind = ? AND unit_key = ?
@@ -1661,7 +1653,7 @@ SELECT id FROM multiremi_feishu_bot_outbound_deliveries WHERE task_id = ? AND ki
 
 执行位置 / scope:generation：225 / 5:2。参数见相邻 JSON。
 
-### turn.complete-137 · 1 次 · 其他
+### turn.complete-136 · 1 次 · 其他
 
 ```sql
 SELECT o.* FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND (o.kind IS NULL OR o.kind NOT IN ('decision_card', 'decision_card_patch', 'decision_reminder') OR o.degraded IS NOT NULL) AND (? = 1 OR o.delivery_mode IS NULL OR o.delivery_mode = 'legacy') AND (o.decision_id IS NULL OR EXISTS ( SELECT 1 FROM multiremi_message_decision_records decision JOIN multiremi_issues target ON target.id = decision.issue_id AND target.workspace_id = decision.workspace_id JOIN multiremi_issues source ON source.id = decision.source_issue_id AND source.workspace_id = decision.workspace_id WHERE decision.id = o.decision_id AND decision.workspace_id = o.workspace_id AND decision.issue_id = o.decision_issue_id AND b.workspace_id = o.workspace_id AND b.issue_id = decision.issue_id )) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_round_pushes r WHERE r.wake_task_id = o.task_id AND r.binding_id = b.id AND r.workspace_id = o.workspace_id AND r.delivery_mode = 'proactive' AND (b.issue_id IS NULL OR b.issue_id <> r.issue_id) ) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_human_request_pushes h WHERE h.wake_task_id = o.task_id AND h.binding_id = b.id AND h.workspace_id = o.workspace_id AND (b.issue_id IS NULL OR b.issue_id <> h.issue_id) ) AND (o.task_id IS NULL OR ? = 1 OR o.body <> '') AND (? = 1 OR o.presentation_checkpoint IS NULL) AND (? = 1 OR o.attachments IS NULL) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries received WHERE o.kind = 'receipt' AND o.unit_key <> o.target_message_id || ':received' AND received.task_id = o.task_id AND received.kind = 'receipt' AND received.unit_key = o.target_message_id || ':received' AND received.status IN ('pending', 'sending')) AND (o.previous_delivery_id IS NULL OR EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries previous WHERE previous.id = o.previous_delivery_id AND previous.workspace_id = o.workspace_id AND (previous.status = 'sent' OR (o.cascade_failure = 0 AND previous.status = 'failed')))) AND ((o.status = 'pending' AND o.available_at <= ?) OR (o.status = 'sending' AND o.leased_until IS NOT NULL AND o.leased_until <= ?)) ORDER BY o.created_at ASC, o.id ASC LIMIT 1
@@ -2561,7 +2553,7 @@ SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drai
 
 确认当前宿主身份、物理 daemon 和 drain fence；异步下行每次同步段重新取快照。
 
-来源：packages/server/src/store/store.ts:3507、packages/server/src/api/server.ts:1235。
+来源：packages/server/src/store/store.ts:3507、packages/server/src/api/server.ts:1238。
 
 执行位置 / scope:generation：91 / None:None, 101 / None:None。参数见相邻 JSON。
 
@@ -2597,7 +2589,7 @@ SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multir
 
 检查出站租约、重试、去重及待投递实体，保持重放、消息顺序与最终状态。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3551、packages/server/src/api/server.ts:1235。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3551、packages/server/src/api/server.ts:1238。
 
 执行位置 / scope:generation：98 / None:None。参数见相邻 JSON。
 
@@ -2609,7 +2601,7 @@ SELECT request.created_at, request.expires_at FROM multiremi_message_question_re
 
 读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3560、packages/server/src/api/server.ts:1235。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3560、packages/server/src/api/server.ts:1238。
 
 执行位置 / scope:generation：99 / None:None。参数见相邻 JSON。
 
@@ -2621,7 +2613,7 @@ SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records 
 
 读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。
 
-来源：packages/server/src/store/repos/feishu-bot-repo.ts:3578、packages/server/src/api/server.ts:1235。
+来源：packages/server/src/store/repos/feishu-bot-repo.ts:3578、packages/server/src/api/server.ts:1238。
 
 执行位置 / scope:generation：100 / None:None。参数见相邻 JSON。
 
@@ -2685,17 +2677,17 @@ UPDATE multiremi_turn_attempts SET projection_to_seq=CASE WHEN COALESCE(projecti
 
 执行位置 / scope:generation：111 / 3:2。参数见相邻 JSON。
 
-### task.fail-085 · 1 次 · 其他
+### task.fail-085 · 2 次 · 其他
 
 ```sql
-SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.849Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.849Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping
+SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T11:58:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T11:58:00.000Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:40:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:59:30.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:59:30.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:40:00.000Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:50:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:50:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:50:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:55:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping
 ```
 
 一次 union/EXISTS 读取所有 runtime 命令族的可领取状态；查询含当前时间边界，不与不同时间的快照合并。
 
 来源：packages/server/src/store/repos/runtimes-repo.ts:2750、packages/server/src/store/repos/runtimes-repo.ts:2418。
 
-执行位置 / scope:generation：113 / 4:0。参数见相邻 JSON。
+执行位置 / scope:generation：113 / 4:0, 136 / 5:0。参数见相邻 JSON。
 
 ### task.fail-086 · 2 次 · 校验
 
@@ -2864,16 +2856,4 @@ SELECT o.* FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu
 来源：packages/server/src/store/repos/feishu-bot-repo.ts:3409、packages/server/src/store/request-read-cache.ts:293。
 
 执行位置 / scope:generation：134 / 4:2。参数见相邻 JSON。
-
-### task.fail-100 · 1 次 · 其他
-
-```sql
-SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.853Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.853Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping
-```
-
-一次 union/EXISTS 读取所有 runtime 命令族的可领取状态；查询含当前时间边界，不与不同时间的快照合并。
-
-来源：packages/server/src/store/repos/runtimes-repo.ts:2750、packages/server/src/store/repos/runtimes-repo.ts:2418。
-
-执行位置 / scope:generation：136 / 5:0。参数见相邻 JSON。
 

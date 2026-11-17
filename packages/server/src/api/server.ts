@@ -167,6 +167,7 @@ import {
   type DaemonProtocolSocket,
 } from "./daemon-protocol/index.js";
 import { DaemonTaskOffers, prepareTaskOffer } from "./daemon-protocol/task-offers.js";
+import type { DaemonProtocolClock } from "./daemon-protocol/clock.js";
 import type { DaemonTurnBridge } from "./daemon-protocol/turn-bridge.js";
 import { DaemonDownlinks } from "./daemon-protocol/downlinks.js";
 import { wakeDaemonWorkspaceEvent } from "./daemon-protocol/workspace-wakeups.js";
@@ -334,6 +335,8 @@ export interface MultiremiApiOptions {
   daemonWelcomeCaps?: readonly DaemonProtocolCap[];
   /** Explicit timer seam for mixed-load integration profiles; production keeps its default. */
   daemonOfferSweepMs?: number;
+  /** Clock injection for deterministic offer/downlink integration fixtures. */
+  daemonWorkClock?: DaemonProtocolClock;
   store?: MultiremiStore;
   scheduler?: MultiremiScheduler | null;
   /** Undefined reads the opt-in env config; null explicitly disables it. */
@@ -1226,11 +1229,11 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   });
   const daemonTurnBridge = options.daemonTurnBridge ?? store.getDaemonTurnBridge();
   const offerProjectKnowledge = options.projectKnowledge ?? createProjectKnowledgeServiceFromEnv(store);
-  const offers = new DaemonTaskOffers({ store, layer: daemonProtocol, autostart: !slotConfiguration, sweepMs: options.daemonOfferSweepMs,
+  const offers = new DaemonTaskOffers({ store, layer: daemonProtocol, autostart: !slotConfiguration, sweepMs: options.daemonOfferSweepMs, clock: options.daemonWorkClock,
     prepare: (task, supportsWikiFetch) => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki,
       supportsWikiFetch, daemonTurnBridge.offerInput(task)),
     onRuntimeReady: (rt, ids) => downlinks.runtimeReady(rt, ids) });
-  const downlinks: DaemonDownlinks = new DaemonDownlinks({ layer: daemonProtocol,
+  const downlinks: DaemonDownlinks = new DaemonDownlinks({ layer: daemonProtocol, clock: options.daemonWorkClock,
     nextWakeAt: rt => {
       const deadlines = [store.nextFeishuBotOutboundWakeAt(rt), store.nextDaemonDrainWakeAt(rt)].filter((at): at is number => at !== null);
       return deadlines.length ? Math.min(...deadlines) : null;

@@ -400,7 +400,7 @@
         "sql": "SELECT * FROM multiremi_turns WHERE current_attempt_id=?",
         "sources": [
           "packages/server/src/store/request-read-cache.ts:182",
-          "packages/server/src/store/execution-reads.ts:29"
+          "packages/server/src/store/execution-reads.ts:33"
         ],
         "reason": "核对 turn/current attempt、终态状态、输入水位或派生轮卡；写入后、取得新锁后及异步新快照必须重读。",
         "executions": [
@@ -524,8 +524,8 @@
                 "ises_<2>",
                 "agt_<3>",
                 "",
-                "2026-11-17T21:44:33.630Z",
-                "2026-11-17T21:44:33.630Z"
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -741,7 +741,7 @@
               "iss_<4>",
               "agt_<3>",
               "tsk_<1>",
-              "2026-11-17T21:44:33.389Z"
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 1,
             "generation": 2,
@@ -753,7 +753,7 @@
               "iss_<4>",
               "agt_<3>",
               "tsk_<1>",
-              "2026-11-17T21:44:33.389Z"
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 1,
             "generation": 2,
@@ -803,8 +803,8 @@
               null,
               null,
               null,
-              "2026-11-17T21:44:33.630Z",
-              "2026-11-17T21:44:33.630Z",
+              "2026-11-17T12:00:00.000Z",
+              "2026-11-17T12:00:00.000Z",
               "tsk_<1>"
             ],
             "scope": 1,
@@ -1266,7 +1266,7 @@
           {
             "index": 98,
             "parameters": [
-              "sevt_c1j6i3le4l9g"
+              "sevt_eult8bwocyi6"
             ],
             "scope": 1,
             "generation": 2,
@@ -1289,7 +1289,7 @@
             "index": 37,
             "parameters": [
               "ises_<2>",
-              "2026-11-17T21:44:33.635Z"
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 1,
             "generation": 2,
@@ -1299,7 +1299,7 @@
             "index": 99,
             "parameters": [
               "ises_<2>",
-              "2026-11-17T21:44:33.649Z"
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 1,
             "generation": 2,
@@ -1340,8 +1340,8 @@
                 null,
                 "{\"task_result\":{\"pr_url\":\"\",\"session_id\":\"\",\"work_dir\":\"\"},\"pending_completion\":true,\"execution_scope\":\"\"}",
                 1,
-                "2026-11-17T21:44:33.636Z",
-                "2026-11-17T21:44:33.636Z",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
                 null,
                 "none",
                 null,
@@ -1368,7 +1368,7 @@
               [
                 "ises_<2>",
                 10,
-                "sevt_c1j6i3le4l9g",
+                "sevt_eult8bwocyi6",
                 "task_completed",
                 "hidden",
                 "agent",
@@ -1381,10 +1381,10 @@
                 null,
                 null,
                 null,
-                "{\"status\":\"completed\",\"assignee_agent_id\":\"agt_9cq4a2r1ce0r\",\"result_available\":true,\"failure_reason\":null,\"target_seq\":2}",
+                "{\"status\":\"completed\",\"assignee_agent_id\":\"agt_saup0k76gs93\",\"result_available\":true,\"failure_reason\":null,\"target_seq\":2}",
                 1,
-                "2026-11-17T21:44:33.648Z",
-                "2026-11-17T21:44:33.648Z",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
                 null,
                 "none",
                 null,
@@ -1501,8 +1501,8 @@
                 null,
                 null,
                 null,
-                "2026-11-17T21:44:33.630Z",
-                "2026-11-17T21:44:33.630Z",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
                 "tsk_<1>"
               ]
             ],
@@ -1528,7 +1528,7 @@
             "parameters": [
               [
                 "completed",
-                "2026-11-17T21:44:33.630Z",
+                "2026-11-17T12:00:00.000Z",
                 "cmt_<5>",
                 "tsk_<1>"
               ]
@@ -1555,7 +1555,7 @@
             "parameters": [
               [
                 "tsk_<1>",
-                "2026-11-17T21:44:33.637Z"
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -1645,7 +1645,7 @@
             "index": 51,
             "parameters": [
               [
-                "2026-11-17T21:44:33.639Z",
+                "2026-11-17T12:00:00.000Z",
                 "tsk_<1>"
               ]
             ],
@@ -1702,15 +1702,15 @@
             "index": 53,
             "parameters": [
               [
-                "act_ef0hzouu04wh",
+                "act_be8rztfate5u",
                 "iss_<4>",
                 "local",
                 "agent",
                 "agt_<3>",
                 "task_completed",
                 "finished",
-                "{\"taskId\":\"tsk_3p72u903jsaf\",\"runtimeId\":\"rt_cost_0\"}",
-                "2026-11-17T21:44:33.639Z"
+                "{\"taskId\":\"tsk_ey515wk05t6h\",\"runtimeId\":\"rt_cost_0\"}",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -1721,15 +1721,15 @@
             "index": 87,
             "parameters": [
               [
-                "act_7jkhc25u04yh",
+                "act_1gzw2w625l13",
                 "iss_<4>",
                 "local",
                 "agent",
                 "agt_<3>",
                 "comment_created",
                 "finished",
-                "{\"commentId\":\"cmt_34jao9lvjpd2\",\"sourceTaskId\":\"tsk_3p72u903jsaf\"}",
-                "2026-11-17T21:44:33.646Z"
+                "{\"commentId\":\"cmt_56dlx9x9sqtp\",\"sourceTaskId\":\"tsk_ey515wk05t6h\"}",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -1944,7 +1944,7 @@
           {
             "index": 61,
             "parameters": [
-              "[\"skl_gvxn0acegykg\"]"
+              "[\"skl_kl9x8u4bftuh\"]"
             ],
             "scope": 1,
             "generation": 2,
@@ -1967,7 +1967,7 @@
             "index": 63,
             "parameters": [
               [
-                "2026-11-17T21:44:33.642Z",
+                "2026-11-17T12:00:00.000Z",
                 "iss_<4>"
               ]
             ],
@@ -2014,13 +2014,13 @@
             "index": 66,
             "parameters": [
               [
-                "spart_lxmnx58nxrbj",
+                "spart_k0ig4xna30c0",
                 "ises_<2>",
                 "agent",
                 "agt_<3>",
                 "participant",
-                "2026-11-17T21:44:33.643Z",
-                "2026-11-17T21:44:33.643Z"
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -2047,8 +2047,8 @@
                 "ises_<2>",
                 "agt_<3>",
                 "",
-                "2026-11-17T21:44:33.643Z",
-                "2026-11-17T21:44:33.643Z"
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -2156,7 +2156,7 @@
             "index": 80,
             "parameters": [
               [
-                "2026-11-17T21:44:33.645Z",
+                "2026-11-17T12:00:00.000Z",
                 "ises_<2>"
               ]
             ],
@@ -2181,8 +2181,8 @@
             "index": 81,
             "parameters": [
               [
-                "{\"task_result\":{\"pr_url\":\"\",\"session_id\":\"\",\"work_dir\":\"\"},\"pending_completion\":false,\"execution_scope\":\"\",\"parent_comment_id\":\"cmt_iwkawhdhcb2l\"}",
-                "2026-11-17T21:44:33.645Z",
+                "{\"task_result\":{\"pr_url\":\"\",\"session_id\":\"\",\"work_dir\":\"\"},\"pending_completion\":false,\"execution_scope\":\"\",\"parent_comment_id\":\"cmt_nvrsee2kwx9x\"}",
+                "2026-11-17T12:00:00.000Z",
                 "ises_<2>",
                 9
               ]
@@ -2268,9 +2268,9 @@
                 "comment_dispatch",
                 "cmt_<5>",
                 null,
-                "{\"commentId\":\"cmt_34jao9lvjpd2\",\"issueId\":\"iss_btm7ptwtegq1\",\"issueSessionId\":\"ises_k0rl5hznax1w\"}",
-                "2026-11-17T21:45:33.642Z",
-                "2026-11-17T21:44:33.642Z"
+                "{\"commentId\":\"cmt_56dlx9x9sqtp\",\"issueId\":\"iss_t6fc4if428b0\",\"issueSessionId\":\"ises_d2wnmj21lp11\"}",
+                "2026-11-17T12:01:00.000Z",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -2334,7 +2334,7 @@
             "index": 96,
             "parameters": [
               [
-                "2026-11-17T21:44:33.648Z",
+                "2026-11-17T12:00:00.000Z",
                 "ises_<2>"
               ]
             ],
@@ -2595,7 +2595,7 @@
               [
                 "in_review",
                 null,
-                "2026-11-17T21:44:33.655Z",
+                "2026-11-17T12:00:00.000Z",
                 "iss_<4>"
               ]
             ],
@@ -2620,13 +2620,13 @@
             "index": 121,
             "parameters": [
               [
-                "sev_5jjjzyztbj5o",
+                "sev_5hx29mhqklcu",
                 "local",
                 "iss_<4>",
                 null,
                 "<fixture payload 277 chars>",
-                "2026-11-17T21:44:33.655Z",
-                "2026-11-17T21:44:33.655Z"
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -2650,7 +2650,7 @@
           {
             "index": 122,
             "parameters": [
-              "sev_5jjjzyztbj5o"
+              "sev_5hx29mhqklcu"
             ],
             "scope": 1,
             "generation": 2,
@@ -3011,7 +3011,7 @@
             "parameters": [
               [
                 4,
-                "2026-11-17T21:44:33.660Z",
+                "2026-11-17T12:00:00.000Z",
                 "ises_<2>",
                 2
               ]
@@ -3038,7 +3038,7 @@
             "parameters": [
               [
                 4,
-                "2026-11-17T21:44:33.660Z",
+                "2026-11-17T12:00:00.000Z",
                 "ises_<2>"
               ]
             ],
@@ -3222,7 +3222,7 @@
             "index": 150,
             "parameters": [
               [
-                "2026-11-17T21:44:33.665Z",
+                "2026-11-17T12:00:00.000Z",
                 "evt_<7>"
               ]
             ],
@@ -3450,7 +3450,7 @@
         "sql": "SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'pending' AND available_at > ? UNION ALL SELECT leased_until AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'sending' AND leased_until > ? ) deadlines",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3551",
-          "packages/server/src/api/server.ts:1235"
+          "packages/server/src/api/server.ts:1238"
         ],
         "reason": "检查出站租约、重试、去重及待投递实体，保持重放、消息顺序与最终状态。",
         "executions": [
@@ -3458,9 +3458,9 @@
             "index": 169,
             "parameters": [
               "local",
-              "2026-11-17T21:44:33.670Z",
+              "2026-11-17T12:00:00.000Z",
               "local",
-              "2026-11-17T21:44:33.670Z"
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": null,
             "generation": null,
@@ -3475,7 +3475,7 @@
         "sql": "SELECT request.created_at, request.expires_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id WHERE task.workspace_id = ? AND task.issue_id IS NOT NULL AND request.status = 'pending' AND request.reminder_sent_at IS NULL AND request.expires_at IS NOT NULL AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries delivery WHERE delivery.human_request_id = request.id AND delivery.kind = 'decision_card' AND delivery.status = 'sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL)",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3560",
-          "packages/server/src/api/server.ts:1235"
+          "packages/server/src/api/server.ts:1238"
         ],
         "reason": "读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。",
         "executions": [
@@ -3497,7 +3497,7 @@
         "sql": "SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id=request.task_id JOIN multiremi_conversation_log message ON message.id=request.id JOIN multiremi_feishu_bot_outbound_deliveries delivery ON delivery.human_request_id=request.id JOIN multiremi_feishu_bot_chat_bindings binding ON binding.id=delivery.binding_id AND binding.workspace_id=delivery.workspace_id WHERE task.workspace_id=? AND task.issue_id IS NOT NULL AND request.status='pending' AND binding.bot_id=? AND binding.app_id=? AND request.reminder_sent_at IS NULL AND request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND delivery.kind='decision_card' AND delivery.status='sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL GROUP BY request.id",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3578",
-          "packages/server/src/api/server.ts:1235"
+          "packages/server/src/api/server.ts:1238"
         ],
         "reason": "读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。",
         "executions": [
@@ -3521,7 +3521,7 @@
         "sql": "SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) WHERE runtime.id = ?",
         "sources": [
           "packages/server/src/store/store.ts:3507",
-          "packages/server/src/api/server.ts:1235"
+          "packages/server/src/api/server.ts:1238"
         ],
         "reason": "确认当前宿主身份、物理 daemon 和 drain fence；异步下行每次同步段重新取快照。",
         "executions": [
@@ -3598,7 +3598,7 @@
           {
             "index": 175,
             "parameters": [
-              "[\"tsk_3p72u903jsaf\",\"tsk_2k5odpvc0xuu\",\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\"]"
+              "[\"tsk_ey515wk05t6h\",\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]"
             ],
             "scope": 2,
             "generation": 0,
@@ -3607,7 +3607,7 @@
           {
             "index": 190,
             "parameters": [
-              "[\"tsk_3mb5mqtp7pag\"]"
+              "[\"tsk_iatsdqrm922v\"]"
             ],
             "scope": 3,
             "generation": 0,
@@ -3630,9 +3630,9 @@
             "index": 178,
             "parameters": [
               [
-                "2026-11-17T21:44:33.672Z",
-                "2026-11-17T21:44:33.672Z",
-                "[\"tsk_2k5odpvc0xuu\",\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\"]",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
+                "[\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]",
                 "local",
                 "rt_cost_0"
               ]
@@ -3645,9 +3645,9 @@
             "index": 193,
             "parameters": [
               [
-                "2026-11-17T21:44:33.677Z",
-                "2026-11-17T21:44:33.677Z",
-                "[\"tsk_3mb5mqtp7pag\"]",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
+                "[\"tsk_iatsdqrm922v\"]",
                 "local",
                 "rt_cost_2"
               ]
@@ -3672,7 +3672,7 @@
           {
             "index": 179,
             "parameters": [
-              "[\"tsk_2k5odpvc0xuu\",\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\"]",
+              "[\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]",
               "local",
               "rt_cost_0"
             ],
@@ -3683,7 +3683,7 @@
           {
             "index": 194,
             "parameters": [
-              "[\"tsk_3mb5mqtp7pag\"]",
+              "[\"tsk_iatsdqrm922v\"]",
               "local",
               "rt_cost_2"
             ],
@@ -3708,7 +3708,7 @@
             "index": 180,
             "parameters": [
               [
-                "[\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\",\"tsk_2k5odpvc0xuu\"]"
+                "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
               ]
             ],
             "scope": 2,
@@ -3719,7 +3719,7 @@
             "index": 195,
             "parameters": [
               [
-                "[\"tsk_3mb5mqtp7pag\"]"
+                "[\"tsk_iatsdqrm922v\"]"
               ]
             ],
             "scope": 3,
@@ -3742,7 +3742,7 @@
           {
             "index": 181,
             "parameters": [
-              "[\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\",\"tsk_2k5odpvc0xuu\"]"
+              "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
             ],
             "scope": 2,
             "generation": 2,
@@ -3751,7 +3751,7 @@
           {
             "index": 196,
             "parameters": [
-              "[\"tsk_3mb5mqtp7pag\"]"
+              "[\"tsk_iatsdqrm922v\"]"
             ],
             "scope": 3,
             "generation": 2,
@@ -3774,7 +3774,7 @@
             "index": 182,
             "parameters": [
               [
-                "[\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\",\"tsk_2k5odpvc0xuu\"]"
+                "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
               ]
             ],
             "scope": 2,
@@ -3785,7 +3785,7 @@
             "index": 197,
             "parameters": [
               [
-                "[\"tsk_3mb5mqtp7pag\"]"
+                "[\"tsk_iatsdqrm922v\"]"
               ]
             ],
             "scope": 3,
@@ -3830,9 +3830,9 @@
       },
       {
         "id": "turn.complete-122",
-        "count": 1,
+        "count": 2,
         "category": "其他",
-        "sql": "SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.679Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.679Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.679Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.679Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.679Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.679Z'))) AS sweep, FALSE AS housekeeping",
+        "sql": "SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T11:58:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T11:58:00.000Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:40:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:59:30.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:59:30.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:40:00.000Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:50:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:50:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:50:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:55:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping",
         "sources": [
           "packages/server/src/store/repos/runtimes-repo.ts:2750",
           "packages/server/src/store/repos/runtimes-repo.ts:2418"
@@ -3861,6 +3861,31 @@
               "rt_cost_2"
             ],
             "scope": 4,
+            "generation": 0,
+            "inTransaction": false
+          },
+          {
+            "index": 206,
+            "parameters": [
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0",
+              "rt_cost_0"
+            ],
+            "scope": 5,
             "generation": 0,
             "inTransaction": false
           }
@@ -3932,44 +3957,6 @@
         "id": "turn.complete-125",
         "count": 1,
         "category": "其他",
-        "sql": "SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.691Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.691Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.691Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.691Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.691Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.691Z'))) AS sweep, FALSE AS housekeeping",
-        "sources": [
-          "packages/server/src/store/repos/runtimes-repo.ts:2750",
-          "packages/server/src/store/repos/runtimes-repo.ts:2418"
-        ],
-        "reason": "一次 union/EXISTS 读取所有 runtime 命令族的可领取状态；查询含当前时间边界，不与不同时间的快照合并。",
-        "executions": [
-          {
-            "index": 206,
-            "parameters": [
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0",
-              "rt_cost_0"
-            ],
-            "scope": 5,
-            "generation": 0,
-            "inTransaction": false
-          }
-        ]
-      },
-      {
-        "id": "turn.complete-126",
-        "count": 1,
-        "category": "其他",
         "sql": "SELECT id, operation FROM multiremi_feishu_bot_outbound_operations WHERE workspace_id = ? AND ((status = 'pending' AND available_at <= ?) OR (status = 'processing' AND leased_until <= ?)) ORDER BY created_at, CASE kind WHEN 'topic' THEN 0 WHEN 'round' THEN 1 WHEN 'retarget' THEN 2 WHEN 'human_request' THEN 3 WHEN 'round_delivery' THEN 4 ELSE 5 END, id LIMIT 32",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3123",
@@ -3981,8 +3968,8 @@
             "index": 211,
             "parameters": [
               "local",
-              "2026-11-17T21:44:33.692Z",
-              "2026-11-17T21:44:33.692Z"
+              "2026-11-17T12:00:00.000Z",
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 5,
             "generation": 0,
@@ -3991,7 +3978,7 @@
         ]
       },
       {
-        "id": "turn.complete-127",
+        "id": "turn.complete-126",
         "count": 1,
         "category": "校验",
         "sql": "SELECT decision.id, decision.issue_id FROM multiremi_message_decision_records decision JOIN multiremi_issues issue ON issue.id = decision.issue_id WHERE decision.status = 'escalated' AND decision.reminder_sent_at IS NULL AND issue.workspace_id = ? AND ( SELECT o.sent_at FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.kind = 'decision_card' AND o.decision_id = decision.id AND b.bot_id = ? AND o.status = 'sent' AND o.external_message_id IS NOT NULL AND o.degraded IS NULL AND o.sent_at IS NOT NULL ORDER BY o.created_at DESC, o.id DESC LIMIT 1 ) <= ? ORDER BY decision.id ASC",
@@ -4006,7 +3993,7 @@
             "parameters": [
               "local",
               "default",
-              "2026-11-17T20:54:33.692Z"
+              "2026-11-17T11:10:00.000Z"
             ],
             "scope": 5,
             "generation": 2,
@@ -4015,7 +4002,7 @@
         ]
       },
       {
-        "id": "turn.complete-128",
+        "id": "turn.complete-127",
         "count": 1,
         "category": "其他",
         "sql": "SELECT id, kind FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND delivery_mode = 'split' AND attempt_count >= 6 AND binding_id IN (SELECT id FROM multiremi_feishu_bot_chat_bindings WHERE workspace_id = ? AND bot_id = ?) AND ((status = 'pending' AND available_at <= ?) OR (status = 'sending' AND leased_until <= ?))",
@@ -4031,8 +4018,8 @@
               "local",
               "local",
               "default",
-              "2026-11-17T21:44:33.692Z",
-              "2026-11-17T21:44:33.692Z"
+              "2026-11-17T12:00:00.000Z",
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 5,
             "generation": 2,
@@ -4041,7 +4028,7 @@
         ]
       },
       {
-        "id": "turn.complete-129",
+        "id": "turn.complete-128",
         "count": 1,
         "category": "校验",
         "sql": "SELECT request.id, request.task_id, request.expires_at, request.created_at, (SELECT MAX(card.sent_at) FROM multiremi_feishu_bot_outbound_deliveries card WHERE card.human_request_id=request.id AND card.kind='decision_card' AND card.status='sent' AND card.external_message_id IS NOT NULL AND card.degraded IS NULL) AS card_sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id JOIN multiremi_conversation_log message ON message.id=request.id WHERE request.status = 'pending' AND request.reminder_sent_at IS NULL -- A reminder is worth sending only while it still leaves the reader -- time to act: under a minute of lifetime left, the nudge would arrive -- as the request expires. The bound is the same expression the CAS and -- the claim use, so SQLite and Postgres agree. AND (request.expires_at >= ? OR (request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries card WHERE card.human_request_id=request.id AND card.kind='decision_card' AND card.status='sent' AND card.external_message_id IS NOT NULL AND card.degraded IS NULL AND card.sent_at<=?))) AND task.issue_id IS NOT NULL AND task.workspace_id = ? AND ( SELECT COUNT(*) FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.kind = 'decision_card' AND o.human_request_id = request.id AND b.bot_id = ? AND o.status = 'sent' AND o.external_message_id IS NOT NULL AND o.degraded IS NULL ) > 0 ORDER BY request.expires_at ASC, request.id ASC",
@@ -4054,8 +4041,8 @@
           {
             "index": 215,
             "parameters": [
-              "2026-11-17T21:45:33.692Z",
-              "2026-11-17T20:54:33.692Z",
+              "2026-11-17T12:01:00.000Z",
+              "2026-11-17T11:10:00.000Z",
               "local",
               "default"
             ],
@@ -4066,7 +4053,7 @@
         ]
       },
       {
-        "id": "turn.complete-130",
+        "id": "turn.complete-129",
         "count": 1,
         "category": "其他",
         "sql": "SELECT d.*, COALESCE(d.outbound_task_id, d.task_id) AS target_task_id, b.chat_id, b.thread_id, s.open_id FROM multiremi_feishu_bot_deliveries d JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id AND b.workspace_id = d.workspace_id LEFT JOIN multiremi_feishu_bot_senders s ON s.id = d.sender_id WHERE d.workspace_id = ? AND d.outbound_requested = 1 AND b.chat_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries carrier WHERE carrier.task_id = COALESCE(d.outbound_task_id, d.task_id) AND (carrier.kind IS NULL OR carrier.kind = 'cot') AND carrier.unit_key = '') AND NOT EXISTS (SELECT 1 FROM multiremi_feishu_bot_deliveries earlier WHERE COALESCE(earlier.outbound_task_id, earlier.task_id) = COALESCE(d.outbound_task_id, d.task_id) AND earlier.outbound_requested = 1 AND (earlier.created_at < d.created_at OR (earlier.created_at = d.created_at AND earlier.external_message_id < d.external_message_id))) ORDER BY d.created_at, d.external_message_id LIMIT 32",
@@ -4088,7 +4075,7 @@
         ]
       },
       {
-        "id": "turn.complete-131",
+        "id": "turn.complete-130",
         "count": 1,
         "category": "校验",
         "sql": "SELECT o.task_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_turn_execution_records t ON t.id = o.task_id WHERE o.workspace_id = ? AND o.kind = 'cot' AND o.delivery_mode = 'split' AND (t.status NOT IN ('completed', 'failed', 'cancelled') OR NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries r WHERE r.task_id = o.task_id AND r.kind = 'result_card'))",
@@ -4110,7 +4097,7 @@
         ]
       },
       {
-        "id": "turn.complete-132",
+        "id": "turn.complete-131",
         "count": 1,
         "category": "其他",
         "sql": "SELECT o.*, b.bot_id FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id=o.binding_id AND b.workspace_id=o.workspace_id WHERE o.task_id = ? AND o.kind = 'cot' AND o.delivery_mode = 'split'",
@@ -4132,7 +4119,7 @@
         ]
       },
       {
-        "id": "turn.complete-133",
+        "id": "turn.complete-132",
         "count": 1,
         "category": "校验",
         "sql": "SELECT * FROM multiremi_message_question_records WHERE task_id = ? ORDER BY created_at ASC, id ASC",
@@ -4154,7 +4141,7 @@
         ]
       },
       {
-        "id": "turn.complete-134",
+        "id": "turn.complete-133",
         "count": 1,
         "category": "其他",
         "sql": "SELECT d.external_message_id FROM multiremi_feishu_bot_deliveries d JOIN multiremi_feishu_bot_chat_bindings b ON b.id = d.binding_id JOIN multiremi_feishu_bot_configs c ON c.workspace_id = d.workspace_id AND c.bot_id = b.bot_id AND c.app_id = b.app_id WHERE d.workspace_id = ? AND COALESCE(d.outbound_task_id, d.task_id) = ? ORDER BY d.created_at, d.external_message_id",
@@ -4177,7 +4164,7 @@
         ]
       },
       {
-        "id": "turn.complete-135",
+        "id": "turn.complete-134",
         "count": 1,
         "category": "必要写入",
         "sql": "INSERT INTO multiremi_feishu_bot_outbound_deliveries (id, workspace_id, binding_id, task_id, chat_id, thread_id, reply_to_message_id, body, kind, unit_key, cascade_failure, delivery_mode, previous_delivery_id, human_request_id, human_request_task_id, target_message_id, mention_snapshot, interaction_open_id, degraded, status, available_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'split', ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?) ON CONFLICT DO NOTHING",
@@ -4191,9 +4178,9 @@
             "index": 224,
             "parameters": [
               [
-                "fbo_1d2jcmevyf04",
+                "fbo_f5rvtxcigl9m",
                 "local",
-                "fcb_66wlud5ggcz3",
+                "fcb_v2770u3k72s7",
                 "tsk_<8>",
                 "oc_scale",
                 null,
@@ -4208,9 +4195,9 @@
                 "{\"mode\":\"none\",\"resolvedOpenId\":null}",
                 "ou_scale",
                 null,
-                "2026-11-17T21:44:33.694Z",
-                "2026-11-17T21:44:33.694Z",
-                "2026-11-17T21:44:33.694Z"
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 5,
@@ -4220,7 +4207,7 @@
         ]
       },
       {
-        "id": "turn.complete-136",
+        "id": "turn.complete-135",
         "count": 1,
         "category": "其他",
         "sql": "SELECT id FROM multiremi_feishu_bot_outbound_deliveries WHERE task_id = ? AND kind = ? AND unit_key = ?",
@@ -4244,7 +4231,7 @@
         ]
       },
       {
-        "id": "turn.complete-137",
+        "id": "turn.complete-136",
         "count": 1,
         "category": "其他",
         "sql": "SELECT o.* FROM multiremi_feishu_bot_outbound_deliveries o JOIN multiremi_feishu_bot_chat_bindings b ON b.id = o.binding_id WHERE o.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND (o.kind IS NULL OR o.kind NOT IN ('decision_card', 'decision_card_patch', 'decision_reminder') OR o.degraded IS NOT NULL) AND (? = 1 OR o.delivery_mode IS NULL OR o.delivery_mode = 'legacy') AND (o.decision_id IS NULL OR EXISTS ( SELECT 1 FROM multiremi_message_decision_records decision JOIN multiremi_issues target ON target.id = decision.issue_id AND target.workspace_id = decision.workspace_id JOIN multiremi_issues source ON source.id = decision.source_issue_id AND source.workspace_id = decision.workspace_id WHERE decision.id = o.decision_id AND decision.workspace_id = o.workspace_id AND decision.issue_id = o.decision_issue_id AND b.workspace_id = o.workspace_id AND b.issue_id = decision.issue_id )) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_round_pushes r WHERE r.wake_task_id = o.task_id AND r.binding_id = b.id AND r.workspace_id = o.workspace_id AND r.delivery_mode = 'proactive' AND (b.issue_id IS NULL OR b.issue_id <> r.issue_id) ) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_human_request_pushes h WHERE h.wake_task_id = o.task_id AND h.binding_id = b.id AND h.workspace_id = o.workspace_id AND (b.issue_id IS NULL OR b.issue_id <> h.issue_id) ) AND (o.task_id IS NULL OR ? = 1 OR o.body <> '') AND (? = 1 OR o.presentation_checkpoint IS NULL) AND (? = 1 OR o.attachments IS NULL) AND NOT EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries received WHERE o.kind = 'receipt' AND o.unit_key <> o.target_message_id || ':received' AND received.task_id = o.task_id AND received.kind = 'receipt' AND received.unit_key = o.target_message_id || ':received' AND received.status IN ('pending', 'sending')) AND (o.previous_delivery_id IS NULL OR EXISTS ( SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries previous WHERE previous.id = o.previous_delivery_id AND previous.workspace_id = o.workspace_id AND (previous.status = 'sent' OR (o.cascade_failure = 0 AND previous.status = 'failed')))) AND ((o.status = 'pending' AND o.available_at <= ?) OR (o.status = 'sending' AND o.leased_until IS NOT NULL AND o.leased_until <= ?)) ORDER BY o.created_at ASC, o.id ASC LIMIT 1",
@@ -4264,8 +4251,8 @@
               1,
               1,
               1,
-              "2026-11-17T21:44:33.692Z",
-              "2026-11-17T21:44:33.692Z"
+              "2026-11-17T12:00:00.000Z",
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 5,
             "generation": 2,
@@ -4750,9 +4737,9 @@
               "agent_error",
               null,
               null,
-              "2026-11-17T21:44:33.829Z",
-              "2026-11-17T21:44:33.829Z",
-              "2026-11-17T21:44:33.829Z",
+              "2026-11-17T12:00:00.000Z",
+              "2026-11-17T12:00:00.000Z",
+              "2026-11-17T12:00:00.000Z",
               "tsk_<1>"
             ],
             "scope": 1,
@@ -4782,8 +4769,8 @@
                 null,
                 null,
                 null,
-                "2026-11-17T21:44:33.829Z",
-                "2026-11-17T21:44:33.829Z",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
                 "tsk_<1>"
               ]
             ],
@@ -4809,7 +4796,7 @@
             "parameters": [
               [
                 "failed",
-                "2026-11-17T21:44:33.829Z",
+                "2026-11-17T12:00:00.000Z",
                 "agent_error",
                 "tsk_<1>"
               ]
@@ -4836,7 +4823,7 @@
             "parameters": [
               [
                 "tsk_<1>",
-                "2026-11-17T21:44:33.831Z"
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -4904,7 +4891,7 @@
             "index": 25,
             "parameters": [
               [
-                "2026-11-17T21:44:33.832Z",
+                "2026-11-17T12:00:00.000Z",
                 "tsk_<1>"
               ]
             ],
@@ -5079,7 +5066,7 @@
           {
             "index": 32,
             "parameters": [
-              "msg_riaebfyario9"
+              "msg_mya9i3xdb80c"
             ],
             "scope": 1,
             "generation": 2,
@@ -5088,7 +5075,7 @@
           {
             "index": 46,
             "parameters": [
-              "msg_riaebfyario9"
+              "msg_mya9i3xdb80c"
             ],
             "scope": 1,
             "generation": 2,
@@ -5278,7 +5265,7 @@
           {
             "index": 40,
             "parameters": [
-              "msg_96m5s7vfqwtn"
+              "msg_5yufh82l6rmk"
             ],
             "scope": 1,
             "generation": 2,
@@ -5325,7 +5312,7 @@
           {
             "index": 42,
             "parameters": [
-              "msg_riaebfyario9"
+              "msg_mya9i3xdb80c"
             ],
             "scope": 1,
             "generation": 2,
@@ -5334,7 +5321,7 @@
           {
             "index": 48,
             "parameters": [
-              "msg_riaebfyario9"
+              "msg_mya9i3xdb80c"
             ],
             "scope": 1,
             "generation": 2,
@@ -5357,7 +5344,7 @@
             "index": 43,
             "parameters": [
               "chat_<2>",
-              "2026-11-17T21:44:33.835Z"
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 1,
             "generation": 2,
@@ -5382,7 +5369,7 @@
               [
                 "chat_<2>",
                 9,
-                "msg_riaebfyario9",
+                "msg_mya9i3xdb80c",
                 "message",
                 "shown",
                 "agent",
@@ -5395,10 +5382,10 @@
                 null,
                 null,
                 null,
-                "{\"failure_reason\":\"agent_error\",\"elapsed_ms\":8270,\"pending_agent_delivery\":false,\"agent_delivery_task_id\":null,\"execution_scope\":\"\"}",
+                "{\"failure_reason\":\"agent_error\",\"elapsed_ms\":0,\"pending_agent_delivery\":false,\"agent_delivery_task_id\":null,\"execution_scope\":\"\"}",
                 1,
-                "2026-11-17T21:44:33.835Z",
-                "2026-11-17T21:44:33.835Z",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
                 null,
                 "member",
                 "mem_local_local",
@@ -5481,8 +5468,8 @@
               [
                 "chat_<2>",
                 "mem_local_local",
-                "2026-11-17T21:44:33.835Z",
-                "2026-11-17T21:44:33.835Z"
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -5506,7 +5493,7 @@
             "index": 49,
             "parameters": [
               [
-                "msg_riaebfyario9",
+                "msg_mya9i3xdb80c",
                 "tsk_<1>"
               ]
             ],
@@ -5745,10 +5732,10 @@
                 0,
                 "claude",
                 0,
-                "chat-workspace:15c46636d33bc564b1c3e6333e1c9a4216882993e526dac830614700aa7f1d16:managed:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "chat-workspace:68562c53c92ba7055897f8628631e09e27c9dabca1ff3ed44b55267d5545b303:managed:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
                 "tsk_<1>",
-                "2026-11-17T21:44:33.831Z",
-                "2026-11-17T21:44:33.831Z",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
                 "chat_<2>"
               ]
             ],
@@ -5776,8 +5763,8 @@
                 "chat_<2>",
                 "agt_<3>",
                 "",
-                "2026-11-17T21:44:33.840Z",
-                "2026-11-17T21:44:33.840Z"
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 1,
@@ -5849,7 +5836,7 @@
             "index": 68,
             "parameters": [
               [
-                "2026-11-17T21:44:33.841Z",
+                "2026-11-17T12:00:00.000Z",
                 "turn_<5>",
                 "chat_<2>",
                 "agt_<3>",
@@ -5900,7 +5887,7 @@
           {
             "index": 70,
             "parameters": [
-              "msg_96m5s7vfqwtn"
+              "msg_5yufh82l6rmk"
             ],
             "scope": 1,
             "generation": 2,
@@ -6025,7 +6012,7 @@
             "parameters": [
               [
                 3,
-                "2026-11-17T21:44:33.842Z",
+                "2026-11-17T12:00:00.000Z",
                 "chat_<2>",
                 2
               ]
@@ -6052,7 +6039,7 @@
             "parameters": [
               [
                 3,
-                "2026-11-17T21:44:33.842Z",
+                "2026-11-17T12:00:00.000Z",
                 "chat_<2>"
               ]
             ],
@@ -6098,7 +6085,7 @@
           {
             "index": 79,
             "parameters": [
-              "msg_riaebfyario9"
+              "msg_mya9i3xdb80c"
             ],
             "scope": 1,
             "generation": 2,
@@ -6391,7 +6378,7 @@
         "sql": "SELECT drain.deadline FROM multiremi_runtimes runtime JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local') AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id) WHERE runtime.id = ?",
         "sources": [
           "packages/server/src/store/store.ts:3507",
-          "packages/server/src/api/server.ts:1235"
+          "packages/server/src/api/server.ts:1238"
         ],
         "reason": "确认当前宿主身份、物理 daemon 和 drain fence；异步下行每次同步段重新取快照。",
         "executions": [
@@ -6468,7 +6455,7 @@
           {
             "index": 94,
             "parameters": [
-              "[\"tsk_3mb5mqtp7pag\"]"
+              "[\"tsk_iatsdqrm922v\"]"
             ],
             "scope": 2,
             "generation": 0,
@@ -6477,7 +6464,7 @@
           {
             "index": 104,
             "parameters": [
-              "[\"tsk_2k5odpvc0xuu\",\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\"]"
+              "[\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]"
             ],
             "scope": 3,
             "generation": 0,
@@ -6492,7 +6479,7 @@
         "sql": "SELECT MIN(wake_at) AS wake_at FROM ( SELECT available_at AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'pending' AND available_at > ? UNION ALL SELECT leased_until AS wake_at FROM multiremi_feishu_bot_outbound_deliveries WHERE workspace_id = ? AND status = 'sending' AND leased_until > ? ) deadlines",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3551",
-          "packages/server/src/api/server.ts:1235"
+          "packages/server/src/api/server.ts:1238"
         ],
         "reason": "检查出站租约、重试、去重及待投递实体，保持重放、消息顺序与最终状态。",
         "executions": [
@@ -6500,9 +6487,9 @@
             "index": 98,
             "parameters": [
               "local",
-              "2026-11-17T21:44:33.846Z",
+              "2026-11-17T12:00:00.000Z",
               "local",
-              "2026-11-17T21:44:33.846Z"
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": null,
             "generation": null,
@@ -6517,7 +6504,7 @@
         "sql": "SELECT request.created_at, request.expires_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id = request.task_id WHERE task.workspace_id = ? AND task.issue_id IS NOT NULL AND request.status = 'pending' AND request.reminder_sent_at IS NULL AND request.expires_at IS NOT NULL AND EXISTS (SELECT 1 FROM multiremi_feishu_bot_outbound_deliveries delivery WHERE delivery.human_request_id = request.id AND delivery.kind = 'decision_card' AND delivery.status = 'sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL)",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3560",
-          "packages/server/src/api/server.ts:1235"
+          "packages/server/src/api/server.ts:1238"
         ],
         "reason": "读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。",
         "executions": [
@@ -6539,7 +6526,7 @@
         "sql": "SELECT MAX(delivery.sent_at) AS sent_at FROM multiremi_message_question_records request JOIN multiremi_turn_execution_records task ON task.id=request.task_id JOIN multiremi_conversation_log message ON message.id=request.id JOIN multiremi_feishu_bot_outbound_deliveries delivery ON delivery.human_request_id=request.id JOIN multiremi_feishu_bot_chat_bindings binding ON binding.id=delivery.binding_id AND binding.workspace_id=delivery.workspace_id WHERE task.workspace_id=? AND task.issue_id IS NOT NULL AND request.status='pending' AND binding.bot_id=? AND binding.app_id=? AND request.reminder_sent_at IS NULL AND request.expires_at IS NULL AND CAST(json_extract(CASE WHEN json_valid(message.metadata) THEN message.metadata ELSE '{}' END,'$.question.version') AS TEXT)='1' AND delivery.kind='decision_card' AND delivery.status='sent' AND delivery.external_message_id IS NOT NULL AND delivery.degraded IS NULL GROUP BY request.id",
         "sources": [
           "packages/server/src/store/repos/feishu-bot-repo.ts:3578",
-          "packages/server/src/api/server.ts:1235"
+          "packages/server/src/api/server.ts:1238"
         ],
         "reason": "读取规范 turn/attempt 执行投影的身份、状态、lineage 或通知事实；窄 guard 与完整 task/终态投影使用不同列和提交时刻。",
         "executions": [
@@ -6571,9 +6558,9 @@
             "index": 107,
             "parameters": [
               [
-                "2026-11-17T21:44:33.847Z",
-                "2026-11-17T21:44:33.847Z",
-                "[\"tsk_2k5odpvc0xuu\",\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\"]",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
+                "[\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]",
                 "local",
                 "rt_cost_0"
               ]
@@ -6598,7 +6585,7 @@
           {
             "index": 108,
             "parameters": [
-              "[\"tsk_2k5odpvc0xuu\",\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\"]",
+              "[\"tsk_ag1jxsmi7mxf\",\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\"]",
               "local",
               "rt_cost_0"
             ],
@@ -6623,7 +6610,7 @@
             "index": 109,
             "parameters": [
               [
-                "[\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\",\"tsk_2k5odpvc0xuu\"]"
+                "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
               ]
             ],
             "scope": 3,
@@ -6646,7 +6633,7 @@
           {
             "index": 110,
             "parameters": [
-              "[\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\",\"tsk_2k5odpvc0xuu\"]"
+              "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
             ],
             "scope": 3,
             "generation": 2,
@@ -6669,7 +6656,7 @@
             "index": 111,
             "parameters": [
               [
-                "[\"tsk_die947fdjpj4\",\"tsk_et7c629e6ev0\",\"tsk_2k5odpvc0xuu\"]"
+                "[\"tsk_1wf9c17cc3kk\",\"tsk_f08m3h6ocpkw\",\"tsk_ag1jxsmi7mxf\"]"
               ]
             ],
             "scope": 3,
@@ -6680,9 +6667,9 @@
       },
       {
         "id": "task.fail-085",
-        "count": 1,
+        "count": 2,
         "category": "其他",
-        "sql": "SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.849Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.849Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.849Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.849Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.849Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.849Z'))) AS sweep, FALSE AS housekeeping",
+        "sql": "SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T11:58:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T11:58:00.000Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:40:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:59:30.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:59:30.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:40:00.000Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:50:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:50:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:50:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:55:00.000Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T11:57:00.000Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T11:57:00.000Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T11:59:00.000Z'))) AS sweep, FALSE AS housekeeping",
         "sources": [
           "packages/server/src/store/repos/runtimes-repo.ts:2750",
           "packages/server/src/store/repos/runtimes-repo.ts:2418"
@@ -6711,6 +6698,31 @@
               "rt_cost_0"
             ],
             "scope": 4,
+            "generation": 0,
+            "inTransaction": false
+          },
+          {
+            "index": 136,
+            "parameters": [
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2",
+              "rt_cost_2"
+            ],
+            "scope": 5,
             "generation": 0,
             "inTransaction": false
           }
@@ -6793,8 +6805,8 @@
             "index": 118,
             "parameters": [
               "local",
-              "2026-11-17T21:44:33.849Z",
-              "2026-11-17T21:44:33.849Z"
+              "2026-11-17T12:00:00.000Z",
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 4,
             "generation": 0,
@@ -6818,7 +6830,7 @@
             "parameters": [
               "local",
               "default",
-              "2026-11-17T20:54:33.850Z"
+              "2026-11-17T11:10:00.000Z"
             ],
             "scope": 4,
             "generation": 2,
@@ -6843,8 +6855,8 @@
               "local",
               "local",
               "default",
-              "2026-11-17T21:44:33.850Z",
-              "2026-11-17T21:44:33.850Z"
+              "2026-11-17T12:00:00.000Z",
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 4,
             "generation": 2,
@@ -6866,8 +6878,8 @@
           {
             "index": 122,
             "parameters": [
-              "2026-11-17T21:45:33.850Z",
-              "2026-11-17T20:54:33.850Z",
+              "2026-11-17T12:01:00.000Z",
+              "2026-11-17T11:10:00.000Z",
               "local",
               "default"
             ],
@@ -7003,9 +7015,9 @@
             "index": 131,
             "parameters": [
               [
-                "fbo_rvdosy56os15",
+                "fbo_qjvllpfbquuc",
                 "local",
-                "fcb_66wlud5ggcz3",
+                "fcb_v2770u3k72s7",
                 "tsk_<6>",
                 "oc_scale",
                 null,
@@ -7020,9 +7032,9 @@
                 "{\"mode\":\"none\",\"resolvedOpenId\":null}",
                 "ou_scale",
                 null,
-                "2026-11-17T21:44:33.851Z",
-                "2026-11-17T21:44:33.851Z",
-                "2026-11-17T21:44:33.851Z"
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z",
+                "2026-11-17T12:00:00.000Z"
               ]
             ],
             "scope": 4,
@@ -7076,50 +7088,12 @@
               1,
               1,
               1,
-              "2026-11-17T21:44:33.850Z",
-              "2026-11-17T21:44:33.850Z"
+              "2026-11-17T12:00:00.000Z",
+              "2026-11-17T12:00:00.000Z"
             ],
             "scope": 4,
             "generation": 2,
             "inTransaction": true
-          }
-        ]
-      },
-      {
-        "id": "task.fail-100",
-        "count": 1,
-        "category": "其他",
-        "sql": "SELECT 'update' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND status = 'pending' AND updated_at >= '2026-11-17T21:42:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_update_requests WHERE runtime_id = ? AND ((status = 'pending' AND updated_at < '2026-11-17T21:42:33.853Z') OR (status IN ('running', 'restarting', 'verifying') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'model_list' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:44:03.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_model_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:44:03.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'command' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:24:33.853Z'))) AS sweep, EXISTS (SELECT 1 FROM multiremi_runtime_command_requests WHERE runtime_id = ? AND status IN ('completed', 'failed', 'timeout') AND (command <> '' OR args <> '[]')) AS housekeeping UNION ALL SELECT 'local_skills' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_list_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'local_skill_import' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_local_skill_import_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'gc_run' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:34:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_gc_run_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:34:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:34:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'bot_menu' AS family, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_bot_menu_publish_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:39:33.853Z'))) AS sweep, FALSE AS housekeeping UNION ALL SELECT 'directory_scan' AS family, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND status = 'pending' AND created_at >= '2026-11-17T21:41:33.853Z') AS claimable, EXISTS (SELECT 1 FROM multiremi_runtime_directory_scan_requests WHERE runtime_id = ? AND ((status = 'pending' AND created_at < '2026-11-17T21:41:33.853Z') OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < '2026-11-17T21:43:33.853Z'))) AS sweep, FALSE AS housekeeping",
-        "sources": [
-          "packages/server/src/store/repos/runtimes-repo.ts:2750",
-          "packages/server/src/store/repos/runtimes-repo.ts:2418"
-        ],
-        "reason": "一次 union/EXISTS 读取所有 runtime 命令族的可领取状态；查询含当前时间边界，不与不同时间的快照合并。",
-        "executions": [
-          {
-            "index": 136,
-            "parameters": [
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2",
-              "rt_cost_2"
-            ],
-            "scope": 5,
-            "generation": 0,
-            "inTransaction": false
           }
         ]
       }

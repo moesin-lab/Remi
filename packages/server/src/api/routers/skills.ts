@@ -1,4 +1,4 @@
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import {
   denyCurrentUserWorkspaceAccess,
   isJsonApiError,
@@ -23,6 +23,7 @@ import {
 } from "../wire/index.js";
 import {
   buildImportedSkillInput,
+  SkillImportError,
 } from "@daemon/agent-runtime/skills/skill-import.js";
 import type {
   CreateSkillInput,
@@ -34,6 +35,31 @@ import type { RouterDeps } from "./deps.js";
 
 export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
+
+  // Source identity is scoped to the selected workspace, independently of the
+  // imported display name. Fetching the complete bundle precedes this write.
+  function saveImportedSkill(c: Context, input: CreateSkillInput) {
+    const origin = input.config?.origin as Record<string, unknown>;
+    const existing = store.listSkills(input.workspaceId, { includeFiles: false }).find((skill) => {
+      const previous = skill.config?.origin as Record<string, unknown> | undefined;
+      return previous?.type === origin.type && previous?.source_url === origin.source_url;
+    });
+    if (existing) {
+      const loaded = loadSkillForCurrentManager(c, store, existing.id!);
+      if (loaded instanceof Response) return loaded;
+    }
+    const sanitized = sanitizeSkillFilesForCompatibility(input);
+    const skill = existing
+      ? store.updateSkill(existing.id!, withSkillUpdateRequestContext(existing, {
+        name: sanitized.name,
+        description: sanitized.description,
+        content: sanitized.content,
+        files: sanitized.files,
+        config: { ...existing.config, origin },
+      }))
+      : store.createSkill(sanitized);
+    return { skill, updated: Boolean(existing) };
+  }
 
   app.get("/api/multiremi/skills", (c) => {
     const workspaceId = requestedSkillWorkspaceId(c, store);
@@ -62,13 +88,16 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const request = withSkillImportRequestContext(c, store, body);
     if (request instanceof Response) return request;
-    const imported = await buildImportedSkillInput(request);
+    const imported = await buildImportedSkillInput(request, { signal: c.req.raw.signal });
+    if (c.req.raw.signal.aborted) throw new SkillImportError("Skill import cancelled before saving", 408);
     const input = withSkillCreateRequestContext(c, store, imported.skillInput);
     if (input instanceof Response) return input;
     try {
-      const skill = store.createSkill(sanitizeSkillFilesForCompatibility(input));
-      publishWorkspaceEvent(c, store, "skill:created", skillWorkspaceId(skill), { skill: skillWithFilesCompatibilityResponse(skill) });
-      return c.json({ skill, source: imported.source, sourceUrl: imported.sourceUrl }, 201);
+      const saved = saveImportedSkill(c, input);
+      if (saved instanceof Response) return saved;
+      const { skill, updated } = saved;
+      publishWorkspaceEvent(c, store, updated ? "skill:updated" : "skill:created", skillWorkspaceId(skill), { skill: skillWithFilesCompatibilityResponse(skill) });
+      return c.json({ skill, source: imported.source, sourceUrl: imported.sourceUrl }, updated ? 200 : 201);
     } catch (error) {
       return skillCompatibilityErrorResponse(c, error, { duplicateImportInput: input, store });
     }
@@ -157,14 +186,17 @@ export function registerSkillRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     const request = withSkillImportRequestContext(c, store, body);
     if (request instanceof Response) return request;
-    const imported = await buildImportedSkillInput(request);
+    const imported = await buildImportedSkillInput(request, { signal: c.req.raw.signal });
+    if (c.req.raw.signal.aborted) throw new SkillImportError("Skill import cancelled before saving", 408);
     const input = withSkillCreateRequestContext(c, store, imported.skillInput);
     if (input instanceof Response) return input;
     try {
-      const skill = store.createSkill(sanitizeSkillFilesForCompatibility(input));
+      const saved = saveImportedSkill(c, input);
+      if (saved instanceof Response) return saved;
+      const { skill, updated } = saved;
       const response = skillWithFilesCompatibilityResponse(skill);
-      publishWorkspaceEvent(c, store, "skill:created", skillWorkspaceId(skill), { skill: response });
-      return c.json(response, 201);
+      publishWorkspaceEvent(c, store, updated ? "skill:updated" : "skill:created", skillWorkspaceId(skill), { skill: response });
+      return c.json(response, updated ? 200 : 201);
     } catch (error) {
       return skillCompatibilityErrorResponse(c, error, { duplicateImportInput: input, store });
     }

@@ -191,13 +191,13 @@ describe.skipIf(!pgAvailable)("MUL-409: in-transaction issue creation on Postgre
       settings: { ...workspace.settings, issueTopics: { enabled: true, chatId } },
     });
     // The sender must be allowed before a group message can create an Issue.
-    store.submitFeishuBotMessage("local", runtimeId, {
+    expect(() => store.submitFeishuBotMessage("local", runtimeId, {
       revision: config.revision,
       externalSessionKey: `${chatId}:discovery`,
       externalMessageId: `om_probe_group_seed_${counter}`,
       senderOpenId: "ou_probe_sender",
       text: "seed",
-    });
+    })).toThrow("sender is not on this bot's allowlist");
     store.setFeishuBotSenderAllowed("local", store.listFeishuBotSenders("local")[0]!.id, true, "local");
     observe(title, () => {
       store.submitFeishuBotMessage("local", runtimeId, {

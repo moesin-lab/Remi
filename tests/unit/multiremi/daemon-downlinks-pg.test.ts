@@ -130,7 +130,7 @@ describe.skipIf(!adminUrl)("A-4 pending state machines on real PostgreSQL", () =
       store.registerRuntime({ id: rt, name: rt, provider: "codex", workspaceId: "local", daemonId: rt, ownerId: "local" });
       store.heartbeatRuntime(rt, { claimPending: false, supportsFeishuBotConfig: true });
       const config = store.upsertFeishuBotConfig("local", { agentId: agent.id, runtimeId: rt,
-        appId: "cli_pg_downlink", appSecretOp: "set", appSecret: "test-only-secret", domain: "feishu", enabled: true });
+        appId: "cli_pg_downlink", senderAccessPolicy: "agent", appSecretOp: "set", appSecret: "test-only-secret", domain: "feishu", enabled: true });
       store.reportFeishuBotRuntimeStatus("local", rt, { appliedRevision: config.revision, state: "online" });
       const submitted = store.submitFeishuBotMessage("local", rt, { revision: config.revision,
         externalSessionKey: "oc_pg_downlink", externalMessageId: "om_pg_downlink", chatId: "oc_pg_downlink",

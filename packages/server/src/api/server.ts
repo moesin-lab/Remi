@@ -770,7 +770,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
       return c.json(body, 400);
     }
     if (err instanceof SkillImportError) {
-      return c.json({ error: err.message }, err.status as 400 | 502);
+      return c.json({ error: err.message }, err.status as 400 | 429 | 408 | 502 | 504);
     }
     if (err instanceof AgentTemplateError) {
       return c.json({ error: err.message, failed_urls: err.failedUrls }, err.status);

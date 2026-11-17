@@ -3640,14 +3640,18 @@ export class IssuesRepo {
     const notifiedOperatorId = notifiedMember?.workspaceId === parent.workspaceId
       ? this.ctx.workspaces().getWorkspaceOperator(parent.workspaceId)?.id ?? notifiedMemberId
       : null;
-    for (const subscriber of this.listIssueSubscribers(parent.id)) {
-      if (subscriber.userType !== "member") continue;
-      // The parent-owner message may already reach this same shared operator.
-      // Deduplicate only this delivery, so later child events remain observable.
-      if (subscriber.userId === notifiedOperatorId) continue;
+    const recipients = new Set(this.listIssueSubscribers(parent.id)
+      .filter(subscriber => subscriber.userType === "member").map(subscriber => subscriber.userId));
+    // An ownerless parent can have no historical human subscriptions. Its child
+    // outcome still needs a shared inbox notification, without inventing an executor.
+    const operator = this.ctx.workspaces().getWorkspaceOperator(parent.workspaceId);
+    if (operator) recipients.add(operator.id);
+    for (const memberId of recipients) {
+      // Deduplicate this event when its role message already notified the operator.
+      if (memberId === notifiedOperatorId) continue;
       this.ctx.createInboxItem({
         issueId: parent.id,
-        memberId: subscriber.userId,
+        memberId,
         type: "child_issue_terminal",
         severity: outcome === "failed" || outcome === "blocked" ? "warning" : "info",
         title: `${parent.key}: ${child.key} ${childOutcomeLabel(outcome)}`,

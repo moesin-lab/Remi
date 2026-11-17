@@ -745,6 +745,7 @@ function mappedOperationsCommand(route: string): string | null {
     [/^DELETE \/api\/autopilots\/:id\/triggers\/:triggerId$/, "autopilot.trigger.delete"],
     [/^POST \/api\/autopilots\/:id\/triggers\/:triggerId\/rotate-webhook-token$/, "autopilot.trigger.rotate-token"],
     [/^PUT \/api\/autopilots\/:id\/triggers\/:triggerId\/signing-secret$/, "autopilot.trigger.set-secret"],
+    [/^GET \/api\/workspaces\/:workspaceId\/scm\/repositories\/:repositoryId\/change-requests\/:number\/checks$/, "scm.change-request.checks"],
     [/^GET \/api\/workspaces\/:workspaceId\/scm\/connections$/, "scm.connection.list"],
     [/^POST \/api\/workspaces\/:workspaceId\/scm\/connections$/, "scm.connection.create"],
     [/^GET \/api\/workspaces\/:workspaceId\/scm\/connections\/:connectionId$/, "scm.connection.get"],

@@ -655,6 +655,23 @@ interface RunSummary {
   completed: boolean;
 }
 
+/** Preserve the last provider checkpoint when shutdown interrupts runAgent. */
+class RunAgentError extends Error {
+  constructor(cause: unknown, readonly sessionId: string | null, readonly workDir: string,
+    readonly runtimeInterrupted: boolean) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
+/** stop() permits providers to drain; only transport cancellation/exit is
+ * evidence of an interrupted provider. Typed failures retain their authority. */
+function isShutdownInterruption(error: unknown): boolean {
+  if (error instanceof AcpSessionFailureError || error instanceof AcpRpcError) return false;
+  if (error instanceof DaemonProtocolRpcError) return error.code === "authority_revoked";
+  return error instanceof Error && (error.message === "Cancelled"
+    || /^ACP agent died unexpectedly \([^\n]+\)$/.test(error.message));
+}
+
 /**
  * What a Chat lane's process holds besides itself (PR 6 §2.8): its private
  * temp dir, the work directory (and its lock), the materialized plugins, and
@@ -1547,7 +1564,7 @@ export class MultiremiDaemon {
       daemonId: this.options.daemonId ?? this.options.runtimeName,
       cliVersion: multiremiVersion,
       launchedBy: this.options.launchedBy,
-      caps: ["offer", "turn.message", "trace.read", "trace.subscribe", "wiki.fetch"],
+      caps: ["offer", "turn.message", "input_unread", "trace.read", "trace.subscribe", "wiki.fetch"],
       log,
       ...options.protocolClientOptions,
     });
@@ -1562,6 +1579,8 @@ export class MultiremiDaemon {
           stateDir: join(dirname(this.outboxPath), "external-chats", outboxIdentity),
         }));
     }
+    // Co-resident lanes share a client whose construction-time caps may be empty.
+    this.protocolClient.advertiseCaps(["input_unread"]);
     // PR 6 §5.3: this lane keeps Chat processes alive for background tasks; it parks only when the server echoes the cap.
     if (this.options.asyncTasks) this.protocolClient.advertiseCaps(["lane.background"]);
     this.parkedLanes = new ParkedLanes({
@@ -4073,16 +4092,23 @@ export class MultiremiDaemon {
         this.finalizeTaskProgress(progressSummarizer, serverTerminalStatus, undefined, task.id);
         return;
       }
-      const failureReason = err instanceof LocalDirectoryError
-        ? err.failureReason
+      // stop() closes the lane before draining providers. SIGTERM may also
+      // terminate ACP children, so Cancelled/EOF here is runtime interruption,
+      // not an Agent failure. Keep the report durable: replay must create the
+      // retry even when startup orphan recovery skips pending terminal rows.
+      const runtimeInterrupted = !timedOut && (err instanceof RunAgentError
+        ? err.runtimeInterrupted : this.pollAbort.signal.aborted && isShutdownInterruption(err));
+      const cause = err instanceof RunAgentError ? err.cause : err;
+      const failureReason = runtimeInterrupted ? "runtime_recovery" : cause instanceof LocalDirectoryError
+        ? cause.failureReason
         : classifyDaemonTaskFailure(task.agent?.provider ?? "", error,
-          err instanceof AcpSessionFailureError ? err.hint
-            : err instanceof AcpRpcError && err.data && typeof err.data === "object"
-              ? err.data : undefined);
+          cause instanceof AcpSessionFailureError ? cause.hint
+            : cause instanceof AcpRpcError && cause.data && typeof cause.data === "object"
+              ? cause.data : undefined);
       this.enqueueTaskReport(task.id, "fail", {
         error,
-        sessionId: summary?.sessionId ?? task.sessionId,
-        workDir: summary?.workDir ?? task.workDir,
+        sessionId: err instanceof RunAgentError ? err.sessionId : summary?.sessionId ?? task.sessionId,
+        workDir: err instanceof RunAgentError ? err.workDir : summary?.workDir ?? task.workDir,
         failureReason,
       });
       log.error(`Failed task ${task.id}: ${error}`);
@@ -5193,6 +5219,10 @@ export class MultiremiDaemon {
       this.enqueueTaskReport(task.id, "usage", { usageSnapshot: snapshot });
     };
     let turnIndex = 0;
+    let unreadReminders = 0;
+    let unreadReply: string | null = null;
+    // Record when the provider failed, before cleanup can race with stop().
+    let providerFailureDuringStop: boolean | null = null;
 
     // Steer channel: the feed receives pushed user directives. A provider that
     // steers natively gets each batch injected into the streaming prompt
@@ -5462,6 +5492,19 @@ export class MultiremiDaemon {
       const firstPromptImages = turnImages(task.chatMessageAttachments);
       // ADR 0025: a `/compact` turn that only compacts has no reply text; it is still a success.
       const compactCommandInput = !skipFirstPrompt && isCompactCommand(prompt);
+      const remindUnreadInput = (err: unknown, candidate: string): boolean => {
+        if (!(err instanceof DaemonProtocolRpcError) || err.code !== "input_unread") return false;
+        unreadReminders++;
+        prompt = err.detail ?? "Read the folded input continuously from the original --from, then give your final reply again.";
+        if (laneRecord) this.parkedLanes.cancelHandOff(laneRecord);
+        backgroundDecision = null;
+        this.recordTrace(task.id, () => trace.steer([{
+          id: `input-unread:${unreadReminders}`, taskId: task.id, authorType: "platform", authorId: null,
+          kind: "steer", content: prompt, createdAt: new Date().toISOString(), consumedAt: null,
+        }], { via: "reprompt", native_outcome: null, error: null }));
+        unreadReply = candidate;
+        return true;
+      };
       while (true) {
         turnIndex++;
         config.media = turnIndex === 1 && firstPromptImages.length ? firstPromptImages : undefined;
@@ -5489,6 +5532,7 @@ export class MultiremiDaemon {
         config.onPromptStarted = roundPump ? () => roundPump.promptStarted() : undefined;
         steerFeed.setInterrupt(roundPump ? () => roundPump.interrupt() : () => turnAbort.abort());
         let turnError: unknown = null;
+        providerFailureDuringStop = null;
         // The attached cycle already answered a doorbell turn with no other input (§2.5).
         const skipRound = turnIndex === 1 && skipFirstPrompt;
         try {
@@ -5511,6 +5555,7 @@ export class MultiremiDaemon {
           }
         } catch (err) {
           turnError = err;
+          providerFailureDuringStop = this.pollAbort.signal.aborted && isShutdownInterruption(err);
         } finally {
           // A steer interrupt aborts the round: its still-open tools end `stopped`.
           if (!skipRound) this.recordTrace(task.id, () => trace.promptEnded({ aborted: turnAbort.signal.aborted }));
@@ -5598,16 +5643,27 @@ export class MultiremiDaemon {
         // The grace ran out while waiting: deliver what there is, as a round's grace timer would.
         if (autonomousRounds > 0 && wrapUpOver()) forceAnswerExpired = true;
         const steered = steerFeed.take().filter((m) => !recordedSteerIds.has(m.id));
-        if (turnError && !turnAbort.signal.aborted) throw turnError;
+        if (turnError && !turnAbort.signal.aborted) {
+          if (unreadReply !== null) {
+            await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: true }, unreadReply, finalSessionId, workDir);
+            return { output: unreadReply, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: true };
+          }
+          throw turnError;
+        }
         const lastItem = trace.lastItem;
         if (!turnAbort.signal.aborted && provider.typedSessionFailures === false && lastItem?.type === "agent_message") {
           const error = redactProviderErrorText(lastItem.text, failureCredentials);
           const failureReason = classifyLegacyProviderFailure(error);
           if (failureReason) {
+            if (unreadReply !== null) {
+              await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: true }, unreadReply, finalSessionId, workDir);
+              return { output: unreadReply, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: true };
+            }
             await this.client.pinTaskSession(task.id, finalSessionId, workDir);
             return { output: error, sessionId: finalSessionId, workDir, usageSnapshot: ledger.finish(), completed: false, failureReason };
           }
         }
+        unreadReply = null;
         if (forceAnswerExpired) {
           log.warn(`Task ${task.id} force-answer grace elapsed; delivering last reply`);
           // Steers that arrived too late to act on are still recorded/consumed
@@ -5667,9 +5723,12 @@ export class MultiremiDaemon {
         onUsage?.(finalUsage);
         await this.client.reportTaskUsageSnapshot(task.id, finalUsage);
         try {
-          await this.taskDownlinks.consumeTaskSteerMessages(task.id, []);
-          await this.client.completeTurn(this.taskDownlinks.turnInput(task.id), candidate, finalSessionId, workDir);
+          // Inline receipts still advance normally; unread bodies are handled
+          // by the recoverable completion gate instead of the receipt-resync loop.
+          await this.taskDownlinks.consumeTaskSteerMessages(task.id, [], true);
+          await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
         } catch (err) {
+          if (remindUnreadInput(err, candidate)) continue;
           if (!isTurnInputPendingConflict(err)) throw err;
           const pendingNow = await this.taskDownlinks.waitForSteer(task.id, this.options.taskDrainTimeoutMs, signal);
           // Already-recorded ids still pending mean an earlier consume call
@@ -5695,11 +5754,19 @@ export class MultiremiDaemon {
           // Steers recorded without injection add no reply, so the pick stands;
           // settle() is still the one rule before every completion attempt.
           this.recordTrace(task.id, () => trace.settle());
-          await this.client.completeTurn(this.taskDownlinks.turnInput(task.id), candidate, finalSessionId, workDir);
+          try {
+            await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
+          } catch (error) {
+            if (remindUnreadInput(error, candidate)) continue;
+            throw error;
+          }
         }
         log.info(`Completed task ${task.id}`);
         return { output: candidate, sessionId: finalSessionId, workDir, usageSnapshot: ledger.snapshot, completed: true };
       }
+    } catch (error) {
+      throw new RunAgentError(error, finalSessionId, workDir,
+        providerFailureDuringStop ?? (this.pollAbort.signal.aborted && isShutdownInterruption(error)));
     } finally {
       // PR 6 §6.3: a cancelled or failed attempt whose process lives still hands its tasks off or stops them
       // (its trace closes after this); a cancel ends the turn, not the background work.

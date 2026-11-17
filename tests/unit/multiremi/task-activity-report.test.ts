@@ -208,8 +208,8 @@ for (const backend of backends) {
           expect(listedTurn(world.store, task.id)).toMatchObject({ running_subagents: 0, running_background_tasks: 3 });
           expect(currentAttempt(world.store, task.id)).toMatchObject({ running_background_tasks: 3 });
           const frames: string[] = [];
-          notifyBrowserTaskEvent(new Map(), new Map([[chat.creatorId!, new Set([{ data: { kind: "browser", workspaceId: "local" },
-            sendText: (frame: string) => frames.push(frame) } as any])]]), world.store, "task:subagents", events.at(-1)!);
+          notifyBrowserTaskEvent(new Map([["local", new Set([{ data: { kind: "browser", workspaceId: "local", authenticated: true, userId: chat.creatorId },
+            sendText: (frame: string) => frames.push(frame) } as any])]]), new Map(), world.store, "task:subagents", events.at(-1)!);
           expect(JSON.parse(frames[0]!).payload).toMatchObject({ running_subagents: 0, running_background_tasks: 3 });
           for (const bad of [-1, 1.5, "2", null, 2 ** 31]) {
             expect(await outcome(world, { task_id: task.id, running_subagents: 0, running_background_tasks: bad }))

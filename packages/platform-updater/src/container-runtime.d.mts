@@ -2,4 +2,4 @@ export function extractArchive(archive: string, destination: string, compressed?
 export const DATA_SCHEMA_INPUTS: string[];
 export const API_BASE_INPUTS: string[];
 export function restoreMigrationReports(archive: string, destination: string): Promise<string>;
-export function rehearseStoreMigration(apiRoot: string, archive: string, scratch: string): Promise<void>;
+export function rehearseStoreMigration(apiRoot: string, archive: string, scratch: string, options?: { executable?: string; env?: NodeJS.ProcessEnv }): Promise<void>;

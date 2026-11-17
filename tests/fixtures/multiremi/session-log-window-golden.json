@@ -1,12 +1,12 @@
 {
  "name": "Session log window responses",
- "source": "fork shared operator with upstream session-log batching",
+ "source": "MUL-48: per-row capture on 84e31e785 with shared-operator contract fixtures",
  "probes": [
   {
    "name": "chat-window",
    "path": "/api/sessions/chat_zj4jmra0xjn7/log?before=30",
    "status": 200,
-   "bytes": 37303,
+   "bytes": 37310,
    "body": {
     "entries": [
      {
@@ -70,9 +70,9 @@
        "legacy_prompt": "Question 31",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.039Z",
-      "updated_at": "2026-09-20T12:00:02.089Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.129Z",
+      "updated_at": "2026-09-20T12:00:02.182Z",
       "deleted_at": null
      },
      {
@@ -113,7 +113,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -128,8 +128,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.083Z",
-      "updated_at": "2026-09-20T12:00:02.088Z",
+      "created_at": "2026-09-20T12:00:02.176Z",
+      "updated_at": "2026-09-20T12:00:02.181Z",
       "deleted_at": null
      },
      {
@@ -179,8 +179,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.100Z",
-      "updated_at": "2026-09-20T12:00:02.110Z",
+      "created_at": "2026-09-20T12:00:02.193Z",
+      "updated_at": "2026-09-20T12:00:02.203Z",
       "deleted_at": null
      },
      {
@@ -254,9 +254,9 @@
        "legacy_prompt": "Question 32",
        "attachments": []
       },
-      "revision": 11,
-      "created_at": "2026-09-20T12:00:02.104Z",
-      "updated_at": "2026-09-20T12:00:02.162Z",
+      "revision": 12,
+      "created_at": "2026-09-20T12:00:02.197Z",
+      "updated_at": "2026-09-20T12:00:02.258Z",
       "deleted_at": null
      },
      {
@@ -297,7 +297,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 50,
+       "elapsed_ms": 53,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -312,8 +312,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.156Z",
-      "updated_at": "2026-09-20T12:00:02.161Z",
+      "created_at": "2026-09-20T12:00:02.252Z",
+      "updated_at": "2026-09-20T12:00:02.257Z",
       "deleted_at": null
      },
      {
@@ -363,8 +363,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.173Z",
-      "updated_at": "2026-09-20T12:00:02.183Z",
+      "created_at": "2026-09-20T12:00:02.269Z",
+      "updated_at": "2026-09-20T12:00:02.279Z",
       "deleted_at": null
      },
      {
@@ -428,9 +428,9 @@
        "legacy_prompt": "Question 33",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.177Z",
-      "updated_at": "2026-09-20T12:00:02.227Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.273Z",
+      "updated_at": "2026-09-20T12:00:02.326Z",
       "deleted_at": null
      },
      {
@@ -471,7 +471,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -486,8 +486,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.221Z",
-      "updated_at": "2026-09-20T12:00:02.226Z",
+      "created_at": "2026-09-20T12:00:02.320Z",
+      "updated_at": "2026-09-20T12:00:02.325Z",
       "deleted_at": null
      },
      {
@@ -537,8 +537,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.238Z",
-      "updated_at": "2026-09-20T12:00:02.248Z",
+      "created_at": "2026-09-20T12:00:02.337Z",
+      "updated_at": "2026-09-20T12:00:02.347Z",
       "deleted_at": null
      },
      {
@@ -602,9 +602,9 @@
        "legacy_prompt": "Question 34",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.242Z",
-      "updated_at": "2026-09-20T12:00:02.292Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.341Z",
+      "updated_at": "2026-09-20T12:00:02.394Z",
       "deleted_at": null
      },
      {
@@ -645,7 +645,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -660,8 +660,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.286Z",
-      "updated_at": "2026-09-20T12:00:02.291Z",
+      "created_at": "2026-09-20T12:00:02.388Z",
+      "updated_at": "2026-09-20T12:00:02.393Z",
       "deleted_at": null
      },
      {
@@ -711,8 +711,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.303Z",
-      "updated_at": "2026-09-20T12:00:02.313Z",
+      "created_at": "2026-09-20T12:00:02.405Z",
+      "updated_at": "2026-09-20T12:00:02.415Z",
       "deleted_at": null
      },
      {
@@ -776,9 +776,9 @@
        "legacy_prompt": "Question 35",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.307Z",
-      "updated_at": "2026-09-20T12:00:02.357Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.409Z",
+      "updated_at": "2026-09-20T12:00:02.462Z",
       "deleted_at": null
      },
      {
@@ -819,7 +819,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -834,8 +834,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.351Z",
-      "updated_at": "2026-09-20T12:00:02.356Z",
+      "created_at": "2026-09-20T12:00:02.456Z",
+      "updated_at": "2026-09-20T12:00:02.461Z",
       "deleted_at": null
      },
      {
@@ -907,14 +907,14 @@
          "contentType": "text/plain",
          "size_bytes": 36,
          "sizeBytes": 36,
-         "created_at": "2026-09-20T12:00:02.365Z",
-         "createdAt": "2026-09-20T12:00:02.365Z"
+         "created_at": "2026-09-20T12:00:02.470Z",
+         "createdAt": "2026-09-20T12:00:02.470Z"
         }
        ]
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.369Z",
-      "updated_at": "2026-09-20T12:00:02.379Z",
+      "created_at": "2026-09-20T12:00:02.474Z",
+      "updated_at": "2026-09-20T12:00:02.484Z",
       "deleted_at": null
      },
      {
@@ -978,9 +978,9 @@
        "legacy_prompt": "Question 36",
        "attachments": []
       },
-      "revision": 14,
-      "created_at": "2026-09-20T12:00:02.373Z",
-      "updated_at": "2026-09-20T12:00:02.463Z",
+      "revision": 15,
+      "created_at": "2026-09-20T12:00:02.478Z",
+      "updated_at": "2026-09-20T12:00:02.571Z",
       "deleted_at": null
      },
      {
@@ -1031,8 +1031,8 @@
        "attachments": []
       },
       "revision": 3,
-      "created_at": "2026-09-20T12:00:02.417Z",
-      "updated_at": "2026-09-20T12:00:02.462Z",
+      "created_at": "2026-09-20T12:00:02.525Z",
+      "updated_at": "2026-09-20T12:00:02.570Z",
       "deleted_at": null
      },
      {
@@ -1082,8 +1082,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.474Z",
-      "updated_at": "2026-09-20T12:00:02.484Z",
+      "created_at": "2026-09-20T12:00:02.582Z",
+      "updated_at": "2026-09-20T12:00:02.592Z",
       "deleted_at": null
      },
      {
@@ -1147,9 +1147,9 @@
        "legacy_prompt": "Question 37",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.478Z",
-      "updated_at": "2026-09-20T12:00:02.528Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.586Z",
+      "updated_at": "2026-09-20T12:00:02.639Z",
       "deleted_at": null
      },
      {
@@ -1190,7 +1190,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -1205,8 +1205,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.522Z",
-      "updated_at": "2026-09-20T12:00:02.527Z",
+      "created_at": "2026-09-20T12:00:02.633Z",
+      "updated_at": "2026-09-20T12:00:02.638Z",
       "deleted_at": null
      },
      {
@@ -1256,8 +1256,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.539Z",
-      "updated_at": "2026-09-20T12:00:02.549Z",
+      "created_at": "2026-09-20T12:00:02.650Z",
+      "updated_at": "2026-09-20T12:00:02.660Z",
       "deleted_at": null
      },
      {
@@ -1321,9 +1321,9 @@
        "legacy_prompt": "Question 38",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.543Z",
-      "updated_at": "2026-09-20T12:00:02.593Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.654Z",
+      "updated_at": "2026-09-20T12:00:02.707Z",
       "deleted_at": null
      },
      {
@@ -1364,7 +1364,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -1379,8 +1379,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.587Z",
-      "updated_at": "2026-09-20T12:00:02.592Z",
+      "created_at": "2026-09-20T12:00:02.701Z",
+      "updated_at": "2026-09-20T12:00:02.706Z",
       "deleted_at": null
      },
      {
@@ -1430,8 +1430,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.604Z",
-      "updated_at": "2026-09-20T12:00:02.614Z",
+      "created_at": "2026-09-20T12:00:02.718Z",
+      "updated_at": "2026-09-20T12:00:02.728Z",
       "deleted_at": null
      },
      {
@@ -1495,9 +1495,9 @@
        "legacy_prompt": "Question 39",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.608Z",
-      "updated_at": "2026-09-20T12:00:02.658Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.722Z",
+      "updated_at": "2026-09-20T12:00:02.775Z",
       "deleted_at": null
      },
      {
@@ -1538,7 +1538,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -1553,8 +1553,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.652Z",
-      "updated_at": "2026-09-20T12:00:02.657Z",
+      "created_at": "2026-09-20T12:00:02.769Z",
+      "updated_at": "2026-09-20T12:00:02.774Z",
       "deleted_at": null
      },
      {
@@ -1604,8 +1604,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.669Z",
-      "updated_at": "2026-09-20T12:00:02.679Z",
+      "created_at": "2026-09-20T12:00:02.786Z",
+      "updated_at": "2026-09-20T12:00:02.796Z",
       "deleted_at": null
      },
      {
@@ -1679,9 +1679,9 @@
        "legacy_prompt": "Question 40",
        "attachments": []
       },
-      "revision": 11,
-      "created_at": "2026-09-20T12:00:02.673Z",
-      "updated_at": "2026-09-20T12:00:02.731Z",
+      "revision": 12,
+      "created_at": "2026-09-20T12:00:02.790Z",
+      "updated_at": "2026-09-20T12:00:02.851Z",
       "deleted_at": null
      },
      {
@@ -1722,7 +1722,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 50,
+       "elapsed_ms": 53,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -1737,8 +1737,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.725Z",
-      "updated_at": "2026-09-20T12:00:02.730Z",
+      "created_at": "2026-09-20T12:00:02.845Z",
+      "updated_at": "2026-09-20T12:00:02.850Z",
       "deleted_at": null
      },
      {
@@ -1788,16 +1788,16 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.892Z",
-      "updated_at": "2026-09-20T12:00:03.902Z",
+      "created_at": "2026-09-20T12:00:04.048Z",
+      "updated_at": "2026-09-20T12:00:04.058Z",
       "deleted_at": null
      }
     ],
     "head_seq": 122,
-    "log_version": 551,
+    "log_version": 592,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:02.035Z",
+    "prev_entry_created_at": "2026-09-20T12:00:02.125Z",
     "before_visible_count": 91,
     "before_visible_count_capped": false
    }
@@ -1848,7 +1848,7 @@
      }
     ],
     "head_seq": 122,
-    "log_version": 551,
+    "log_version": 592,
     "has_more_before": false,
     "has_more_after": true,
     "prev_entry_created_at": null
@@ -1858,7 +1858,7 @@
    "name": "chat-around-anchor",
    "path": "/api/sessions/chat_zj4jmra0xjn7/log?anchor=30&before=4&after=4",
    "status": 200,
-   "bytes": 9596,
+   "bytes": 9598,
    "body": {
     "entries": [
      {
@@ -1899,7 +1899,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -1914,8 +1914,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.611Z",
-      "updated_at": "2026-09-20T12:00:00.616Z",
+      "created_at": "2026-09-20T12:00:00.638Z",
+      "updated_at": "2026-09-20T12:00:00.643Z",
       "deleted_at": null
      },
      {
@@ -1965,8 +1965,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.628Z",
-      "updated_at": "2026-09-20T12:00:00.638Z",
+      "created_at": "2026-09-20T12:00:00.655Z",
+      "updated_at": "2026-09-20T12:00:00.665Z",
       "deleted_at": null
      },
      {
@@ -2030,9 +2030,9 @@
        "legacy_prompt": "Question 10",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:00.632Z",
-      "updated_at": "2026-09-20T12:00:00.682Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:00.659Z",
+      "updated_at": "2026-09-20T12:00:00.712Z",
       "deleted_at": null
      },
      {
@@ -2073,7 +2073,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2088,8 +2088,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.676Z",
-      "updated_at": "2026-09-20T12:00:00.681Z",
+      "created_at": "2026-09-20T12:00:00.706Z",
+      "updated_at": "2026-09-20T12:00:00.711Z",
       "deleted_at": null
      },
      {
@@ -2139,8 +2139,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.693Z",
-      "updated_at": "2026-09-20T12:00:00.703Z",
+      "created_at": "2026-09-20T12:00:00.723Z",
+      "updated_at": "2026-09-20T12:00:00.733Z",
       "deleted_at": null
      },
      {
@@ -2204,9 +2204,9 @@
        "legacy_prompt": "Question 11",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:00.697Z",
-      "updated_at": "2026-09-20T12:00:00.747Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:00.727Z",
+      "updated_at": "2026-09-20T12:00:00.780Z",
       "deleted_at": null
      },
      {
@@ -2247,7 +2247,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2262,8 +2262,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.741Z",
-      "updated_at": "2026-09-20T12:00:00.746Z",
+      "created_at": "2026-09-20T12:00:00.774Z",
+      "updated_at": "2026-09-20T12:00:00.779Z",
       "deleted_at": null
      },
      {
@@ -2313,16 +2313,16 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:00.758Z",
-      "updated_at": "2026-09-20T12:00:00.768Z",
+      "created_at": "2026-09-20T12:00:00.791Z",
+      "updated_at": "2026-09-20T12:00:00.801Z",
       "deleted_at": null
      }
     ],
     "head_seq": 122,
-    "log_version": 551,
+    "log_version": 592,
     "has_more_before": true,
     "has_more_after": true,
-    "prev_entry_created_at": "2026-09-20T12:00:00.567Z",
+    "prev_entry_created_at": "2026-09-20T12:00:00.591Z",
     "before_visible_count": 26,
     "before_visible_count_capped": false
    }
@@ -2362,7 +2362,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.035Z",
+      "created_at": "2026-09-20T12:00:02.125Z",
       "body_md": "Question 31",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2407,7 +2407,7 @@
        "current_attempt_id": "tsk_eg8koluf1w1g",
        "legacy_prompt": "Question 31"
       },
-      "created_at": "2026-09-20T12:00:02.039Z",
+      "created_at": "2026-09-20T12:00:02.129Z",
       "body_md": "Answer 31",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2430,7 +2430,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2443,7 +2443,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.083Z",
+      "created_at": "2026-09-20T12:00:02.176Z",
       "body_md": "Answer 31",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2473,7 +2473,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.100Z",
+      "created_at": "2026-09-20T12:00:02.193Z",
       "body_md": "Question 32",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2528,7 +2528,7 @@
        "current_attempt_id": "tsk_dh309fgki2iv",
        "legacy_prompt": "Question 32"
       },
-      "created_at": "2026-09-20T12:00:02.104Z",
+      "created_at": "2026-09-20T12:00:02.197Z",
       "body_md": "Answer 32",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2551,7 +2551,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 50,
+       "elapsed_ms": 53,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2564,7 +2564,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.156Z",
+      "created_at": "2026-09-20T12:00:02.252Z",
       "body_md": "Answer 32",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2594,7 +2594,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.173Z",
+      "created_at": "2026-09-20T12:00:02.269Z",
       "body_md": "Question 33",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2639,7 +2639,7 @@
        "current_attempt_id": "tsk_1fpzy7lmhbvv",
        "legacy_prompt": "Question 33"
       },
-      "created_at": "2026-09-20T12:00:02.177Z",
+      "created_at": "2026-09-20T12:00:02.273Z",
       "body_md": "Answer 33",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2662,7 +2662,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2675,7 +2675,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.221Z",
+      "created_at": "2026-09-20T12:00:02.320Z",
       "body_md": "Answer 33",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2705,7 +2705,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.238Z",
+      "created_at": "2026-09-20T12:00:02.337Z",
       "body_md": "Question 34",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2750,7 +2750,7 @@
        "current_attempt_id": "tsk_s5az74nkgrte",
        "legacy_prompt": "Question 34"
       },
-      "created_at": "2026-09-20T12:00:02.242Z",
+      "created_at": "2026-09-20T12:00:02.341Z",
       "body_md": "Answer 34",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2773,7 +2773,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2786,7 +2786,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.286Z",
+      "created_at": "2026-09-20T12:00:02.388Z",
       "body_md": "Answer 34",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2816,7 +2816,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.303Z",
+      "created_at": "2026-09-20T12:00:02.405Z",
       "body_md": "Question 35",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2861,7 +2861,7 @@
        "current_attempt_id": "tsk_ymzvy27063um",
        "legacy_prompt": "Question 35"
       },
-      "created_at": "2026-09-20T12:00:02.307Z",
+      "created_at": "2026-09-20T12:00:02.409Z",
       "body_md": "Answer 35",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2884,7 +2884,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -2897,7 +2897,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.351Z",
+      "created_at": "2026-09-20T12:00:02.456Z",
       "body_md": "Answer 35",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2927,7 +2927,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.369Z",
+      "created_at": "2026-09-20T12:00:02.474Z",
       "body_md": "Question 36",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -2972,7 +2972,7 @@
        "current_attempt_id": "tsk_vm9tse2daxmc",
        "legacy_prompt": "Question 36"
       },
-      "created_at": "2026-09-20T12:00:02.373Z",
+      "created_at": "2026-09-20T12:00:02.478Z",
       "body_md": "Answer 36 after retry",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -3003,7 +3003,7 @@
         "priority": 4
        }
       },
-      "created_at": "2026-09-20T12:00:02.417Z",
+      "created_at": "2026-09-20T12:00:02.525Z",
       "body_md": "Answer 36 after retry",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -3033,7 +3033,7 @@
         "recipient_agent_id": "agt_wrf4zdgpg4e7"
        }
       },
-      "created_at": "2026-09-20T12:00:02.474Z",
+      "created_at": "2026-09-20T12:00:02.582Z",
       "body_md": "Question 37",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -3078,7 +3078,7 @@
        "current_attempt_id": "tsk_ynw5d40ii31d",
        "legacy_prompt": "Question 37"
       },
-      "created_at": "2026-09-20T12:00:02.478Z",
+      "created_at": "2026-09-20T12:00:02.586Z",
       "body_md": "Answer 37",
       "body_offset": 0,
       "body_omitted_chars": 0
@@ -3140,7 +3140,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3155,8 +3155,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.587Z",
-      "updated_at": "2026-09-20T12:00:02.592Z",
+      "created_at": "2026-09-20T12:00:02.701Z",
+      "updated_at": "2026-09-20T12:00:02.706Z",
       "deleted_at": null
      },
      {
@@ -3206,8 +3206,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.604Z",
-      "updated_at": "2026-09-20T12:00:02.614Z",
+      "created_at": "2026-09-20T12:00:02.718Z",
+      "updated_at": "2026-09-20T12:00:02.728Z",
       "deleted_at": null
      },
      {
@@ -3248,7 +3248,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3263,8 +3263,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.652Z",
-      "updated_at": "2026-09-20T12:00:02.657Z",
+      "created_at": "2026-09-20T12:00:02.769Z",
+      "updated_at": "2026-09-20T12:00:02.774Z",
       "deleted_at": null
      },
      {
@@ -3314,8 +3314,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.669Z",
-      "updated_at": "2026-09-20T12:00:02.679Z",
+      "created_at": "2026-09-20T12:00:02.786Z",
+      "updated_at": "2026-09-20T12:00:02.796Z",
       "deleted_at": null
      },
      {
@@ -3356,7 +3356,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 50,
+       "elapsed_ms": 53,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3371,8 +3371,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.725Z",
-      "updated_at": "2026-09-20T12:00:02.730Z",
+      "created_at": "2026-09-20T12:00:02.845Z",
+      "updated_at": "2026-09-20T12:00:02.850Z",
       "deleted_at": null
      },
      {
@@ -3422,16 +3422,16 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.892Z",
-      "updated_at": "2026-09-20T12:00:03.902Z",
+      "created_at": "2026-09-20T12:00:04.048Z",
+      "updated_at": "2026-09-20T12:00:04.058Z",
       "deleted_at": null
      }
     ],
     "head_seq": 122,
-    "log_version": 551,
+    "log_version": 592,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:02.539Z",
+    "prev_entry_created_at": "2026-09-20T12:00:02.650Z",
     "before_visible_count": 112,
     "before_visible_count_capped": false
    }
@@ -3476,8 +3476,8 @@
        "title": "Someone else's chat"
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:02.739Z",
-      "updated_at": "2026-09-20T12:00:02.739Z",
+      "created_at": "2026-09-20T12:00:02.859Z",
+      "updated_at": "2026-09-20T12:00:02.859Z",
       "deleted_at": null
      }
     ],
@@ -3492,7 +3492,7 @@
    "name": "chat-not-creator",
    "path": "/api/sessions/chat_zj4jmra0xjn7/log?before=30",
    "status": 200,
-   "bytes": 37303,
+   "bytes": 37310,
    "body": {
     "entries": [
      {
@@ -3556,9 +3556,9 @@
        "legacy_prompt": "Question 31",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.039Z",
-      "updated_at": "2026-09-20T12:00:02.089Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.129Z",
+      "updated_at": "2026-09-20T12:00:02.182Z",
       "deleted_at": null
      },
      {
@@ -3599,7 +3599,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3614,8 +3614,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.083Z",
-      "updated_at": "2026-09-20T12:00:02.088Z",
+      "created_at": "2026-09-20T12:00:02.176Z",
+      "updated_at": "2026-09-20T12:00:02.181Z",
       "deleted_at": null
      },
      {
@@ -3665,8 +3665,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.100Z",
-      "updated_at": "2026-09-20T12:00:02.110Z",
+      "created_at": "2026-09-20T12:00:02.193Z",
+      "updated_at": "2026-09-20T12:00:02.203Z",
       "deleted_at": null
      },
      {
@@ -3740,9 +3740,9 @@
        "legacy_prompt": "Question 32",
        "attachments": []
       },
-      "revision": 11,
-      "created_at": "2026-09-20T12:00:02.104Z",
-      "updated_at": "2026-09-20T12:00:02.162Z",
+      "revision": 12,
+      "created_at": "2026-09-20T12:00:02.197Z",
+      "updated_at": "2026-09-20T12:00:02.258Z",
       "deleted_at": null
      },
      {
@@ -3783,7 +3783,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 50,
+       "elapsed_ms": 53,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3798,8 +3798,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.156Z",
-      "updated_at": "2026-09-20T12:00:02.161Z",
+      "created_at": "2026-09-20T12:00:02.252Z",
+      "updated_at": "2026-09-20T12:00:02.257Z",
       "deleted_at": null
      },
      {
@@ -3849,8 +3849,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.173Z",
-      "updated_at": "2026-09-20T12:00:02.183Z",
+      "created_at": "2026-09-20T12:00:02.269Z",
+      "updated_at": "2026-09-20T12:00:02.279Z",
       "deleted_at": null
      },
      {
@@ -3914,9 +3914,9 @@
        "legacy_prompt": "Question 33",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.177Z",
-      "updated_at": "2026-09-20T12:00:02.227Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.273Z",
+      "updated_at": "2026-09-20T12:00:02.326Z",
       "deleted_at": null
      },
      {
@@ -3957,7 +3957,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -3972,8 +3972,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.221Z",
-      "updated_at": "2026-09-20T12:00:02.226Z",
+      "created_at": "2026-09-20T12:00:02.320Z",
+      "updated_at": "2026-09-20T12:00:02.325Z",
       "deleted_at": null
      },
      {
@@ -4023,8 +4023,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.238Z",
-      "updated_at": "2026-09-20T12:00:02.248Z",
+      "created_at": "2026-09-20T12:00:02.337Z",
+      "updated_at": "2026-09-20T12:00:02.347Z",
       "deleted_at": null
      },
      {
@@ -4088,9 +4088,9 @@
        "legacy_prompt": "Question 34",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.242Z",
-      "updated_at": "2026-09-20T12:00:02.292Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.341Z",
+      "updated_at": "2026-09-20T12:00:02.394Z",
       "deleted_at": null
      },
      {
@@ -4131,7 +4131,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -4146,8 +4146,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.286Z",
-      "updated_at": "2026-09-20T12:00:02.291Z",
+      "created_at": "2026-09-20T12:00:02.388Z",
+      "updated_at": "2026-09-20T12:00:02.393Z",
       "deleted_at": null
      },
      {
@@ -4197,8 +4197,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.303Z",
-      "updated_at": "2026-09-20T12:00:02.313Z",
+      "created_at": "2026-09-20T12:00:02.405Z",
+      "updated_at": "2026-09-20T12:00:02.415Z",
       "deleted_at": null
      },
      {
@@ -4262,9 +4262,9 @@
        "legacy_prompt": "Question 35",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.307Z",
-      "updated_at": "2026-09-20T12:00:02.357Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.409Z",
+      "updated_at": "2026-09-20T12:00:02.462Z",
       "deleted_at": null
      },
      {
@@ -4305,7 +4305,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -4320,8 +4320,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.351Z",
-      "updated_at": "2026-09-20T12:00:02.356Z",
+      "created_at": "2026-09-20T12:00:02.456Z",
+      "updated_at": "2026-09-20T12:00:02.461Z",
       "deleted_at": null
      },
      {
@@ -4393,14 +4393,14 @@
          "contentType": "text/plain",
          "size_bytes": 36,
          "sizeBytes": 36,
-         "created_at": "2026-09-20T12:00:02.365Z",
-         "createdAt": "2026-09-20T12:00:02.365Z"
+         "created_at": "2026-09-20T12:00:02.470Z",
+         "createdAt": "2026-09-20T12:00:02.470Z"
         }
        ]
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.369Z",
-      "updated_at": "2026-09-20T12:00:02.379Z",
+      "created_at": "2026-09-20T12:00:02.474Z",
+      "updated_at": "2026-09-20T12:00:02.484Z",
       "deleted_at": null
      },
      {
@@ -4464,9 +4464,9 @@
        "legacy_prompt": "Question 36",
        "attachments": []
       },
-      "revision": 14,
-      "created_at": "2026-09-20T12:00:02.373Z",
-      "updated_at": "2026-09-20T12:00:02.463Z",
+      "revision": 15,
+      "created_at": "2026-09-20T12:00:02.478Z",
+      "updated_at": "2026-09-20T12:00:02.571Z",
       "deleted_at": null
      },
      {
@@ -4517,8 +4517,8 @@
        "attachments": []
       },
       "revision": 3,
-      "created_at": "2026-09-20T12:00:02.417Z",
-      "updated_at": "2026-09-20T12:00:02.462Z",
+      "created_at": "2026-09-20T12:00:02.525Z",
+      "updated_at": "2026-09-20T12:00:02.570Z",
       "deleted_at": null
      },
      {
@@ -4568,8 +4568,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.474Z",
-      "updated_at": "2026-09-20T12:00:02.484Z",
+      "created_at": "2026-09-20T12:00:02.582Z",
+      "updated_at": "2026-09-20T12:00:02.592Z",
       "deleted_at": null
      },
      {
@@ -4633,9 +4633,9 @@
        "legacy_prompt": "Question 37",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.478Z",
-      "updated_at": "2026-09-20T12:00:02.528Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.586Z",
+      "updated_at": "2026-09-20T12:00:02.639Z",
       "deleted_at": null
      },
      {
@@ -4676,7 +4676,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -4691,8 +4691,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.522Z",
-      "updated_at": "2026-09-20T12:00:02.527Z",
+      "created_at": "2026-09-20T12:00:02.633Z",
+      "updated_at": "2026-09-20T12:00:02.638Z",
       "deleted_at": null
      },
      {
@@ -4742,8 +4742,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.539Z",
-      "updated_at": "2026-09-20T12:00:02.549Z",
+      "created_at": "2026-09-20T12:00:02.650Z",
+      "updated_at": "2026-09-20T12:00:02.660Z",
       "deleted_at": null
      },
      {
@@ -4807,9 +4807,9 @@
        "legacy_prompt": "Question 38",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.543Z",
-      "updated_at": "2026-09-20T12:00:02.593Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.654Z",
+      "updated_at": "2026-09-20T12:00:02.707Z",
       "deleted_at": null
      },
      {
@@ -4850,7 +4850,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -4865,8 +4865,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.587Z",
-      "updated_at": "2026-09-20T12:00:02.592Z",
+      "created_at": "2026-09-20T12:00:02.701Z",
+      "updated_at": "2026-09-20T12:00:02.706Z",
       "deleted_at": null
      },
      {
@@ -4916,8 +4916,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.604Z",
-      "updated_at": "2026-09-20T12:00:02.614Z",
+      "created_at": "2026-09-20T12:00:02.718Z",
+      "updated_at": "2026-09-20T12:00:02.728Z",
       "deleted_at": null
      },
      {
@@ -4981,9 +4981,9 @@
        "legacy_prompt": "Question 39",
        "attachments": []
       },
-      "revision": 9,
-      "created_at": "2026-09-20T12:00:02.608Z",
-      "updated_at": "2026-09-20T12:00:02.658Z",
+      "revision": 10,
+      "created_at": "2026-09-20T12:00:02.722Z",
+      "updated_at": "2026-09-20T12:00:02.775Z",
       "deleted_at": null
      },
      {
@@ -5024,7 +5024,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -5039,8 +5039,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.652Z",
-      "updated_at": "2026-09-20T12:00:02.657Z",
+      "created_at": "2026-09-20T12:00:02.769Z",
+      "updated_at": "2026-09-20T12:00:02.774Z",
       "deleted_at": null
      },
      {
@@ -5090,8 +5090,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.669Z",
-      "updated_at": "2026-09-20T12:00:02.679Z",
+      "created_at": "2026-09-20T12:00:02.786Z",
+      "updated_at": "2026-09-20T12:00:02.796Z",
       "deleted_at": null
      },
      {
@@ -5165,9 +5165,9 @@
        "legacy_prompt": "Question 40",
        "attachments": []
       },
-      "revision": 11,
-      "created_at": "2026-09-20T12:00:02.673Z",
-      "updated_at": "2026-09-20T12:00:02.731Z",
+      "revision": 12,
+      "created_at": "2026-09-20T12:00:02.790Z",
+      "updated_at": "2026-09-20T12:00:02.851Z",
       "deleted_at": null
      },
      {
@@ -5208,7 +5208,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 50,
+       "elapsed_ms": 53,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -5223,8 +5223,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.725Z",
-      "updated_at": "2026-09-20T12:00:02.730Z",
+      "created_at": "2026-09-20T12:00:02.845Z",
+      "updated_at": "2026-09-20T12:00:02.850Z",
       "deleted_at": null
      },
      {
@@ -5274,16 +5274,16 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.892Z",
-      "updated_at": "2026-09-20T12:00:03.902Z",
+      "created_at": "2026-09-20T12:00:04.048Z",
+      "updated_at": "2026-09-20T12:00:04.058Z",
       "deleted_at": null
      }
     ],
     "head_seq": 122,
-    "log_version": 551,
+    "log_version": 592,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:02.035Z",
+    "prev_entry_created_at": "2026-09-20T12:00:02.125Z",
     "before_visible_count": 91,
     "before_visible_count_capped": false
    }
@@ -5364,9 +5364,9 @@
        "current_attempt_id": "tsk_eu103h28gdfc",
        "legacy_prompt": "Round 5 request"
       },
-      "revision": 12,
-      "created_at": "2026-09-20T12:00:03.137Z",
-      "updated_at": "2026-09-20T12:00:03.213Z",
+      "revision": 13,
+      "created_at": "2026-09-20T12:00:03.269Z",
+      "updated_at": "2026-09-20T12:00:03.348Z",
       "deleted_at": null
      },
      {
@@ -5411,8 +5411,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.197Z",
-      "updated_at": "2026-09-20T12:00:03.206Z",
+      "created_at": "2026-09-20T12:00:03.332Z",
+      "updated_at": "2026-09-20T12:00:03.341Z",
       "deleted_at": null
      },
      {
@@ -5454,14 +5454,14 @@
          "actor_type": "member",
          "actor_id": "mem_local_local",
          "emoji": "+1",
-         "created_at": "2026-09-20T12:00:03.231Z"
+         "created_at": "2026-09-20T12:00:03.366Z"
         }
        ],
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.227Z",
-      "updated_at": "2026-09-20T12:00:03.227Z",
+      "created_at": "2026-09-20T12:00:03.362Z",
+      "updated_at": "2026-09-20T12:00:03.362Z",
       "deleted_at": null
      },
      {
@@ -5512,8 +5512,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.234Z",
-      "updated_at": "2026-09-20T12:00:03.248Z",
+      "created_at": "2026-09-20T12:00:03.369Z",
+      "updated_at": "2026-09-20T12:00:03.383Z",
       "deleted_at": null
      },
      {
@@ -5575,9 +5575,9 @@
        "current_attempt_id": "tsk_nuvuxi2tf1nb",
        "legacy_prompt": "Round 6 request"
       },
-      "revision": 10,
-      "created_at": "2026-09-20T12:00:03.239Z",
-      "updated_at": "2026-09-20T12:00:03.307Z",
+      "revision": 11,
+      "created_at": "2026-09-20T12:00:03.374Z",
+      "updated_at": "2026-09-20T12:00:03.445Z",
       "deleted_at": null
      },
      {
@@ -5622,8 +5622,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.291Z",
-      "updated_at": "2026-09-20T12:00:03.300Z",
+      "created_at": "2026-09-20T12:00:03.429Z",
+      "updated_at": "2026-09-20T12:00:03.438Z",
       "deleted_at": null
      },
      {
@@ -5662,8 +5662,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.323Z",
-      "updated_at": "2026-09-20T12:00:03.323Z",
+      "created_at": "2026-09-20T12:00:03.461Z",
+      "updated_at": "2026-09-20T12:00:03.461Z",
       "deleted_at": null
      },
      {
@@ -5714,8 +5714,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.329Z",
-      "updated_at": "2026-09-20T12:00:03.343Z",
+      "created_at": "2026-09-20T12:00:03.467Z",
+      "updated_at": "2026-09-20T12:00:03.481Z",
       "deleted_at": null
      },
      {
@@ -5777,9 +5777,9 @@
        "current_attempt_id": "tsk_ncsj856q6hc5",
        "legacy_prompt": "Round 7 request"
       },
-      "revision": 10,
-      "created_at": "2026-09-20T12:00:03.334Z",
-      "updated_at": "2026-09-20T12:00:03.402Z",
+      "revision": 11,
+      "created_at": "2026-09-20T12:00:03.472Z",
+      "updated_at": "2026-09-20T12:00:03.543Z",
       "deleted_at": null
      },
      {
@@ -5824,8 +5824,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.386Z",
-      "updated_at": "2026-09-20T12:00:03.395Z",
+      "created_at": "2026-09-20T12:00:03.527Z",
+      "updated_at": "2026-09-20T12:00:03.536Z",
       "deleted_at": null
      },
      {
@@ -5886,14 +5886,14 @@
          "contentType": "text/plain",
          "size_bytes": 8,
          "sizeBytes": 8,
-         "created_at": "2026-09-20T12:00:03.420Z",
-         "createdAt": "2026-09-20T12:00:03.420Z"
+         "created_at": "2026-09-20T12:00:03.561Z",
+         "createdAt": "2026-09-20T12:00:03.561Z"
         }
        ]
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.416Z",
-      "updated_at": "2026-09-20T12:00:03.416Z",
+      "created_at": "2026-09-20T12:00:03.557Z",
+      "updated_at": "2026-09-20T12:00:03.557Z",
       "deleted_at": null
      },
      {
@@ -5944,8 +5944,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.423Z",
-      "updated_at": "2026-09-20T12:00:03.437Z",
+      "created_at": "2026-09-20T12:00:03.564Z",
+      "updated_at": "2026-09-20T12:00:03.578Z",
       "deleted_at": null
      },
      {
@@ -6007,9 +6007,9 @@
        "current_attempt_id": "tsk_9hnh8w5b9bsl",
        "legacy_prompt": "Round 8 request"
       },
-      "revision": 10,
-      "created_at": "2026-09-20T12:00:03.428Z",
-      "updated_at": "2026-09-20T12:00:03.496Z",
+      "revision": 11,
+      "created_at": "2026-09-20T12:00:03.569Z",
+      "updated_at": "2026-09-20T12:00:03.640Z",
       "deleted_at": null
      },
      {
@@ -6054,8 +6054,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.480Z",
-      "updated_at": "2026-09-20T12:00:03.489Z",
+      "created_at": "2026-09-20T12:00:03.624Z",
+      "updated_at": "2026-09-20T12:00:03.633Z",
       "deleted_at": null
      },
      {
@@ -6097,14 +6097,14 @@
          "actor_type": "member",
          "actor_id": "mem_local_local",
          "emoji": "+1",
-         "created_at": "2026-09-20T12:00:03.514Z"
+         "created_at": "2026-09-20T12:00:03.658Z"
         }
        ],
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.510Z",
-      "updated_at": "2026-09-20T12:00:03.510Z",
+      "created_at": "2026-09-20T12:00:03.654Z",
+      "updated_at": "2026-09-20T12:00:03.654Z",
       "deleted_at": null
      },
      {
@@ -6155,8 +6155,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.517Z",
-      "updated_at": "2026-09-20T12:00:03.531Z",
+      "created_at": "2026-09-20T12:00:03.661Z",
+      "updated_at": "2026-09-20T12:00:03.675Z",
       "deleted_at": null
      },
      {
@@ -6218,9 +6218,9 @@
        "current_attempt_id": "tsk_jjdh9lxrvo0u",
        "legacy_prompt": "Round 9 request"
       },
-      "revision": 10,
-      "created_at": "2026-09-20T12:00:03.522Z",
-      "updated_at": "2026-09-20T12:00:03.590Z",
+      "revision": 11,
+      "created_at": "2026-09-20T12:00:03.666Z",
+      "updated_at": "2026-09-20T12:00:03.737Z",
       "deleted_at": null
      },
      {
@@ -6265,8 +6265,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.574Z",
-      "updated_at": "2026-09-20T12:00:03.583Z",
+      "created_at": "2026-09-20T12:00:03.721Z",
+      "updated_at": "2026-09-20T12:00:03.730Z",
       "deleted_at": null
      },
      {
@@ -6305,8 +6305,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.604Z",
-      "updated_at": "2026-09-20T12:00:03.604Z",
+      "created_at": "2026-09-20T12:00:03.751Z",
+      "updated_at": "2026-09-20T12:00:03.751Z",
       "deleted_at": null
      },
      {
@@ -6357,8 +6357,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.610Z",
-      "updated_at": "2026-09-20T12:00:03.624Z",
+      "created_at": "2026-09-20T12:00:03.757Z",
+      "updated_at": "2026-09-20T12:00:03.771Z",
       "deleted_at": null
      },
      {
@@ -6430,9 +6430,9 @@
        "current_attempt_id": "tsk_508bhur7mr4z",
        "legacy_prompt": "Round 10 request"
       },
-      "revision": 12,
-      "created_at": "2026-09-20T12:00:03.615Z",
-      "updated_at": "2026-09-20T12:00:03.691Z",
+      "revision": 13,
+      "created_at": "2026-09-20T12:00:03.762Z",
+      "updated_at": "2026-09-20T12:00:03.841Z",
       "deleted_at": null
      },
      {
@@ -6477,8 +6477,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.675Z",
-      "updated_at": "2026-09-20T12:00:03.684Z",
+      "created_at": "2026-09-20T12:00:03.825Z",
+      "updated_at": "2026-09-20T12:00:03.834Z",
       "deleted_at": null
      },
      {
@@ -6517,8 +6517,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.705Z",
-      "updated_at": "2026-09-20T12:00:03.705Z",
+      "created_at": "2026-09-20T12:00:03.855Z",
+      "updated_at": "2026-09-20T12:00:03.855Z",
       "deleted_at": null
      },
      {
@@ -6569,8 +6569,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.711Z",
-      "updated_at": "2026-09-20T12:00:03.725Z",
+      "created_at": "2026-09-20T12:00:03.861Z",
+      "updated_at": "2026-09-20T12:00:03.875Z",
       "deleted_at": null
      },
      {
@@ -6632,9 +6632,9 @@
        "current_attempt_id": "tsk_geu8tl0ni76w",
        "legacy_prompt": "Round 11 request"
       },
-      "revision": 10,
-      "created_at": "2026-09-20T12:00:03.716Z",
-      "updated_at": "2026-09-20T12:00:03.784Z",
+      "revision": 11,
+      "created_at": "2026-09-20T12:00:03.866Z",
+      "updated_at": "2026-09-20T12:00:03.937Z",
       "deleted_at": null
      },
      {
@@ -6679,8 +6679,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.768Z",
-      "updated_at": "2026-09-20T12:00:03.777Z",
+      "created_at": "2026-09-20T12:00:03.921Z",
+      "updated_at": "2026-09-20T12:00:03.930Z",
       "deleted_at": null
      },
      {
@@ -6722,7 +6722,7 @@
          "actor_type": "member",
          "actor_id": "mem_local_local",
          "emoji": "+1",
-         "created_at": "2026-09-20T12:00:03.802Z"
+         "created_at": "2026-09-20T12:00:03.955Z"
         }
        ],
        "attachments": [
@@ -6750,14 +6750,14 @@
          "contentType": "text/plain",
          "size_bytes": 12,
          "sizeBytes": 12,
-         "created_at": "2026-09-20T12:00:03.803Z",
-         "createdAt": "2026-09-20T12:00:03.803Z"
+         "created_at": "2026-09-20T12:00:03.956Z",
+         "createdAt": "2026-09-20T12:00:03.956Z"
         }
        ]
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.798Z",
-      "updated_at": "2026-09-20T12:00:03.798Z",
+      "created_at": "2026-09-20T12:00:03.951Z",
+      "updated_at": "2026-09-20T12:00:03.951Z",
       "deleted_at": null
      },
      {
@@ -6808,8 +6808,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.806Z",
-      "updated_at": "2026-09-20T12:00:03.820Z",
+      "created_at": "2026-09-20T12:00:03.959Z",
+      "updated_at": "2026-09-20T12:00:03.973Z",
       "deleted_at": null
      },
      {
@@ -6871,9 +6871,9 @@
        "current_attempt_id": "tsk_je79pqzbldz3",
        "legacy_prompt": "Round 12 request"
       },
-      "revision": 10,
-      "created_at": "2026-09-20T12:00:03.811Z",
-      "updated_at": "2026-09-20T12:00:03.879Z",
+      "revision": 11,
+      "created_at": "2026-09-20T12:00:03.964Z",
+      "updated_at": "2026-09-20T12:00:04.035Z",
       "deleted_at": null
      },
      {
@@ -6918,16 +6918,16 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.863Z",
-      "updated_at": "2026-09-20T12:00:03.872Z",
+      "created_at": "2026-09-20T12:00:04.019Z",
+      "updated_at": "2026-09-20T12:00:04.028Z",
       "deleted_at": null
      }
     ],
     "head_seq": 60,
-    "log_version": 196,
+    "log_version": 208,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:03.132Z",
+    "prev_entry_created_at": "2026-09-20T12:00:03.264Z",
     "before_visible_count": 18,
     "before_visible_count_capped": false,
     "activities": [
@@ -6936,7 +6936,7 @@
       "id": "act_9lalhizagnpy",
       "actor_type": "system",
       "actor_id": null,
-      "created_at": "2026-09-20T12:00:03.318Z",
+      "created_at": "2026-09-20T12:00:03.456Z",
       "action": "issue_updated",
       "details": {
        "status": "in_progress",
@@ -6992,8 +6992,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.705Z",
-      "updated_at": "2026-09-20T12:00:03.705Z",
+      "created_at": "2026-09-20T12:00:03.855Z",
+      "updated_at": "2026-09-20T12:00:03.855Z",
       "deleted_at": null
      },
      {
@@ -7044,8 +7044,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.711Z",
-      "updated_at": "2026-09-20T12:00:03.725Z",
+      "created_at": "2026-09-20T12:00:03.861Z",
+      "updated_at": "2026-09-20T12:00:03.875Z",
       "deleted_at": null
      },
      {
@@ -7107,9 +7107,9 @@
        "current_attempt_id": "tsk_geu8tl0ni76w",
        "legacy_prompt": "Round 11 request"
       },
-      "revision": 10,
-      "created_at": "2026-09-20T12:00:03.716Z",
-      "updated_at": "2026-09-20T12:00:03.784Z",
+      "revision": 11,
+      "created_at": "2026-09-20T12:00:03.866Z",
+      "updated_at": "2026-09-20T12:00:03.937Z",
       "deleted_at": null
      },
      {
@@ -7154,8 +7154,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.768Z",
-      "updated_at": "2026-09-20T12:00:03.777Z",
+      "created_at": "2026-09-20T12:00:03.921Z",
+      "updated_at": "2026-09-20T12:00:03.930Z",
       "deleted_at": null
      },
      {
@@ -7197,7 +7197,7 @@
          "actor_type": "member",
          "actor_id": "mem_local_local",
          "emoji": "+1",
-         "created_at": "2026-09-20T12:00:03.802Z"
+         "created_at": "2026-09-20T12:00:03.955Z"
         }
        ],
        "attachments": [
@@ -7225,14 +7225,14 @@
          "contentType": "text/plain",
          "size_bytes": 12,
          "sizeBytes": 12,
-         "created_at": "2026-09-20T12:00:03.803Z",
-         "createdAt": "2026-09-20T12:00:03.803Z"
+         "created_at": "2026-09-20T12:00:03.956Z",
+         "createdAt": "2026-09-20T12:00:03.956Z"
         }
        ]
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.798Z",
-      "updated_at": "2026-09-20T12:00:03.798Z",
+      "created_at": "2026-09-20T12:00:03.951Z",
+      "updated_at": "2026-09-20T12:00:03.951Z",
       "deleted_at": null
      },
      {
@@ -7283,8 +7283,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.806Z",
-      "updated_at": "2026-09-20T12:00:03.820Z",
+      "created_at": "2026-09-20T12:00:03.959Z",
+      "updated_at": "2026-09-20T12:00:03.973Z",
       "deleted_at": null
      },
      {
@@ -7346,9 +7346,9 @@
        "current_attempt_id": "tsk_je79pqzbldz3",
        "legacy_prompt": "Round 12 request"
       },
-      "revision": 10,
-      "created_at": "2026-09-20T12:00:03.811Z",
-      "updated_at": "2026-09-20T12:00:03.879Z",
+      "revision": 11,
+      "created_at": "2026-09-20T12:00:03.964Z",
+      "updated_at": "2026-09-20T12:00:04.035Z",
       "deleted_at": null
      },
      {
@@ -7393,16 +7393,16 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.863Z",
-      "updated_at": "2026-09-20T12:00:03.872Z",
+      "created_at": "2026-09-20T12:00:04.019Z",
+      "updated_at": "2026-09-20T12:00:04.028Z",
       "deleted_at": null
      }
     ],
     "head_seq": 60,
-    "log_version": 196,
+    "log_version": 208,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:03.675Z",
+    "prev_entry_created_at": "2026-09-20T12:00:03.825Z",
     "before_visible_count": 40,
     "before_visible_count_capped": false
    }
@@ -7450,8 +7450,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.604Z",
-      "updated_at": "2026-09-20T12:00:03.604Z",
+      "created_at": "2026-09-20T12:00:03.751Z",
+      "updated_at": "2026-09-20T12:00:03.751Z",
       "deleted_at": null
      },
      {
@@ -7502,8 +7502,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.610Z",
-      "updated_at": "2026-09-20T12:00:03.624Z",
+      "created_at": "2026-09-20T12:00:03.757Z",
+      "updated_at": "2026-09-20T12:00:03.771Z",
       "deleted_at": null
      },
      {
@@ -7575,9 +7575,9 @@
        "current_attempt_id": "tsk_508bhur7mr4z",
        "legacy_prompt": "Round 10 request"
       },
-      "revision": 12,
-      "created_at": "2026-09-20T12:00:03.615Z",
-      "updated_at": "2026-09-20T12:00:03.691Z",
+      "revision": 13,
+      "created_at": "2026-09-20T12:00:03.762Z",
+      "updated_at": "2026-09-20T12:00:03.841Z",
       "deleted_at": null
      },
      {
@@ -7622,8 +7622,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.675Z",
-      "updated_at": "2026-09-20T12:00:03.684Z",
+      "created_at": "2026-09-20T12:00:03.825Z",
+      "updated_at": "2026-09-20T12:00:03.834Z",
       "deleted_at": null
      },
      {
@@ -7662,8 +7662,8 @@
        "attachments": []
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.705Z",
-      "updated_at": "2026-09-20T12:00:03.705Z",
+      "created_at": "2026-09-20T12:00:03.855Z",
+      "updated_at": "2026-09-20T12:00:03.855Z",
       "deleted_at": null
      },
      {
@@ -7714,8 +7714,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.711Z",
-      "updated_at": "2026-09-20T12:00:03.725Z",
+      "created_at": "2026-09-20T12:00:03.861Z",
+      "updated_at": "2026-09-20T12:00:03.875Z",
       "deleted_at": null
      },
      {
@@ -7777,9 +7777,9 @@
        "current_attempt_id": "tsk_geu8tl0ni76w",
        "legacy_prompt": "Round 11 request"
       },
-      "revision": 10,
-      "created_at": "2026-09-20T12:00:03.716Z",
-      "updated_at": "2026-09-20T12:00:03.784Z",
+      "revision": 11,
+      "created_at": "2026-09-20T12:00:03.866Z",
+      "updated_at": "2026-09-20T12:00:03.937Z",
       "deleted_at": null
      },
      {
@@ -7824,8 +7824,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.768Z",
-      "updated_at": "2026-09-20T12:00:03.777Z",
+      "created_at": "2026-09-20T12:00:03.921Z",
+      "updated_at": "2026-09-20T12:00:03.930Z",
       "deleted_at": null
      },
      {
@@ -7867,7 +7867,7 @@
          "actor_type": "member",
          "actor_id": "mem_local_local",
          "emoji": "+1",
-         "created_at": "2026-09-20T12:00:03.802Z"
+         "created_at": "2026-09-20T12:00:03.955Z"
         }
        ],
        "attachments": [
@@ -7895,14 +7895,14 @@
          "contentType": "text/plain",
          "size_bytes": 12,
          "sizeBytes": 12,
-         "created_at": "2026-09-20T12:00:03.803Z",
-         "createdAt": "2026-09-20T12:00:03.803Z"
+         "created_at": "2026-09-20T12:00:03.956Z",
+         "createdAt": "2026-09-20T12:00:03.956Z"
         }
        ]
       },
       "revision": 1,
-      "created_at": "2026-09-20T12:00:03.798Z",
-      "updated_at": "2026-09-20T12:00:03.798Z",
+      "created_at": "2026-09-20T12:00:03.951Z",
+      "updated_at": "2026-09-20T12:00:03.951Z",
       "deleted_at": null
      },
      {
@@ -7953,8 +7953,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.806Z",
-      "updated_at": "2026-09-20T12:00:03.820Z",
+      "created_at": "2026-09-20T12:00:03.959Z",
+      "updated_at": "2026-09-20T12:00:03.973Z",
       "deleted_at": null
      },
      {
@@ -8016,9 +8016,9 @@
        "current_attempt_id": "tsk_je79pqzbldz3",
        "legacy_prompt": "Round 12 request"
       },
-      "revision": 10,
-      "created_at": "2026-09-20T12:00:03.811Z",
-      "updated_at": "2026-09-20T12:00:03.879Z",
+      "revision": 11,
+      "created_at": "2026-09-20T12:00:03.964Z",
+      "updated_at": "2026-09-20T12:00:04.035Z",
       "deleted_at": null
      },
      {
@@ -8063,16 +8063,16 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.863Z",
-      "updated_at": "2026-09-20T12:00:03.872Z",
+      "created_at": "2026-09-20T12:00:04.019Z",
+      "updated_at": "2026-09-20T12:00:04.028Z",
       "deleted_at": null
      }
     ],
     "head_seq": 60,
-    "log_version": 196,
+    "log_version": 208,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:03.574Z",
+    "prev_entry_created_at": "2026-09-20T12:00:03.721Z",
     "before_visible_count": 36,
     "before_visible_count_capped": false,
     "activities": [],
@@ -8124,7 +8124,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -8139,8 +8139,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.652Z",
-      "updated_at": "2026-09-20T12:00:02.657Z",
+      "created_at": "2026-09-20T12:00:02.769Z",
+      "updated_at": "2026-09-20T12:00:02.774Z",
       "deleted_at": null
      },
      {
@@ -8190,8 +8190,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.669Z",
-      "updated_at": "2026-09-20T12:00:02.679Z",
+      "created_at": "2026-09-20T12:00:02.786Z",
+      "updated_at": "2026-09-20T12:00:02.796Z",
       "deleted_at": null
      },
      {
@@ -8232,7 +8232,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 50,
+       "elapsed_ms": 53,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -8247,8 +8247,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.725Z",
-      "updated_at": "2026-09-20T12:00:02.730Z",
+      "created_at": "2026-09-20T12:00:02.845Z",
+      "updated_at": "2026-09-20T12:00:02.850Z",
       "deleted_at": null
      },
      {
@@ -8298,8 +8298,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.892Z",
-      "updated_at": "2026-09-20T12:00:03.902Z",
+      "created_at": "2026-09-20T12:00:04.048Z",
+      "updated_at": "2026-09-20T12:00:04.058Z",
       "deleted_at": null
      },
      {
@@ -8359,17 +8359,17 @@
        "legacy_prompt": "Still running",
        "attachments": []
       },
-      "revision": 6,
-      "created_at": "2026-09-20T12:00:03.896Z",
-      "updated_at": "2026-09-20T12:00:03.928Z",
+      "revision": 7,
+      "created_at": "2026-09-20T12:00:04.052Z",
+      "updated_at": "2026-09-20T12:00:04.087Z",
       "deleted_at": null
      }
     ],
     "head_seq": 122,
-    "log_version": 551,
+    "log_version": 592,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:02.608Z",
+    "prev_entry_created_at": "2026-09-20T12:00:02.722Z",
     "before_visible_count": 116,
     "before_visible_count_capped": false
    }
@@ -8419,7 +8419,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 42,
+       "elapsed_ms": 45,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -8434,8 +8434,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.652Z",
-      "updated_at": "2026-09-20T12:00:02.657Z",
+      "created_at": "2026-09-20T12:00:02.769Z",
+      "updated_at": "2026-09-20T12:00:02.774Z",
       "deleted_at": null
      },
      {
@@ -8485,8 +8485,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.669Z",
-      "updated_at": "2026-09-20T12:00:02.679Z",
+      "created_at": "2026-09-20T12:00:02.786Z",
+      "updated_at": "2026-09-20T12:00:02.796Z",
       "deleted_at": null
      },
      {
@@ -8560,9 +8560,9 @@
        "legacy_prompt": "Question 40",
        "attachments": []
       },
-      "revision": 11,
-      "created_at": "2026-09-20T12:00:02.673Z",
-      "updated_at": "2026-09-20T12:00:02.731Z",
+      "revision": 12,
+      "created_at": "2026-09-20T12:00:02.790Z",
+      "updated_at": "2026-09-20T12:00:02.851Z",
       "deleted_at": null
      },
      {
@@ -8603,7 +8603,7 @@
        "pending_completion": false,
        "execution_scope": "",
        "failure_reason": null,
-       "elapsed_ms": 50,
+       "elapsed_ms": 53,
        "pending_agent_delivery": false,
        "agent_delivery_task_id": null,
        "envelope": {
@@ -8618,8 +8618,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:02.725Z",
-      "updated_at": "2026-09-20T12:00:02.730Z",
+      "created_at": "2026-09-20T12:00:02.845Z",
+      "updated_at": "2026-09-20T12:00:02.850Z",
       "deleted_at": null
      },
      {
@@ -8669,8 +8669,8 @@
        "attachments": []
       },
       "revision": 2,
-      "created_at": "2026-09-20T12:00:03.892Z",
-      "updated_at": "2026-09-20T12:00:03.902Z",
+      "created_at": "2026-09-20T12:00:04.048Z",
+      "updated_at": "2026-09-20T12:00:04.058Z",
       "deleted_at": null
      },
      {
@@ -8730,17 +8730,17 @@
        "legacy_prompt": "Still running",
        "attachments": []
       },
-      "revision": 6,
-      "created_at": "2026-09-20T12:00:03.896Z",
-      "updated_at": "2026-09-20T12:00:03.928Z",
+      "revision": 7,
+      "created_at": "2026-09-20T12:00:04.052Z",
+      "updated_at": "2026-09-20T12:00:04.087Z",
       "deleted_at": null
      }
     ],
     "head_seq": 122,
-    "log_version": 551,
+    "log_version": 592,
     "has_more_before": true,
     "has_more_after": false,
-    "prev_entry_created_at": "2026-09-20T12:00:02.608Z",
+    "prev_entry_created_at": "2026-09-20T12:00:02.722Z",
     "before_visible_count": 116,
     "before_visible_count_capped": false
    }

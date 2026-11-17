@@ -1,5 +1,5 @@
-import { acknowledgeAttemptInput } from '../inbox/attempt-input.js';
-import { assertOfferedInputRead, lockLane,reRingAfterTurnEnd,sweepIdleLanes,acknowledgeInput } from "../inbox/lane-machine.js";
+import { attemptInputState, acknowledgeAttemptInput } from '../inbox/attempt-input.js';
+import { InputUnreadError, assertOfferedInputRead, lockLane,reRingAfterTurnEnd,sweepIdleLanes,acknowledgeInput } from "../inbox/lane-machine.js";
 import { countMessageDelegationPairHops, sendMessageWithinTransaction } from "../inbox/send-message.js";
 import { patchDecisionRecord } from "../inbox/decision-records.js";
 import { Questions } from '../inbox/questions.js';
@@ -5280,6 +5280,7 @@ ${placementAfter.sql}
     sessionId?: string | null;
     workDir?: string | null;
     turnInputToSeq?:number;
+    allowUnreadInput?:boolean;
     replyKind?:'reply'|'final';
     expectedRuntimeId?:string;
     expectedDaemonId?:string;
@@ -5290,7 +5291,9 @@ ${placementAfter.sql}
     let deferredEvents = createCommitEventQueue();
     const ownsTransaction = !this.ctx.db.inTransaction;
     let skipAutoReply = false;
+    let unreadInput: { read_to_seq: number; required_to_seq: number } | undefined;
     const completeWithinTransaction = () => {
+      unreadInput = undefined;
       if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
       const current = daemonAuthority ? this.lockTaskDaemonReport(taskId, daemonAuthority) : this.getTask(taskId);
       if (current && daemonAuthority) {
@@ -5325,9 +5328,18 @@ ${placementAfter.sql}
             AND wake_applied='now' AND seq>? AND seq<=? AND ${scopeSql}=? LIMIT 1`)
             .get(turn.session_id,turn.agent_id,input.turnInputToSeq,offered,turn.execution_scope);
           if(pending)throw new Error('turn_input_pending');
-          assertOfferedInputRead(this.ctx,turn,input.turnInputToSeq);
-          acknowledgeInput(this.ctx,turn.id,Number(turn.input_to_seq??0),input.turnInputToSeq,false);
-          acknowledgeAttemptInput(this.ctx,turn,input.turnInputToSeq);
+          let acknowledgedToSeq = input.turnInputToSeq;
+          try { assertOfferedInputRead(this.ctx, turn, input.turnInputToSeq); }
+          catch (error) {
+            if (!(error instanceof Error) || error.message !== 'input_gap') throw error;
+            const read = Math.min(input.turnInputToSeq, attemptInputState(this.ctx, turn).read);
+            if (!input.allowUnreadInput) throw new InputUnreadError(read, input.turnInputToSeq,
+              `remi message list ${turn.session_id} --from ${read} --to ${input.turnInputToSeq}`);
+            unreadInput = { read_to_seq: read, required_to_seq: input.turnInputToSeq };
+            acknowledgedToSeq = Math.max(Number(turn.input_to_seq ?? 0), read);
+          }
+          acknowledgeInput(this.ctx, turn.id, Number(turn.input_to_seq ?? 0), acknowledgedToSeq, false);
+          acknowledgeAttemptInput(this.ctx, turn, acknowledgedToSeq);
         }}
       const now = nowIso();
       const resultSnapshot = current.delegationId && current.delegatedByAgentId !== current.agentId
@@ -5335,7 +5347,7 @@ ${placementAfter.sql}
       const existingReply=turn&&chatExecutionKind !== "session"&&!current.chatSessionId&&current.issueId
         &&this.agentCommentedSince(current.issueId,current.agentId,current.startedAt??current.dispatchedAt??current.createdAt,current.id)
         ? resultSnapshot ? resultSnapshot.commentId : this.lastDelegationResultCommentId(current) : null;
-      const storedResult = skipAutoReply||existingReply?null:toJson(taskCompletionResultPayload(input));
+      const storedResult = skipAutoReply||existingReply?null:toJson(taskCompletionResultPayload({ ...input, unreadInput }));
       const result = runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records
          SET status = 'completed',
              result = ?,
@@ -5353,7 +5365,7 @@ ${placementAfter.sql}
       if(existingReply&&!skipAutoReply&&turn){
         this.ctx.db.run('UPDATE multiremi_turns SET reply_message_id=? WHERE id=?',[existingReply,turn.id]);
         const reply=this.ctx.inbox().getMessage(existingReply)!;
-        const {output,...provenance}=taskCompletionResultPayload(input);
+        const {output,...provenance}=taskCompletionResultPayload({ ...input, unreadInput });
         this.ctx.conversationLog().updateConversationLogWithinTransaction(reply.session_id,reply.seq,{fields:{metadata:{...reply.metadata,task_result:provenance}}});
       }
       if(skipAutoReply&&turn)this.ctx.db.run('UPDATE multiremi_turns SET reply_message_id=NULL WHERE id=?',[turn.id]);
@@ -7330,7 +7342,7 @@ function delegationTerminalReportSection(report: DelegationTerminalReport, comme
     `Status: ${report.terminalStatus}`,
     ...(report.crossIssue && report.sourceIssueKey ? [`来源：${report.sourceIssueKey}`] : []),
     report.resultCommentId
-      ? `结论评论：${report.resultCommentId}（remi comment list ${report.source.issueId} --thread ${report.resultCommentId}）`
+      ? `结论评论：${report.resultCommentId}（remi message get ${report.resultCommentId} --output json）`
       : `结论评论：无；结果见 remi turn get ${report.sourceTurnId}`,
     `摘要：${envelopeSummary(report.terminalStatus === "cancelled" ? null
       : report.terminalStatus === "completed" ? commentBody ?? report.terminalBody : report.terminalBody)}`,
@@ -7560,8 +7572,10 @@ function taskCompletionResultPayload(input: {
   branchName?: string | null;
   sessionId?: string | null;
   workDir?: string | null;
-}): { pr_url: string; output: string; session_id: string; work_dir: string } {
+  unreadInput?:{read_to_seq:number;required_to_seq:number};
+}) {
   return {
+    ...(input.unreadInput ? {input_unread:input.unreadInput} : {}),
     pr_url: input.branchName ?? "",
     output: input.output,
     session_id: input.sessionId ?? "",

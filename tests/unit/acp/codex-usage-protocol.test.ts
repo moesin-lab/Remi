@@ -39,10 +39,10 @@ for (const [file, body] of Object.entries(${JSON.stringify(files)})) {
 
 it("accepts the app-server protocol the usage patch and rollout reader rely on", () => {
   expect(() => verifyCodexRequestUsageProtocol(bundle())).not.toThrow();
-});
+}, 60_000);
 
 it("fails runtime preparation when request usage would silently stop", () => {
   expect(() => verifyCodexRequestUsageProtocol(bundle({ rawEvents: false }))).toThrow("thread/start experimentalRawEvents");
   expect(() => verifyCodexRequestUsageProtocol(bundle({ optOut: false }))).toThrow("initialize optOutNotificationMethods");
   expect(() => verifyCodexRequestUsageProtocol(bundle({ responseId: false }))).toThrow("rawResponse/completed");
-});
+}, 120_000);

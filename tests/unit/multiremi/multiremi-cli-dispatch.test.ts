@@ -3,7 +3,7 @@
  *
  * A command that is documented in prompts/skills but never registered fails at
  * the very first hop — `dispatch()` prints "Unknown command: <name>" and exits
- * 1 — so these tests drive the real dispatcher rather than the multiremi layer
+ * 1 after draining output — so these tests drive the real dispatcher rather than the multiremi layer
  * behind it. `process.exit` is stubbed so an unregistered command surfaces as a
  * test failure instead of killing the test runner.
  *
@@ -51,12 +51,16 @@ async function runDispatch(args: string[]): Promise<DispatchResult> {
   console.error = (...parts: unknown[]) => { stderr.push(parts.map(String).join(" ")); };
   console.log = () => {};
   process.exit = ((code?: number) => { throw new ProcessExitError(code ?? 0); }) as typeof process.exit;
+  const previousExitCode = process.exitCode;
+  process.exitCode = 0;
   try {
     await dispatch(args);
-    return { error: null, exitCode: null, stderr };
+    return { error: null, exitCode: process.exitCode ? Number(process.exitCode) : null, stderr };
   } catch (err) {
     if (err instanceof ProcessExitError) return { error: null, exitCode: err.code, stderr };
     return { error: err, exitCode: null, stderr };
+  } finally {
+    process.exitCode = previousExitCode ?? 0;
   }
 }
 
@@ -196,10 +200,10 @@ describe("remi CLI dispatcher", () => {
     }
   });
 
-  it("routes `remi project` into the native resource group", async () => {
+  it("shows help successfully for the bare native project group", async () => {
     const result = await runDispatch(["project"]);
 
-    expect(String((result.error as Error | null)?.message ?? "")).toContain("usage: remi project list|get|search");
+    expect(result.error).toBeNull();
     expect(result.exitCode).toBeNull();
     expect(result.stderr.join("\n")).not.toContain("Unknown command");
   });

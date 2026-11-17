@@ -142,6 +142,14 @@ describe("unified CLI wire contracts", () => {
       expect(entries).toMatchObject([{ seq: 1, body_md: body, body_omitted_chars: 0 }, { seq: 50, body_md: "LAST_ENTRY" }]);
     }
   });
+  it("prints a noncontiguous range warning on stderr without changing successful output", async () => {
+    const command="remi message list ises_1 --from 0 --to 20";
+    setup({entries:[{seq:20,body_md:"suffix"}],next_cursor:null,read_warning:`Read continuously: ${command}`});
+    const result=await registry.execute(["message","list","ises_1","--from","10","--to","20","--output","json"]);
+    expect(result).toBe(true);
+    expect(warnings.join("\n")).toContain(command);
+    expect(JSON.parse(output.join("\n"))).toMatchObject([{seq:20,body_md:"suffix"}]);
+  });
   it("rejects a range cursor that does not advance", async () => {
     setup({ entries: [], next_cursor: '{"seq":1,"offset":1}' });
     await expect(registry.execute(["message", "list", "ises_1", "--from", "0", "--to", "2"])).rejects.toThrow("cursor did not advance");

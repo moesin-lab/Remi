@@ -655,7 +655,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
         // The inbox Result comment line is the bridge's id, so the injected
         // comment id never appears on that line.
         const promptLine = report.split("\n").find((line) => line.startsWith("结论评论："));
-        expect(promptLine).toBe(`结论评论：${bridgeCommentId}（remi comment list ${f.child.id} --thread ${bridgeCommentId}）`);
+        expect(promptLine).toBe(`结论评论：${bridgeCommentId}（remi message get ${bridgeCommentId} --output json）`);
         // One resolution on the terminal path: the fix threads the first value
         // through the drain instead of issuing a second SELECT.
         expect(injector.count()).toBe(1);

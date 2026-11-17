@@ -118,7 +118,8 @@ it("Q419-4 A: absent or zero plugin capability keeps Store and real-socket heart
       await nextSocketHeartbeat(h);
       await h.layer.drain();
       for (let n = 0; n < 3; n++) {
-        expect(await countSocketHeartbeat(h)).toEqual({ selects: 6, updates: 2 });
+        // Includes the daemon-retirement fence; it must stay bounded on every heartbeat.
+        expect(await countSocketHeartbeat(h)).toEqual({ selects: 7, updates: 2 });
       }
     } finally { restore(); }
   }
@@ -139,7 +140,8 @@ it("Q419-4 A: a missing capability clears stored protocol 1 once and emits its t
   expect(migration.selects).toBeGreaterThan(6);
   expect(h.store.getRuntimeLite(id)!.metadata.agent_plugin_protocol).toBe(0);
   expect(transitions).toMatchObject([{ previous_agent_plugin_protocol: 1, agent_plugin_protocol: 0 }]);
-  expect(await countSocketHeartbeat(h)).toEqual({ selects: 6, updates: 2 });
+  // Includes the daemon-retirement fence; it must stay bounded on every heartbeat.
+  expect(await countSocketHeartbeat(h)).toEqual({ selects: 7, updates: 2 });
   expect(transitions).toHaveLength(1);
   restore();
 });

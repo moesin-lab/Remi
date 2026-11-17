@@ -1,6 +1,7 @@
+import { createMultiremiApp } from "@multiremi/api.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { daemonTaskClaimResponse, taskRealtimePayload } from "@multiremi/api/wire/tasks.js";
-import { buildTaskPrompt } from "@daemon/agent-runtime/prompts/ephemeral.js";
+import { buildTaskPrompt, buildAgentInstructions } from "@daemon/agent-runtime/prompts/ephemeral.js";
 import { resolveWorkDir } from "@daemon/agent-runtime/workspace/persistent.js";
 import { resolveTaskProviderHome } from "@daemon/agent-runtime/workspace/session-home.js";
 import { createLocalStore, createResponsibleTestIssue, db, resetMultiremiTestEnv } from "./helpers.js";
@@ -271,7 +272,7 @@ describe("Session Task dual ownership", () => {
     });
   }
 
-  it("shares published results only with the actual Session owner and its public Issue work", () => {
+  it("keeps published results available by actual owner through the CLI without inlining sibling bodies", async () => {
     const { store, runtime, agent, issue, chat, session } = fixture("chat", true);
     const ownSibling = store.createSession(chat!.id, { title: "Unprojected sibling" });
     const otherChat = store.createChatSession({ agentId: agent.id, creatorId: "another-user" });
@@ -281,20 +282,27 @@ describe("Session Task dual ownership", () => {
     const own = store.publishSessionResult(ownSibling.id, { title: "Own Chat result", body: "Own curated evidence" });
     const privateResult = store.publishSessionResult(privateSibling.id, { title: "Private result", body: "Private evidence" });
     const publicResult = store.publishSessionResult(publicSibling.id, { title: "Issue result", body: "Public curated evidence" });
-    for (const [target, expected] of [[session, [own.id, publicResult.id]], [issueSibling, [publicResult.id]], [ownSibling, []]] as const) {
+    for (const [target, expected] of [[session, [publicResult.id]], [issueSibling, [publicResult.id]], [ownSibling, [own.id]]] as const) {
       const task = store.createSessionTask(target.id, { agentId: agent.id, prompt: "Read curated sibling results" });
       const claimed = store.claimTask(runtime.id)!;
       expect(claimed.id).toBe(task.id);
       const wire = daemonTaskClaimResponse(store, claimed);
-      const results = wire.issue_session_results as { id: string }[];
+      expect(wire).not.toHaveProperty("issue_session_results");
+      const token = await store.createTaskAccessToken(claimed, "local");
+      const app = createMultiremiApp({ store, authToken: "result-test" });
+      const path = target.issueId ? `/api/issues/${target.issueId}/session-results`
+        : `/api/multiremi/chats/${target.chatId}/sessions/${target.id}/results`;
+      const response = await app.request(path, { headers: { Authorization: `Bearer ${token.token}` } });
+      expect(response.status).toBe(200);
+      const data = await response.json();
+      const results = (Array.isArray(data) ? data : data.results) as { id: string }[];
       expect(results.map(result => result.id).sort()).toEqual([...expected].sort());
       expect(results.map(result => result.id)).not.toContain(privateResult.id);
-      const prompt = buildTaskPrompt({ ...claimed, issueSession: target, sessionProjection: wire.session_projection,
-        issueSessionResults: results, agent } as any);
-      const publishCommand = target.chatId
-        ? `remi session result publish ${target.chatId} ${target.id}`
-        : `remi issue session result publish ${issue!.id} ${target.id}`;
-      expect(prompt).toContain(publishCommand);
+      const taskContext = { ...claimed, issueSession: target, sessionProjection: wire.session_projection, agent } as any;
+      const prompt = buildTaskPrompt(taskContext);
+      for (const body of [own.body, privateResult.body, publicResult.body]) expect(prompt).not.toContain(body);
+      if (!target.chatId) expect(buildAgentInstructions(taskContext))
+        .toContain(`remi issue session result publish ${issue!.id} --session ${target.id}`);
       store.cancelTask(task.id);
     }
   });

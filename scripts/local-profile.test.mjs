@@ -33,6 +33,7 @@ childProcess.spawnSync = (command, args, options = {}) => {
   const selection = existsSync(metadataPath) ? JSON.parse(readFileSync(metadataPath, 'utf8')) : null;
   appendFileSync(process.env.TEST_COMMAND_LOG, JSON.stringify({
     command, args,
+    buildOverride: args.includes('-') && options.input ? JSON.parse(options.input) : null,
     // Log only names, never inherited values or the generated credentials.
     environmentKeys: Object.keys(options.env || {}),
     selectedRef: selection?.ref ?? null,
@@ -145,9 +146,15 @@ function fixture(t) {
   function run(profile, action, { args = [], commit = OLD_REF, fail = '', environment = {}, profileBase = profilesRoot, localBuild = true } = {}) {
     writeFileSync(log, '');
     if (localBuild && profile === 'stable' && ['deploy', 'host-stage'].includes(action)) args = [...args, '--build-local', 'true'];
+    const inheritedEnvironment = { ...process.env };
+    // Delete all spellings before applying test inputs. Empty uppercase entries
+    // would shadow lowercase inputs when Windows deduplicates spawn's env keys.
+    for (const key of Object.keys(inheritedEnvironment)) {
+      if (/^(https?_proxy|no_proxy|remi_build_network)$/iu.test(key)) delete inheritedEnvironment[key];
+    }
     const result = spawnSync(process.execPath, ['--import', pathToFileURL(mock).href, script, profile, action, ...args], {
       env: {
-        ...process.env,
+        ...inheritedEnvironment,
         ...environment,
         NODE_OPTIONS: '',
         REMI_PROFILES_ROOT: profileBase,
@@ -1007,4 +1014,75 @@ test('internal updates persist across up and block competing host deployment or 
   const conflicting = f.run('stable', 'up');
   assert.notEqual(conflicting.status, 0);
   assert.match(conflicting.stderr, /cannot be combined/);
+});
+
+
+test('local builds inherit proxy names only and keep proxy values out of saved files and output', (t) => {
+  const f = fixture(t);
+  const proxy = 'http://build-user:sentinel-secret@127.0.0.1:17890';
+  const environment = { HTTP_PROXY: proxy, HTTPS_PROXY: proxy, NO_PROXY: 'localhost,127.0.0.1', http_proxy: proxy, https_proxy: proxy, no_proxy: 'localhost' };
+  const result = f.run('stable', 'deploy', { environment });
+  succeeds(result);
+  const build = result.calls.find(isAction('build'));
+  for (const service of ['api', 'web']) {
+    assert.deepEqual(build.buildOverride.services[service].build, {
+      args: Object.fromEntries(Object.keys(environment).map((key) => [process.platform === 'win32' ? key.toUpperCase() : key, null])),
+      ...(process.platform === 'linux' ? { network: 'host' } : {}),
+    });
+  }
+  assert.ok(build.args.indexOf('-') < build.args.indexOf('build'));
+  assert.ok(result.calls.filter((call) => call !== build).every((call) => !call.buildOverride));
+  assert.ok(!JSON.stringify(result.calls).includes('sentinel-secret'));
+  assert.ok(!(result.stdout + result.stderr).includes('sentinel-secret'));
+  for (const name of readdirSync(f.profileRoot())) {
+    const path = join(f.profileRoot(), name);
+    if (statSync(path).isFile()) assert.ok(!readFileSync(path, 'utf8').includes('sentinel-secret'), name);
+  }
+});
+
+test('direct builds keep the original command and network overrides apply to dev watch rebuilds', (t) => {
+  const f = fixture(t);
+  succeeds(f.run('dev', 'prepare'));
+  const direct = f.run('dev', 'build');
+  succeeds(direct);
+  assert.equal(direct.calls.find(isAction('build')).buildOverride, null);
+  for (const network of ['host', 'default', 'none']) {
+    const result = f.run('dev', 'watch', { environment: { REMI_BUILD_NETWORK: network, https_proxy: 'http://proxy.example:8080' } });
+    succeeds(result);
+    for (const call of result.calls.filter((call) => call.args.includes('--build') || call.args.includes('watch'))) {
+      const proxyKey = process.platform === 'win32' ? 'HTTPS_PROXY' : 'https_proxy';
+      assert.deepEqual(call.buildOverride.services.api.build, { args: { [proxyKey]: null }, network });
+      assert.ok(call.environmentKeys.some((key) => key.toLowerCase() === 'https_proxy'), 'the lowercase proxy input reaches Docker');
+    }
+  }
+});
+
+for (const proxy of ['http://localhost:17890', 'http://127.4.3.2:17890', 'http://[::1]:17890', 'http://proxy.example:8080']) {
+  test(`build network selection for ${proxy}`, (t) => {
+    const f = fixture(t);
+    succeeds(f.run('dev', 'prepare'));
+    const result = f.run('dev', 'build', { environment: { HTTPS_PROXY: proxy } });
+    succeeds(result);
+    assert.equal(result.calls.find(isAction('build')).buildOverride.services.api.build.network,
+      process.platform === 'linux' && !proxy.includes('proxy.example') ? 'host' : undefined);
+  });
+}
+
+test('invalid build settings fail without disclosing proxy values or invoking a build', (t) => {
+  const f = fixture(t);
+  succeeds(f.run('dev', 'prepare'));
+  for (const environment of [{ REMI_BUILD_NETWORK: 'bad-secret' }, { HTTPS_PROXY: 'bad-secret' }]) {
+    const result = f.run('dev', 'build', { environment });
+    assert.equal(result.status, 1);
+    assert.ok(!result.stderr.includes('bad-secret'));
+    assert.equal(result.calls.filter(isAction('build')).length, 0);
+  }
+});
+
+test('Dockerfiles keep predefined proxy args out of image metadata and shell tracing', () => {
+  for (const name of ['api', 'web']) {
+    const source = readFileSync(join(repository, `deploy/docker/Dockerfile.${name}`), 'utf8');
+    assert.doesNotMatch(source, /^(?:ARG|ENV)\s+.*(?:https?_proxy|no_proxy)/imu);
+    assert.doesNotMatch(source, /\$(?:\{)?(?:https?_proxy|no_proxy)|set\s+-[a-z]*x/iu);
+  }
 });

@@ -1325,14 +1325,19 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     }
   };
   const stopJobs = async () => {
-    const stopped = await Promise.allSettled([
-      offers.stop(), daemonProtocol.drain(),
-      scheduler?.stop(), scmPolling?.stop(), messaging?.stop(), issueTitleScheduler?.stop(),
-      store.stopNotificationDeliverySweeper(), bodyHtmlBackfill?.stop(),
-      backgroundJobs ? repositoryWiki.stopStorageWorker?.() : undefined,
-      controlPlaneSshMesh?.stop(),
-    ]);
-    for (const result of stopped) if (result.status === "rejected") throw result.reason;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const stopped = await Promise.race([Promise.allSettled([
+        offers.stop(), daemonProtocol.drain(),
+        scheduler?.stop(), scmPolling?.stop(), messaging?.stop(), issueTitleScheduler?.stop(),
+        store.stopNotificationDeliverySweeper(), bodyHtmlBackfill?.stop(),
+        backgroundJobs ? repositoryWiki.stopStorageWorker?.() : undefined,
+        controlPlaneSshMesh?.stop(),
+      ]), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("background job stop timed out; role lock retained")), slotConfiguration?.stopTimeoutMs ?? 5_000);
+      })]);
+      for (const result of stopped) if (result.status === "rejected") throw result.reason;
+    } finally { clearTimeout(timer); }
   };
   const disconnect = () => {
     daemonProtocol.closeAll();
@@ -1345,6 +1350,9 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     }, 1000);
     timer.unref();
   };
+  const pendingSlotControls = new Set<Request>();
+  const pendingRequests = (): number => Math.max(0, server.pendingRequests
+    - [...pendingSlotControls].filter(req => !req.signal.aborted).length);
   const slot = slotConfiguration ? new SlotLifecycle(slotConfiguration, multiremiVersion, {
     acquire: async () => {
       const guard = await startHubRoleGuard({
@@ -1355,10 +1363,10 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       if (!guard) throw new Error("hub role lock could not be acquired");
       return guard;
     },
-    fence: options.slotFence, start: startJobs, stop: stopJobs, disconnect,
+    pendingRequests, fence: options.slotFence, start: startJobs, stop: stopJobs, disconnect,
   }) : null;
   const requestLifecycle = slot ?? new SlotLifecycle({ id: "", start: "active", controlToken: "", lockTimeoutMs: 0, drainTimeoutMs: 20_000 }, multiremiVersion, {
-    acquire: async () => ({ close: async () => {} }), start: () => {}, stop: stopJobs, disconnect,
+    pendingRequests, acquire: async () => ({ close: async () => {} }), start: () => {}, stop: stopJobs, disconnect,
   });
   if (!slot) requestLifecycle.state = "active";
   let requestExit: () => void;
@@ -1373,22 +1381,25 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       const url = new URL(req.url);
       if (slot) {
         if (url.pathname.startsWith("/internal/slot/")) {
-          if (!slot.authorized(req, socketAddress)) return Response.json({ error: "forbidden" }, { status: 403 });
-          const action = url.pathname.slice("/internal/slot/".length);
-          if (action === "status" && req.method === "GET") return Response.json(slot.status());
-          if (!["activate", "release", "exit"].includes(action)) return new Response(null, { status: 404 });
-          if (req.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
+          pendingSlotControls.add(req);
           try {
-            if (action === "activate") await slot.activate();
-            else await slot.release();
-            if (action === "exit") {
-              await slot.exit();
-              setTimeout(() => requestExit(), 0);
+            if (!slot.authorized(req, socketAddress)) return Response.json({ error: "forbidden" }, { status: 403 });
+            const action = url.pathname.slice("/internal/slot/".length);
+            if (action === "status" && req.method === "GET") return Response.json(slot.status());
+            if (!["activate", "release", "exit"].includes(action)) return new Response(null, { status: 404 });
+            if (req.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
+            try {
+              if (action === "activate") await slot.activate();
+              else await slot.release();
+              if (action === "exit") {
+                await slot.exit();
+                setTimeout(() => requestExit(), 0);
+              }
+              return Response.json(slot.status());
+            } catch {
+              return Response.json({ ...slot.status(), error: "slot transition failed" }, { status: 503 });
             }
-            return Response.json(slot.status());
-          } catch {
-            return Response.json({ ...slot.status(), error: "slot transition failed" }, { status: 503 });
-          }
+          } finally { pendingSlotControls.delete(req); }
         }
         if (url.pathname === "/readyz") {
           if (slot.state !== "active") return Response.json(slot.status(), { status: 503 });

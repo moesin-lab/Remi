@@ -2394,7 +2394,7 @@ function localIPv4Addresses(): string[] {
   return result;
 }
 
-async function waitForShutdown(stop: () => void | Promise<void>, exitRequested?: Promise<void>): Promise<void> {
+export async function waitForShutdown(stop: () => void | Promise<void>, exitRequested?: Promise<void>): Promise<void> {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
   const done = new Promise<void>((r, fail) => { resolve = r; reject = fail; });
@@ -2405,13 +2405,17 @@ async function waitForShutdown(stop: () => void | Promise<void>, exitRequested?:
     try { await stop(); resolve(); }
     catch (error) { reject(error); }
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  const signalShutdown = () => {
+    if (stopping) process.exit(1);
+    void shutdown();
+  };
+  process.on("SIGINT", signalShutdown);
+  process.on("SIGTERM", signalShutdown);
   void exitRequested?.then(shutdown);
   try { await done; }
   finally {
-    process.off("SIGINT", shutdown);
-    process.off("SIGTERM", shutdown);
+    process.off("SIGINT", signalShutdown);
+    process.off("SIGTERM", signalShutdown);
   }
 }
 

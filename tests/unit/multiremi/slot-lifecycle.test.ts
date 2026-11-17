@@ -25,7 +25,7 @@ describe("API slot lifecycle", () => {
     expect(() => resolveSlotConfiguration({ MULTIREMI_SLOT_START: "standby" })).toThrow();
     expect(() => resolveSlotConfiguration({ MULTIREMI_SLOT: "blue" })).toThrow();
     expect(resolveSlotConfiguration({ MULTIREMI_SLOT: "blue", MULTIREMI_SLOT_CONTROL_TOKEN: "secret" }))
-      .toMatchObject({ start: "active", lockTimeoutMs: 10_000, drainTimeoutMs: 20_000 });
+      .toMatchObject({ start: "active", lockTimeoutMs: 10_000, drainTimeoutMs: 20_000, stopTimeoutMs: 5_000 });
   });
 
   test("serializes activation, awaits stop before unlock, and permits rollback activation", async () => {
@@ -177,8 +177,93 @@ describe("API slot lifecycle", () => {
     }, 12_000);
   }
 
+  test("release excludes its own control request from the native drain count", async () => {
+    const server = startMultiremiServer({ store: createLocalStore(), port: 0, hostname: "127.0.0.1",
+      backgroundJobs: false, slotConfiguration: { ...config, start: "active", drainTimeoutMs: 6000 } });
+    try {
+      await server.slotStartup;
+      const started = performance.now();
+      const response = await fetch(new URL("/internal/slot/release", server.url), {
+        method: "POST", headers: { Authorization: "Bearer test-secret" }, signal: AbortSignal.timeout(2000),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ state: "released" });
+      expect(performance.now() - started).toBeLessThan(1000);
+    } finally { await server.shutdown(); }
+  });
+
+  test("ordinary responses preserve native body identity", async () => {
+    const { slot } = fixture();
+    const response = new Response("native body");
+    expect(await slot.request(new Request("http://localhost/"), () => response)).toBe(response);
+  });
+
+  test("hung network jobs fail release within budget and retain ownership until retry", async () => {
+    const store = createLocalStore();
+    const scheduler = new MultiremiScheduler({ store });
+    let finish!: () => void;
+    const running = new Promise<void>(resolve => { finish = resolve; });
+    const start = spyOn(scheduler, "start").mockImplementation(() => {});
+    const stop = spyOn(scheduler, "stop").mockImplementation(() => running);
+    const server = startMultiremiServer({ store, port: 0, hostname: "127.0.0.1", backgroundJobs: true,
+      scmPolling: null, messaging: null, issueTitleScheduler: null, bodyHtmlBackfill: null, controlPlaneSshMesh: null,
+      scheduler, slotConfiguration: { ...config, start: "active", stopTimeoutMs: 30 } });
+    try {
+      await server.slotStartup;
+      const started = performance.now();
+      await expect(server.slot!.release()).rejects.toThrow("background job stop timed out");
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(server.slot!.state).toBe("draining");
+      await expect(server.slot!.activate()).rejects.toThrow("release the previous activation");
+      finish();
+      await server.slot!.release();
+      await server.slot!.activate();
+      expect(server.slot!.state).toBe("active");
+    } finally { finish(); await server.shutdown(); start.mockRestore(); stop.mockRestore(); }
+  });
+
+  test("a second shutdown signal forces exit while graceful stop is pending", async () => {
+    const child = Bun.spawn([process.execPath, "--no-env-file", "tests/fixtures/slot-shutdown-signals.ts"], { stdout: "pipe", stderr: "pipe" });
+    let output = "";
+    const read = (async () => { for await (const chunk of child.stdout) output += new TextDecoder().decode(chunk); })();
+    const waitFor = async (text: string) => {
+      const deadline = Date.now() + 5000;
+      while (!output.includes(text) && Date.now() < deadline) await Bun.sleep(10);
+      expect(output).toContain(text);
+    };
+    try {
+      await waitFor("ready");
+      child.kill("SIGINT");
+      await waitFor("stopping");
+      expect(child.exitCode).toBeNull();
+      child.kill("SIGINT");
+      expect(await Promise.race([child.exited, Bun.sleep(3000).then(() => "timeout")])).toBe(1);
+    } finally { child.kill(); await child.exited; await read; }
+  }, 10_000);
+
+  for (const mode of ["body", "slot", "legacy"]) {
+    test(`${mode}: pipelined requests and socket resets cannot crash Bun`, async () => {
+      for (let run = 0; run < 3; run++) {
+        const child = Bun.spawn([process.execPath, "--no-env-file", "tests/fixtures/slot-disconnect-stress.ts", mode], {
+          env: { ...process.env, MULTIREMI_DATABASE_URL: "", MULTIREMI_SLOT: "", MULTIREMI_SLOT_START: "" },
+          stdout: "pipe", stderr: "pipe",
+        });
+        const stdout = new Response(child.stdout).text();
+        const stderr = new Response(child.stderr).text();
+        try {
+          const result = await Promise.race([child.exited, Bun.sleep(12_000).then(() => "timeout")]);
+          expect(result, result === "timeout" ? "stress child timed out" : await stderr).toBe(0);
+          const report = JSON.parse((await stdout).trim().split("\n").at(-1)!);
+          expect(report.resets).toBeGreaterThan(500);
+          if (mode === "body") expect(report.handled).toBeGreaterThan(500);
+          console.info(`[disconnect-stress] ${mode} run ${run + 1}: ${JSON.stringify(report)}`);
+        } finally { child.kill(); await child.exited; }
+      }
+    }, 40_000);
+  }
+
   test("waits for a slow HTTP response body before disconnecting daemon RPC", async () => {
-    const { slot, events } = fixture();
+    const { slot, events } = fixture({ pendingRequests: () => server.pendingRequests });
     await slot.activate();
     let finish!: () => void;
     let entered!: () => void;
@@ -213,6 +298,7 @@ describe("API slot lifecycle", () => {
     expect(performance.now() - start).toBeLessThan(100);
     await response.body?.cancel();
     const bounded = new SlotLifecycle({ ...config, drainTimeoutMs: 30 }, "test", {
+      pendingRequests: () => 1,
       acquire: async () => ({ close: async () => {} }), start: () => {}, stop: () => {}, disconnect: () => {},
     });
     await bounded.activate();

@@ -1,7 +1,7 @@
 import { shouldBypassProxy } from "./no-proxy.js";
 
-/** Bun fetch reads proxy environment synchronously, before returning its Promise. */
-function withNoProxyRoute<T>(url: string | URL, start: () => T): T {
+/** Start the Bun transport synchronously: fetch and node:http snapshot proxy env here. */
+export function withNoProxyRoute<T>(url: string | URL, start: () => T): T {
   if (!shouldBypassProxy(url)) return start();
   const previous = { NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
   try {
@@ -71,5 +71,6 @@ export function proxyWebSocket(url: string, init: { headers: Record<string, stri
   const proxy = shouldBypassProxy(url) ? undefined : secure
     ? process.env.https_proxy ?? process.env.HTTPS_PROXY
     : process.env.http_proxy ?? process.env.HTTP_PROXY;
-  return new WebSocket(url, { ...init, ...(proxy ? { proxy } : {}) });
+  // The DOM constructor overload omits Bun's headers/proxy options.
+  return new WebSocket(url, { ...init, ...(proxy ? { proxy } : {}) } as never);
 }

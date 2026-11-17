@@ -114,6 +114,40 @@ it("keeps all daemon helper entry points on the shared transport", () => {
   }
 });
 
+it("inspects daemon upgrade rejections directly for CIDR NO_PROXY and proxies outside hosts", async () => {
+  let proxyHits = 0;
+  let directHits = 0;
+  const direct = Bun.serve({ hostname: "0.0.0.0", port: 0, fetch(req) {
+    directHits++;
+    expect(req.headers.get("upgrade")).toBe("websocket");
+    expect(req.headers.get("authorization")).toBe("Bearer test");
+    const status = Number(new URL(req.url).pathname.slice(1));
+    return Response.json({ code: status === 426 ? "cli_upgrade_required" : "rejected", min_version: 3 }, { status });
+  }});
+  const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+    proxyHits++;
+    return new Response("proxy", { status: 502 });
+  }});
+  try {
+    expect(await child(`
+      import { inspectDaemonUpgradeRejection } from "./packages/server/src/worker/daemon-protocol-client.ts";
+      import { strict as assert } from "node:assert";
+      const before = { NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
+      for (const status of [426, 401, 403, 410]) {
+        const pending = inspectDaemonUpgradeRejection("ws://127.0.0.2:${direct.port}/" + status,
+          { authorization: "Bearer test" }, AbortSignal.timeout(3000));
+        assert.deepEqual({ NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy }, before);
+        assert.deepEqual(await pending, { status, code: status === 426 ? "cli_upgrade_required" : "rejected", minProtocol: 3 });
+      }
+      assert.deepEqual(await inspectDaemonUpgradeRejection("ws://outside.invalid/426", {}, AbortSignal.timeout(3000)),
+        { status: 502, code: null, minProtocol: undefined });
+      console.log("ok");
+    `, proxy.url.href)).toBe("ok");
+    expect(directHits).toBe(4);
+    expect(proxyHits).toBe(1);
+  } finally { direct.stop(true); proxy.stop(true); }
+}, 15000);
+
 it("routes real daemon WebSockets directly for CIDR and through HTTP CONNECT otherwise", async () => {
   let tunnels = 0;
   const server = Bun.serve({ hostname: "0.0.0.0", port: 0,

@@ -1,4 +1,4 @@
-import { proxyWebSocket } from "@shared/proxy-fetch.js";
+import { proxyWebSocket, withNoProxyRoute } from "@shared/proxy-fetch.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -610,7 +610,7 @@ export function inspectDaemonUpgradeRejection(
 ): Promise<{ status: number; code: string | null; minProtocol?: number } | null> {
   const url = new URL(socketUrl);
   url.protocol = url.protocol === "wss:" ? "https:" : "http:";
-  return new Promise((resolve, reject) => {
+  return withNoProxyRoute(url, () => new Promise((resolve, reject) => {
     const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
       headers: { ...headers, Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": randomBytes(16).toString("base64") },
       signal,
@@ -637,5 +637,5 @@ export function inspectDaemonUpgradeRejection(
     });
     request.on("error", reject);
     request.end();
-  });
+  }));
 }

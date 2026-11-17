@@ -30,6 +30,13 @@ bun run test tests/unit/multiremi/multiremi-api-issues.test.ts
 bun run test tests/arch/
 ```
 
+持久化 Outbox 大积压的重复诊断可运行
+`bun run scripts/check-outbox-replay.ts <日志目录>`：串行执行 20 个独立 HOME 隔离进程，
+保留每次日志和 `summary.json`。摘要的 p50/p95/max 是包含冷启动与 HOME 清理的整轮
+耗时；用例日志另报 setup/persist/replay 及其中的 Store 耗时，
+两种口径不能混用。Windows CI 可重跑现有 `platform-updater` job，
+每轮记录同一 head SHA、run/attempt 和日志；配置存在不等于已完成 20 轮稳定性验证。
+
 API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api-issues.test.ts)的进程内 `app.request()`，共享夹具在 [helpers.ts](tests/unit/multiremi/helpers.ts)。需要真实服务的测试应在自身入口明确配置和隔离方式，不能把本地凭据或生产数据作为普通单测前提。
 
 普通合成根 Issue 使用 `createResponsibleTestIssue(store, input)`；Issue 不再指定人类，保留的

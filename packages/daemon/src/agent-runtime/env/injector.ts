@@ -8,6 +8,7 @@
  * unchanged).
  */
 
+import { appendTaskNoProxy } from "@shared/no-proxy.js";
 import type { AgentTask } from "@daemon/contracts/types.js";
 import type { IssueSessionProviderHome } from "../workspace/session-home.js";
 import { appendGitCredentialBrokerEnv } from "../repo/credential-broker.js";
@@ -96,6 +97,7 @@ export function buildTaskEnv(task: AgentTask, opts: BuildTaskEnvOptions): Record
   if (agent?.provider === "codex" && isSideConversation(task)) {
     preserveSideCodexInstructions(brokerEnv);
   }
+  appendTaskNoProxy(brokerEnv, opts.serverUrl);
   return cleanProcessEnv(brokerEnv);
 }
 

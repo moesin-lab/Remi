@@ -1,3 +1,4 @@
+import { BUILD_COMMIT } from "@shared/version.js";
 import { bindUpdateCandidate } from "@shared/daemon-update.js";
 /**
  * `remi multiremi` — CLI entry facade.
@@ -550,7 +551,7 @@ export function attachControlPlaneConciergeHosts(
 }
 
 async function runDaemonForeground(options: CliOptions, programName: string): Promise<void> {
-  bindUpdateCandidate(multiremiDaemonPaths().stateDir, multiremiVersion);
+  bindUpdateCandidate(multiremiDaemonPaths().stateDir, multiremiVersion, process.pid, BUILD_COMMIT);
   if (!options.once && restartUnitIfSpawnedSuccessor()) process.exit(0);
   let workspaceSupervisor: WorkspaceSupervisorLease | null = acquireWorkspaceSupervisorLease(
     configuredMultiremiWorkspacesRoot(),

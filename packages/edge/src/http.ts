@@ -33,7 +33,9 @@ export async function exchange(url: URL, request: Request, headers: Headers, hoo
       cancel() { if (!ended) { ended = true; clearTimeout(connectTimer); signal.removeEventListener('abort', abort); socket?.terminate(); drain?.(); hooks.done(); } },
     }, { highWaterMark: 65536, size: data => data?.byteLength ?? 0 });
     const emit = (data: Buffer) => {
-      if (data.length) controller.enqueue(new Uint8Array(data));
+      // Bun delivers owned Buffers; retain the bounded slice instead of copying
+      // every response chunk twice and accumulating transient allocations.
+      if (data.length) controller.enqueue(data);
       if ((controller.desiredSize ?? 0) <= 0) socket?.pause();
     };
     const data = (incoming: Buffer) => {
@@ -97,7 +99,7 @@ export async function exchange(url: URL, request: Request, headers: Headers, hoo
     signal.addEventListener('abort', abort, { once: true });
     if (signal.aborted) { abort(); return; }
     void Bun.connect<undefined>({ hostname: url.hostname, port: Number(url.port || 80), socket: {
-      data(_socket, bytes) { try { data(Buffer.from(bytes)); } catch (error) { fail(error as Error); } },
+      data(_socket, bytes) { try { data(bytes); } catch (error) { fail(error as Error); } },
       drain() { const wake = drain; drain = undefined; wake?.(); },
       close() { if (parsed && !chunked && remaining < 0) finish(); else if (!ended) fail(new Error('Upstream closed early')); },
       error(_socket, error) { fail(error); },

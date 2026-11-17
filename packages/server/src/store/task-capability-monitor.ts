@@ -1,5 +1,8 @@
-import { DatabaseRetryLoop } from "@shared/db/recovery.js";
+import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
+import { createLogger } from "@shared/logger.js";
+
+const log = createLogger("capability-monitor");
 
 export const QUEUED_CAPABILITY_SWEEP_MS = 60_000;
 
@@ -25,9 +28,16 @@ export class TaskCapabilityMonitor {
     this.sweeping = true;
     try {
       const now = Date.now();
+      let connectionError: unknown;
       for (const job of typeof this.refresh === "function" ? [this.refresh] : this.refresh) {
-        job(now);
+        try { job(now); }
+        catch (error) {
+          if (isDatabaseConnectionError(error)) connectionError ??= error;
+          else log.error("Unexpected maintenance job error", error);
+        }
       }
+      // Preserve outage backoff after giving every independent job a chance.
+      if (connectionError) throw connectionError;
     } finally {
       this.sweeping = false;
     }

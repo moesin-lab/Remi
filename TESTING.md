@@ -18,10 +18,13 @@
 集成用例启动真实 Bun API 子进程，在同步 SQL 边界注入连接失败，实际执行 Store、scheduler、HTTP 和租约去重；
 覆盖断连期间存活、503/200 探针、自动恢复及提交运行后确认事件前断连的重领场景。
 重试循环的非连接异常策略：action 或动态 interval 抛错时以 ERROR 记录原始异常，
-在 `retryMaxMs`（默认 30 秒）后运行下一轮，不修改数据库故障计数或恢复状态，
-也不重新读取可能出错的 interval。连接异常仍使用独立的指数退避；成功完成 action 和 interval 后重置退避。
+按正常 interval 运行下一轮；interval <= 0 的一次性任务结束本次执行，等待下一次显式 start（例如 cron）。
+动态 interval 自身出错时使用上次成功读取的周期；尚未读取成功时暂用 `retryMaxMs`（默认 30 秒）。
+非连接异常不修改数据库故障计数或恢复状态。连接异常仍使用独立的指数退避；成功完成 action 和 interval 后重置退避。
 停止或 generation 已失效的轮次仍报告非连接异常，但不得重新调度。
-单元回归覆盖 TypeError 拒绝后的进程存活、下一轮运行、interval 抛错、stop/restart 和混合故障退避。
+能力维护扫描逐项隔离程序错误并记录 ERROR，执行其余任务后再传播连接错误以保留整轮退避。
+ERROR 的 JSONL 保留异常 name、message 和 stack。
+单元回归覆盖一次性任务不重放、长周期与动态周期、TypeError 拒绝后的进程存活、下一轮运行、interval 抛错、stop/restart 和混合故障退避。
 计划 claim 后断连回归：`bun run test tests/unit/multiremi/scheduler-claim-recovery.test.ts`。
 真实 SQLite Store 与同一个 scheduler 重试循环覆盖单条、批量 trigger 和 runtime provision；
 断连后重新执行启动恢复，从当前时间安排下一次，不补跑错过的那次，也不重放可能已经提交的运行。

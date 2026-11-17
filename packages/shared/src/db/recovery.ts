@@ -29,7 +29,9 @@ const log = createLogger("db-recovery");
 /**
  * Single-flight timer; never replays an individual SQL statement/commit.
  * Unexpected action/interval errors are reported at ERROR and the next tick runs
- * after retryMaxMs, without changing database outage backoff/recovery state.
+ * at the normal cadence (one-shot loops stop), without changing database outage
+ * backoff/recovery state. If interval lookup fails, use the last known cadence
+ * or retryMaxMs until a cadence has been read successfully.
  */
 export class DatabaseRetryLoop {
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -37,10 +39,13 @@ export class DatabaseRetryLoop {
   private generation = 0;
   private failures = 0;
   private lastWarning = -Infinity;
+  private lastInterval: number;
 
   constructor(private readonly name: string, private readonly action: () => unknown | Promise<unknown>,
     private readonly interval: number | (() => number),
-    private readonly retryBaseMs = 1_000, private readonly retryMaxMs = 30_000) {}
+    private readonly retryBaseMs = 1_000, private readonly retryMaxMs = 30_000) {
+    this.lastInterval = typeof interval === "number" ? interval : retryMaxMs;
+  }
 
   start(delayMs = 0): void {
     if (!this.stopped) return;
@@ -63,14 +68,21 @@ export class DatabaseRetryLoop {
     this.timer.unref?.();
   }
 
+  private readInterval(): number {
+    return this.lastInterval = withDatabaseTimeout(5_000,
+      () => typeof this.interval === "function" ? this.interval() : this.interval);
+  }
+
   private async tick(generation: number): Promise<void> {
     if (this.stopped || generation !== this.generation) return;
     let delay: number;
+    let readingInterval = false;
     try {
       await withDatabaseTimeout(5_000, this.action);
       if (this.stopped || generation !== this.generation) return;
       // Interval lookup may itself read configuration from the database.
-      delay = withDatabaseTimeout(5_000, () => typeof this.interval === "function" ? this.interval() : this.interval);
+      readingInterval = true;
+      delay = this.readInterval();
       if (this.failures) log.info(`${this.name}: database recovered`);
       this.failures = 0;
       this.lastWarning = -Infinity;
@@ -79,8 +91,19 @@ export class DatabaseRetryLoop {
         // Report even a late failure, but never let an obsolete tick rearm.
         log.error(`${this.name}: unexpected maintenance error`, error);
         if (this.stopped || generation !== this.generation) return;
-        // Do not consult a possibly broken interval callback or call this an outage.
-        delay = this.retryMaxMs;
+        delay = this.lastInterval;
+        if (!readingInterval) {
+          // Action failed: still honor the current configured cadence, including 0.
+          try { delay = this.readInterval(); }
+          catch (intervalError) {
+            if (isDatabaseConnectionError(intervalError)) {
+              delay = Math.max(delay, this.retryMaxMs);
+            } else {
+              log.error(`${this.name}: unexpected maintenance interval error`, intervalError);
+            }
+          }
+        }
+        if (this.stopped || generation !== this.generation) return;
       } else {
         if (this.stopped || generation !== this.generation) return;
         delay = Math.min(this.retryMaxMs, this.retryBaseMs * 2 ** Math.min(this.failures++, 16));

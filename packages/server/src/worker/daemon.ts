@@ -1,3 +1,4 @@
+import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
 import { performUpdate } from "@shared/cli-update.js";
 import { armUpdateWatchdog, restorePreviousLauncher, journalForInstall, updateJournalDir, readUpdateJournal, updateDecision, decideUpdate, DAEMON_STOP_TIMEOUT_MS } from "@shared/daemon-update.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
@@ -1479,6 +1480,7 @@ export class MultiremiDaemon {
     this.cliUpdateCoordinator?.register({
       provider: this.options.provider,
       activeTaskCount: () => this.activeTaskCount,
+      activeTaskIds: () => [...this.activeTaskIds],
       pendingClaimCount: () => this.pendingClaimCount,
       claimsPaused: () => this.claimsPaused,
       pauseClaims: () => { this.claimsPaused = true; },
@@ -1672,7 +1674,7 @@ export class MultiremiDaemon {
               this.taskDownlinks.reconcileCancellation(task.task_id, task.status);
             }
           }
-          if (ack.pending_update) await this.handleRuntimeUpdate(this.options.runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli");
+          if (ack.pending_update) await this.handleRuntimeUpdate(this.options.runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli", ack.pending_update.drain_deadline);
         } catch (error) {
           if (isTerminalDaemonAuthorityError(error)) await this.stopAfterTerminalAuthority();
         }
@@ -2308,7 +2310,7 @@ export class MultiremiDaemon {
       this.workspaceRelays.set(workspaceId, ack.relay);
     }
     if (ack.pending_update) {
-      await this.handleRuntimeUpdate(runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli");
+      await this.handleRuntimeUpdate(runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli", ack.pending_update.drain_deadline);
     }
     if (ack.pending_model_list) {
       const requestId = ack.pending_model_list.id;
@@ -2411,6 +2413,7 @@ export class MultiremiDaemon {
     requestId: string,
     targetVersion: string,
     scope: MultiremiRuntimeUpdateScope = "cli",
+    drainDeadline?: string,
   ): Promise<void> {
     // Only the CLI binary is owned by the Desktop app; the ACP bridges live in
     // ~/.remi and are independent of how the daemon was launched.
@@ -2421,7 +2424,9 @@ export class MultiremiDaemon {
       });
       return;
     }
-    const claimPause = this.tryPauseClaimsForUpdate(scope);
+    const claimPause = scope === "cli"
+      ? await this.pauseCliClaimsUntilIdle(drainDeadline)
+      : this.tryPauseLocalClaimsForUpdate();
     if (!claimPause.ok) {
       await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
         status: "failed",
@@ -3771,10 +3776,26 @@ export class MultiremiDaemon {
     return this.outbox?.stats() ?? null;
   }
 
-  private tryPauseClaimsForUpdate(scope: MultiremiRuntimeUpdateScope): MultiremiCliUpdatePauseResult {
-    if (scope === "cli" && this.cliUpdateCoordinator) {
-      return this.cliUpdateCoordinator.tryPauseClaims();
-    }
+  private async pauseCliClaimsUntilIdle(drainDeadline?: string): Promise<MultiremiCliUpdatePauseResult> {
+    // The server normally hands off only after drain. This covers accepted
+    // local work racing its last report, using the same persisted deadline.
+    const coordinator = this.cliUpdateCoordinator ?? new MultiremiCliUpdateCoordinator();
+    if (!this.cliUpdateCoordinator) coordinator.register({
+      provider: this.options.provider,
+      activeTaskCount: () => this.activeTaskCount,
+      activeTaskIds: () => [...this.activeTaskIds],
+      pendingClaimCount: () => this.pendingClaimCount,
+      claimsPaused: () => this.claimsPaused,
+      pauseClaims: () => { this.claimsPaused = true; },
+      releaseClaims: () => this.releaseLocalUpdateClaimPause(),
+    });
+    const configured = Number(process.env.MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS ?? DEFAULT_DAEMON_DRAIN_MS);
+    const fallback = Number.isSafeInteger(configured) && configured > 0 && configured <= 86_400_000 ? configured : DEFAULT_DAEMON_DRAIN_MS;
+    const deadline = drainDeadline ? Date.parse(drainDeadline) : Date.now() + fallback;
+    return coordinator.pauseClaimsUntilIdle(Number.isFinite(deadline) ? deadline : Date.now(), () => this.stopped);
+  }
+
+  private tryPauseLocalClaimsForUpdate(): MultiremiCliUpdatePauseResult {
     if (this.claimsPaused || this.activeTaskCount > 0) {
       return { ok: false, error: "daemon is busy; retry update when idle" };
     }

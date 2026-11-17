@@ -73,9 +73,11 @@ describe("daemon drain", () => {
       const update = store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" });
       expect(store.claimRuntimeUpdateRequest("rt_a")?.id).toBe(update.id);
       store.reportRuntimeUpdateResult("rt_a", update.id, { status: "restarting" });
-      store.recordDaemonProtocol("rt_a", "machine-a", 2, "0.2.96");
+      const reopened = new MultiremiStore(db!);
+      expect(reopened.getDaemonDrainStatus("local", "machine-a").mode).toBe("draining");
+      reopened.recordDaemonProtocol("rt_a", "machine-a", 2, "0.2.96");
       expect(store.getRuntimeUpdateRequest("rt_a", update.id)?.status).toBe("verifying");
-      expect(store.reportRuntimeUpdateResult("rt_a", update.id, { status: outcome, self_check: true }).status).toBe(outcome);
+      expect(reopened.reportRuntimeUpdateResult("rt_a", update.id, { status: outcome, self_check: true }).status).toBe(outcome);
       expect(store.getDaemonDrainStatus("local", "machine-a").mode).toBe("normal");
       expect(store.hasCliUpdateDrainForRuntime("rt_a_other")).toBe(false);
       const task = store.createTask({ agentId: agent.id, prompt: "after restart" });
@@ -181,28 +183,55 @@ describe("daemon drain", () => {
     expect(store.claimTask("rt_a")?.parentTaskId).toBe(task.id);
   });
 
-  it("lets a long CLI update continue after expiry and local zero, then releases only its own fence", () => {
+  it("fails an expired CLI drain without recovering or cancelling the running round", () => {
     const { store, agent } = fixture();
-    const issue = store.createIssue({ title: "long running", assigneeType: "agent", assigneeId: agent.id });
-    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "long running" });
-    store.claimTask("rt_a"); store.startTask(task.id);
-    ack(store, 1);
+    const task = store.createTask({ agentId: agent.id, prompt: "long running" });
+    store.claimTask("rt_a"); store.startTask(task.id); ack(store, 1);
     const update = store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" });
     expect(store.claimRuntimeUpdateRequest("rt_a")).toBeNull();
-    expect(() => store.undrainDaemon("local", "machine-a")).toThrow("CLI update is still active");
-    for (let elapsed = 60_000; elapsed < 300_000; elapsed += 60_000) { advance(elapsed); ack(store, 1); }
     advance(300_000); store.reconcileDaemonDrain("rt_a");
+    expect(store.getRuntimeUpdateRequest("rt_a", update.id)).toMatchObject({ status: "failed" });
+    expect(store.getRuntimeUpdateRequest("rt_a", update.id)?.error).toContain(task.id);
+    expect(store.getTask(task.id)?.status).toBe("running");
+    expect(store.getDaemonDrainStatus("local", "machine-a").mode).toBe("normal");
     expect(store.claimRuntimeUpdateRequest("rt_a")).toBeNull();
-    advance(300_001); ack(store, 0);
-    expect(store.claimRuntimeUpdateRequest("rt_a")?.id).toBe(update.id);
-    store.reportRuntimeUpdateResult("rt_a", update.id, { status: "restarting" });
-    store.recordDaemonProtocol("rt_a", "machine-a", 2, "0.2.96");
-    store.reportRuntimeUpdateResult("rt_a", update.id, { status: "completed", self_check: true });
-    expect(store.hasCliUpdateDrainForRuntime("rt_a_other")).toBe(false);
-    store.beginDaemonDrain("local", "machine-a", "deploy");
-    const second = store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.97" });
-    store.reportRuntimeUpdateResult("rt_a", second.id, { status: "failed", error: "install failed" });
-    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ mode: "draining", reason: "deploy" });
+  });
+
+  it("keeps a busy update pending until natural drain, then hands off the original deadline", () => {
+    const { store, agent } = fixture();
+    const task = store.createTask({ agentId: agent.id, prompt: "finishes naturally" });
+    store.claimTask("rt_a"); store.startTask(task.id); ack(store, 1);
+    const update = store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" });
+    expect(store.claimRuntimeUpdateRequest("rt_a")).toBeNull();
+    expect(store.getRuntimeUpdateRequest("rt_a", update.id)?.status).toBe("pending");
+    store.completeTask(task.id, { output: "done" }); ack(store, 0);
+    expect(store.heartbeatRuntime("rt_a").pending_update).toMatchObject({ id: update.id, drain_deadline: "2026-11-17T02:05:00.000Z" });
+  });
+
+  for (const reason of ["manual", "deploy"] as const) it(`preserves an existing ${reason} drain after a failed update`, () => {
+    const { store } = fixture();
+    const original = store.beginDaemonDrain("local", "machine-a", reason);
+    const update = store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" });
+    store.reportRuntimeUpdateResult("rt_a", update.id, { status: "failed", error: "checksum mismatch" });
+    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ mode: "draining", reason, deadline: original.deadline });
+  });
+
+  it("does not release another request's drain on a sibling failure", () => {
+    const { store } = fixture();
+    const owner = store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" });
+    const sibling = store.createRuntimeUpdateRequest("rt_a_other", { scope: "cli", targetVersion: "0.2.97" });
+    store.reportRuntimeUpdateResult("rt_a_other", sibling.id, { status: "failed", error: "checksum mismatch" });
+    expect(store.getDaemonDrainStatus("local", "machine-a").mode).toBe("draining");
+    expect(store.getRuntimeUpdateRequest("rt_a", owner.id)?.status).toBe("pending");
+  });
+
+  it("releases only the terminal owner's drain even when a sibling has another active update", () => {
+    const { store } = fixture();
+    const first = store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" });
+    const second = store.createRuntimeUpdateRequest("rt_a_other", { scope: "cli", targetVersion: "0.2.97" });
+    store.reportRuntimeUpdateResult("rt_a", first.id, { status: "failed", error: "checksum mismatch" });
+    expect(store.getDaemonDrainStatus("local", "machine-a").mode).toBe("normal");
+    expect(store.getRuntimeUpdateRequest("rt_a_other", second.id)?.status).toBe("pending");
   });
 
   it("pushes per-daemon draining while preserving independent platform maintenance", () => {
@@ -228,6 +257,25 @@ describe("daemon drain", () => {
       expect(store.hasCliUpdateDrainForRuntime("persisted")).toBe(true);
       store.undrainDaemon("local", "machine");
       expect(store.hasCliUpdateDrainForRuntime("persisted")).toBe(false);
+    } finally { handle.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  for (const outcome of ["completed", "rolled_back"] as const) it(`retains a CLI drain across SQLite close/reopen until ${outcome} confirmation`, () => {
+    const root = mkdtempSync(join(tmpdir(), "mul80-cli-persistence-"));
+    const path = join(root, "db.sqlite");
+    let handle = openSqliteDatabase(path);
+    try {
+      let store = new MultiremiStore(handle); store.ensureLocalWorkspace();
+      store.registerRuntime({ id: "persisted", name: "persisted", provider: "codex", daemonId: "machine" });
+      const update = store.createRuntimeUpdateRequest("persisted", { scope: "cli", targetVersion: "0.2.96" });
+      const deadline = store.getDaemonDrainStatus("local", "machine").deadline;
+      store.claimRuntimeUpdateRequest("persisted");
+      store.reportRuntimeUpdateResult("persisted", update.id, { status: "restarting" });
+      handle.close(); handle = openSqliteDatabase(path); store = new MultiremiStore(handle);
+      expect(store.getDaemonDrainStatus("local", "machine")).toMatchObject({ mode: "draining", deadline, expiry_action: "fail_update" });
+      store.recordDaemonProtocol("persisted", "machine", 2, "0.2.96");
+      store.reportRuntimeUpdateResult("persisted", update.id, { status: outcome, self_check: true });
+      expect(store.getDaemonDrainStatus("local", "machine").mode).toBe("normal");
     } finally { handle.close(); rmSync(root, { recursive: true, force: true }); }
   });
 

@@ -41,6 +41,7 @@ export function productionSnapshot() {
 export class SystemdRehearsal {
   readonly unit = `remi-rehearsal-${randomUUID()}.service`;
   readonly watchdogs = new Set<string>();
+  readonly monitor = this.unit.replace(".service", "-monitor.service");
   readonly before = productionSnapshot();
   constructor(readonly root: string) {
     assert.equal(process.platform, "linux", "systemd rehearsal requires Linux");
@@ -53,6 +54,8 @@ export class SystemdRehearsal {
       `--unit=${this.unit.replace(".service", "-probe.service")}`, "/bin/sh", "-c", 'for file do test -r "$file" || exit 1; done', "preflight", this.root, executable, ...dependencies],
       { stdout: "pipe", stderr: "pipe" });
     assert.equal(probe.exitCode, 0, `User manager cannot see the isolated root or its dependencies (permissions or mount namespace); no fallback allowed: ${probe.stderr}`);
+    run(["/usr/bin/systemd-run", "--user", "--collect", `--unit=${this.monitor}`,
+      "/usr/bin/python3", join(cwd, "tests/fixtures/daemon-update-monitor.py"), this.root]);
     // Pass only fixture settings. Manager-provided INVOCATION_ID identifies the real unit.
     // Keep a failed transient definition until rollback restarts it. --collect would
     // unload it after exit 23, unlike the installed product service.
@@ -63,7 +66,7 @@ export class SystemdRehearsal {
         .map(([key, value]) => `--setenv=${key}=${value}`), executable, "daemon", "start", "--foreground"]);
   }
   state() {
-    return run(["systemctl", "--user", "show", this.unit, "-p", "MainPID", "-p", "ExecStart", "-p", "ActiveState", "-p", "SubState", "-p", "TimeoutStopUSec", "-p", "KillMode"]);
+    return run(["systemctl", "--user", "show", this.unit, "-p", "MainPID", "-p", "ExecStart", "-p", "ActiveState", "-p", "SubState", "-p", "TimeoutStopUSec", "-p", "KillMode", "-p", "ExecMainStartTimestamp", "-p", "ExecMainStartTimestampMonotonic", "-p", "ExecMainPID", "-p", "ExecMainCode", "-p", "ExecMainStatus", "-p", "Result"]);
   }
   discoverWatchdogs() {
     for (const unit of units().filter(unit => unit.startsWith("remi-update-"))) {
@@ -72,12 +75,12 @@ export class SystemdRehearsal {
     }
   }
   journal(unit = this.unit) {
-    return hostRun(["/usr/bin/journalctl", "--user", "-u", unit, "--no-pager", "-o", "cat"], true);
+    return hostRun(["/usr/bin/journalctl", "--user", "-u", unit, "--no-pager", "-o", "short-iso-precise"], true);
   }
   async cleanup(ports: number[]) {
     this.discoverWatchdogs();
     const logs = { daemon: this.journal(), watchdogs: [...this.watchdogs].map(unit => ({ unit, journal: this.journal(unit) })) };
-    for (const unit of [...this.watchdogs, this.unit]) {
+    for (const unit of [...this.watchdogs, this.unit, this.monitor]) {
       run(["systemctl", "--user", "stop", unit], true);
       run(["systemctl", "--user", "reset-failed", unit], true);
     }

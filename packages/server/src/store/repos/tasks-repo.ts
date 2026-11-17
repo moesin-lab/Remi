@@ -2699,6 +2699,18 @@ export class TasksRepo {
     return row ? convert(row) : null;
   }
 
+  /** Identity lookup for a downlink batch, without hydrating task usage. */
+  getTaskIdentities(ids: readonly string[]): MultiremiTaskIdentity[] {
+    if (!ids.length) return [];
+    const values = this.ctx.db.dialect === "postgres"
+      ? "SELECT jsonb_array_elements_text(CAST(CAST(? AS TEXT) AS JSONB))"
+      : "SELECT value FROM json_each(?)";
+    const rows = this.ctx.db.query(`SELECT id, workspace_id, runtime_id, status, agent_id,
+      chat_session_id, issue_id, issue_session_id FROM multiremi_turn_execution_records
+      WHERE id IN (${values})`).all(JSON.stringify([...new Set(ids)])) as Row[];
+    return rows.map(toTaskIdentity);
+  }
+
   /**
    * Batched form of the conversation-visibility source lookup
    * `getTask((getTurn(id) ?? getTurnForAttempt(id))?.current_attempt_id)`.
@@ -4706,11 +4718,20 @@ ${placementAfter.sql}
       // The card moves queued -> running in place and bumps `revision`; no marker
       // row, because the seq axis must keep `cursor_seq` meanings intact.
 
+      const workspaceEventStart = deferredEvents.workspace.length;
       this.deriveTaskIssueWithinTransaction(started, "in_progress", {
         rederive: true,
         collectChildStatusChanges: childStatusChanges,
         deferredEvents,
       });
+      // Accepting an attempt consumes capacity on its host. The derived status
+      // still reaches every browser, while daemon input/offer refresh belongs
+      // to the starting runtime; no other host gains eligibility from start.
+      for (const event of deferredEvents.workspace.slice(workspaceEventStart)) {
+        if (event.type === "issue:updated" && event.payload.status_changed === true) {
+          event.payload = { ...event.payload, runtime_id: started.runtimeId };
+        }
+      }
       return started;
     };
     const task = this.ctx.db.inTransaction ? startWithinTransaction() : this.ctx.db.transaction(startWithinTransaction)();

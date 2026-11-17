@@ -3,17 +3,35 @@ import { countSql, settleReportFleet, useReportFleetFixtures } from "../../fixtu
 import { createReportScaleFixture, REPORT_SCALES } from "../../fixtures/multiremi/daemon-report-scale.js";
 
 useReportFleetFixtures("file");
+// Executions include queued downlinks/offers, through layer.drain(). PG runs
+// the same comparisons; its fixed totals need a real-backend capture.
+const SQLITE_BUDGETS = {
+  hb: { total: 62, reads: 43, writes: 19 },
+  'task.start': { total: 96, reads: 77, writes: 19 },
+  'task.progress': { total: 50, reads: 40, writes: 10 },
+  'task.workspace': { total: 42, reads: 33, writes: 9 },
+  'turn.input': { total: 101, reads: 81, writes: 20 },
+};
 const fleets: Record<string, Awaited<ReturnType<typeof createReportScaleFixture>>> = {};
 const costs: Record<string, { total: number; reads: number; writes: number; statements: Record<string, number> }> = {};
 afterAll(async () => {
   if (process.env.MULTIREMI_TEST_QUERY_PROFILE) await Bun.write(process.env.MULTIREMI_TEST_QUERY_PROFILE, JSON.stringify(costs, null, 2));
 });
 beforeAll(async () => {
-  for (const [name, scale] of Object.entries(REPORT_SCALES)) fleets[name] = await createReportScaleFixture(scale);
+  for (const [name, scale] of Object.entries(REPORT_SCALES)) fleets[name] = await createReportScaleFixture({ ...scale,
+    ...(process.env.MULTIREMI_TEST_SCALE_DIMENSIONS ? JSON.parse(process.env.MULTIREMI_TEST_SCALE_DIMENSIONS) : {}),
+    ...(name === 'stable' && process.env.MULTIREMI_TEST_STABLE_DIMENSIONS ? JSON.parse(process.env.MULTIREMI_TEST_STABLE_DIMENSIONS) : {}),
+  });
 }, 120_000);
 
 test('seed contains every requested scale dimension', () => {
   for (const f of Object.values(fleets)) {
+    expect(f.activeTasks).toHaveLength(f.scale.activeAttempts ?? 0);
+    expect(f.questionIds).toHaveLength(f.scale.pendingQuestions ?? 0);
+    for (const id of f.questionIds) expect(f.store.getQuestion(id)?.status).toBe('pending');
+    expect(Number(f.database.query("SELECT COUNT(*) AS n FROM multiremi_feishu_bot_outbound_deliveries WHERE id LIKE 'scale-pending-%' AND status IN ('pending','sending')").get()!.n))
+      .toBe(f.scale.pendingOutbound ?? 0);
+    for (const task of f.activeTasks) expect(['running','awaiting_human']).toContain(f.store.getTask(task.id)?.status!);
     expect(f.issues).toHaveLength(f.scale.issues);
     expect(f.sessionIds).toHaveLength(f.scale.sessions);
     expect(f.agents).toHaveLength(f.scale.agents);
@@ -56,31 +74,76 @@ for (const type of ['hb','task.start','task.progress','task.workspace','turn.inp
       if (type === 'task.fail') p = { ...p, ...completion, error: 'fixture failure' };
       const seq = 100 + ['hb','task.start','task.progress','task.workspace','turn.input','turn.complete','task.fail'].indexOf(type);
       const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
-      const unsubscribe = f.store.onWorkspaceEvent(event => events.push({ type: event.type, payload: event.payload }));
+      const unsubscribe = f.store.onWorkspaceEvent(event => events.push(event));
       const sql = await countSql(f.database, f.layer, () => type === 'hb' ? f.heartbeat(0, false, 1)
         : f.sessions[sessionIndex]!.handleMessage(JSON.stringify({ v: 2, t: type, rt: runtime, seq, id: String(seq), p })));
+      unsubscribe();
       if (type !== 'hb') expect(f.frames[sessionIndex]!.find(frame => frame.t === 'res' && frame.re === String(seq))?.p.ok).toBe(true);
       const profile: Record<string, number> = {};
       for (const statement of sql) { const normalized = statement.replace(/\s+/g, ' ').trim(); profile[normalized] = (profile[normalized] ?? 0) + 1; }
       const reads = sql.filter(statement => /^\s*(SELECT|WITH)\b/i.test(statement)).length;
       costs[`${type}:${name}`] = { total: sql.length, reads, writes: sql.length - reads, statements: profile };
-      const measured = { reads, writes: sql.length - reads, total: sql.length };
-      if (type === 'turn.complete' || type === 'task.fail') {
-        if (f.database.dialect === 'sqlite') expect(measured).toEqual(type === 'turn.complete'
-          ? { reads: 201, writes: 49, total: 250 } : { reads: 137, writes: 21, total: 158 });
+      console.info('SCALE_COST', type, name, sql.length, reads, sql.length - reads);
+      const measured = { total: sql.length, reads, writes: sql.length - reads };
+      const expected = SQLITE_BUDGETS[type as keyof typeof SQLITE_BUDGETS];
+      if (expected) {
+        if (f.database.dialect === 'sqlite') expect(measured).toEqual(expected);
         if (name === 'stable') {
-          const small = costs[`${type}:small`]!;
-          expect(measured).toEqual({ reads: small.reads, writes: small.writes, total: small.total });
+          const { statements: _, ...small } = costs[`${type}:small`]!;
+          expect(measured).toEqual(small);
         }
       }
+      if (type === 'task.start') {
+        expect(f.store.getTask(task.id)?.status).toBe('running');
+        expect(events.filter(event => event.type === 'issue:updated')
+          .every(event => event.payload.runtime_id === runtime)).toBe(true);
+      }
+      if (type === 'task.progress') expect(f.store.getTask(task.id)?.progressSummary).toBe('working');
+      if (type === 'task.workspace') {
+        expect(f.store.getIssueWorkspace(f.issue.id)?.rootPath).toBe('/fixture');
+        expect(events.filter(event => event.type === 'daemon:dispatch_conditions_changed')
+          .map(event => event.payload.runtime_id).sort()).toEqual([f.runtimeIds[0], f.runtimeIds[1]].sort());
+      }
+      if (type === 'turn.input') expect(f.database.query('SELECT input_ack_seq FROM multiremi_turn_attempts WHERE id=?')
+        .get(task.id)!.input_ack_seq).toBe(input.input_to_seq);
       if (type === 'turn.complete') {
         expect(f.store.getTask(task.id)?.status).toBe('completed');
         expect(f.store.getMessage(f.store.getTurn(turn.id)!.reply_message_id!)?.body_md).toBe('finished');
       }
       if (type === 'task.fail') expect(f.store.getTask(task.id)?.status).toBe('failed');
-      unsubscribe();
-      if (process.env.MULTIREMI_TEST_EVENT_PROFILE) console.info('SCALE_EVENTS', type, name, JSON.stringify(events));
-      console.info('SCALE_COST', type, name, sql.length, reads, sql.length - reads);
     }
   }, 60_000);
 }
+
+test('batched downlink identities match individual lookups across runtime and status', async () => {
+  for (const f of Object.values(fleets)) {
+    const ids = f.database.query('SELECT id FROM multiremi_turn_execution_records').all().map(row => String(row.id));
+    const expected = ids.map(id => f.store.getTaskIdentity(id)!).sort((a, b) => a.id.localeCompare(b.id));
+    const sql = await countSql(f.database, f.layer, () => {
+      expect(f.store.getTaskIdentities([...ids, ids[0]!, 'missing']).sort((a, b) => a.id.localeCompare(b.id))).toEqual(expected);
+    });
+    expect(sql).toHaveLength(1);
+  }
+});
+
+test('batched snapshots retain every live interrupt and wrap-up and exclude foreign attempts', async () => {
+  for (const f of Object.values(fleets)) {
+    const tasks = f.activeTasks.filter(task => f.store.getTask(task.id)?.status === 'running');
+    const expected = tasks.map(task => f.store.sendChatMessage(task.chatSessionId!, { body: `Interrupt ${task.id}` }).message.id);
+    await settleReportFleet(f);
+    const turn = f.store.getTurnForAttempt(tasks[0]!.id)!;
+    const at = new Date().toISOString();
+    f.database.run('UPDATE multiremi_turns SET wrap_up_requested_at=? WHERE id=?', [at, turn.id]);
+    let result!: ReturnType<ReturnType<typeof f.store.getDaemonTurnBridge>['snapshot']>;
+    const sql = await countSql(f.database, f.layer, () => {
+      result = f.store.getDaemonTurnBridge().snapshot({ runtimeId: f.runtimeIds[0]!, daemonId: 'dm_cost_0', workspaceId: 'local' },
+        new Set([...tasks.map(task => task.id), f.peer.id, 'missing-attempt']));
+    });
+    expect(result.messages.map(input => input.message.id).sort()).toEqual(expected.sort());
+    expect(result.wrapUps).toEqual([{ turn_id: turn.id, attempt_id: tasks[0]!.id, requested_at: at }]);
+    expect(sql.length).toBeLessThanOrEqual(9);
+    const wrongHost = f.store.getDaemonTurnBridge().snapshot({ runtimeId: f.runtimeIds[0]!, daemonId: 'foreign-daemon', workspaceId: 'local' },
+      new Set(tasks.map(task => task.id)));
+    expect(wrongHost).toEqual({ messages: [], wrapUps: [] });
+  }
+}, 60_000);

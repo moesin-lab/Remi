@@ -3839,8 +3839,13 @@ runMigrations(this.db);
 
   reportIssueWorkspace(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
     const workspace = this.issueWorkspaces.report(input);
-    this.ctx.emitWorkspaceEvent({ type: "daemon:dispatch_conditions_changed", workspaceId: workspace.workspaceId,
-      actorType: "system", actorId: null, payload: { dispatch_only: true } });
+    // A live Issue workspace is pinned to its daemon. Its readiness changes
+    // eligibility for sibling providers on that host, not unrelated machines.
+    const runtime = this.runtimes.getRuntimeLite(input.runtimeId)!;
+    for (const runtimeId of this.runtimes.runtimeIdsForDaemon(runtime)) {
+      this.ctx.emitWorkspaceEvent({ type: "daemon:dispatch_conditions_changed", workspaceId: workspace.workspaceId,
+        actorType: "system", actorId: null, payload: { dispatch_only: true, runtime_id: runtimeId } });
+    }
     return workspace;
   }
 
@@ -5872,6 +5877,8 @@ runMigrations(this.db);
   }
 
   /** MUL-474: identity/status columns only, request-scoped. */
+  getTaskIdentities(ids: readonly string[]) { return this.tasks.getTaskIdentities(ids); }
+
   getTaskIdentity(id: string): MultiremiTaskIdentity | null;
   getTaskIdentity(id: string, projection: "fanout"): import("@multiremi/store/context.js").TaskMessageFanoutSubject | null;
   getTaskIdentity(id: string, projection?: "fanout") {

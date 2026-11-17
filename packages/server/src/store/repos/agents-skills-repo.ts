@@ -501,7 +501,7 @@ export class AgentsSkillsRepo {
       ],
     );
     this.replaceSkillFiles(id, files, now);
-    return this.getSkill(id)!;
+    return this.getSkill(id, { includeFiles: true })!;
   }
 
   updateSkill(id: string, input: UpdateSkillInput): MultiremiSkill {
@@ -534,7 +534,7 @@ export class AgentsSkillsRepo {
       );
       if (input.files !== undefined) this.replaceSkillFiles(id, normalizeSkillFiles(input.files), now);
     })();
-    return this.getSkill(id)!;
+    return this.getSkill(id, { includeFiles: true })!;
   }
 
   upsertSkill(input: CreateSkillInput & { id: string }): MultiremiSkill {
@@ -569,7 +569,7 @@ export class AgentsSkillsRepo {
       );
       if (input.files !== undefined) this.replaceSkillFiles(input.id, normalizeSkillFiles(input.files), now);
     })();
-    return this.getSkill(input.id)!;
+    return this.getSkill(input.id, { includeFiles: true })!;
   }
 
   archiveSkill(id: string): MultiremiSkill {
@@ -588,11 +588,11 @@ export class AgentsSkillsRepo {
     return rows.map((row) => toSkill(row, options.includeFiles ? this.listSkillFiles(String(row.id)) : []));
   }
 
-  getSkill(id: string, options: { includeArchived?: boolean; includeFiles?: boolean } = { includeFiles: true }): MultiremiSkill | null {
+  getSkill(id: string, options: { includeArchived?: boolean; includeFiles?: boolean } = {}): MultiremiSkill | null {
     const row = this.ctx.db.query(
       `SELECT * FROM multiremi_skills WHERE id = ?${options.includeArchived ? "" : " AND archived_at IS NULL"}`,
     ).get(id) as Row | null;
-    return row ? toSkill(row, options.includeFiles === false ? [] : this.listSkillFiles(id, { includeArchived: options.includeArchived })) : null;
+    return row ? toSkill(row, options.includeFiles ? this.listSkillFiles(id, { includeArchived: options.includeArchived }) : []) : null;
   }
 
   listSkillFiles(skillId: string, options: { includeArchived?: boolean } = {}): MultiremiSkillFile[] {
@@ -634,7 +634,7 @@ export class AgentsSkillsRepo {
     return result.changes > 0;
   }
 
-  listAgentSkills(agentId: string, options: { includeFiles?: boolean } = { includeFiles: true }): MultiremiSkill[] {
+  listAgentSkills(agentId: string, options: { includeFiles?: boolean } = {}): MultiremiSkill[] {
     const row = this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(agentId) as Row | null;
     if (!row) throw new Error(`Agent not found: ${agentId}`);
     const agent = toAgent(row);
@@ -645,7 +645,7 @@ export class AgentsSkillsRepo {
        WHERE aks.agent_id = ? AND s.archived_at IS NULL
        ORDER BY aks.created_at ASC, s.name ASC`,
     ).all(agentId) as Row[];
-    const structured = rows.map((row) => toSkill(row, options.includeFiles === false ? [] : this.listSkillFiles(String(row.id))));
+    const structured = rows.map((row) => toSkill(row, options.includeFiles ? this.listSkillFiles(String(row.id)) : []));
     return mergeAgentSkills(agent.skills, structured);
   }
 
@@ -751,9 +751,9 @@ export class AgentsSkillsRepo {
     return row ? this.hydrateAgent(toAgent(row)) : null;
   }
 
-  getAgent(id: string): MultiremiAgent | null {
+  getAgent(id: string, options: { includeFiles?: boolean } = {}): MultiremiAgent | null {
     const row = this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null;
-    return row ? this.hydrateAgent(toAgent(row)) : null;
+    return row ? this.hydrateAgent(toAgent(row), options) : null;
   }
 
   /**
@@ -765,7 +765,7 @@ export class AgentsSkillsRepo {
    * whose Agents carry a few hundred KB of Skills each, a claim that only ever *selects* one
    * Agent pays megabytes to answer questions the Skills cannot affect.
    *
-   * Callers that ship an Agent to a daemon must still use {@link getAgent}; this is only for
+   * Callers that ship an Agent to a daemon must use `getAgent(id, { includeFiles: true })`; this is only for
    * decisions.
    */
   getAgentLite(id: string): MultiremiAgent | null {
@@ -820,7 +820,9 @@ export class AgentsSkillsRepo {
     const rows = this.ctx.db.query(options.includeArchived
       ? "SELECT * FROM multiremi_agents ORDER BY created_at ASC"
       : "SELECT * FROM multiremi_agents WHERE archived_at IS NULL ORDER BY created_at ASC").all() as Row[];
-    return rows.map((row) => this.hydrateAgent(toAgent(row)));
+    const agents = rows.map(toAgent);
+    const skills = this.listAgentSkillSummaries(agents);
+    return agents.map(agent => ({ ...agent, skills: skills.get(agent.id) ?? [] }));
   }
 
   /**
@@ -876,17 +878,19 @@ export class AgentsSkillsRepo {
        WHERE runtime_id = ? AND archived_at IS NULL
        ORDER BY lower(name) ASC, name ASC`,
     ).all(runtimeId) as Row[];
-    return rows.map((row) => this.hydrateAgent(toAgent(row)));
+    const agents = rows.map(toAgent);
+    const skills = this.listAgentSkillSummaries(agents);
+    return agents.map(agent => ({ ...agent, skills: skills.get(agent.id) ?? [] }));
   }
 
-  hydrateAgent(agent: MultiremiAgent): MultiremiAgent {
+  hydrateAgent(agent: MultiremiAgent, options: { includeFiles?: boolean } = {}): MultiremiAgent {
     return {
       ...agent,
-      skills: this.listAgentSkillsForExistingAgent(agent),
+      skills: this.listAgentSkillsForExistingAgent(agent, options),
     };
   }
 
-  private listAgentSkillsForExistingAgent(agent: MultiremiAgent): MultiremiSkill[] {
+  private listAgentSkillsForExistingAgent(agent: MultiremiAgent, options: { includeFiles?: boolean }): MultiremiSkill[] {
     const rows = this.ctx.db.query(
       `SELECT s.*
        FROM multiremi_skills s
@@ -894,7 +898,7 @@ export class AgentsSkillsRepo {
        WHERE aks.agent_id = ? AND s.archived_at IS NULL
        ORDER BY aks.created_at ASC, s.name ASC`,
     ).all(agent.id) as Row[];
-    const structured = rows.map((row) => toSkill(row, this.listSkillFiles(String(row.id))));
+    const structured = rows.map((row) => toSkill(row, options.includeFiles ? this.listSkillFiles(String(row.id)) : []));
     return mergeAgentSkills(agent.skills, structured);
   }
 

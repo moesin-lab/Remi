@@ -2933,7 +2933,7 @@ export class TasksRepo {
     return {
       ...task,
       runtimeWorkspace: task.runtimeWorkspaceId ? new RuntimeWorkspacesRepo(this.ctx).get(task.runtimeWorkspaceId) : null,
-      agent: this.ctx.agents().getAgent(task.agentId),
+      agent: this.ctx.agents().getAgent(task.agentId, { includeFiles: true }),
       ...(issueSession ? { issueSession, issue_session: issueSession } : {}),
       issue,
       project,

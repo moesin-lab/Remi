@@ -30,6 +30,7 @@ it("profiles mixed HTTP, real daemon heartbeats and production background scans"
   const pollers = positive("MUL85_POLLERS", 10);
   const seconds = positive("MUL85_SECONDS", 60);
   const sqlMs = positive("MUL85_SQL_MS", 2.5);
+  const skillFiles = positive("MUL85_SKILL_FILES", 0);
   const extraIds = Array.from({ length: runtimes - 1 }, (_, n) => `rt_mul85_${n}`);
   let extraReports: any[] = [];
   const options = { enabled: true, summaryDbRoutes: true, slowRequestMs: 1e9,
@@ -70,6 +71,12 @@ it("profiles mixed HTTP, real daemon heartbeats and production background scans"
     expect(h.layer.registry.listSessions()[0]!.runtimeIds.length).toBe(runtimes);
     const fixture = seedFirstScreenHotspotsFixture(h.store, { sessions: 60, agents: 8, inboxRows: 100,
       privatePrimaryAgent: false, run: (sql, params) => h.db.run(sql, params as never[]) });
+    if (skillFiles) {
+      const skill = h.store.createSkill({ name: "Profile shared large bundle", content: "# Shared bundle",
+        files: Array.from({ length: skillFiles }, (_, n) => ({ path: `files/${n}.txt`, content: "x".repeat(10_240) })),
+      });
+      for (const id of fixture.agentIds) h.store.setAgentSkills(id, [skill.id!]);
+    }
     const token = await h.store.createAccessToken({ name: "mixed profile reader", type: "pat",
       userId: fixture.readerUserId, workspaceId: "local", purpose: "session" });
     await h.layer.drain();
@@ -156,7 +163,7 @@ it("profiles mixed HTTP, real daemon heartbeats and production background scans"
     expect(window.db_unattributed).toBeGreaterThanOrEqual(0);
     const report = { revision: process.env.MUL85_REVISION ?? "working-tree", dialect: h.db.dialect,
       simulated_sql_delay_ms: sqlMs, seconds, runtimes, pollers, agents: 8, chatSessions: 60,
-      activeProviderLanes: 0, daemonSockets: 1, connections: "real WS + HTTP; synthetic scale; no external model",
+      activeProviderLanes: 0, daemonSockets: 1, sharedSkillFiles: skillFiles, sharedSkillBytes: skillFiles * 10_240, connections: "real WS + HTTP; synthetic scale; no external model",
       elapsed_ms: performance.now() - started, sql_per_minute: window.db_queries / window.window_ms * 60000,
       statements: [...statements].sort((a, b) => b[1] - a[1]).slice(0, 20),
       client: JSON.parse(clientText), summary: window };

@@ -231,3 +231,13 @@ Daemon 测试和独立 harness 必须注入 [disabledSshMeshRuntime()](tests/hel
 [包装信号回归](tests/unit/scripts/run-tests-signals.test.ts)实际转发 SIGINT/SIGTERM；中断后子进程退出 0 时包装仍返回失败，原非零退出码继续保留，并检查 HOME 清理；[包装环境回归](tests/unit/scripts/run-tests.test.ts)核对 CI 的测试数据库 URL 与 lock sentinel 输入；[多文件 preload 回归](tests/unit/scripts/hermetic-preload-process.test.ts)验证多个文件及其 awaited afterAll 子进程结束前共享运行根仍在，整个套件结束才清理。
 
 [Remi core 测试](tests/unit/remi/core.test.ts)通过构造参数把旧 sessions.json 迁移和 metrics 写入临时 home；shared/config 的生产常量仍按原 HOME 解析，不读取 REMI_HOME 环境变量。[Claude wrapper 测试](tests/unit/acp/claude-runtime-wrapper.test.ts)为子进程设置 npm_config_logs_dir 与 npm_config_cache。[Lark CLI 集成测试](tests/integration/lark-cli-message-provider.test.ts)保留真实健康探测；无配置文件时将 CLI 配置、数据、日志目录放入测试运行根，避免未登录探测生成 HOME 缓存。直接 bun test 且存在 CLI 配置时保留原登录环境，继续运行真实 CLI 用例。
+
+## Daemon 报告规模预算
+
+`tests/fixtures/multiremi/daemon-report-scale.ts` 提供参数化的小档与 stable 档；
+`daemon-report-scale-budget.test.ts` 每档仅在 `beforeAll` seed 一次，测量前排空 ACK 窗口，
+计数直到 queued downlinks/offers drain 完成。默认 SQLite 的非终态帧断言读/写固定常量；
+配置 `MULTIREMI_TEST_POSTGRES_URL` 后同一文件必须完成真实 PG 两档相等检查，连接失败不能回退。
+`MULTIREMI_TEST_QUERY_PROFILE=/tmp/profile.json` 可导出逐语句计数。
+本地 SQLite 规模套件低于 30 秒；PG 的真实耗时、固定常量与完整 Release build check 尚待采集，
+见 [MUL-199 测量边界](reports/performance/MUL-199-daemon-report-scale.md)。

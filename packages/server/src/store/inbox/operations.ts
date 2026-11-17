@@ -1,3 +1,5 @@
+import { readCurrentTurnRow } from "@multiremi/store/execution-reads.js";
+import { readTurnRow } from "@multiremi/store/execution-reads.js";
 import { inboxVisibilitySql, type InboxAccess } from './inbox-visibility.js';
 import { questionNotificationVisibilitySql } from './question-notification-visibility.js';
 import type { SendMessageInput, UnifiedMessage, MultiremiTurn, MultiremiTurnAttempt } from '@multiremi/contracts/unified-model.js';
@@ -50,7 +52,7 @@ export class InboxOperations {
   /** A terminal report grants only its named result and direct replies to the original recipient lane. */
   canReadDelegationResult(attemptId: string, messageId: string): boolean {
     const caller = this.ctx.tasks().getTask(attemptId);
-    const current = this.ctx.db.query('SELECT * FROM multiremi_turns WHERE current_attempt_id=?').get(attemptId);
+    const current = readCurrentTurnRow(this.ctx.db, attemptId);
     const message = getMessage(this.ctx, messageId);
     if (!caller || !current || !message || message.deleted_at || message.visibility !== 'shown') return false;
     const candidates = [message.id, message.reply_to_id].filter((id): id is string => !!id);
@@ -271,7 +273,7 @@ export class InboxOperations {
     });
   }
   getTurn(id:string):MultiremiTurn|null {
-    const row=this.ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(id);return row?{...row,holds_workspace:!!row.holds_workspace} as MultiremiTurn:null;
+    const row=readTurnRow(this.ctx.db, id);return row?{...row,holds_workspace:!!row.holds_workspace} as MultiremiTurn:null;
   }
   listTurns(input:{workspace_id:string;issue_id?:string;session_id?:string;agent_id?:string;status?:string;limit?:number;cursor?:{created_at:string;id:string};visibility?:{userId:string|null;admin:boolean;attemptId?:string;coordinatingSessionId?:string}}):MultiremiTurn[]{
     const params:unknown[]=[input.workspace_id],conditions=['multiremi_turns.workspace_id=?'];

@@ -1,3 +1,4 @@
+import { activeRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
 import {
@@ -57,8 +58,20 @@ export async function countSql(
   onResult?: (sql: string, value: unknown) => void,
 ) {
   const statements: string[] = [];
-  const traces: { sql: string; stack?: string }[] = [];
-  const record = (sql: string) => { statements.push(sql); if (process.env.MULTIREMI_TEST_SQL_TRACE) traces.push({ sql, stack: new Error().stack }); };
+  const traces: { sql: string; parameters: unknown[]; inTransaction: boolean; scope: number | null; generation: number | null; stack?: string }[] = [];
+  const scopes = new WeakMap<object, number>();
+  let nextScope = 0;
+  const record = (sql: string, parameters: unknown[] = []) => {
+    statements.push(sql);
+    if (process.env.MULTIREMI_TEST_SQL_TRACE) {
+      const cache = activeRequestReadCache();
+      if (cache && !scopes.has(cache)) scopes.set(cache, ++nextScope);
+      traces.push({ sql, parameters, inTransaction: !!database.inTransaction,
+        scope: cache ? scopes.get(cache)! : null,
+        // Diagnostic only: identify the existing transaction/lock generation.
+        generation: cache ? Number(Reflect.get(cache, "generation")) : null, stack: new Error().stack });
+    }
+  };
   const query = database.query.bind(database);
   const prepare = database.prepare.bind(database);
   const run = database.run.bind(database);
@@ -72,7 +85,7 @@ export async function countSql(
         const value = Reflect.get(target, key, target);
         if (["get", "all", "run", "values"].includes(String(key)))
           return (...args: unknown[]) => {
-            record(sql);
+            record(sql, args);
             const result = value.apply(target, args);
             onResult?.(sql, result);
             return result;
@@ -90,7 +103,7 @@ export async function countSql(
   ) => wrap(prepare(sql), sql)) as typeof database.prepare);
   const runSpy = spyOn(database, "run").mockImplementation(
     (...args: Parameters<SqlDatabase["run"]>) => {
-      record(args[0]);
+      record(args[0], args.slice(1));
       return run(...args);
     },
   );

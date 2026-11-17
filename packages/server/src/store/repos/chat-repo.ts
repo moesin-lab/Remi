@@ -1,3 +1,5 @@
+import { memoizeRequestRead } from "@multiremi/store/request-read-cache.js";
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { sendMessageWithinTransaction } from '../inbox/send-message.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Chat domain (chat sessions and chat messages), extracted verbatim from MultiremiStore
@@ -249,7 +251,9 @@ export class ChatRepo {
   }
 
   getChatSession(id: string): MultiremiChatSession | null {
-    const row = this.ctx.db.query(`${CHAT_SESSION_SELECT} WHERE chat.id = ?`).get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_chat_sessions', 'multiremi_conversation_log',
+      'multiremi_chat_message_records', 'multiremi_session_lanes', 'multiremi_workspace_read_cursors'], `chat:${id}`,
+      () => this.ctx.db.query(`${CHAT_SESSION_SELECT} WHERE chat.id = ?`).get(id) as Row | null);
     return row ? toChatSession(row) : null;
   }
 
@@ -548,7 +552,7 @@ export class ChatRepo {
     const staged=input.role==='assistant'&&input.taskId?this.ctx.db.query('SELECT reply_message_id FROM multiremi_turns WHERE current_attempt_id=?').get(input.taskId)?.reply_message_id:null;
     const id=input.id??staged??createId('msg');
     const task=input.taskId?this.ctx.tasks().getTask(input.taskId):null;
-    const source=input.taskId?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(input.taskId):null;
+    const source=input.taskId?readAttemptTurn(this.ctx.db, input.taskId):null;
     const member=this.ctx.workspaces().ensureWorkspaceOperator(session.workspaceId);
     const result=sendMessageWithinTransaction(this.ctx,{id,session_id:session.id,
       sender:{type:input.role==='assistant'?'agent':input.role==='user'?'member':'platform',id:input.role==='assistant'?task?.agentId??null:input.role==='user'?member?.id??null:null},

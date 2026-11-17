@@ -184,6 +184,16 @@ export function memoizeRequestRead<T>(db: object, tables: readonly string[], key
   return next.value;
 }
 
+/** Seed a narrower canonical projection from a row already read in this generation. */
+export function seedRequestRead<T>(db: object, tables: readonly string[], key: string, value: T): void {
+  const cache = activeRequestReadCache();
+  if (!cache) return;
+  let databaseId = readDatabaseIds.get(db);
+  if (databaseId === undefined) { databaseId = ++nextReadDatabaseId; readDatabaseIds.set(db, databaseId); }
+  const entry = { value };
+  for (const table of tables) cache.set(cacheKey(table, databaseId, key), entry);
+}
+
 // Only locks acquired through the wrapped transaction runner are reusable.
 // A savepoint rollback restores its entry set: PG releases locks acquired after it.
 const transactionLocks = new WeakMap<object, { held: Set<string> | null }>();

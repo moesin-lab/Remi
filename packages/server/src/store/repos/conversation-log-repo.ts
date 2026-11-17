@@ -1,3 +1,4 @@
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { memoizeRequestRead } from '../request-read-cache.js';
 import { attemptInputState } from '../inbox/attempt-input.js';
 import { lockLane } from '../inbox/lane-machine.js';
@@ -436,7 +437,7 @@ export class ConversationLogRepo {
       const workspaceId=session?.workspaceId??chat?.workspaceId??this.ctx.db.query('SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id=?').get(input.sessionId)?.workspace_id;
       const type=input.authorType==='system'||input.authorType==='external'?'platform':input.authorType;
       const member=type==='member'?this.ctx.workspaces().getWorkspaceMemberByRef(input.authorId??'local',workspaceId):null;
-      const source=input.taskId?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(input.taskId):null;
+      const source=input.taskId?readAttemptTurn(this.ctx.db, input.taskId):null;
       const result=sendMessageWithinTransaction(this.ctx,{id:input.id,session_id:input.sessionId,
         sender:{type:type as 'agent'|'member'|'platform'|'timer',id:member?.id??input.authorId??null},source_turn_id:source?.turn_id??null,
         to:{type:'none'},message_kind:input.messageKind??(input.kind==='delegation_report'?'report':input.parentId?'reply':type==='member'?'request':'status'),
@@ -485,7 +486,7 @@ export class ConversationLogRepo {
       : input.kind === "head" ? 0 : this.nextSeqWithinTransaction(input.sessionId);
     if (input.seq != null) this.raiseHeadWithinTransaction(input.sessionId, seq);
     const id = input.id ?? createId("clog");
-    const workId=input.taskId?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(input.taskId)?.turn_id??input.taskId:null;
+    const workId=input.taskId?readAttemptTurn(this.ctx.db, input.taskId)?.turn_id??input.taskId:null;
     const now = input.createdAt ?? nowIso();
     const updatedAt = input.updatedAt ?? now;
     const rendered = renderMarkdown(input.bodyMd ?? "");
@@ -588,9 +589,9 @@ export class ConversationLogRepo {
   }
 
   getEntryWithinTransaction(sessionId: string, seq: number): ConversationLogEntry | null {
-    const row = this.ctx.db.query(
-      "SELECT * FROM multiremi_conversation_log WHERE session_id = ? AND seq = ?",
-    ).get(sessionId, seq) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_conversation_log'], `log-entry:${sessionId}:${seq}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_conversation_log WHERE session_id = ? AND seq = ?")
+        .get(sessionId, seq) as Row | null);
     return row ? this.materialize(row) : null;
   }
 
@@ -817,7 +818,7 @@ export class ConversationLogRepo {
     lateSubagents?:TraceLateSubagent[]|null;
     inbox?:{delivered_from_seq:number;delivered_to_seq:number;delivered_at:string;task_id:string};
   }, materialize=true):ConversationLogEntry|null {
-    const attempt=this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(taskId);
+    const attempt=readAttemptTurn(this.ctx.db, taskId);
     if(!attempt)return null;
     const mapping:Record<string,string>={summary:'progress_summary',toolCallCount:'tool_call_count',eventCount:'event_count',typeHistogram:'type_histogram',usage:'usage',model:'model',failureReason:'failure_reason',
       contextUsage:'context_usage',workedMs:'worked_ms',processItemCount:'process_item_count',lateSubagents:'late_subagents'};
@@ -832,7 +833,7 @@ export class ConversationLogRepo {
   }
   recordTurnInboxDeliveryWithinTransaction(taskId:string,fromSeq:number,toSeq:number):ConversationLogEntry|null {
     this.ctx.db.run('UPDATE multiremi_turns SET input_from_seq=?,input_to_seq=? WHERE current_attempt_id=?',[fromSeq,toSeq,taskId]);
-    const row=this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(taskId);
+    const row=readAttemptTurn(this.ctx.db, taskId);
     if(row)notifyTurnChanged(this.ctx.db,row.turn_id);
     return this.findTurnEntry(taskId);
   }

@@ -9,10 +9,10 @@ const SQLITE_BUDGETS = {
   hb: { total: 60, reads: 43, writes: 17 },
   'task.start': { total: 80, reads: 63, writes: 17 },
   'task.progress': { total: 38, reads: 30, writes: 8 },
-  'task.workspace': { total: 41, reads: 33, writes: 8 },
+  'task.workspace': { total: 40, reads: 32, writes: 8 },
   'turn.input': { total: 88, reads: 73, writes: 15 },
-  'turn.complete': { total: 249, reads: 197, writes: 52 },
-  'task.fail': { total: 166, reads: 141, writes: 25 },
+  'turn.complete': { total: 229, reads: 177, writes: 52 },
+  'task.fail': { total: 141, reads: 116, writes: 25 },
 };
 const fleets: Record<string, Awaited<ReturnType<typeof createReportScaleFixture>>> = {};
 const costs: Record<string, { total: number; reads: number; writes: number; statements: Record<string, number> }> = {};

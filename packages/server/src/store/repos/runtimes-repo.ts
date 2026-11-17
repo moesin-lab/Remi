@@ -49,7 +49,7 @@ import {
 } from "@multiremi/store/helpers.js";
 import { createCommitEventQueue, type CommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
 import type { CancelTaskResult, ChildStatusChangeCollector } from "@multiremi/store/repos/tasks-repo.js";
-import { activeRequestReadCache, cacheKey, writeThroughRequestReadCache } from "@multiremi/store/request-read-cache.js";
+import { memoizeRequestRead, activeRequestReadCache, cacheKey, writeThroughRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import { canonicalizeDaemonRoutingWithinTransaction } from "@multiremi/store/daemon-routing.js";
 import { RuntimeRequestQueue, type RuntimeRequestSpec } from "@multiremi/store/repos/runtime-request-queue.js";
 import { BackgroundTasksRepo } from "@multiremi/store/repos/background-tasks-repo.js";
@@ -550,7 +550,8 @@ export class RuntimesRepo {
     const rows: Row[] = [];
     for (let offset = 0; offset < unique.length; offset += 400) {
       const batch = unique.slice(offset, offset + 400);
-      rows.push(...this.ctx.db.query(`SELECT runtime.*, profile.display_name AS daemon_display_name,
+      rows.push(...memoizeRequestRead(this.ctx.db, ['multiremi_runtimes', 'multiremi_daemon_drains', 'multiremi_daemon_profiles'],
+        JSON.stringify(['runtime-batch', batch]), () => this.ctx.db.query(`SELECT runtime.*, profile.display_name AS daemon_display_name,
           drain.daemon_id AS draining_daemon_id
         FROM multiremi_runtimes runtime
         LEFT JOIN multiremi_daemon_drains drain
@@ -559,7 +560,7 @@ export class RuntimesRepo {
         LEFT JOIN multiremi_daemon_profiles profile
           ON profile.workspace_id = COALESCE(runtime.workspace_id, 'local')
          AND profile.daemon_id = runtime.daemon_id
-        WHERE runtime.id IN (${batch.map(() => '?').join(',')})`).all(...batch) as Row[]);
+        WHERE runtime.id IN (${batch.map(() => '?').join(',')})`).all(...batch) as Row[]));
     }
     const cache = activeRequestReadCache();
     for (const row of rows) cache?.set(cacheKey("multiremi_runtimes", "row", String(row.id)), row);
@@ -569,7 +570,9 @@ export class RuntimesRepo {
   /** Consumers of message/terminal changes. Idle hosts have no input to refresh;
    * maintenance/configuration events still use the complete workspace fanout. */
   daemonInputRuntimeIds(workspaceId: string): string[] {
-    return (this.ctx.db.query(`SELECT runtime_id FROM multiremi_turn_execution_records
+    return memoizeRequestRead(this.ctx.db, ['multiremi_turn_execution_records', 'multiremi_feishu_bot_configs',
+      'multiremi_feishu_bot_runtime_states', 'multiremi_background_tasks', 'multiremi_runtimes', 'multiremi_daemon_drains'],
+      `daemon-input-runtimes:${workspaceId}`, () => (this.ctx.db.query(`SELECT runtime_id FROM multiremi_turn_execution_records
         WHERE workspace_id=? AND runtime_id IS NOT NULL
           AND status IN ('dispatched','running','waiting_local_directory','awaiting_human')
       UNION SELECT runtime_id FROM multiremi_feishu_bot_configs WHERE workspace_id=? AND runtime_id IS NOT NULL
@@ -579,7 +582,7 @@ export class RuntimesRepo {
       UNION SELECT r.id AS runtime_id FROM multiremi_runtimes r JOIN multiremi_daemon_drains d
         ON d.workspace_id=COALESCE(r.workspace_id,'local') AND d.daemon_id=COALESCE(r.daemon_id,r.id)
         WHERE d.workspace_id=?`).all(workspaceId,workspaceId,workspaceId,workspaceId,workspaceId) as Row[])
-      .map(row => String(row.runtime_id));
+      .map(row => String(row.runtime_id)));
   }
 
   recordDaemonProtocol(runtimeId: string, daemonId: string, version: number, cliVersion?: string): void {

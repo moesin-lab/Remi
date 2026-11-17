@@ -203,5 +203,14 @@ function environmentTmpMounts(
       // left untouched rather than turning unrelated variables into failures.
     }
   }
-  return [...mounts.values()];
+  // A mounted directory already exposes its descendants. Preparing a second
+  // file mount beneath it would run `: > target` through the directory bind
+  // mount and truncate the HOST file (e.g. npm_package_json in a /tmp checkout).
+  // Select parents first regardless of environment variable insertion order.
+  const selected: Array<{ source: string; relativePath: string; kind: "directory" | "file" }> = [];
+  for (const mount of [...mounts.values()].sort((a, b) => a.source.length - b.source.length)) {
+    if (selected.some(parent => parent.kind === "directory" && mount.source.startsWith(`${parent.source}${sep}`))) continue;
+    selected.push(mount);
+  }
+  return selected;
 }

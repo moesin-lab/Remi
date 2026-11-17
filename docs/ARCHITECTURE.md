@@ -130,7 +130,8 @@ SQLite 最外层事务以 `BEGIN IMMEDIATE` 取得写锁，嵌套事务仍用 sa
 按循环以 1、2、4、8、16、30 秒退避，警告每循环最多每 30 秒一次，恢复后回到正常间隔。
 Scheduler 的各 tick 共用一次 sync 边界；failure monitor、归档、SCM、messaging、标题、通知、
 能力维护、HTML 回填和 Wiki storage 各自恢复。Offer pump 和 downlink 按 Runtime 使用相同上限与日志频率。
-非连接错误向上传播；已有 provider/领域错误仍由各模块处理。断连时不确认 system event，
+循环边界将非连接错误记为 ERROR 并按正常周期继续，一次性任务结束而不自动重放；动态周期读取失败时沿用上次周期（首次失败暂用 30 秒）。
+能力维护逐项隔离程序错误，整轮结束后传播连接错误以保留退避。已有 provider/领域错误仍由各模块处理。断连时不确认 system event，
 保留 processing 租约；到期后重新领取，已提交的自动化运行由 `(trigger_id, event_id)` 去重。
 
 PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packages/server/src/store/db/pg-worker.ts)，worker 使用单连接。

@@ -157,10 +157,12 @@ export function createLogger(
     if (traceCtx?.spanId) entry.spanId = traceCtx.spanId;
 
     // Extract structured data from args
-    if (args.length === 1 && typeof args[0] === "object" && args[0] !== null && !Array.isArray(args[0])) {
+    if (args.length === 1 && args[0] instanceof Error) {
+      entry.data = { name: args[0].name, message: args[0].message, stack: args[0].stack };
+    } else if (args.length === 1 && typeof args[0] === "object" && args[0] !== null && !Array.isArray(args[0])) {
       entry.data = args[0] as Record<string, unknown>;
     } else if (args.length > 0) {
-      entry.data = { _args: args.map((a) => (a instanceof Error ? a.message : String(a))) };
+      entry.data = { _args: args.map((a) => (a instanceof Error ? { name: a.name, message: a.message, stack: a.stack } : String(a))) };
     }
 
     persistEntry(entry);

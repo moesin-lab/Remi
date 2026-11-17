@@ -3,6 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { join } from "node:path";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import {
   AcpClient,
   isolateProcessTmp,
@@ -37,6 +38,30 @@ function unavailableIsolation(directory: string): PrivateTmpIsolationUnavailable
 }
 
 describe("task private /tmp", () => {
+  it("preserves overlapping environment directories and files in either order", async () => {
+    if (process.platform !== "linux") return;
+    const directory = privateDirectory("overlapping-env");
+    if (unavailableIsolation(directory)) return;
+    const project = realpathSync(mkdtempSync(join(tmpdir(), "remi-env-project-")));
+    roots.push(project);
+    const manifest = join(project, "package.json");
+    const contents = '{"name":"preserve-me"}\n';
+    writeFileSync(manifest, contents);
+    for (const paths of [
+      { npm_config_local_prefix: project, npm_package_json: manifest },
+      { npm_package_json: manifest, npm_config_local_prefix: project },
+    ]) {
+      const launch = isolateProcessTmp({ executable: Bun.which("sh")!, args: ["-ceu", 'cat "$npm_package_json"'] }, directory, paths);
+      const child = Bun.spawn([launch.executable, ...launch.args], { env: { ...process.env, ...paths }, stdout: "pipe", stderr: "pipe" });
+      const output = await new Response(child.stdout).text();
+      const error = await new Response(child.stderr).text();
+      expect(await child.exited).toBe(0);
+      expect(error).toBe("");
+      expect(readFileSync(manifest, "utf8")).toBe(contents);
+      expect(output).toBe(contents);
+    }
+  });
+
   it("isolates the same literal /tmp path across concurrent process trees", async () => {
     if (process.platform !== "linux") return;
     const first = privateDirectory("first");

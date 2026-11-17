@@ -175,6 +175,8 @@ export async function capturePr2QueryCounts(point?: number) {
     try {
       const routes: Record<string, number> = {};
       for (const path of ["/api/inbox", `/api/attachments/${harness.attachmentId}/content`, "/api/runtimes"]) {
+        // Measure business reads with a warm readiness cache (cold cost has its own regression).
+        harness.store.checkDatabaseReady(true);
         harness.probe.reset();
         const response = await harness.app.request(path, { headers: harness.headers });
         await response.arrayBuffer();

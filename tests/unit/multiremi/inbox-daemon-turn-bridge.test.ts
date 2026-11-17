@@ -42,6 +42,16 @@ pendingTurnBackendTests('MUL-506 DaemonTurnBridge',fixture=>{
     expect(f.bridge.rpc('turn.input',{...payload,message_ids:[]},f.scope).ok).toBe(false);
     expect(f.bridge.rpc('turn.input',payload,f.scope).ok).toBe(true);expect(f.bridge.rpc('turn.input',payload,f.scope).ok).toBe(true);
     expect(f.store.getTurn(f.sent.turn_id!)?.input_to_seq).toBe(f.offer.input_to_seq);},120_000);
+  for(const partial of [false,true])it(`MUL-178 inline acknowledgement preserves an ahead ${partial?'partial':'complete'} body receipt`,()=>{
+    const f=setup();
+    const later=f.store.sendMessage({session_id:f.session.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'status',wake_requested:'inbox_only',body_md:'x'.repeat(10000)});
+    f.store.recordSessionAgentRangeRead(f.session.id,f.agent.id,{seq:1,offset:0},
+      {seq:later.message.seq+(partial?0:1),offset:partial?50:0},f.attempt.id);
+    const receipt=()=>f.db.query('SELECT input_read_seq,input_read_offset FROM multiremi_turn_attempts WHERE id=?').get(f.attempt.id);
+    const before=receipt();
+    expect(f.bridge.rpc('turn.input',{turn_id:f.sent.turn_id,attempt_id:f.attempt.id,input_to_seq:f.offer.input_to_seq,message_ids:f.offer.input_messages.map(m=>m.id)},f.scope).ok).toBe(true);
+    expect(receipt()).toEqual(before);
+  });
   it('decision/permission waits, member reply resumes, wrap-up is a marker',()=>{const f=setup();
     const requested=f.bridge.rpc('turn.decision',{turn_id:f.sent.turn_id,attempt_id:f.attempt.id,wait_id:'bridge-permission-native-wait',dedupe_key:'permission',body_md:'Permit?',options:[{label:'Yes',value:'yes'}],metadata:{kind:'permission',options:[{optionId:'yes',name:'Yes',kind:'allow_once'}]}},f.scope);
     expect(requested.ok).toBe(true);expect(f.store.getTurn(f.sent.turn_id!)?.status).toBe('awaiting_human');

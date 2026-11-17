@@ -353,14 +353,19 @@ describe("MUL-74 / MUL-197 drain + outbox end to end", () => {
       const state = daemon as unknown as {
         activeTaskCount: number;
         drainingTaskCount: number;
-        tryPauseClaimsForUpdate(scope: "cli"): { ok: boolean; error?: string };
+        claimsPaused: boolean;
+        pauseCliClaimsUntilIdle(deadline: string): Promise<{ ok: boolean; error?: string }>;
       };
       expect(state.activeTaskCount).toBe(1);
       expect(state.drainingTaskCount).toBe(0);
-      expect(state.tryPauseClaimsForUpdate("cli")).toEqual({
+      const pausing = state.pauseCliClaimsUntilIdle(new Date(Date.now() + 30).toISOString());
+      expect(state.claimsPaused).toBe(true);
+      expect(await pausing).toEqual({
         ok: false,
-        error: "daemon is busy; retry update when idle",
+        error: `CLI update drain deadline exceeded; remaining tasks: claude: ${task.id}`,
       });
+      expect(state.claimsPaused).toBe(false);
+      expect(state.activeTaskCount).toBe(1);
 
       rejectComplete = false;
       await daemonRun;

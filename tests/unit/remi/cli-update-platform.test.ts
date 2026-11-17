@@ -11,7 +11,7 @@ const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const commit = "a".repeat(40);
 const version = "0.2.95-stable.ab12cd34";
-function fixture(reportedCommit: string | null = commit) {
+function fixture(reportedCommit: string | null = commit, version = "0.2.95-stable.ab12cd34") {
   const root = mkdtempSync(join(tmpdir(), "platform-cli-update-")); roots.push(root);
   const staged = join(root, "staged"); mkdirSync(staged);
   const binary = join(staged, "remi");
@@ -100,8 +100,37 @@ test("explicit commit selects the platform even with github-only preference and 
 test("explicit commit and version must both match the manifest", async () => {
   const f = fixture();
   await expect(performUpdate({ ...f.options, targetCommit: "b".repeat(40) })).rejects.toThrow("target_commit");
-  await expect(performUpdate({ ...f.options, targetVersion: "0.2.95-stable.other" })).rejects.toThrow("target_version");
+  await expect(performUpdate({ ...f.options, targetCommit: commit, targetVersion: "0.2.95-stable.other" })).rejects.toThrow("target_version");
   expect(f.requests.every(r => !r.url.includes("github"))).toBe(true);
+});
+for (const platformVersion of ["0.2.94", "0.2.96"]) test(`version-only target falls back when platform current is ${platformVersion}`, async () => {
+  const f = fixture(); f.manifest.version = platformVersion;
+  const result = await performUpdate({ ...f.options, targetVersion: `v${version}` });
+  expect(result).toMatchObject({ status: "installed", source: "github", version });
+  expect(f.requests[0]!.url).toEndWith("/current");
+  expect(f.requests.find(r => r.url.includes("api.github.com"))!.url).toEndWith(`/releases/tags/v${version}`);
+  expect(f.requests.some(r => r.url.startsWith("https://platform.test") && r.url.endsWith(".tar.gz"))).toBe(false);
+  expect(f.logs.join("\n")).toContain("Using github");
+});
+test("platform-only version mismatch fails before downloading or changing the launcher", async () => {
+  const f = fixture(); f.manifest.version = "0.2.94";
+  await expect(performUpdate({ ...f.options, targetVersion: version,
+    env: { MULTIREMI_UPDATE_SOURCES: "platform" } })).rejects.toThrow("target_version");
+  expect(f.requests).toHaveLength(1);
+  expect(readFileSync(f.launcherPath, "utf8")).toContain("echo previous");
+});
+test("an unpinned update skips an older platform build without changing the installation", async () => {
+  const f = fixture();
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.96", currentCommit: "b".repeat(40) }))
+    .toMatchObject({ status: "current", version: "0.2.96", source: "platform" });
+  expect(f.requests).toHaveLength(1);
+  expect(readFileSync(f.launcherPath, "utf8")).toContain("echo previous");
+  expect(existsSync(join(f.options.installRoot!, "versions"))).toBe(false);
+});
+test("an explicitly requested older version remains installable", async () => {
+  const f = fixture();
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.96", targetVersion: version }))
+    .toMatchObject({ status: "installed", version, source: "platform" });
 });
 for (const source of ["github", "platform"] as const) test(`${source}-only source selection`, async () => {
   const f = fixture();
@@ -120,6 +149,52 @@ test("same version with a different commit installs; the identical build skips d
   expect(await performUpdate({ ...current.options, currentVersion: version, currentCommit: commit })).toMatchObject({ status: "current", source: "platform" });
   expect(current.requests).toHaveLength(1);
   expect(compareVersions(version, "0.2.95-stable.other")).not.toBe(0);
+});
+for (const label of ["rc", "build"]) test(`an unpinned numeric ${label} downgrade skips download`, async () => {
+  const f = fixture(commit, `0.2.95-${label}.12345678`);
+  expect(await performUpdate({ ...f.options, currentVersion: `0.2.95-${label}.12345679`,
+    currentCommit: "b".repeat(40), env: { MULTIREMI_UPDATE_SOURCES: "platform" } }))
+    .toMatchObject({ status: "current", source: "platform" });
+  expect(f.requests).toHaveLength(1);
+  expect(readFileSync(f.launcherPath, "utf8")).toContain("echo previous");
+});
+for (const currentCommit of [undefined, "b".repeat(40)]) test(`unproven local hash suffix is preserved (${currentCommit ? "mismatch" : "unknown"})`, async () => {
+  const f = fixture(commit, "0.2.95-stable");
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.95-stable.ff001122", currentCommit }))
+    .toMatchObject({ status: "current" });
+  expect(f.requests).toHaveLength(1);
+});
+for (const target of ["version", "commit"]) test(`explicit ${target} bypasses numeric prerelease downgrade protection`, async () => {
+  const f = fixture(commit, "0.2.95-rc.12345678");
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.95-rc.12345679",
+    currentCommit: "b".repeat(40), ...(target === "version" ? { targetVersion: f.manifest.version } : { targetCommit: commit }) }))
+    .toMatchObject({ status: "installed", source: "platform" });
+  expect(f.requests).toHaveLength(2);
+});
+test("GitHub keeps numeric prerelease ordering without commit identity", async () => {
+  const f = fixture(commit, "0.2.95-rc.12345678");
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.95-rc.12345679",
+    env: { MULTIREMI_UPDATE_SOURCES: "github" } })).toMatchObject({ status: "current", source: "github" });
+  expect(f.requests).toHaveLength(1);
+});
+for (const [hotfixHash, currentHash] of [["0a1b2c3d", "ff001122"], ["12345678", "12345679"]]) test(`an unpinned platform hotfix installs when its proven hash ${hotfixHash} sorts before the current hash`, async () => {
+  const hotfixVersion = `0.2.95-stable.${hotfixHash}`;
+  const currentVersion = `0.2.95-stable.${currentHash}`;
+  const hotfixCommit = hotfixHash + "a".repeat(32);
+  const f = fixture(hotfixCommit, hotfixVersion);
+  f.manifest.commit = hotfixCommit;
+  expect(compareVersions(hotfixVersion, currentVersion)).toBeLessThan(0);
+  expect(await performUpdate({ ...f.options, currentVersion, currentCommit: currentHash + "b".repeat(32) }))
+    .toMatchObject({ status: "installed", version: hotfixVersion, source: "platform", commit: hotfixCommit });
+  expect(f.requests).toHaveLength(2);
+  expect(readFileSync(f.launcherPath, "utf8")).not.toContain("echo previous");
+});
+test("an unpinned platform update still skips a lower prerelease label regardless of build hash", async () => {
+  const f = fixture(commit, "0.2.95-beta.ff001122");
+  expect(await performUpdate({ ...f.options, currentVersion: "0.2.95-stable.0a1b2c3d", currentCommit: "b".repeat(40) }))
+    .toMatchObject({ status: "current", source: "platform" });
+  expect(f.requests).toHaveLength(1);
+  expect(readFileSync(f.launcherPath, "utf8")).toContain("echo previous");
 });
 test("GitHub fetch errors and status text do not expose credentials", async () => {
   const token = "do-not-print-this";

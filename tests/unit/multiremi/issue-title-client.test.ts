@@ -1,5 +1,6 @@
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 import { createResponsibleTestIssue } from './helpers.js';
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import {
   generateIssueTitle,
   IssueTitleGatewayUnconfiguredError,
@@ -8,7 +9,7 @@ import {
 import { createLocalStore, resetMultiremiTestEnv } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
-beforeEach(() => { process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = Buffer.alloc(32, 42).toString("base64"); });
+useEndpointEncryptionKey();
 
 const CODEX_FRAGMENT = [
   'model_provider = "OpenAI"',

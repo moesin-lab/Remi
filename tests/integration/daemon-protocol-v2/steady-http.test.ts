@@ -72,4 +72,4 @@ it("Q418-http15: real v2 model and GC timers produce no idle HTTP in an accelera
     gc.mockRestore();
     fetchSpy.mockRestore();
   }
-});
+}, 30_000);

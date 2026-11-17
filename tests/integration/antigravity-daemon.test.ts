@@ -109,6 +109,13 @@ async function setup(options: { gateway: ReturnType<typeof fakeGateway> | null; 
   writeFileSync(capture, "");
   writeFileSync(join(local, "AGENTS.md"), "AGY_LOCAL_CONTEXT_SENTINEL");
   writeFileSync(join(local, "README.md"), "# project\n");
+  // Reproduce Bun/npm's overlapping environment paths in a /tmp checkout.
+  // Private-/tmp setup must never truncate the manifest through a parent bind.
+  const manifest = join(local, "package.json");
+  const manifestContents = '{"name":"antigravity-test-project"}\n';
+  writeFileSync(manifest, manifestContents);
+  cleanup.push(() => { expect(readFileSync(manifest, "utf8")).toBe(manifestContents); });
+  const fixtureEnv = { FAKE_AGY_CAPTURE: capture, npm_config_local_prefix: local, npm_package_json: manifest };
   if (options.gateway) {
     store.upsertRelayConfig("local", "antigravity", {
       fragment: JSON.stringify({ base_url: options.gateway.base, default_model: SESSION_MODEL }), tokenOp: "set", authToken: GATEWAY_KEY,
@@ -116,7 +123,7 @@ async function setup(options: { gateway: ReturnType<typeof fakeGateway> | null; 
   }
   // The agent names no model: the engine's default_model applies.
   const agent = store.createAgent({ name: "AGY", provider: "antigravity", executable: process.execPath, customArgs: [FIXTURE],
-    customEnv: { FAKE_AGY_CAPTURE: capture } });
+    customEnv: fixtureEnv });
   const token = await store.createAccessToken({ name: "AGY test daemon", type: "daemon", workspaceId: "local", daemonId: "agy-test-machine" });
   const server = startMultiremiServer({ store, scheduler: null, authToken: "agy-test-root", hostname: "127.0.0.1", port: 0 });
   cleanup.push(() => server.stop(true));
@@ -133,7 +140,7 @@ async function setup(options: { gateway: ReturnType<typeof fakeGateway> | null; 
     // The model probe has no pinned install here: run it in-process against the fake server.
     inProcessRuntimeModelDiscoveryEnabled: true,
     providerFactory: (provider) => createRuntimeProvider({
-      ...(provider.executable ? provider : { ...provider, executable: process.execPath, args: [FIXTURE], env: { ...provider.env, FAKE_AGY_CAPTURE: capture } }),
+      ...(provider.executable ? provider : { ...provider, executable: process.execPath, args: [FIXTURE], env: { ...provider.env, ...fixtureEnv } }),
       ...(options.turnStallTimeoutMs ? { turnStallTimeoutMs: options.turnStallTimeoutMs } : {}),
     }),
   });

@@ -1,6 +1,7 @@
 export interface MultiremiCliUpdateParticipant {
   provider: string;
   activeTaskCount(): number;
+  activeTaskIds?(): string[];
   pendingClaimCount(): number;
   claimsPaused(): boolean;
   pauseClaims(): void;
@@ -19,43 +20,25 @@ export class MultiremiCliUpdateCoordinator {
     this.participants.push(participant);
   }
 
-  tryPauseClaims(): MultiremiCliUpdatePauseResult {
-    const busy = this.participants
-      .map((participant) => ({
-        provider: participant.provider,
-        activeTaskCount: participant.activeTaskCount(),
-      }))
-      .filter((participant) => participant.activeTaskCount > 0);
-    if (busy.length > 0) {
-      const providers = busy
-        .map(({ provider, activeTaskCount }) => `${provider} (${activeTaskCount} active task${activeTaskCount === 1 ? "" : "s"})`)
-        .join(", ");
-      return {
-        ok: false,
-        error: `CLI update blocked: provider${busy.length === 1 ? " is" : "s are"} busy: ${providers}; retry when all providers are idle`,
-      };
+  /** Pause once, then let accepted work finish without cancelling any task. */
+  async pauseClaimsUntilIdle(deadline: number, stopped: () => boolean): Promise<MultiremiCliUpdatePauseResult> {
+    if (this.participants.some(participant => participant.claimsPaused())) {
+      return { ok: false, error: "CLI update already paused for maintenance" };
     }
-
-    const claiming = this.participants.filter((participant) => participant.pendingClaimCount() > 0);
-    if (claiming.length > 0) {
-      return {
-        ok: false,
-        error: `CLI update blocked: provider${claiming.length === 1 ? " is" : "s are"} checking for new work: ${claiming.map(({ provider }) => provider).join(", ")}; retry when all providers are idle`,
-      };
-    }
-
-    const paused = this.participants.find((participant) => participant.claimsPaused());
-    if (paused) {
-      return {
-        ok: false,
-        error: `CLI update blocked: ${paused.provider} provider has already paused claims for maintenance; retry when it completes`,
-      };
-    }
-
-    // The check and pause run synchronously in one event-loop turn, so no
-    // provider can claim work between the machine-idle gate and this pause.
     for (const participant of this.participants) participant.pauseClaims();
-    return { ok: true };
+    while (true) {
+      const busy = this.participants.filter(participant => participant.activeTaskCount() > 0 || participant.pendingClaimCount() > 0);
+      if (stopped() || (busy.length && Date.now() >= deadline)) {
+        const tasks = busy.map(participant => {
+          const ids = (participant.activeTaskIds?.() ?? []).join(", ");
+          return `${participant.provider}: ${ids || `${participant.activeTaskCount()} active tasks, ${participant.pendingClaimCount()} pending claims`}`;
+        }).join("; ");
+        this.releaseClaims();
+        return { ok: false, error: stopped() ? "CLI update drain interrupted by shutdown" : `CLI update drain deadline exceeded; remaining tasks: ${tasks}` };
+      }
+      if (!busy.length) return { ok: true };
+      await new Promise(resolve => setTimeout(resolve, Math.max(1, Math.min(50, deadline - Date.now()))));
+    }
   }
 
   releaseClaims(): void {

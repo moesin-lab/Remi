@@ -20,7 +20,7 @@ import { acceptTestIssueDelivery, testWorkspaceMember } from './helpers.js';
  * supplies the no-op the production code documents and records the key — the
  * same technique `mul405-lock-order.test.ts` uses for its interleave.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { PostgresSyncDatabase, type SqlDatabase, type SqlStatement } from "@multiremi/store/db/postgres.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
@@ -30,6 +30,10 @@ import { MultiremiStore } from "@multiremi/store/store.js";
 import type { FeishuBotRepo } from "@multiremi/store/repos/feishu-bot-repo.js";
 import type { CanonicalMessage } from "@multiremi/contracts/messaging.js";
 import type { IngestedFeishuMessageInput } from "@multiremi/store/repos/feishu-ingest-repo.js";
+
+// Every PG case includes a fresh migration/seed, observed at 3–5.5s in full CI.
+// Lock-order and statement assertions below remain the performance contract.
+if (process.env.MULTIREMI_TEST_POSTGRES_URL) setDefaultTimeout(30_000);
 
 const APP_SECRET = "wJ4tQ7xR2nB8vC5mZ1kL0pS6dF3gH9jA";
 

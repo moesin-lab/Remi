@@ -27,7 +27,10 @@ describe("deployment CLI identity reconciliation", () => {
     expect(request).toMatchObject({ targetVersion: version, targetCommit: A, target_commit: A, scope: "cli" });
     expect(store.getDaemonDrainStatus("local", "dm_build")).toMatchObject({ reason: "cli_update", mode: "draining" });
     expect(store.pendingRuntimeRequests("rt_build")).toContainEqual({ kind: "update", id: request!.id,
-      payload: { id: request!.id, target_version: version, target_commit: A, scope: "cli" } });
+      payload: { id: request!.id, target_version: version, target_commit: A, scope: "cli",
+        drain_deadline: store.getDaemonDrainStatus("local", "dm_build").deadline } });
+    expect(store.heartbeatRuntime("rt_build").pending_update).toMatchObject({
+      id: request!.id, target_commit: A, drain_deadline: store.getDaemonDrainStatus("local", "dm_build").deadline });
     expect(store.reconcileRuntimeCliRelease(version, A)).toEqual([]);
   });
   it("skips matching commits and falls back to exact version only for old daemons", () => {

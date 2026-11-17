@@ -59,7 +59,11 @@ describe("merged heartbeat poll", () => {
     const ack = (await receiveRuntimeInputs(store, runtime.id));
 
     expect(ack.status).toBe("ok");
-    expect(ack.pending_update).toEqual({ id: update.id, target_version: "9.9.9", scope: "cli" });
+    const drain = store.getDaemonDrainStatus("local", "daemon-probe");
+    expect(drain.deadline).not.toBeNull();
+    expect(ack.pending_update).toEqual({ id: update.id, target_version: "9.9.9", scope: "cli",
+      drain_deadline: drain.deadline! });
+    expect(Date.parse(String(ack.pending_update!.drain_deadline))).toBeGreaterThan(Date.now());
     expect(ack.pending_model_list).toEqual({ id: modelList.id });
     expect(ack.pending_command).toEqual({ id: command.id, command: "printf ready", args: ["one"], timeout_ms: command.timeoutMs });
     expect(ack.pending_bot_menu).toEqual({ id: botMenu.id, config: botMenu.config, dry_run: true });

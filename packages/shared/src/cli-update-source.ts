@@ -1,4 +1,4 @@
-/** Resolve trusted release metadata; integrity errors must never select another source. */
+/** Resolve release metadata; an unavailable target may select another source, integrity errors may not. */
 import { parseDaemonArtifactManifest } from "./daemon-artifact-manifest.js";
 import { fetchLatestRelease, releaseAssetName, releaseRepository, type UpdateOptions, type UpdatePlatform } from "./cli-update.js";
 
@@ -44,6 +44,12 @@ export async function resolveUpdateArtifact(options: UpdateOptions, platform: Up
         try { manifest = parseDaemonArtifactManifest(await response.json()); }
         catch { throw new Error("Invalid platform daemon artifact manifest"); }
         if (options.targetCommit && manifest.commit !== options.targetCommit) throw new Error("Platform release does not match target_commit");
+        if (options.targetVersion && manifest.version !== options.targetVersion.replace(/^v/, "")) {
+          // /current is a catalog lookup, not a response for the requested version.
+          // A pinned commit must still satisfy both requested identities.
+          if (options.targetCommit) throw new Error("Platform release does not match target_version");
+          throw new SourceUnavailable("Platform release does not match target_version");
+        }
         const artifact = manifest.artifacts.find(a => a.os === platform.os && a.arch === platform.arch);
         if (!artifact) throw new Error(`Platform release has no ${platform.os}-${platform.arch} artifact`);
         return { source: "platform", version: manifest.version, commit: manifest.commit,

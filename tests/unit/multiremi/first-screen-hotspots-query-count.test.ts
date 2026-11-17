@@ -159,6 +159,8 @@ async function getJson(
   harness: Harness,
   path: string,
 ): Promise<{ body: unknown; statements: number; bytes: number }> {
+  // Measure business reads with a warm readiness cache (cold cost has its own regression).
+  harness.store.checkDatabaseReady(true);
   harness.probe.reset();
   const beforeBytes = readProcessDbCounters().dbBytes;
   const response = await harness.app.request(path, { headers: harness.headers });

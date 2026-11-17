@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, it } from "bun:test";
+import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
+import { afterEach, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
@@ -8,7 +9,7 @@ import { resetMultiremiTestEnv } from "./helpers.js";
 const key = "endpoint-test-secret";
 const connection = { base_url: "http://127.0.0.1:8788/v1", protocols: ["openai-responses", "anthropic-messages"],
   auth_mode: "api_key", env_key: "", auth_header: "bearer" };
-beforeEach(() => { process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = Buffer.alloc(32, 71).toString("base64"); });
+useEndpointEncryptionKey();
 afterEach(resetMultiremiTestEnv);
 
 pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {

@@ -130,6 +130,8 @@ async function countRoute(
   path: string,
   body?: unknown,
 ): Promise<string[]> {
+  // Measure business reads with a warm readiness cache (cold cost has its own regression).
+  scaffolded.store.checkDatabaseReady(true);
   scaffolded.probe.reset();
   const response = await scaffolded.app.request(path, {
     method,

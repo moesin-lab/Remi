@@ -29,12 +29,17 @@ import { createHash } from 'node:crypto';
 
 const succeed = (stdout = '') => ({ status: 0, stdout, stderr: '' });
 const fail = () => ({ status: 1, stdout: '', stderr: 'Injected test failure' });
+Atomics.wait = (array, index, value, delay) => {
+  appendFileSync(process.env.TEST_COMMAND_LOG, JSON.stringify({ command: 'backoff', delay }) + '\n');
+  return 'timed-out';
+};
 const imageId = (tag) => 'sha256:' + createHash('sha256').update(tag).digest('hex');
 childProcess.spawnSync = (command, args, options = {}) => {
   let streamingSecrets = null;
+  let detectPortBinding = false;
   if (args[0]?.endsWith('proxy-command.mjs')) {
     const request = JSON.parse(options.input);
-    command = request.command; args = request.args; streamingSecrets = request.secrets;
+    command = request.command; args = request.args; streamingSecrets = request.secrets; detectPortBinding = request.detectPortBinding;
     options = { ...options, input: request.input };
   }
   const metadataPath = join(process.env.TEST_PROFILE_ROOT, 'deployment.json');
@@ -92,6 +97,10 @@ childProcess.spawnSync = (command, args, options = {}) => {
     const diagnostic = options.env.REMI_RUNTIME_HTTPS_PROXY + ' sentinel-user sentinel-password ' + process.env.HTTPS_PROXY;
     writeSync(2, streamingSecrets.filter(Boolean).sort((a,b) => b.length-a.length).reduce((text, secret) => text.replaceAll(secret, '[REDACTED]'), diagnostic));
     return fail();
+  }
+  if (process.env.TEST_FAIL.startsWith('bind_') && args.includes('up') && selection?.ref === process.env.TEST_NEW_COMMIT) {
+    const attempts = readFileSync(process.env.TEST_COMMAND_LOG, 'utf8').trim().split('\n').map(JSON.parse).filter(call => call.args?.includes('up') && call.selectedRef === selection.ref).length;
+    if (process.env.TEST_FAIL === 'bind_always' || attempts <= 2) return { status: detectPortBinding ? 98 : 1, stdout: '', stderr: 'bind: address already in use' };
   }
   if (process.env.TEST_FAIL === 'config' && args.includes('config')) return fail();
   if (process.env.TEST_FAIL === 'build' && args.includes('build')) return fail();
@@ -215,6 +224,66 @@ const hostStageArgs = (operationId = 'pop_recoverable_test') => [
   '--source-url', 'https://example.com/platform-release.tar.gz',
   '--source-sha256', releaseSha,
 ];
+
+
+for (const runtimeProxy of [false, true]) {
+  test(`deploy retries bind errors and records active after success (runtime proxy ${runtimeProxy})`, (t) => {
+    const f = fixture(t);
+    f.activate();
+    const result = f.run('stable', 'deploy', { commit: NEW_REF, fail: 'bind_twice',
+      args: runtimeProxy ? ['--runtime-proxy', 'true'] : [],
+      environment: runtimeProxy ? { HTTPS_PROXY: 'http://sentinel-user:sentinel-password@proxy.example:8080' } : {} });
+    succeeds(result);
+    const attempts = dockerCalls(result).filter(call => call.args.includes('up') && call.selectedRef === NEW_REF);
+    assert.equal(attempts.length, 3);
+    for (const attempt of attempts) assert.deepEqual(attempt.args, attempts[0].args);
+    assert.deepEqual(result.calls.filter(call => call.command === 'backoff').map(call => call.delay), [1000, 2000]);
+    assert.equal(f.readProfile('active.json').ref, NEW_REF);
+    assert.equal(result.calls.filter(isAction('pg_dump')).length, 2, 'backup must not repeat');
+    assert.doesNotMatch(result.stderr, /Restore|sentinel-user|sentinel-password/);
+  });
+}
+
+test('persistent bind conflict exhausts retries without changing active or suggesting data restore', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const result = f.run('stable', 'deploy', { commit: NEW_REF, fail: 'bind_always' });
+  assert.equal(result.status, 1);
+  assert.equal(dockerCalls(result).filter(call => call.args.includes('up') && call.selectedRef === NEW_REF).length, 4);
+  assert.deepEqual(result.calls.filter(call => call.command === 'backoff').map(call => call.delay), [1000, 2000, 4000]);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  assert.match(result.stderr, /port binding conflict persisted after 3 retries/);
+  assert.doesNotMatch(result.stderr, /Restore the matching|before rolling code back/);
+});
+
+test('unrelated startup failure is not retried or treated as proof of migration', (t) => {
+  const f = fixture(t);
+  f.activate();
+  const result = f.run('stable', 'deploy', { commit: NEW_REF, fail: 'activate' });
+  assert.equal(result.status, 1);
+  assert.equal(dockerCalls(result).filter(call => call.args.includes('up') && call.selectedRef === NEW_REF).length, 1);
+  assert.equal(result.calls.filter(call => call.command === 'backoff').length, 0);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  assert.match(result.stderr, /Check API migration logs/);
+  assert.doesNotMatch(result.stderr, /Restore the matching|before rolling code back/);
+});
+
+for (const [diagnostic, exit, expected] of [
+  ['listen tcp4 0.0.0.0:13000: bind: address already in use', 1, 98],
+  ['Bind for 0.0.0.0:13000 failed: port is already allocated', 1, 98],
+  ['Ports are not available: exposing port TCP: listen tcp: bind: Only one usage of each socket address is normally permitted.', 1, 98],
+  ['container is unhealthy', 98, 1],
+  ['bind: address already in use', 0, 0],
+]) {
+  test(`streaming runner classifies failed port binding: ${diagnostic}, exit ${exit}`, () => {
+    const request = { command: process.execPath, args: ['-e', `process.stderr.write(${JSON.stringify(diagnostic.slice(0, 25))});setTimeout(()=>{process.stderr.write(${JSON.stringify(diagnostic.slice(25))});process.exit(${exit})},20)`],
+      secrets: [], cwd: repository, detectPortBinding: true };
+    const result = spawnSync(process.execPath, [join(repository, 'scripts/proxy-command.mjs'), '--run'], { input: JSON.stringify(request), encoding: 'utf8', timeout: 5000 });
+    assert.ifError(result.error);
+    assert.equal(result.status, expected, result.stderr);
+    assert.equal(result.stderr, diagnostic);
+  });
+}
 
 test('stable deploy pulls verified CI digests before stopping the previous service', (t) => {
   const f = fixture(t);

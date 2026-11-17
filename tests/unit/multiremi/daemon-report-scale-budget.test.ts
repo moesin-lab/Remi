@@ -55,6 +55,8 @@ for (const type of ['hb','task.start','task.progress','task.workspace','turn.inp
         input_to_seq: input.input_to_seq, reply: { body_md: 'finished', message_kind: 'final' } };
       if (type === 'task.fail') p = { ...p, ...completion, error: 'fixture failure' };
       const seq = 100 + ['hb','task.start','task.progress','task.workspace','turn.input','turn.complete','task.fail'].indexOf(type);
+      const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+      const unsubscribe = f.store.onWorkspaceEvent(event => events.push({ type: event.type, payload: event.payload }));
       const sql = await countSql(f.database, f.layer, () => type === 'hb' ? f.heartbeat(0, false, 1)
         : f.sessions[sessionIndex]!.handleMessage(JSON.stringify({ v: 2, t: type, rt: runtime, seq, id: String(seq), p })));
       if (type !== 'hb') expect(f.frames[sessionIndex]!.find(frame => frame.t === 'res' && frame.re === String(seq))?.p.ok).toBe(true);
@@ -62,6 +64,22 @@ for (const type of ['hb','task.start','task.progress','task.workspace','turn.inp
       for (const statement of sql) { const normalized = statement.replace(/\s+/g, ' ').trim(); profile[normalized] = (profile[normalized] ?? 0) + 1; }
       const reads = sql.filter(statement => /^\s*(SELECT|WITH)\b/i.test(statement)).length;
       costs[`${type}:${name}`] = { total: sql.length, reads, writes: sql.length - reads, statements: profile };
+      const measured = { reads, writes: sql.length - reads, total: sql.length };
+      if (type === 'turn.complete' || type === 'task.fail') {
+        if (f.database.dialect === 'sqlite') expect(measured).toEqual(type === 'turn.complete'
+          ? { reads: 201, writes: 49, total: 250 } : { reads: 137, writes: 21, total: 158 });
+        if (name === 'stable') {
+          const small = costs[`${type}:small`]!;
+          expect(measured).toEqual({ reads: small.reads, writes: small.writes, total: small.total });
+        }
+      }
+      if (type === 'turn.complete') {
+        expect(f.store.getTask(task.id)?.status).toBe('completed');
+        expect(f.store.getMessage(f.store.getTurn(turn.id)!.reply_message_id!)?.body_md).toBe('finished');
+      }
+      if (type === 'task.fail') expect(f.store.getTask(task.id)?.status).toBe('failed');
+      unsubscribe();
+      if (process.env.MULTIREMI_TEST_EVENT_PROFILE) console.info('SCALE_EVENTS', type, name, JSON.stringify(events));
       console.info('SCALE_COST', type, name, sql.length, reads, sql.length - reads);
     }
   }, 60_000);

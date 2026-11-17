@@ -55,6 +55,26 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
 }
 
 describe("A-3 task offers", () => {
+  it("workspace wakeups retain queued hosts and unassigned admission without checking idle hosts", async () => {
+    const h = fixture(undefined, 2);
+    await h.hello();
+    const task = h.task(1);
+    const kick = spyOn(h.offers, "kick").mockImplementation(() => {});
+    try {
+      h.offers.kickWorkspace("local");
+      expect(kick.mock.calls.map(([id]) => id)).toEqual([h.runtimeIds[1]]);
+      // Unassigned queued work must still try all connected hosts.
+      db!.run("UPDATE multiremi_turn_attempts SET runtime_id=NULL WHERE id=?", [task.id]);
+      kick.mockClear();
+      h.offers.kickWorkspace("local");
+      expect(kick.mock.calls.map(([id]) => id).sort()).toEqual([...h.runtimeIds].sort());
+      db!.run("UPDATE multiremi_turn_attempts SET status='cancelled' WHERE id=?", [task.id]);
+      kick.mockClear();
+      h.offers.kickWorkspace("local");
+      expect(kick).not.toHaveBeenCalled();
+    } finally { kick.mockRestore(); }
+  });
+
   it("backs off an unavailable database and resumes offers on the same session", async () => {
     const h = fixture();
     const task = h.task();

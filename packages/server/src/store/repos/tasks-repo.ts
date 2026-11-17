@@ -3319,6 +3319,12 @@ export class TasksRepo {
     });
   }
 
+  pendingTaskOfferRuntimeIds(workspaceId: string): Array<string | null> {
+    return this.ctx.db.query(`SELECT DISTINCT runtime_id FROM multiremi_turn_execution_records
+      WHERE workspace_id = ? AND status IN ('queued', 'dispatched')`).all(workspaceId)
+      .map(row => row.runtime_id == null ? null : String(row.runtime_id));
+  }
+
   hasPendingTaskOffers(workspaceId: string): boolean {
     return Boolean(this.ctx.db.query(`SELECT 1 FROM multiremi_turn_execution_records
       WHERE workspace_id = ? AND status IN ('queued', 'dispatched') LIMIT 1`).get(workspaceId));

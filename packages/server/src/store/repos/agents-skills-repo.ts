@@ -901,7 +901,23 @@ export class AgentsSkillsRepo {
        WHERE aks.agent_id = ? AND s.archived_at IS NULL
        ORDER BY aks.created_at ASC, s.name ASC`,
     ).all(agent.id) as Row[]);
-    const structured = rows.map((row) => toSkill(row, options.includeFiles ? this.listSkillFiles(String(row.id)) : []));
+    // The join already checked active skills; load their files as one batch,
+    // keeping each skill's path order without a per-skill existence/read pair.
+    const files = options.includeFiles && rows.length ? memoizeRequestRead(this.ctx.db,
+      ['multiremi_skill_files'], `skill-files:${JSON.stringify(rows.map(row => row.id))}`, () => {
+        const values = this.ctx.db.dialect === 'postgres'
+          ? 'SELECT jsonb_array_elements_text(CAST(CAST(? AS TEXT) AS JSONB))'
+          : 'SELECT value FROM json_each(?)';
+        return this.ctx.db.query(`SELECT * FROM multiremi_skill_files WHERE skill_id IN (${values})
+          ORDER BY skill_id ASC, path ASC`).all(JSON.stringify(rows.map(row => row.id))) as Row[];
+      }) : [];
+    const bySkill = new Map<string, MultiremiSkillFile[]>();
+    for (const file of files) {
+      const id = String(file.skill_id);
+      const list = bySkill.get(id) ?? [];
+      list.push(toSkillFile(file)); bySkill.set(id, list);
+    }
+    const structured = rows.map(row => toSkill(row, bySkill.get(String(row.id)) ?? []));
     return mergeAgentSkills(agent.skills, structured);
   }
 

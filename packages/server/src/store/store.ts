@@ -652,6 +652,7 @@ export class MultiremiStore {
       now => this.tasks.sweepIdleIssueLanes(now),
       now => this.archiveIdleChats(now),
       now => this.backgroundTasks.sweep(now),
+      () => this.reconcileRuntimeUpdateFailures(),
     ]);
     this.migrate();
     for (const workspace of this.workspaces.listWorkspaces()) {
@@ -3447,12 +3448,14 @@ runMigrations(this.db);
     return this.runtimes.createRuntimeUpdateRequest(runtimeId, input);
   }
 
-  reconcileRuntimeCliRelease(targetVersion: string): MultiremiRuntimeUpdateRequest[] {
-    return this.runtimes.reconcileRuntimeCliRelease(targetVersion);
+  reconcileRuntimeCliRelease(targetVersion: string, targetCommit?: string): MultiremiRuntimeUpdateRequest[] {
+    return this.runtimes.reconcileRuntimeCliRelease(targetVersion, targetCommit);
   }
 
-  runtimeCliReleaseReconciliationKey(targetVersion: string): string {
-    return this.runtimes.runtimeCliReleaseReconciliationKey(targetVersion);
+  reconcileRuntimeUpdateFailures(): void { this.runtimes.reconcileRuntimeUpdateFailures(); }
+
+  runtimeCliReleaseReconciliationKey(targetVersion: string, targetCommit?: string): string {
+    return this.runtimes.runtimeCliReleaseReconciliationKey(targetVersion, targetCommit);
   }
 
   getRuntimeUpdateRequest(runtimeId: string, requestId: string): MultiremiRuntimeUpdateRequest | null {
@@ -3487,6 +3490,7 @@ runMigrations(this.db);
 
   reportRuntimeUpdateResult(runtimeId: string, requestId: string, input: ReportRuntimeUpdateInput): MultiremiRuntimeUpdateRequest {
     const request = this.runtimes.reportRuntimeUpdateResult(runtimeId, requestId, input);
+    this.reconcileRuntimeUpdateFailures();
     this.publishDaemonDispatchConditionsChanged(this.getRuntimeLite(runtimeId)?.workspaceId ?? "local");
     return request;
   }

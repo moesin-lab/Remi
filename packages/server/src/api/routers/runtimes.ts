@@ -288,7 +288,7 @@ export function registerRuntimeRoutes(app: Hono, deps: RouterDeps): void {
     if (loaded instanceof Response) return loaded;
     const body = await readJsonStrict<CreateRuntimeUpdateInput>(c);
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
-    const result = safeCreateRuntimeUpdateRequest(store, loaded.runtime.id, { target_version: body.target_version, scope: body.scope });
+    const result = safeCreateRuntimeUpdateRequest(store, loaded.runtime.id, { target_version: body.target_version, target_commit: body.target_commit, scope: body.scope });
     if ("apiError" in result) return c.json({ error: result.apiError }, result.statusCode);
     return c.json(runtimeUpdateRequestCompatibilityResponse(result));
   });

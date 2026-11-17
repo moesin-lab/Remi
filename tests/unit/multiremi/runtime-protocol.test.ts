@@ -81,7 +81,7 @@ describe("database-derived runtime protocol", () => {
     }
   });
 
-  it("adds exactly one nullable runtime column idempotently without modifying the update table", () => {
+  it("adds nullable protocol/build columns idempotently while preserving historical update columns", () => {
     const legacyDb = openSqliteDatabase(":memory:");
     try {
       // Old DDL runs only before the unified-model migration marker exists.
@@ -89,11 +89,17 @@ describe("database-derived runtime protocol", () => {
       legacyDb.exec("ALTER TABLE multiremi_runtimes DROP COLUMN daemon_protocol_version");
       const before = legacyDb.query("PRAGMA table_info(multiremi_runtime_update_requests)").all();
       runMigrations(legacyDb as unknown as SqlDatabase);
+      const expanded = legacyDb.query("PRAGMA table_info(multiremi_runtime_update_requests)").all() as Array<{ name: string }>;
       runMigrations(legacyDb as unknown as SqlDatabase);
       const column = (legacyDb.query("PRAGMA table_info(multiremi_runtimes)").all() as any[]).filter(row => row.name === "daemon_protocol_version");
       expect(column).toHaveLength(1);
       expect(column[0]).toMatchObject({ type: "INTEGER", notnull: 0, dflt_value: null });
-      expect(legacyDb.query("PRAGMA table_info(multiremi_runtime_update_requests)").all()).toEqual(before);
+      expect(expanded.filter(row => !["target_commit", "automatic_daemon_key"].includes(row.name))).toEqual(before);
+      expect(expanded.filter(row => ["target_commit", "automatic_daemon_key"].includes(row.name))).toEqual([
+        expect.objectContaining({ name: "target_commit", type: "TEXT", notnull: 0, dflt_value: null }),
+        expect.objectContaining({ name: "automatic_daemon_key", type: "TEXT", notnull: 0, dflt_value: null }),
+      ]);
+      expect(legacyDb.query("PRAGMA table_info(multiremi_runtime_update_requests)").all()).toEqual(expanded);
     } finally {
       legacyDb.close();
     }

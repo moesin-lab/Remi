@@ -141,3 +141,26 @@ test("callback errors are redacted before reaching daemon update output", async 
     expect(String(error)).not.toContain("github-secret");
   }
 });
+for (const phase of ["manifest", "download"] as const) {
+  for (const status of [301, 302, 307, 308]) test(`real HTTP ${status} at ${phase} is hard failure without forwarding credentials`, async () => {
+    const f = fixture();
+    let sinkRequests = 0;
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: request => {
+      const path = new URL(request.url).pathname;
+      if (path === "/credential-sink") { sinkRequests++; return new Response("must not follow"); }
+      if (phase === "manifest" || path.endsWith(".tar.gz")) {
+        return new Response(null, { status, headers: { Location: "/credential-sink" } });
+      }
+      return Response.json(f.manifest);
+    } });
+    const mockFetch = f.options.fetchImpl!;
+    const fetchImpl = ((input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+      String(input).startsWith(server.url.origin) ? fetch(input, init) : mockFetch(input, init)) as typeof fetch;
+    try {
+      await expect(performUpdate({ ...f.options, serverUrl: server.url.origin, fetchImpl })).rejects.toThrow(String(status));
+      expect(f.requests).toEqual([]); // Any GitHub fallback would reach the mock.
+      expect(sinkRequests).toBe(0);
+      expect(readFileSync(f.launcherPath, "utf8")).toContain("echo previous");
+    } finally { server.stop(true); }
+  });
+}

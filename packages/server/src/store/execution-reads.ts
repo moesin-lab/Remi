@@ -1,5 +1,5 @@
 import type { SqlDatabase } from './db/postgres.js';
-import { memoizeRequestRead, seedRequestRead } from './request-read-cache.js';
+import { activeRequestReadCache, memoizeRequestRead, seedRequestRead } from './request-read-cache.js';
 
 type TurnRow = Record<string, any> & { id: string; workspace_id: string; session_id: string; agent_id: string;
   execution_scope: string; status: string; current_attempt_id: string };
@@ -21,6 +21,10 @@ export function readAttemptRow(db: SqlDatabase, id: string): Record<string, any>
 }
 
 export function readAttemptTurn(db: SqlDatabase, id: string): { turn_id: string } | null {
+  // Outside a report scope retain the narrow projection. In particular, migration
+  // callers may drop/re-add attempt columns on this connection; a prepared SELECT *
+  // would keep the old PostgreSQL result type across that schema change.
+  if (!activeRequestReadCache()) return db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(id) as { turn_id: string } | null;
   const row = readAttemptRow(db, id);
   return row ? { turn_id: String(row.turn_id) } : null;
 }

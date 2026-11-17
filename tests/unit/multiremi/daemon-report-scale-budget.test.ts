@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
 import { countSql, settleReportFleet, useReportFleetFixtures } from "../../fixtures/multiremi/daemon-report-fleet.js";
 import { createReportScaleFixture, REPORT_SCALES } from "../../fixtures/multiremi/daemon-report-scale.js";
 
@@ -20,6 +20,9 @@ afterAll(async () => {
   if (process.env.MULTIREMI_TEST_QUERY_PROFILE) await Bun.write(process.env.MULTIREMI_TEST_QUERY_PROFILE, JSON.stringify(costs, null, 2));
 });
 beforeAll(async () => {
+  // PG seed/round trips can cross store freshness and offer retry windows.
+  // Measure identical state/time in both tiers; protocol timers are manual too.
+  setSystemTime(new Date('2026-11-17T12:00:00.000Z'));
   for (const [name, scale] of Object.entries(REPORT_SCALES)) fleets[name] = await createReportScaleFixture({ ...scale,
     ...(process.env.MULTIREMI_TEST_SCALE_DIMENSIONS ? JSON.parse(process.env.MULTIREMI_TEST_SCALE_DIMENSIONS) : {}),
     ...(name === 'stable' && process.env.MULTIREMI_TEST_STABLE_DIMENSIONS ? JSON.parse(process.env.MULTIREMI_TEST_STABLE_DIMENSIONS) : {}),

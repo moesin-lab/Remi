@@ -251,7 +251,7 @@ CLI：`remi workspace magpie get --workspace <id>`；配置使用 `remi workspac
 
 ## Agent 提交署名
 
-「设置 → 源代码管理」的 Commits 卡片支持修改 Co-authored-by 名称、邮箱和实时预览；关闭开关后仍可编辑，非管理员只读。校验、默认身份和读取旧设置的兜底由 [contracts](../../packages/contracts/src/co-authored-by.ts) 统一定义，四语言键保持一致。组件回归见 [source-control-tab.test.tsx](../../frontend/packages/views/settings/components/source-control-tab.test.tsx)。
+「设置 → 源代码管理」的 Commits 卡片支持修改 Co-authored-by 名称、邮箱和实时预览；关闭开关后仍可编辑，非管理员只读。校验、默认身份和读取旧设置的兜底由 [contracts](../../packages/contracts/src/co-authored-by.ts) 统一定义，四语言键保持一致。页面内的设置写入共用在途锁，保存前从工作区列表缓存读取最新 settings 合并；恢复默认成功后清除本地草稿，后续服务端身份更新可直接显示。组件回归见 [source-control-tab.test.tsx](../../frontend/packages/views/settings/components/source-control-tab.test.tsx)。
 
 工作区 settings 的 `co_authored_by_name`、`co_authored_by_email` 写入时会 trim，传 null 删除对应键并恢复默认；非法值返回 400 且不写库。POST、PUT 和 PATCH 共享校验；PUT/PATCH 的 settings 整体替换，调用方需保留其他设置（CLI 可用 `remi workspace update <workspace> --file <file>` 提交完整 settings）。API 回归见 [workspace-co-authored-by.test.ts](../../tests/unit/multiremi/workspace-co-authored-by.test.ts)。
 

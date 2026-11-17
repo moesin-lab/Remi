@@ -188,7 +188,7 @@ test("PPE actual daemon first turn reads its range and consumes a normalized nat
     // ADR 0023: a fresh provider session records mode "bootstrap"; the prompt is only the turn input,
     // and the Issue notes travel in the provider home's AGENTS.md (recorded as instructions).
     expect(prompt.mode).toBe("bootstrap");
-    expect(prompt.prompt).toStartWith(`[Local User] ${issue.title}`);
+    expect(prompt.prompt).toStartWith(`[Operator] ${issue.title}`);
     expect(prompt.prompt).not.toContain("# Bootstrap Prompt");
     expect(prompt.instructions).toContain("## Issue");
     expect(prompt.instructions).toContain(`Title: ${issue.title}`);

@@ -343,7 +343,7 @@ describe("task-level agent delegation return", () => {
         expect(Buffer.byteLength(body)).toBeLessThan(2_048);
         expect(body).toContain("Status: completed\n");
         expect(body).toContain("QA completed a task you delegated.");
-        expect(body).toContain(`remi comment list ${f.issue.id} --thread ${id}`);
+        expect(body).toContain(`remi message get ${id} --output json`);
         expect(f.store.getIssueComment(id!)?.body).toBe(commented ? "结论评论" : output);
         if (authored) expect(id).toBe(authored.id);
         expect(f.store.getIssue(f.issue.id)?.status).not.toBe("blocked");

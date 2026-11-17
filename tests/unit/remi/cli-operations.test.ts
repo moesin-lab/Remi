@@ -29,6 +29,61 @@ afterEach(() => {
 });
 
 describe("operations CLI contracts", () => {
+  it("reads live checks with the canonical repository and provider PR number", async () => {
+    useCliEnv();
+    const spec = specById("scm.change-request.checks");
+    globalThis.fetch = capabilityFetch(spec.id, request => {
+      expect(request.method).toBe("GET");
+      expect(new URL(request.url).pathname).toBe("/api/workspaces/ws_1/scm/repositories/repo_widgets/change-requests/42/checks");
+      return Response.json({ summary: { conclusion: "missing", checks: [] } });
+    });
+    const output = await capture(() => registryFor([spec]).execute(["scm", "change-request", "checks", "repo_widgets", "42", "--json"]));
+    expect(JSON.parse(output.stdout).summary.conclusion).toBe("missing");
+  });
+
+  it("renders check metadata and every mixed check without hiding pending or failures", async () => {
+    useCliEnv();
+    const spec = specById("scm.change-request.checks");
+    const summary = { headSha: "a".repeat(40), observedAt: "2026-11-17T02:00:00Z", conclusion: "failure", checks: [
+      { id: "1", name: "queued job", status: "queued", conclusion: null, url: "https://github.com/acme/widgets/actions/runs/123456789/job/987654321" },
+      { id: "2", name: "running job", status: "in_progress", conclusion: null, url: null },
+      { id: "3", name: "failed job", status: "completed", conclusion: "failure", url: null },
+      { id: "4", name: "cancelled job", status: "completed", conclusion: "cancelled", url: null },
+      { id: "5", name: "skipped job", status: "completed", conclusion: "skipped", url: null },
+      { id: "6", name: "neutral job", status: "completed", conclusion: "neutral", url: null },
+    ] };
+    globalThis.fetch = capabilityFetch(spec.id, () => Response.json({ summary }));
+    const run = (...args: string[]) => capture(() => registryFor([spec]).execute(["scm", "change-request", "checks", "repo_widgets", "42", ...args]));
+    const lines = (await run()).stdout.split("\n");
+    expect(lines[0]).toBe(`Head SHA: ${summary.headSha}  Conclusion: failure  Observed at: ${summary.observedAt}`);
+    expect(lines[1]).toMatch(/NAME\s+STATUS\s+CONCLUSION\s+LINK \/ ID/);
+    expect(lines).toHaveLength(8);
+    for (const [index, check] of summary.checks.entries()) {
+      expect(lines[index + 2]).toContain(check.name);
+      expect(lines[index + 2]).toContain(check.status);
+      expect(lines[index + 2]).toContain(check.conclusion ?? "-");
+      expect(lines[index + 2]).toContain(check.url ?? check.id);
+    }
+    expect(JSON.parse((await run("--json")).stdout)).toEqual({ summary });
+    expect((await run("--output", "jsonl")).stdout.split("\n").map(line => JSON.parse(line))).toEqual(summary.checks);
+    summary.checks = [];
+    summary.conclusion = "missing";
+    expect((await run()).stdout).toContain("Conclusion: missing");
+    expect((await run()).stdout).toContain("No checks observed.");
+  });
+
+  it.each(["acme/widgets", "https://github.com/acme/widgets.git", "git@github.com:acme/widgets.git"])("encodes repository reference %s in the checks request", async reference => {
+    useCliEnv();
+    const spec = specById("scm.change-request.checks");
+    globalThis.fetch = capabilityFetch(spec.id, request => {
+      expect(new URL(request.url).pathname).toBe(`/api/workspaces/ws_1/scm/repositories/${encodeURIComponent(reference)}/change-requests/42/checks`);
+      return Response.json({ summary: { conclusion: "missing", checks: [] } });
+    });
+    await capture(() => registryFor([spec]).execute(["scm", "change-request", "checks", reference, "42", "--json"]));
+    expect(spec.positionals?.[0]?.description).toContain("owner/name");
+    expect(spec.description).toContain("Git URL");
+  });
+
   it("requests one canonical day/model detail page using the declared CLI parameters", async () => {
     useCliEnv();
     const spec = specById("dashboard.usage.report");

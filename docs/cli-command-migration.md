@@ -2,6 +2,14 @@
 
 ## Output and pipe completion
 
+Command namespaces, including implicit nested groups, print their generated help
+to stdout and exit 0 when invoked without a subcommand. An unknown subcommand
+prints `Unknown command: remi <full path>` and the nearest group's help to stderr
+and exits 1. Commands that also have children retain their positional arguments
+and executable behavior. `--help`, `-h`, and `remi help <path>` retain generated help.
+The [registry-wide group tests](../tests/unit/remi/cli-command-groups.test.ts)
+cover each namespace so new groups inherit this behavior.
+
 The CLI entry point routes console output through the standard streams and waits
 for stdout and stderr writes to complete before returning, including fatal command
 errors. JSON, JSONL and text output must remain complete when a pipe consumer is
@@ -516,6 +524,31 @@ compatible task can be claimed, leaving those tasks available after the update. 
 [Runtime skill import contract](runtime-skills.md) for file limits and daemon
 compatibility. JSON request input remains available through `--data` or `--file`;
 `--json` selects JSON output.
+
+### Skill URL import
+
+`remi skill import --url <url>` imports GitHub, skills.sh or ClawHub sources.
+GitHub and skills.sh imports recursively include text supporting files with their
+relative paths, skip binary extensions and LICENSE files, and retain the limits
+of 128 supporting files, 1 MiB per file and 8 MiB combined supporting content.
+A failed directory listing, invalid listing or failed file download fails the
+whole GitHub/skills.sh import before saving anything. Upstream rate limits return
+HTTP 429 with a reset time when available and a hint to configure `GITHUB_TOKEN`
+on the API server. Each upstream request has a 10-second deadline covering both
+connection and body reading; the whole import has a 25-second deadline, below
+the CLI default of 30 seconds. Timeouts return HTTP 504 with the upstream host,
+operation (ref resolution, listing or download path), read/connect phase and
+deadline. Client cancellation aborts the active upstream request and stops
+subsequent requests. Failed or timed-out imports leave existing Skills intact.
+Other upstream failures return HTTP 502. CLI failures display
+the server error and exit unsuccessfully.
+
+Reimporting the same source type and URL in the selected workspace updates the
+existing Skill (HTTP 200, versus HTTP 201 on creation), including SKILL.md and a
+complete replacement of supporting files: deleted upstream files are removed.
+The Skill ID, creator and other local configuration remain. Existing Skill
+management permissions apply to updates. A same-name Skill from a different
+source remains a conflict (HTTP 409); it is never replaced by name alone.
 
 ### Repository checkout defaults
 

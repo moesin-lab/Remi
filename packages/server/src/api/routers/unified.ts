@@ -5,7 +5,7 @@ import { MESSAGE_KINDS, TURN_STATUSES, type SendMessageInput, type UnifiedMessag
 import { CHAT_ATTACHMENT_MAX_BYTES, chatAttachmentValidationError, sanitizeChatAttachmentFilename } from "@multiremi/contracts/attachments.js";
 import { compatibilityInboxScope, denyAttachmentAccess, denyCurrentUserWorkspaceAccess, canCurrentUserAccessAgent, currentWorkspaceRole, canCurrentUserAccessChatTask, canTaskCoordinateSession, denySessionAccess } from "../helpers/auth-guards.js";
 import { resolveRequestWorkspaceId } from "../helpers/workspace-context.js";
-import { loadConversation, messageActor, messageResponse, canAccessConversationTask, conversationEntryVisibility } from "../helpers/conversations.js";
+import { loadConversation, messageActor, messageResponse, canAccessConversationTask, conversationEntryVisibility, canReadDelegationResult } from "../helpers/conversations.js";
 import { persistUploadedAttachments, detectContentTypeFromFilename, safeFilename, uploadedAttachmentPath } from "../helpers/uploads.js";
 import { currentAccessToken, currentTaskAccessToken, currentRequestUserId } from "../wire/context.js";
 import { parseTraceWindow } from "../trace/request.js";
@@ -102,7 +102,11 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
   };
   app.get("/api/sessions/:sessionId/messages", async (c, next) => {
     if (c.req.query("from") != null || c.req.query("to") != null) return next();
-    const conversation = loadConversation(c, store, c.req.param("sessionId"));
+    const sessionId = c.req.param("sessionId");
+    const thread = c.req.query("thread");
+    const delegated = !!thread && store.getMessage(thread)?.session_id === sessionId && canReadDelegationResult(c, store, thread);
+    const conversation = delegated ? { id: sessionId, workspaceId: currentTaskAccessToken(c)!.workspaceId! }
+      : loadConversation(c, store, sessionId);
     if (conversation instanceof Response) return conversation;
     return action(c, () => {
       const n = limit(c), rawCursor = c.req.query("cursor"), after = number(rawCursor ?? c.req.query("after_seq"), 0)!;
@@ -112,7 +116,8 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
       if (unread && store.getAgent(unread)?.workspaceId !== conversation.workspaceId) throw new InputError("invalid unread_by");
       const thread = c.req.query("thread");
       if (thread && store.getMessage(thread)?.session_id !== conversation.id) throw new InputError("invalid thread");
-      const visible = conversationEntryVisibility(c, store), rows: UnifiedMessage[] = [];
+      const visible = delegated ? (message: UnifiedMessage) => canReadDelegationResult(c, store, message.id)
+        : conversationEntryVisibility(c, store), rows: UnifiedMessage[] = [];
       let from = after;
       for (;;) {
         const page = store.listMessages(conversation.id, { from, limit: n + 1, thread, unread_by: unread, message_kind: kind });
@@ -293,6 +298,8 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
     });
   });
   app.get("/api/messages/:id", c => {
+    const id = c.req.param("id")!;
+    if (canReadDelegationResult(c, store, id)) return c.json({ message: publicMessage(store.getMessage(id)!) });
     const loaded = loadMessage(c);
     return loaded instanceof Response ? loaded : c.json({ message: publicMessage(loaded.message) });
   });

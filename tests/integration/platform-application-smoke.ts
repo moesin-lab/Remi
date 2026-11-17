@@ -117,6 +117,15 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
     await docker(['run', '--rm', '--pull=never', '--network', 'none', '--mount', `type=bind,src=${root},dst=/fixture`, '--entrypoint', 'openssl', pgBase, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', '/fixture/feed-key.pem', '-out', '/fixture/feed-cert.pem', '-days', '1', '-subj', '/CN=feed', '-addext', 'subjectAltName=DNS:feed']);
     await save(join(root, 'feed.ts'), `Bun.serve({hostname:'0.0.0.0',port:8443,tls:{key:Bun.file('/feed/feed-key.pem'),cert:Bun.file('/feed/feed-cert.pem')},fetch(request){const name=new URL(request.url).pathname.slice(1);if(!/^(releases\\.json|application-[0-9.]+\\.tar\\.gz)$/.test(name))return new Response('missing',{status:404});return new Response(Bun.file('/feed/'+name));}});`);
     await save(join(root, 'releases.json'), JSON.stringify({ latest: null }));
+    // Fault injection happens when taking the backup, never in live API HOME.
+    // The updater runs in a separate process, so use a read-only mounted flag.
+    await save(join(root, 'backup-tools/tar'), `#!/bin/sh
+case " $* " in
+  *" -cf "*) if [ -f /backup-tools/omit-reports ]; then exec /usr/bin/tar --exclude=./reports/migrations "$@"; fi ;;
+esac
+exec /usr/bin/tar "$@"
+`);
+    await chmod(join(root, 'backup-tools/tar'), 0o755);
   }
   await docker(['build', '--pull=false', '-q', '-f', join(root, 'Dockerfile.api'), '-t', apiImage, root]); builtApi = true;
   await docker(['build', '--pull=false', '-q', '-f', join(root, 'Dockerfile.web'), '-t', webImage, root]); builtWeb = true;
@@ -144,9 +153,11 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
     model.services.feed = { image: bunBase, command: ['bun', '/feed/feed.ts'], volumes: [{ type: 'bind', source: root, target: '/feed', read_only: true }] };
     model.services.updater = { image: updaterImage, init: true, environment: { MULTIREMI_API_URL: 'http://api:6120', MULTIREMI_TOKEN: adminToken, MULTIREMI_PLATFORM_UPDATER_TOKEN: updaterToken,
       MULTIREMI_DATABASE_URL: 'postgresql://fixture@postgres:5432/fixture', MULTIREMI_PLATFORM_RELEASE_FEED_URL: feedUrl,
-      MULTIREMI_PLATFORM_MIN_FREE_BYTES: '1', MULTIREMI_PLATFORM_VERIFY_TIMEOUT_MS: '10000', NODE_EXTRA_CA_CERTS: '/feed-cert.pem' },
+      MULTIREMI_PLATFORM_MIN_FREE_BYTES: '1', MULTIREMI_PLATFORM_VERIFY_TIMEOUT_MS: '10000', NODE_EXTRA_CA_CERTS: '/feed-cert.pem',
+      PATH: '/backup-tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' },
       volumes: ['program:/remi-program', 'control:/remi-control', 'state:/remi-state', 'api-seed:/remi-seeds/api:ro', 'web-seed:/remi-seeds/web:ro',
-        { type: 'bind', source: persistent, target: '/remi-data', read_only: true }, { type: 'bind', source: join(root, 'feed-cert.pem'), target: '/feed-cert.pem', read_only: true }] };
+        { type: 'bind', source: persistent, target: '/remi-data', read_only: true }, { type: 'bind', source: join(root, 'feed-cert.pem'), target: '/feed-cert.pem', read_only: true },
+        { type: 'bind', source: join(root, 'backup-tools'), target: '/backup-tools', read_only: true }] };
     model.services.rehearsal = { image: updaterImage, init: true, command: ['rehearsal'], network_mode: 'none',
       volumes: ['program:/remi-program:ro', 'control:/remi-control', 'state:/remi-state:ro'], tmpfs: ['/tmp:rw,nosuid,size=2g,mode=1777'] };
   }
@@ -328,14 +339,18 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   check((await updateFromWeb(second)).status === 'succeeded', 'Internally triggered application update failed');
   check(await docker(['inspect', '--format', '{{.Id}}|{{.Image}}', `${project}-api-1`]) === stableApi, 'Subsequent update replaced API container/image');
   check(await docker(['inspect', '--format', '{{.Id}}|{{.Image}}', `${project}-web-1`]) === stableWeb, 'Subsequent update replaced Web container/image');
-  if (!internal) {
+  {
     console.log('phase: missing reports in current backup refuse rehearsal');
     omitBackupReports = true;
+    if (internal) await save(join(root, 'backup-tools/omit-reports'), '1');
     try {
       const refused = await updateFromWeb(await bundle('1.0.4', '9'.repeat(40)));
       check(refused.status === 'failed' && String(refused.error).includes('reports/migrations'), 'Missing backup reports did not fail diagnostically');
       check((await readMigrationReports()).every((report, index) => report === originalReports[index]), 'Failed rehearsal changed production reports');
-    } finally { omitBackupReports = false; }
+    } finally {
+      omitBackupReports = false;
+      if (internal) await rm(join(root, 'backup-tools/omit-reports'), { force: true });
+    }
   }
   console.log('phase: broken application rolls code back and preserves later writes');
   const broken = await bundle('1.0.3', '4'.repeat(40), true);

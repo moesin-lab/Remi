@@ -298,7 +298,7 @@ function skillSpecs(): CommandSpec[] {
       const skill = await resolveSkill(client, invocation, positional(invocation, 0, "skill"));
       renderResource(invocation, (await client.request({ method: "DELETE", path: `/api/skills/${encodePath(String(skill.id))}` })).data);
     }, [{ path: ["skill", "delete"], deprecatedSince: DEPRECATED_SINCE, replacement: "remi skill archive" }]),
-    spec("skill.import", ["skill", "import"], "Import a skill", "write", HUMAN, [], [...INPUT_OPTIONS, {
+    spec("skill.import", ["skill", "import"], "Import a complete skill bundle or update the same source", "write", HUMAN, [], [...INPUT_OPTIONS, {
       name: "url", type: "string", valueName: "url", description: "Skill source URL",
     }, ...SKILL_FIELDS.slice(0, 2)], async (invocation) => {
       renderResource(invocation, (await (await clientFor(invocation)).request({ method: "POST", path: "/api/skills/import", body: await requestBody(invocation, {

@@ -123,6 +123,7 @@ export function runtimeProviderProfileCases(provider: "claude" | "codex") {
       const listed = await app.request(`/api/runtimes/${runtime.id}/models`, { headers });
       expect(listed.status).toBe(200);
       expect((await listed.json()).models.map((model: { id: string }) => model.id)).toEqual([profile.model, "custom-alternative"]);
+      process.env.MULTIREMI_PROVIDER_ENCRYPTION_KEY = Buffer.alloc(32, 17).toString("base64");
       store.setRelayModelDiscovery("local", true);
       const revision = store.upsertRelayConfig("local", provider, {
         fragment: JSON.stringify({ env: { [config.gatewayBaseUrlEnv]: "https://gateway.example" } }),

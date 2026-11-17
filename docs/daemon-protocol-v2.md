@@ -488,6 +488,16 @@ A-2 用它进入 `upgrade_wait`（§7.3）而不是单纯停止重连。另外�
 允许排在 complete 之后；complete 是最后一条改变任务状态的帧，其余帧类型仍须在它之前。
 服务端接收这两种终态尾帧，不改变任务状态，相同内容的重放只生效一次。
 
+daemon 停止/重启期间中断的执行通过持久 outbox 上报 `task.fail`，原因为
+`runtime_recovery`，携带最新 provider session 和工作目录；服务端按现有尝试上限自动重试并续接
+该 session。尝试状态为 `failed`，恢复语义与孤儿的 `lost / runtime_recovery` 相同。
+已持久化的完成报告继续重放；停止导致收尾 RPC 失去执行权限时同样按运行时中断重试。
+provider 执行错误只有在停止期间观察到 `Cancelled` 或 ACP 进程退出时才按运行时中断恢复；
+drain 期间的 typed provider failure（包括 AIR session failure / RPC 错误）及其他普通错误仍按原分类处理。
+未停止时的 provider 退出仍按 Agent 错误分类，
+已由服务端取消的执行不再上报失败，超时继续按超时处理。进程来不及持久化报告而退出时，
+仍由孤儿恢复处理。本规则不增加 drain 期限或无感续接能力。
+
 `outbox_events.task_id` 语义扩展为分区键：runtime 级记录写 `rt:<runtime_id>`。每分区内保序，
 分区间可并行。断线期间照常入库，重连后从最小未删 id 续发。
 
@@ -968,6 +978,17 @@ available_commands?: SlashCommandCatalogue | null;  // agent 最近一次发布�
   终态照常生效；截断后写进这一尝试的 agent 会话线 `multiremi_session_lanes.available_commands`
   （JSON 文本，迁移 `20261020_lane_available_commands`），空列表照存；较早的尝试不覆盖较新尝试写下的目录。
   Chat 菜单经 `GET /api/chat/slash-commands` 读取。
+- 折叠输入未读只在协商 `input_unread` 能力后返回 `input_unread`（`retryable:false`），
+  附 `read_to_seq`、`required_to_seq`、`read_command` 和包含连续读取命令的 `message`。
+  outbox 将该拒绝交回执行器，将原完成记录持久暂停，保持 trace 开放；后继终态入队时
+  原子替换暂停记录，重启后将无人接管的暂停记录转为 fallback 重放。执行器在同一 provider 会话
+  提醒最多两次，要求从指定 `--from` 连续读取后重新给出最终回复。
+  达到上限、provider 补读续接失败，或 outbox 重放时执行器已不在，daemon 用
+  `input_unread_fallback:true` 重交原回复；未协商能力的旧 daemon 直接兜底。
+  服务端接受完成，只确认到实际读取位置（不回退既有业务覆盖），在结果和回复的
+  `task_result.input_unread` 记录 `{read_to_seq,required_to_seq}`；未读 now 输入由现有
+  `turn_end_re_ring` 再唤起。该原因不会变成 `invalid_report`，越过 offered 的非法完成仍拒绝。
+  `remi message list` 如因读取缺口未推进游标，在 stderr 提供连续读取命令，退出码不变。
 - `turn.complete` 的回复在 `reply: {body_md, message_kind}` 中，载荷另带 `turn_id`、`attempt_id`、`input_to_seq`；不再上报旧 `output`。
 - `head` 与 `event_count` 分开：新写的 trace 两者相等，**历史 trace 可能是稀疏的**，
   `head ≠ event_count`（A11）。

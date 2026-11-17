@@ -44,6 +44,23 @@ CI 固定 Bun 版本并使用公共依赖源，发布唯一 `ci-<提交>-<run>-<
 
 仅在明确需要宿主编译时使用 `stable deploy --ref <提交> --build-local true`。dev 仍在本机构建和 watch；stable 的日常构建内存开销由 CI 承担，Docker Desktop 在本机只需运行服务。
 
+### 本地构建代理
+
+`build`、`deploy --build-local true`、dev deploy 和 dev watch（包括后续依赖重建）继承当前进程的 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 及其小写形式，作为 API/Web 的 build args。无代理时保持原有构建网络和参数。POSIX 上大小写变量分别按原值传入，请避免同时设置互相冲突的值；Windows 环境变量名不区分大小写，每项只生成一个大写 build arg，小写环境变量同样有效。
+
+Linux 原生 Docker 上，代理 URL 指向 `localhost`、`127.0.0.0/8` 或 `[::1]` 时自动使用 `build.network: host`，让构建步骤能访问宿主回环代理。例如（Bash）：
+
+```bash
+export HTTP_PROXY=http://127.0.0.1:17890
+export HTTPS_PROXY=http://127.0.0.1:17890
+export NO_PROXY=localhost,127.0.0.1,::1
+node scripts/local-profile.mjs stable deploy --ref HEAD --build-local true
+```
+
+可用进程环境变量 `REMI_BUILD_NETWORK=host|default|none` 显式选择构建网络；`default` 可覆盖 Linux 的自动 host 选择。Docker Desktop 的回环地址通常属于 Linux VM，不能假定等于宿主回环：请将代理地址改为容器可达地址（如 `host.docker.internal`，并配置代理监听），或在 Docker Desktop 已启用 host networking 时显式设置 `REMI_BUILD_NETWORK=host`。host 构建需要本机 builder 允许 host 网络；脚本不会修改 builder 权限。此配置只影响构建步骤，不改变运行容器的网络。基础镜像拉取由 Docker daemon / BuildKit 自身的代理设置负责，build args 不负责镜像仓库连接。
+
+脚本通过 stdin 临时 Compose 覆盖只传代理变量名，不把代理值写入命令参数、profile 配置、备份或脚本日志。Dockerfile 不声明代理 `ARG` / `ENV`，使用 Docker 预定义代理参数，使其不进入最终镜像环境、history 和构建缓存键；不要为排障加入 `env`、`set -x` 或打印代理值的构建指令。代理仅供构建使用，不注入 API/Web 运行环境。自动检查见 `node --test scripts/local-profile.test.mjs`，覆盖参数生成、回环与显式网络、watch 重建、敏感值不落盘/输出及 Dockerfile 约束。
+
 从仓库根目录运行：
 
 ```powershell

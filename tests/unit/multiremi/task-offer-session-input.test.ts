@@ -56,7 +56,7 @@ test("50 unread entries and huge Wiki offer only trigger messages and the unread
   const prompt = buildTaskPrompt(normalizeDaemonClaimTask(response)!);
   // ADR 0023: one sentence with the range read replaces the server's range instruction.
   const toSeq = JSON.parse(jsonl.split("\n")[0]!).to_seq;
-  expect(prompt).toContain(`Read it before you answer: \`remi message list ${f.session.id} --from 0 --to ${toSeq}\`)`);
+  expect(prompt).toContain(`Read it before you answer: \`remi message list ${f.session.id} --from 0 --to ${toSeq}\`; you must read continuously starting at the given --from.)`);
   expect(prompt).not.toContain("动手前先读完未读");
   expect(prompt).toContain("TRIGGER");
   expect(prompt).not.toContain("UNREAD_");

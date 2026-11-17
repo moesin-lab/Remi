@@ -119,4 +119,21 @@ for (const compiled of [false, true]) describe(compiled ? "compiled CLI stdio" :
       expect(result.err.length).toBeGreaterThan(0);
     }
   }, 15_000);
+
+  it("rejects unknown group subcommands on stderr and prints bare group help with exit 0", async () => {
+    const prefix = compiled ? [binary] : [process.execPath, "apps/remi/main.ts"];
+    for (const path of [["scm"], ["scm", "change-request"], ["scm", "connection"],
+      ["platform"], ["platform", "operation"], ["runtime"]]) {
+      const args = [...path, "bogus", "extra"];
+      const unknown = await run([...prefix, ...args], "fast");
+      expect(unknown.code).toBe(1);
+      expect(unknown.out.length).toBe(0);
+      expect(unknown.err.toString()).toStartWith(`Unknown command: remi ${args.join(" ")}\n`);
+      expect(unknown.err.toString()).toContain(`Usage: remi ${path.join(" ")}`);
+      const bare = await run([...prefix, ...path], "fast");
+      expect(bare.code).toBe(0);
+      expect(bare.err.length).toBe(0);
+      expect(bare.out.toString()).toContain(`Usage: remi ${path.join(" ")}`);
+    }
+  }, 15_000);
 });

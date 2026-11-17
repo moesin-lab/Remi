@@ -860,28 +860,33 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
         appSecretOp: "set", appSecret: "fixture-secret-not-a-real-credential",
       });
       const input = { revision: config.revision, externalSessionKey: "oc_pg_allowlist", externalMessageId: "om_pg_1", senderOpenId: "ou_pg_sender", senderName: "PG Sender", text: "Create an Issue" };
-      const inbound = store.submitFeishuBotMessage(workspaceId, runtimeId, input);
-      store.submitFeishuBotMessage(workspaceId, runtimeId, { ...input, externalMessageId: "om_pg_2", senderUnionId: "on_pg_sender" });
+      expect(() => store.submitFeishuBotMessage(workspaceId, runtimeId, input)).toThrow("sender is not on this bot's allowlist");
+      expect(() => store.submitFeishuBotMessage(workspaceId, runtimeId, { ...input, externalMessageId: "om_pg_2", senderUnionId: "on_pg_sender" }))
+        .toThrow("sender is not on this bot's allowlist");
+      expect(store.listTasks().filter(task => task.workspaceId === workspaceId)).toHaveLength(0);
       const senders = store.listFeishuBotSenders(workspaceId);
       expect(senders).toHaveLength(1);
       expect(senders[0]).toMatchObject({ open_id: "ou_pg_sender", union_id: "on_pg_sender", allowed: false });
+      store.setFeishuBotSenderAllowed(workspaceId, senders[0]!.id, true, "local");
+      const inbound = store.submitFeishuBotMessage(workspaceId, runtimeId, input);
+      store.submitFeishuBotMessage(workspaceId, runtimeId, { ...input, externalMessageId: "om_pg_2", senderUnionId: "on_pg_sender" });
       expect(store.listFeishuBotTaskReceiptMessageIds(workspaceId, inbound.taskId)).toEqual(["om_pg_1", "om_pg_2"]);
       expect(store.listFeishuBotTaskReceiptMessageIds("local", inbound.taskId)).toEqual([]);
       const child = store.createTask({ agentId: agent.id, workspaceId, prompt: "Delegated request", parentTaskId: inbound.taskId, assignmentAuthorType:"system" });
-      expect(store.isFeishuBotTaskIssueCreationRestricted(child.id)).toBe(true);
-      store.setFeishuBotSenderAllowed(workspaceId, senders[0]!.id, true, "local");
       expect(store.isFeishuBotTaskIssueCreationRestricted(child.id)).toBe(false);
       const beforeRefresh = new Date().toISOString();
       expect(store.listFeishuBotSenderProfileSources(workspaceId, beforeRefresh)).toEqual([{
         id: senders[0]!.id, appId: config.appId, openId: "ou_pg_sender", messageId: "om_pg_2",
       }]);
+      const beforeProfileRefresh = store.listFeishuBotSenders(workspaceId)[0]!;
       store.updateFeishuBotSenderProfile(workspaceId, config.appId, senders[0]!.id,
         { name: "陈测试", nameEn: "Test Chen" }, beforeRefresh);
-      expect(store.listFeishuBotSenders(workspaceId)[0]).toMatchObject({ ...senders[0],
+      expect(store.listFeishuBotSenders(workspaceId)[0]).toMatchObject({ ...beforeProfileRefresh,
         allowed: true, display_name: "陈测试", name_en: "Test Chen" });
       expect(store.listFeishuBotSenderProfileSources(workspaceId, beforeRefresh)).toEqual([]);
       store.setFeishuBotSenderAllowed(workspaceId, senders[0]!.id, false, "local");
       expect(store.isFeishuBotTaskIssueCreationRestricted(inbound.taskId)).toBe(true);
+      expect(store.isFeishuBotTaskIssueCreationRestricted(child.id)).toBe(true);
       store.upsertFeishuBotConfig(workspaceId, { ...config, appSecretOp: "keep", senderAccessPolicy: "agent" });
       expect(store.isFeishuBotTaskIssueCreationRestricted(inbound.taskId)).toBe(false);
       expect(store.isFeishuBotTaskIssueCreationRestricted(child.id)).toBe(false);

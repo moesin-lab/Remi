@@ -159,7 +159,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     const plainClaim = store.claimTask(runtime.id)!;
     expect(plainClaim.id).toBe(plain.id);
     expect(daemonTaskClaimResponse(store, plainClaim).agent as Record<string, unknown>).toMatchObject({
-      model: PRIMARY, thinking_level: "high", fallback_model: FALLBACK, fallback_thinking_level: "high",
+      model: PRIMARY, thinking_level: "high", fallback_model: "", fallback_thinking_level: "",
     });
   });
 
@@ -232,7 +232,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     expect(store.getTask(task.id)).toMatchObject({
       status: "failed",
       failureReason: TaskFailureReason.AgentProviderNoAvailableAccount,
-      executionModel: null,
+      executionModel: PRIMARY,
     });
   });
 
@@ -251,7 +251,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     // may smuggle in the fallback model.
     const retry = successor(store, task.id);
     if (retry) {
-      expect(retry).toMatchObject({ executionModel: null, fallbackSwitched: false, switchReason: null });
+      expect(retry).toMatchObject({ executionModel: PRIMARY, fallbackSwitched: false, switchReason: null });
     }
   });
 
@@ -372,7 +372,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     expect(retry).toMatchObject({
       status: "queued",
       failureReason: null,
-      executionModel: null,
+      executionModel: PRIMARY,
       fallbackSwitched: false,
       attempt: 2,
     });
@@ -409,7 +409,7 @@ describe("MUL-336 model fallback recovery chain", () => {
     const retry = successor(store, first.id)!;
     const claimed = [store.claimTask(runtime.id)?.id, store.claimTask(runtime.id)?.id].sort();
     expect(claimed).toEqual([retry.id, second.id].sort());
-    expect(store.getTask(second.id)?.executionModel).toBeNull();
+    expect(store.getTask(second.id)?.executionModel).toBe(PRIMARY);
     expect(store.getTask(retry.id)?.executionModel).toBe(FALLBACK);
   });
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Remi 自举"
+  short_description: "协调 Remi 的 Agent 改进 Remi 本身：建单、审阅、转达 CI、合并、部署到自用实例并验证"
+  default_prompt: "使用 $remi-bootstrap，推进 Remi 项目当前的自举路线图：疏通卡住的单，合并已审阅的 PR，部署并验证，把新发现的缺陷建单。"

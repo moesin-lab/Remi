@@ -164,6 +164,11 @@ export class MultiremiTaskReportOutbox {
     this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
     this.onTaskBlocked = options.onTaskBlocked ?? null;
     this.deliveryBatchSize = Math.max(1, Math.floor(options.deliveryBatchSize ?? DEFAULT_TASK_MESSAGE_BATCH_COUNT));
+    // A paused completion belonged to the previous process's executor. Recover
+    // its original reply directly; no provider remains to act on the reminder.
+    this.db.run(`UPDATE outbox_events SET status='pending', next_attempt_at=NULL,
+      payload=json_set(payload, '$.input_unread_fallback', json('true'))
+      WHERE status='input_unread' AND kind='turn.complete'`);
     this.db.run("UPDATE outbox_events SET next_attempt_at = NULL WHERE status = 'pending'");
     // Older versions parked late usage behind a rejected execution report.
     // Recovered usage must still pass the server's immutable-run AND current
@@ -214,11 +219,17 @@ export class MultiremiTaskReportOutbox {
     const id = Number(idRow?.seq ?? 0) + 1;
     const oversized = outboxRecordBytes({ id, taskId, kind, payload, seq: id, terminal, attempts: 0 }) > DAEMON_FRAME_MAX_BYTES;
     const blocked = this.readMeta(`blocked:${taskId}`) !== null || oversized;
-    this.db.run(
-      `INSERT INTO outbox_events (idempotency_key, task_id, kind, payload, seq, terminal, status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [randomUUID(), taskId, kind, JSON.stringify(oversized ? {} : payload), id, terminal ? 1 : 0, blocked ? "blocked" : "pending", new Date().toISOString()],
-    );
+    this.db.transaction(() => {
+      this.db.run(
+        `INSERT INTO outbox_events (idempotency_key, task_id, kind, payload, seq, terminal, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [randomUUID(), taskId, kind, JSON.stringify(oversized ? {} : payload), id, terminal ? 1 : 0, blocked ? "blocked" : "pending", new Date().toISOString()],
+      );
+      // Keep the saved reply until a valid successor terminal is durable. A new
+      // id puts that successor after reports produced during the reminder.
+      if (terminal && !blocked) this.db.run(
+        "DELETE FROM outbox_events WHERE task_id=? AND status='input_unread'", [taskId]);
+    })();
     // A complete marker may follow multiple bounded chunks. It never proves
     // that one body contains older units, so pending usage deltas are retained.
     if (oversized) this.blockPartition(taskId, "protocol_violation: encoded report exceeds 1 MiB");
@@ -327,7 +338,7 @@ export class MultiremiTaskReportOutbox {
 
   taskIdsWithPendingTerminal(runtimeId?: string): string[] {
     const rows = this.db.query(
-      `SELECT DISTINCT task_id FROM outbox_events WHERE status = 'pending' AND terminal = 1
+      `SELECT DISTINCT task_id FROM outbox_events WHERE status IN ('pending', 'input_unread') AND terminal = 1
        AND (? IS NULL OR json_extract(payload, '$.runtime_id') = ?)`,
     ).all(runtimeId ?? null, runtimeId ?? null) as Array<{ task_id: string }>;
     return rows.map((row) => String(row.task_id));
@@ -380,16 +391,16 @@ export class MultiremiTaskReportOutbox {
   }
 
   stats(): MultiremiOutboxStats {
-    const pending = this.db.query("SELECT COUNT(*) AS n FROM outbox_events WHERE status = 'pending'").get() as { n: number };
+    const pending = this.db.query("SELECT COUNT(*) AS n FROM outbox_events WHERE status IN ('pending', 'input_unread')").get() as { n: number };
     const blocked = this.db.query("SELECT COUNT(*) AS n FROM outbox_events WHERE status = 'blocked'").get() as { n: number };
     const pendingTerminal = this.db.query(
-      "SELECT COUNT(*) AS n FROM outbox_events WHERE status = 'pending' AND terminal = 1",
+      "SELECT COUNT(*) AS n FROM outbox_events WHERE status IN ('pending', 'input_unread') AND terminal = 1",
     ).get() as { n: number };
     const pendingTasks = this.db.query(
-      "SELECT COUNT(DISTINCT task_id) AS n FROM outbox_events WHERE status = 'pending'",
+      "SELECT COUNT(DISTINCT task_id) AS n FROM outbox_events WHERE status IN ('pending', 'input_unread')",
     ).get() as { n: number };
     const oldest = this.db.query(
-      "SELECT MIN(created_at) AS at FROM outbox_events WHERE status = 'pending'",
+      "SELECT MIN(created_at) AS at FROM outbox_events WHERE status IN ('pending', 'input_unread')",
     ).get() as { at: string | null };
     const pages = this.db.query("PRAGMA page_count").get() as { page_count: number };
     const pageSize = this.db.query("PRAGMA page_size").get() as { page_size: number };
@@ -503,6 +514,19 @@ export class MultiremiTaskReportOutbox {
         this.recordWaiters.delete(id);
       }
     } catch (error) {
+      if (error instanceof DaemonProtocolRpcError && error.code === "input_unread" && record.kind === "turn.complete") {
+        const waiter = this.recordWaiters.get(record.id);
+        if (waiter) {
+          this.db.run("UPDATE outbox_events SET status='input_unread',next_attempt_at=NULL WHERE id=? AND status='pending'", [record.id]);
+          this.recordWaiters.delete(record.id);
+          waiter.reject(error);
+        } else {
+          // Preserve the durable reply across a crash between refusal and retry.
+          this.db.run("UPDATE outbox_events SET payload=?,next_attempt_at=NULL WHERE id=? AND status='pending'",
+            [JSON.stringify({ ...record.payload, input_unread_fallback: true }), record.id]);
+        }
+        return;
+      }
       if (error instanceof DaemonProtocolRpcError && error.code === "turn_input_pending" && record.kind === "turn.complete") {
         if (this.closed) return;
         const waiter = this.recordWaiters.get(record.id);

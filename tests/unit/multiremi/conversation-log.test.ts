@@ -283,6 +283,10 @@ pendingTurnBackendTests("read-only display log", fixture => {
       const response = await app.request(`${path}?${query}`, { headers }); expect(response.status).toBe(400);
       expect((await response.json()).error).toContain("remi message list"); expect(lanes()).toEqual(before);
     }
+    const later=store.sendMessage({session_id:sessionId,sender:{type:"member",id:"mem_local_local"},to:{type:"agent",ref:agent.id},message_kind:"request",body_md:"later",wake_requested:"now"});
+    const suffix=await app.request(`/api/sessions/${sessionId}/messages?from=${sent.message.seq}&to=${later.message.seq}`,{headers});
+    expect(suffix.status).toBe(200);
+    expect((await suffix.json()).read_warning).toContain(`remi message list ${sessionId} --from 0 --to ${later.message.seq}`);
     const range = await app.request(`/api/sessions/${sessionId}/messages?from=0&to=${sent.message.seq}`, { headers });
     expect(range.status).toBe(200); expect(store.getSessionAgentReadProgress(sessionId, agent.id).seq).toBe(sent.message.seq);
   });

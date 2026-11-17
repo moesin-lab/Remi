@@ -18,7 +18,7 @@ import { createId, nowIso } from "@multiremi/ids.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
 import { createLogger } from "@shared/logger.js";
 import { INBOX_ROUTING, inboxRouteFor } from "@multiremi/store/inbox-routing.js";
-import { acquireTransactionLock, markRequestReadCacheLockTaken } from "@multiremi/store/request-read-cache.js";
+import { memoizeRequestRead, acquireTransactionLock, markRequestReadCacheLockTaken } from "@multiremi/store/request-read-cache.js";
 import type { MultiremiTaskTrace } from "@multiremi/contracts/trace-file.js";
 import type { TaskMessageFanoutSubject } from "@multiremi/contracts/task-message-fanout.js";
 export type { TaskMessageFanoutSubject } from "@multiremi/contracts/task-message-fanout.js";
@@ -1583,7 +1583,8 @@ export class StoreContext {
   // Lightweight workspace lookup for realtime broadcasts — the hydrated
   // getIssue() runs several queries, which is wasted work on hot write paths.
   issueWorkspaceId(issueId: string): string | null {
-    const row = this.db.query("SELECT workspace_id FROM multiremi_issues WHERE id = ?").get(issueId) as { workspace_id?: unknown } | null;
+    const row = memoizeRequestRead(this.db, ['multiremi_issues'], `issue-workspace:${issueId}`,
+      () => this.db.query("SELECT workspace_id FROM multiremi_issues WHERE id = ?").get(issueId) as { workspace_id?: unknown } | null);
     return row ? String(row.workspace_id ?? "local") : null;
   }
 

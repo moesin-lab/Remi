@@ -1,3 +1,4 @@
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
 import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
@@ -5728,7 +5729,7 @@ runMigrations(this.db);
   readAgentMessageInbox(...args: Parameters<InboxRepo["operations"]["readAgentMessageInbox"]>) { return this.inbox.operations.readAgentMessageInbox(...args); }
   getTurn(...args: Parameters<InboxRepo["operations"]["getTurn"]>) { return this.inbox.operations.getTurn(...args); }
   getTurnForAttempt(attemptId: string) {
-    const row = this.db.query("SELECT turn_id FROM multiremi_turn_attempts WHERE id=?").get(attemptId);
+    const row = readAttemptTurn(this.db, attemptId);
     return row ? this.getTurn(String(row.turn_id)) : null;
   }
   listTurns(...args: Parameters<InboxRepo["operations"]["listTurns"]>) { return this.inbox.operations.listTurns(...args); }

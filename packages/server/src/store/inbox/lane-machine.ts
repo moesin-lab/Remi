@@ -1,3 +1,4 @@
+import { readAttemptTurn, readTurnRow } from "@multiremi/store/execution-reads.js";
 import { acquireTransactionLock } from "../request-read-cache.js";
 import type { TaskSessionContinuation } from "../repos/tasks-repo.js";
 import { readAttemptInputRow, attemptInputState } from './attempt-input.js';
@@ -67,7 +68,7 @@ export function ensurePendingTurn(ctx: StoreContext, message: UnifiedMessage, in
     assignmentAuthorType:continuation ? 'system' : message.sender_type==='member'?'member':message.sender_type==='agent'?'agent':'system',
     assignmentAuthorId:continuation ? null : message.sender_id,
   },[],events,undefined,scope,continuation);
-  const turn=ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(task.id)!;
+  const turn=readAttemptTurn(ctx.db, task.id)!;
   ctx.db.run('UPDATE multiremi_turns SET trigger_message_id=?,wake_seq=? WHERE id=?',[message.id,message.seq,turn.turn_id]);
   appendPendingTurnAuditWithinTransaction(ctx.db,{id:turn.turn_id,issueId:task.issueId,workspaceId:task.workspaceId},
     'turn_created',{message_id:message.id,seq:message.seq,reason:message.wake_reason});
@@ -76,7 +77,7 @@ export function ensurePendingTurn(ctx: StoreContext, message: UnifiedMessage, in
 }
 
 export function reRingAfterTurnEnd(ctx: StoreContext, turnId: string, events: CommitEventQueue, origin='turn_end'): string | undefined {
-  const turn=ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(turnId);
+  const turn=readTurnRow(ctx.db, turnId);
   if (!turn || !['completed','failed','cancelled'].includes(turn.status)) return;
   const agent=ctx.agents().getAgent(turn.agent_id);
   const session=ctx.issueSessions().getIssueSession(turn.session_id);
@@ -136,7 +137,7 @@ export function assertOfferedInputRead(ctx:StoreContext,turn:any,toSeq:number):v
 }
 
 export function acknowledgeInput(ctx: StoreContext, turnId:string, fromSeq:number, toSeq:number, advanceRead=true): void {
-  const turn=ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(turnId);
+  const turn=readTurnRow(ctx.db, turnId);
   if (!turn) throw new Error('Turn not found');
   lockLane(ctx,turn.session_id,turn.agent_id,turn.execution_scope);
   const lane=ctx.db.query(`SELECT cursor_seq,cursor_offset FROM multiremi_session_lanes

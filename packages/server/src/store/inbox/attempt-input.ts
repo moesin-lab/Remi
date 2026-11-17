@@ -1,4 +1,4 @@
-import { memoizeRequestRead } from '../request-read-cache.js';
+import { readAttemptRow } from "../execution-reads.js";
 import type { SqlDatabase } from '../db/postgres.js';
 import type { StoreContext } from '../context.js';
 import { nowIso } from '@multiremi/ids.js';
@@ -27,8 +27,7 @@ export function migrateAttemptInput(db: SqlDatabase): void {
 }
 /** Shared raw receipt row; an attempt write or transaction boundary invalidates it. */
 export function readAttemptInputRow(ctx: StoreContext, id: string): any {
-    return memoizeRequestRead(ctx.db, ['multiremi_turn_attempts'], `input-attempt:${id}`,
-        () => ctx.db.query('SELECT * FROM multiremi_turn_attempts WHERE id=?').get(id));
+    return readAttemptRow(ctx.db, id);
 }
 /** Caller holds the lane mutex. Preparing a new provider leaves actual reading unchanged. */
 export function attemptInputState(ctx: StoreContext, turn: any): {

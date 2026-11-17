@@ -1,3 +1,4 @@
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { renderMarkdown } from "../render/markdown.js";
 /** Read projection for execution consumers; mutations always target normalized tables. */
 import type { SqlDatabase, SqlStatement } from "./db/postgres.js";
@@ -276,7 +277,7 @@ function insertExecution(db:SqlDatabase,sql:string,params:unknown[]):{changes:nu
   const names=match[1]!.split(",").map(k=>k.trim());
   const evaluated=db.query(`SELECT ${splitExecutionSql(match[2]!,",").map((v,i)=>`(${v}) AS value_${i}`).join(",")}`).get(...params);
   const input=Object.fromEntries(names.map((name,i)=>[name,evaluated[`value_${i}`]]));
-  const parent=input.parent_task_id && Number(input.attempt??1)>1?db.query("SELECT turn_id FROM multiremi_turn_attempts WHERE id=?").get(input.parent_task_id):null;
+  const parent=input.parent_task_id && Number(input.attempt??1)>1?readAttemptTurn(db, input.parent_task_id):null;
   const turnId=parent?.turn_id??input.id;
   if(input.parent_task_id&&Number(input.attempt??1)>1&&!parent)throw new Error("Retry parent attempt does not exist");
   if(!parent){

@@ -1,4 +1,4 @@
-import { acquireTransactionLock, memoizeRequestRead } from "../request-read-cache.js";
+import { acquireTransactionLock, memoizeRequestRead, seedRequestRead } from "../request-read-cache.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Issue sessions domain (sessions, participants, session events, agent lanes and published
 // results), extracted verbatim from MultiremiStore (the facade delegates every public method here).
@@ -455,6 +455,7 @@ export class IssueSessionsRepo {
       LEFT JOIN multiremi_conversation_heads head ON head.session_id = scoped.id`).get(id) as Row | null);
     if (!row || row.chat_id == null && row.issue_id == null) return null;
 
+    seedRequestRead(this.ctx.db, ['multiremi_issue_sessions', 'multiremi_conversation_log'], `session:${id}`, row);
     const session = toIssueSession(row);
     const actualOwnerWorkspaceId = nullableString(row.owner_workspace_id);
     // Canonical creation leaves the head unbound until its first message.

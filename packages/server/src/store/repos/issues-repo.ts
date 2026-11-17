@@ -1,3 +1,4 @@
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { memoizeRequestRead } from "../request-read-cache.js";
 import { InboxOperations } from '../inbox/operations.js';
 import { activeRequestReadCache, cacheKey } from '../request-read-cache.js';
@@ -4426,7 +4427,7 @@ export class IssuesRepo {
     // Always the within-transaction flavour: the public entry point, or the
     // caller that runs this half directly, guarantees a frame is open around
     // every write below.
-    const sourceTurn=taskId?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(taskId):null;
+    const sourceTurn=taskId?readAttemptTurn(this.ctx.db, taskId):null;
     const member=authorType==='member'?this.ctx.workspaces().getWorkspaceMemberByRef(input.authorId??'local',workspaceId):null;
     const written=sendMessageWithinTransaction(this.ctx,{id,session_id:issueSessionId,
       sender:{type:authorType==='system'?'platform':authorType as 'agent'|'member',id:member?.id??input.authorId??null},

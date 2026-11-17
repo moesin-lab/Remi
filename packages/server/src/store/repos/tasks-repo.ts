@@ -1,3 +1,5 @@
+import { readCurrentTurnRow } from "@multiremi/store/execution-reads.js";
+import { readAttemptTurn, readTurnRow } from "@multiremi/store/execution-reads.js";
 import { withTurnChangeBatch } from "../turn-execution-records.js";
 import { attemptInputState, acknowledgeAttemptInput } from '../inbox/attempt-input.js';
 import { InputUnreadError, assertOfferedInputRead, lockLane,reRingAfterTurnEnd,sweepIdleLanes,acknowledgeInput } from "../inbox/lane-machine.js";
@@ -1180,7 +1182,7 @@ export class TasksRepo {
   constructor(private ctx: StoreContext) {}
 
   countDelegationPairHops(source: MultiremiTask, targetAgentId: string, limit = pairRoundTripLimit()): number {
-    const turn=this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(source.id);
+    const turn=readAttemptTurn(this.ctx.db, source.id);
     return turn?countMessageDelegationPairHops(this.ctx,turn.turn_id,targetAgentId,limit):0;
   }
 
@@ -1806,7 +1808,7 @@ export class TasksRepo {
       throw new ChatIssueTaskConflictError("Only Feishu Issue topics can create Chat transport tasks with an Issue");
     const sourceId=resolveCamelOrSnakeString(input,'parentTaskId','parent_task_id');
     const sourceTask=sourceId?this.getTask(sourceId):null;
-    const sourceTurn=sourceTask?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(sourceTask.id):null;
+    const sourceTurn=sourceTask?readAttemptTurn(this.ctx.db, sourceTask.id):null;
     const existingId=input.triggerCommentId??input.trigger_comment_id;
     const existing=existingId?this.ctx.inbox().getMessage(existingId):null;
     const issueId=input.issueId??(existing?this.ctx.getLogIssueComment(existing.id)?.issueId:null);
@@ -2685,6 +2687,8 @@ export class TasksRepo {
     const cache = activeRequestReadCache();
     const key = cacheKey("multiremi_turn_execution_records", projection ?? "identity", id);
     const convert = projection === "fanout" ? toTaskMessageFanoutSubject : toTaskIdentity;
+    const full = cache?.get<Row | null>(cacheKey("multiremi_turn_execution_records", "row", id));
+    if (full !== undefined) return full ? convert(full) : null;
     if (cache) {
       const cached = cache.get<Row | null>(key);
       if (cached !== undefined) return cached ? convert(cached) : null;
@@ -2842,9 +2846,9 @@ export class TasksRepo {
       detachedSessionReference = true;
     }
     if (chat.agentId !== task.agentId) return invalid();
-    const bindings = this.ctx.db.query(
-      "SELECT id, workspace_id, agent_id, chat_session_id, issue_id FROM multiremi_feishu_bot_chat_bindings WHERE chat_session_id = ?",
-    ).all(task.chatSessionId) as Row[];
+    const bindings = memoizeRequestRead(this.ctx.db, ['multiremi_feishu_bot_chat_bindings'], `chat-bindings:${task.chatSessionId}`,
+      () => this.ctx.db.query("SELECT id, workspace_id, agent_id, chat_session_id, issue_id FROM multiremi_feishu_bot_chat_bindings WHERE chat_session_id = ?")
+        .all(task.chatSessionId) as Row[]);
     const matches = (binding: Row | undefined): boolean => !!binding && !!task.issueId
       && binding.workspace_id === task.workspaceId && binding.agent_id === task.agentId
       && binding.chat_session_id === task.chatSessionId && binding.issue_id === task.issueId;
@@ -3332,9 +3336,10 @@ export class TasksRepo {
   }
 
   pendingTaskOfferRuntimeIds(workspaceId: string): Array<string | null> {
-    return this.ctx.db.query(`SELECT DISTINCT runtime_id FROM multiremi_turn_execution_records
+    return memoizeRequestRead(this.ctx.db, ['multiremi_turn_execution_records'], `pending-offer-runtimes:${workspaceId}`,
+      () => this.ctx.db.query(`SELECT DISTINCT runtime_id FROM multiremi_turn_execution_records
       WHERE workspace_id = ? AND status IN ('queued', 'dispatched')`).all(workspaceId)
-      .map(row => row.runtime_id == null ? null : String(row.runtime_id));
+      .map(row => row.runtime_id == null ? null : String(row.runtime_id)));
   }
 
   hasPendingTaskOffers(workspaceId: string): boolean {
@@ -4857,7 +4862,7 @@ ${placementAfter.sql}
       const task=this.getTask(input.taskId);
       if(!task)throw new Error('Decision source attempt not found');
       this.ctx.lockWorkspaceRuntimeLifecycle(task.workspaceId);
-      const turn=this.ctx.db.query('SELECT * FROM multiremi_turns WHERE current_attempt_id=?').get(task.id);
+      const turn=readCurrentTurnRow(this.ctx.db, task.id);
       if(!turn)throw new Error('Decision source is not the current attempt');
       const question = new Questions(this.ctx).createWithinTransaction({id,session_id:turn.session_id,source_turn_id:turn.id,
         sender:{type:'agent',id:task.agentId},to:{type:'none'},message_kind:'decision',wake_requested:'inbox_only',
@@ -4987,7 +4992,7 @@ ${placementAfter.sql}
     if(!task)throw new Error('Steer target not found');
     if(input.kind==='steer'&&!input.content.trim())throw new Error('Steer content is empty');
     this.ctx.lockWorkspaceRuntimeLifecycle(task.workspaceId);
-    const turn=this.ctx.db.query('SELECT * FROM multiremi_turns WHERE current_attempt_id=?').get(task.id);
+    const turn=readCurrentTurnRow(this.ctx.db, task.id);
     if(!turn)throw new Error('Steer target is not the current attempt');
     if (!['pending','running','awaiting_human'].includes(turn.status)) throw new Error('Steer target is terminal');
     const events=createCommitEventQueue();
@@ -5027,7 +5032,7 @@ ${placementAfter.sql}
   getTaskSteerMessage(id:string):MultiremiTaskSteerMessage|null {
     const message=this.ctx.inbox().getMessage(id),turnId=message?.metadata.steer_target_turn_id;
     if(!message||typeof turnId!=='string')return null;
-    const turn=this.ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(turnId);
+    const turn=readTurnRow(this.ctx.db, turnId);
     if(!turn)return null;
     const attachmentMessageId=typeof message.metadata.source_chat_message_id==='string'?message.metadata.source_chat_message_id:message.id;
     const attachments = this.ctx.issues().listAttachmentsForMessages([attachmentMessageId])
@@ -5037,7 +5042,7 @@ ${placementAfter.sql}
   }
 
   listTaskSteerMessages(taskId:string):MultiremiTaskSteerMessage[] {
-    const turn=this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(taskId);
+    const turn=readAttemptTurn(this.ctx.db, taskId);
     if(!turn)return [];
     const target=this.ctx.db.dialect==='postgres'?"metadata::jsonb->>'steer_target_turn_id'":"json_extract(metadata,'$.steer_target_turn_id')";
     return this.ctx.db.query(`SELECT id FROM multiremi_conversation_log WHERE kind='message' AND ${target}=? ORDER BY seq`).all(turn.turn_id)
@@ -5046,7 +5051,7 @@ ${placementAfter.sql}
   listPendingTaskSteerMessages(taskId:string):MultiremiTaskSteerMessage[] {return this.listTaskSteerMessages(taskId).filter(m=>!m.consumedAt);}
   consumeTaskSteerMessages(taskId:string,ids:string[]):MultiremiTaskSteerMessage[] {
     return this.ctx.db.transaction(()=>{
-      const turn=this.ctx.db.query('SELECT * FROM multiremi_turns WHERE current_attempt_id=?').get(taskId);
+      const turn=readCurrentTurnRow(this.ctx.db, taskId);
       if(!turn)return [];
       const pending=this.listPendingTaskSteerMessages(taskId),wanted=new Set(ids),consumed:MultiremiTaskSteerMessage[]=[];
       for(const row of pending){if(!wanted.has(row.id))break;const message=this.ctx.inbox().getMessage(row.id)!;
@@ -5365,8 +5370,7 @@ ${placementAfter.sql}
       unreadInput = undefined;
       if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
       const current = daemonAuthority ? this.lockTaskDaemonReport(taskId, daemonAuthority) : this.getTask(taskId);
-      const reportedTurn = input.expectedTurnId ? this.ctx.db.query(
-        'SELECT * FROM multiremi_turns WHERE current_attempt_id=?').get(taskId) : null;
+      const reportedTurn = input.expectedTurnId ? readCurrentTurnRow(this.ctx.db, taskId) : null;
       if (input.expectedTurnId && (!reportedTurn || reportedTurn.id !== input.expectedTurnId
         || reportedTurn.workspace_id !== daemonAuthority?.workspaceId)) throw new Error('stale_attempt');
       if (reportedTurn && reportedTurn.status !== 'completed') {
@@ -5394,7 +5398,7 @@ ${placementAfter.sql}
       this.assertTaskRuntimeAvailableWithinWorkspaceLock(current);
       const chatExecutionKind = this.getTaskChatExecutionKind(current);
       this.lockTaskIssueSessionsWithinWorkspaceLock([current]);
-      const turn=reportedTurn??this.ctx.db.query('SELECT * FROM multiremi_turns WHERE current_attempt_id=?').get(taskId);
+      const turn=reportedTurn??readCurrentTurnRow(this.ctx.db, taskId);
       if(turn){lockLane(this.ctx,turn.session_id,turn.agent_id,turn.execution_scope);
         if(input.turnInputToSeq===undefined){const to=current.projectionToSeq??turn.wake_seq??0;if(to>=Number(turn.input_to_seq??0))acknowledgeInput(this.ctx,turn.id,Number(turn.input_to_seq??0),to,false);}
         if(input.turnInputToSeq!==undefined){
@@ -6071,7 +6075,7 @@ ${placementAfter.sql}
 
   /** Execution replacement has no work-unit or Issue side effects. */
   private createRetryAttemptWithinWorkspaceLock(parent:MultiremiTask,input:Partial<CreateTaskInput>,redispatch=false):MultiremiTask {
-    const row=this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(parent.id);
+    const row=readAttemptTurn(this.ctx.db, parent.id);
     if(!row)throw new Error(`Attempt not found: ${parent.id}`);
     const detached=!!parent.chatSessionId&&!!parent.issueId&&!parent.issueSessionId&&this.ctx.feishuBot().getFeishuIssueIdForChatSession(parent.chatSessionId)!==parent.issueId;
     if(input.resetProviderSession&&parent.issueSessionId)this.resetSessionAgentLane(parent.issueSessionId,parent.agentId,taskExecutionScope(parent),undefined,createCommitEventQueue());
@@ -6398,7 +6402,7 @@ ${placementAfter.sql}
         || !returnSession.chatId && (!returnIssue || ["done", "cancelled"].includes(returnIssue.status))) {
         if(delegator?.archivedAt&&delegator.workspaceId===report.source.workspaceId&&returnIssue&&!['done','cancelled'].includes(returnIssue.status)){
           sendMessageWithinTransaction(this.ctx,{session_id:issueSessionId,sender:{type:'platform',id:null},
-            source_turn_id:this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(report.source.id)?.turn_id,
+            source_turn_id:readAttemptTurn(this.ctx.db, report.source.id)?.turn_id,
             to:{type:'role',ref:'delegator'},message_kind:'report',wake_requested:'now',
             dedupe_key:`delegation_terminal:${report.source.id}`,
             body_md:delegationTerminalReportSection(report,report.resultCommentId?this.ctx.issues().getIssueComment(report.resultCommentId)?.body:undefined),
@@ -6470,7 +6474,7 @@ ${placementAfter.sql}
     runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records
        SET delegation_return_task_id = ?, updated_at = ?
        WHERE id IN (${placeholders}) AND delegation_return_task_id IS NULL`,
-      [this.ctx.db.query("SELECT turn_id FROM multiremi_turn_attempts WHERE id=?").get(returnTaskId)?.turn_id ?? returnTaskId, nowIso(), ...sourceTaskIds],
+      [readAttemptTurn(this.ctx.db, returnTaskId)?.turn_id ?? returnTaskId, nowIso(), ...sourceTaskIds],
     );
   }
 
@@ -6843,9 +6847,7 @@ ${placementAfter.sql}
       }
     }
 
-    const runRow = this.ctx.db.query(
-      "SELECT id FROM multiremi_autopilot_run_records WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
-    ).get(task.id) as { id: string } | null;
+    const runRow = this.readTaskAutopilotRun(task.id);
     if (runRow) {
       const previousRun = this.ctx.autopilots().getAutopilotRun(runRow.id);
       const scopedRepository = (previousRun as { repositoryId?: string | null } | null)?.repositoryId
@@ -7040,7 +7042,7 @@ ${placementAfter.sql}
     if (result.changes === 0) throw new Error(`Task not found or terminal: ${current.id}`);
     let redrain: DelegationReturnDrainResult | null = null;
     if (current.projectionToSeq == null && !replacementPlanned) {
-      const currentTurnId=this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(current.id)?.turn_id??current.id;
+      const currentTurnId=readAttemptTurn(this.ctx.db, current.id)?.turn_id??current.id;
       const cleared = runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records
          SET delegation_return_task_id = NULL, updated_at = ?
          WHERE delegation_return_task_id = ?`,
@@ -7170,7 +7172,7 @@ ${placementAfter.sql}
   }
 
   private reRingUnreadLane(task:MultiremiTask,_changes:ChildStatusChangeCollector,events:CommitEventQueue,_origin='turn_end'):void {
-    const turn=this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(task.id);
+    const turn=readAttemptTurn(this.ctx.db, task.id);
     if(turn)reRingAfterTurnEnd(this.ctx,turn.turn_id,events,_origin);
   }
 
@@ -7254,9 +7256,10 @@ ${placementAfter.sql}
        WHERE s.issue_id = ? AND log.sender_type = 'agent' AND log.sender_id = ? AND log.kind = 'message'
          AND log.message_kind IN ('request', 'reply', 'final') AND log.to_type = 'none'
          AND SUBSTR(log.id, 1, 4) = 'cmt_' AND log.visibility='shown' AND log.deleted_at IS NULL AND log.task_id = (SELECT turn_id FROM multiremi_turn_attempts WHERE id=?)`;
-    const row = (since == null
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_conversation_log', 'multiremi_issue_sessions', 'multiremi_turn_attempts'],
+      JSON.stringify(['agent-commented', issueId, agentId, since, taskId]), () => (since == null
       ? this.ctx.db.query(`${base} LIMIT 1`).get(issueId, agentId, taskId)
-      : this.ctx.db.query(`${base} AND log.created_at >= ? LIMIT 1`).get(issueId, agentId, taskId, since)) as { present: number } | null;
+      : this.ctx.db.query(`${base} AND log.created_at >= ? LIMIT 1`).get(issueId, agentId, taskId, since)) as { present: number } | null);
     return Boolean(row);
   }
 

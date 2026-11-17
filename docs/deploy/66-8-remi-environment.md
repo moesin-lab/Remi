@@ -186,3 +186,28 @@ bun test tests/unit/multiremi/multiremi-feishu-bot-task-bridge.test.ts
 ```
 
 这些是当前验证入口；实际执行结果应记录在对应任务或 PR，并分别说明 Bun 测试、服务重启、凭据测试和真实飞书消息收发的验证范围。
+
+## CLI 更新来源与构建身份
+
+`remi update` 使用已配置的控制面地址（环境变量 `MULTIREMI_SERVER_URL` 或保存的
+`server_url`）及对应 token；daemon 使用自身连接地址与 daemon token。默认来源顺序
+是 `platform,github`，可用 `MULTIREMI_UPDATE_SOURCES=platform` 或 `github` 限定来源，
+也可改变顺序。平台未配置、返回 404 或网络不可达时才尝试下一个来源；401、400、5xx、
+清单错误、size/SHA-256 或二进制身份不一致均直接失败。下载阶段的 404/网络不可达也适用
+后备规则。日志及更新输出标明实际来源；GitHub 元数据请求可使用 daemon 自身环境中的
+`GITHUB_TOKEN`，不使用工作区 SCM 凭据。
+
+平台清单来自 `/api/remi/releases/daemon/current`，显式 `target_commit` 则使用
+`/api/remi/releases/daemon/<40位提交>`，且只允许 platform 来源。未指定提交时仍要求
+`target_version` 与清单版本完全相等，包含版本后缀。制品按 OS/arch 选择，下载、校验后
+继续使用原有快照与 launcher 原子替换、watchdog 回滚流程。此命令不重启正在运行的 daemon。
+
+`remi --build-info` 输出单行 `{version, commit}` JSON，`--version` 保持原有输出。
+`BUILD_COMMIT` 由编译期 `MULTIREMI_BUILD_COMMIT` 注入，未注入时读取同名进程环境变量；
+规范化后不是完整 40 位 hex 则为 null。平台制品必须通过暂存二进制 `--build-info` 的版本与
+提交校验；GitHub 旧制品仅要求 `--version`。daemon 在 runtime metadata 中报告 `cli_commit`，
+没有构建提交时省略。handoff journal 保存 `targetCommit`；存在时 PID 绑定与 completed 确认
+必须同时满足版本和提交一致，避免同版本不同提交误判。
+
+回归入口：`bun run test tests/unit/remi/cli-update-platform.test.ts tests/unit/daemon/cli-update-identity.test.ts`。清单类型与解析器见
+[daemon-artifact-manifest.ts](../../packages/shared/src/daemon-artifact-manifest.ts)。

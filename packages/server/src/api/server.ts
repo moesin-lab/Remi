@@ -1,3 +1,4 @@
+import { reconcileCurrentDaemonBuild } from "../releases/current-daemon-build.js";
 import { isDatabaseConnectionError, withDatabaseTimeout } from "@shared/db/recovery.js";
 import { registerExecutionConfigRoutes } from "./routers/execution-config.js";
 import { Hono, type Handler } from "hono";
@@ -1493,6 +1494,10 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     browserWebSockets,
     jitterMs: options.jitterMs,
   });
+  if (backgroundJobs && effectiveApiRole !== "ui") {
+    try { reconcileCurrentDaemonBuild(store); }
+    catch { log.warn("startup daemon build reconciliation failed; updater heartbeat may retry"); }
+  }
   const stopServer = server.stop.bind(server);
   controlPlaneSshMesh?.start();
   server.stop = (closeActiveConnections?: boolean) => {

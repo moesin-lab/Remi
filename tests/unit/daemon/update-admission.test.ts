@@ -270,3 +270,28 @@ for (const code of ["cli_update_not_admitted", "cli_update_not_runnable", "proto
   expect(f.installs()).toBe(0);
   expect(f.state.restartRequestedFlag).toBe(false);
 });
+
+for (const path of ["WS", "heartbeat"] as const) it(`preserves both build commit and drain deadline through ${path}`, async () => {
+  const f = await fixture("lost");
+  const deadline = new Date(Date.now() + 3000).toISOString();
+  const commit = "a".repeat(40);
+  const installs: unknown[][] = [];
+  const deadlines: unknown[] = [];
+  const pause = (f.state as unknown as { pauseCliClaimsUntilIdle(deadline?: string): Promise<unknown> }).pauseCliClaimsUntilIdle.bind(f.state);
+  Object.assign(f.state, { updateRunner: undefined,
+    pauseCliClaimsUntilIdle: (value?: string) => { deadlines.push(value); return pause(value); },
+    installRuntimeUpdate: async (...args: unknown[]) => { installs.push(args); return "installed"; } });
+  const payload = { id: f.a.id, target_version: "0.2.96", target_commit: commit, scope: "cli" as const, drain_deadline: deadline };
+  const apply = (rt: string, ack: MultiremiDaemonHeartbeatConfigAck) => f.state.handleHeartbeatAck(rt, ack);
+  if (path === "WS") {
+    const handlers = new Map<string, (frame: any) => Promise<void>>();
+    registerDaemonRuntimeDownlinks({ dedupe: new DaemonDownlinkDedupe(), send() {},
+      registerFrameHandler(type: string, handler: any) { handlers.set(type, handler); } } as unknown as DaemonProtocolClient,
+      () => "rt", apply, async () => {});
+    await handlers.get("runtime.update")!({ rt: "rt", payload });
+  } else await apply("rt", { pending_update: payload } as MultiremiDaemonHeartbeatConfigAck);
+  await f.outbox.flushAll();
+  expect(deadlines).toEqual([deadline]);
+  expect(installs).toEqual([["rt", f.a.id, "0.2.96", commit]]);
+  expect(f.store.getRuntimeUpdateRequest("rt", f.a.id)?.status).toBe("restarting");
+});

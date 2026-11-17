@@ -101,7 +101,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
       addColumnIfMissing(db, "multiremi_execution_groups", "connection_mode TEXT NOT NULL DEFAULT 'legacy'");
       addColumnIfMissing(db, "multiremi_execution_groups", "model_policy TEXT NOT NULL DEFAULT '{}'");
     }
-    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);return;}
+    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);return;}
     // Inspect the existing snapshot before bootstrap migrations can touch it.
     const checks=unifiedModelPreflight(db);
     if(checks.some(c=>!c.ok)){
@@ -110,7 +110,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     }
     runMigrationsForDialect(db,resolveSqlDialect(db,options.dialect));
     runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});
-    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);
+    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);
   }));
   // SQLite schema rebuilds toggle foreign_keys outside their transactions.
   // Hold a separate SQLite writer lock across that entire sequence so another
@@ -6762,6 +6762,19 @@ function ensureDaemonDrains(db: SqlDatabase): void {
     WHERE u.scope = 'cli' AND u.status IN ('pending', 'running', 'restarting', 'verifying')
     GROUP BY COALESCE(r.workspace_id, 'local'), COALESCE(r.daemon_id, r.id)
     ON CONFLICT (workspace_id, daemon_id) DO NOTHING`, [now, deadline]);
+}
+
+/** Expand only; old requests retain nullable identity and do not become automatic. */
+function ensureRuntimeUpdateBuildIdentity(db: SqlDatabase): void {
+  addColumnIfMissing(db, "multiremi_runtime_update_requests", "target_commit TEXT");
+  addColumnIfMissing(db, "multiremi_runtime_update_requests", "automatic_daemon_key TEXT");
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_runtime_automatic_commit
+    ON multiremi_runtime_update_requests(automatic_daemon_key, target_commit);
+    CREATE TABLE IF NOT EXISTS multiremi_runtime_update_failures (
+      daemon_key TEXT NOT NULL, target_commit TEXT NOT NULL, issue_id TEXT,
+      outcome TEXT NOT NULL, created_at TEXT NOT NULL,
+      PRIMARY KEY (daemon_key, target_commit)
+    );`);
 }
 
 /** Expand-only indexes for base-table claim selection and retry deadlines. */

@@ -968,11 +968,13 @@ export interface MultiremiDaemonRuntimeInput {
   ssh_mesh?: MultiremiSshMeshHeartbeatAck;
   /** Platform maintenance directive: daemons must pause task claims while draining. */
   drain?: MultiremiDaemonDrainDirective;
+  /** Compatibility upgrade probes reconcile local attempts after WS rejection. */
+  cancelled_tasks?: Array<{ task_id: string; status: "completed" | "failed" | "cancelled" }>;
 }
 
 /** The v1 compatibility heartbeat only delivers the mandatory upgrade and drain. */
 export type MultiremiDaemonHeartbeatAck = Pick<MultiremiDaemonRuntimeInput,
-  "runtime_id" | "status" | "runtime_gone" | "pending_update" | "drain">;
+  "runtime_id" | "status" | "runtime_gone" | "pending_update" | "drain" | "cancelled_tasks">;
 
 /** Server → daemon drain instruction carried in every heartbeat ack. */
 export interface MultiremiDaemonDrainDirective {

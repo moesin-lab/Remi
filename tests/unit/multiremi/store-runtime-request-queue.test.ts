@@ -93,13 +93,14 @@ function goldenClaimBatch(table: string): string {
  * pre-update `status`, so each row keeps the message it had before.
  */
 function goldenExpire(table: string): string {
+  const running = table === "multiremi_runtime_update_requests" ? "status IN ('running', 'restarting', 'verifying')" : "status IN ('running')";
   return `UPDATE ${table}${NL}SET status = 'timeout',`
-    + `${NL}    error = CASE WHEN status = 'running' THEN ? ELSE ? END,`
+    + `${NL}    error = CASE WHEN ${running} THEN ? ELSE ? END,`
     + `${NL}    updated_at = ?`
     + `${NL}WHERE runtime_id = ?`
     + `${NL}  AND (`
     + `${NL}    (status = 'pending' AND PLACEHOLDER < ?)`
-    + `${NL}    OR (status = 'running' AND run_started_at IS NOT NULL AND run_started_at < ?)`
+    + `${NL}    OR (${running} AND run_started_at IS NOT NULL AND run_started_at < ?)`
     + `${NL}  )`;
 }
 
@@ -241,12 +242,12 @@ describe("RuntimeRequestQueue SQL", () => {
     expect(emitted).toContain(
       "UPDATE multiremi_runtime_model_list_requests\n" +
         "       SET status = 'timeout',\n" +
-        "           error = CASE WHEN status = 'running' THEN ? ELSE ? END,\n" +
+        "           error = CASE WHEN status IN ('running') THEN ? ELSE ? END,\n" +
         "           updated_at = ?\n" +
         "       WHERE runtime_id = ?\n" +
         "         AND (\n" +
         "           (status = 'pending' AND created_at < ?)\n" +
-        "           OR (status = 'running' AND run_started_at IS NOT NULL AND run_started_at < ?)\n" +
+        "           OR (status IN ('running') AND run_started_at IS NOT NULL AND run_started_at < ?)\n" +
         "         )",
     );
     // The per-deadline sweeps must not come back: they were the two writes an idle heartbeat

@@ -38,10 +38,11 @@ it("reads fresh pending commands without rehydrating unchanged runtime configura
   try {
     const pending = runtimeInputSnapshot(store, "rt_pending_only", undefined, "pending");
     expect(pending.find(entity => entity.type === "runtime.command")?.payload.id).toBe(command.id);
-    expect(maintenance).not.toHaveBeenCalled();
+    // Pending snapshots re-read the combined drain fence before an update.
+    expect(maintenance).toHaveBeenCalledTimes(1);
     const full = runtimeInputSnapshot(store, "rt_pending_only");
     expect(full.some(entity => entity.type === "platform.drain")).toBe(true);
-    expect(maintenance).toHaveBeenCalledTimes(1);
+    expect(maintenance).toHaveBeenCalledTimes(2);
     store.reportRuntimeCommandResult("rt_pending_only", command.id, { status: "completed", exitCode: 0 });
     expect(runtimeInputSnapshot(store, "rt_pending_only", undefined, "pending")
       .some(entity => entity.type === "runtime.command")).toBe(false);

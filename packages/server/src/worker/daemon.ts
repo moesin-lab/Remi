@@ -1663,10 +1663,15 @@ export class MultiremiDaemon {
           const capabilities = this.runtimeCapabilities();
           const ack = await this.client.heartbeatRuntime(
             this.options.runtimeId, this.sshMeshManager.getHeartbeatStatus(),
-            { ackGeneration: this.appliedDrainGeneration, activeTaskCount: this.activeTaskCount },
+            { ackGeneration: this.appliedDrainGeneration, activeTaskCount: this.protocolClient.processActiveTaskCount(), scope: "daemon", activeTaskIds: [...this.activeTaskIds] },
             capabilities.supports_bot_menu === true,
             Boolean(capabilities.feishu_concierge_protocol), this.pollAbort.signal,
           );
+          for (const task of ack.cancelled_tasks ?? []) {
+            if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
+              this.taskDownlinks.reconcileCancellation(task.task_id, task.status);
+            }
+          }
           if (ack.pending_update) await this.handleRuntimeUpdate(this.options.runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli");
         } catch (error) {
           if (isTerminalDaemonAuthorityError(error)) await this.stopAfterTerminalAuthority();

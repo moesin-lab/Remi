@@ -66,7 +66,7 @@ runtime、请求 ID、核对结论及脱敏错误，不记录 token、凭据、�
 |---|---|---|
 | drain 已应用 | `remi platform status --json`；各主机 `remi daemon status --json` | maintenance 为 draining；全部 lane 的 `claims_paused_by_drain=true`、`drain_ack_generation` 等于该 generation、active/draining task count 为 0；再执行下节 outbox 门禁 |
 | 镜像切换完成 | `remi platform status --json`；`remi platform health --json`；`remi platform ready --json`；上节 Compose ps | 目标 release、API/Web 镜像与发布清单一致，服务健康；不在 209 手工构建替代产物 |
-| 升级通道已建请求 | `remi runtime get <runtime-id> --json`；知道请求 ID 后 `remi runtime release status <runtime-id> <request-id> --json` | `protocol.state=upgrade_pending`；CLI scope、目标版本为服务端自身 release；同 runtime 最多一条 pending/running；忙时继续等既有空闲判定 |
+| 升级通道已建请求 | `remi runtime get <runtime-id> --json`；知道请求 ID 后 `remi runtime release status <runtime-id> <request-id> --json` | `protocol.state=upgrade_pending`；CLI scope、目标版本为服务端自身 release；同 runtime 最多一条 pending/running/restarting/verifying；忙时继续等既有空闲判定 |
 | daemon 升级完成 | 本地 `remi daemon status --json`；`remi runtime get <runtime-id> --json` | 实际进程版本为目标 tag 对应版本；本地 protocol connected，平台 `protocol.version=2,state=ok,last_error=null`，新心跳在 freshness 窗口内；不能只用 SSH 可达算在线 |
 | 8 个 runtime 收尾 | `remi runtime list --json`；`remi platform status` | 30 分钟内逐个记录两 provider 的 v2 正常状态，汇总 `待升级 0 台 / 失败 0 台`；负责人确认后解除 drain |
 

@@ -432,7 +432,23 @@ function formatBytes(bytes: number): string {
 }
 
 function daemonSpecs(): CommandSpec[] {
+  const drainPath = (i: CommandInvocation) => {
+    const id = stringOption(i, "daemon-id") ?? process.env.MULTIREMI_DAEMON_ID;
+    if (!id) throw new CliError("usage", "Use --daemon-id <id> to select the daemon");
+    return `/api/daemons/${encodePath(id)}/drain`;
+  };
+  const daemonOption: CliOptionSpec = { name: "daemon-id", type: "string", description: "Daemon ID (or MULTIREMI_DAEMON_ID)" };
   return [
+    op({ id: "daemon.drain", path: ["daemon", "drain"], description: "Stop daemon task admission and drain (default deadline 5m)",
+      method: "POST", apiPath: drainPath, mutation: "write", auth: HUMAN,
+      query: i => ({ workspace_id: requiredWorkspace(i) }),
+      options: [daemonOption, { name: "deadline", type: "string", description: "Drain duration, e.g. 30s or 5m (up to 24h)" },
+        { name: "reason", type: "string", description: "manual, cli_update or deploy" }],
+      body: i => ({ deadline: stringOption(i, "deadline"), reason: stringOption(i, "reason") ?? "manual" }) }),
+    op({ id: "daemon.drain.status", path: ["daemon", "drain", "status"], description: "Show remaining tasks, start, deadline and runtime_recovery expiry action",
+      method: "GET", apiPath: drainPath, auth: HUMAN_TASK, options: [daemonOption], query: i => ({ workspace_id: requiredWorkspace(i) }) }),
+    op({ id: "daemon.undrain", path: ["daemon", "undrain"], description: "Resume task admission after a manual or deployment drain",
+      method: "DELETE", apiPath: drainPath, mutation: "write", auth: HUMAN, options: [daemonOption], query: i => ({ workspace_id: requiredWorkspace(i) }) }),
     group("daemon", "Manage local daemon lifecycle and machine retirement"),
     op({ id: "daemon.list", path: ["daemon", "list"], description: "List daemon machines", method: "GET", apiPath: "/api/multiremi/daemons", auth: HUMAN, query: (i) => ({ workspace_id: requiredWorkspace(i) }), collections: ["daemons"] }),
     op({ id: "daemon.get", path: ["daemon", "get"], description: "Get daemon routing settings", method: "GET", apiPath: (i) => `/api/daemons/${encodePath(positional(i, 0, "daemon"))}`, auth: HUMAN, positionals: [ref("daemon")], query: (i) => ({ workspace_id: requiredWorkspace(i) }) }),

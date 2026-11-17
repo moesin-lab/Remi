@@ -377,6 +377,8 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       ssh_mesh_status?: MultiremiDaemonSshMeshStatus;
       drain_ack_generation?: number;
       active_task_count?: number;
+      active_task_ids?: string[];
+      active_task_count_scope?: "daemon" | "runtime";
       supports_bot_menu?: boolean;
       bot_menu_protocol?: number;
       feishu_concierge_protocol?: number;
@@ -409,6 +411,17 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     // bot to code that cannot host it.
     const feishuConciergeProtocol = normalizeDaemonProtocolVersion(body.feishu_concierge_protocol);
     const supportsFeishuBotConfig = feishuConciergeProtocol >= FEISHU_CONCIERGE_PROTOCOL_VERSION;
+    store.reconcileDaemonDrain(runtimeId);
+    const ackGeneration = Number(body.drain_ack_generation);
+    if (Number.isSafeInteger(ackGeneration) && ackGeneration >= 0) {
+      const activeCount = Number(body.active_task_count);
+      store.recordRuntimeDrainAck(
+        runtimeId,
+        ackGeneration,
+        Number.isSafeInteger(activeCount) && activeCount >= 0 ? activeCount : null,
+        body.active_task_count_scope === "daemon" ? "daemon" : "runtime",
+      );
+    }
     const ack = store.heartbeatRuntime(runtimeId, {
       supportsBatchImport: body.supports_batch_import ?? false,
       supportsDirectoryScan: body.supports_directory_scan ?? false,
@@ -436,19 +449,20 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     }
     // Reading the maintenance row also enforces the drain lease TTL lazily,
     // so an expired lease flips back to normal on the very next heartbeat.
-    const maintenance = store.getPlatformMaintenance();
-    ack.drain = { mode: maintenance.mode, generation: maintenance.generation };
-    const ackGeneration = Number(body.drain_ack_generation);
-    if (Number.isSafeInteger(ackGeneration) && ackGeneration >= 0) {
-      const activeCount = Number(body.active_task_count);
-      store.recordRuntimeDrainAck(
-        runtimeId,
-        ackGeneration,
-        Number.isSafeInteger(activeCount) && activeCount >= 0 ? activeCount : null,
-      );
-    }
+    store.reconcileDaemonDrain(runtimeId);
+    ack.drain = store.daemonDrainDirective(runtimeId);
     if (body.execution_profile_protocol === 1) {
       store.recordRuntimeExecutionBindingAcks(runtimeId, body.runtime_binding_acks);
+    }
+    // Only report terminal attempts owned by this authenticated runtime. The
+    // daemon feeds these through the same cancellation observer as WS pushes.
+    if (Array.isArray(body.active_task_ids)) {
+      ack.cancelled_tasks = body.active_task_ids.slice(0, 1024).flatMap(id => {
+        if (typeof id !== "string") return [];
+        const task = store.getTask(id);
+        return task?.runtimeId === runtimeId && (task.status === "completed" || task.status === "failed" || task.status === "cancelled")
+          ? [{ task_id: id, status: task.status }] : [];
+      });
     }
     const response = daemonHeartbeatHttpResponse(ack);
     return c.json(response);

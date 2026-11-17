@@ -1205,7 +1205,7 @@ min_version, last_error }`：
 该字段只从数据库推导，不读取 v2 会话注册表。成功的 `hello` 将协议版本与 CLI 版本写入
 runtime 的可空 `daemon_protocol_version` 列与既有 `metadata.cli_version`；旧行的空值按 v1 读。
 HTTP 升级探测不覆盖最近一次成功协商的版本。当前 v2 且 CLI 达标时为 `ok`；否则优先查看
-CLI 升级请求：pending/running 为 `upgrade_pending`，最近一次 failed 为 `upgrade_failed`，
+CLI 升级请求：pending/running/restarting/verifying 为 `upgrade_pending`，最近一次 failed 为 `upgrade_failed`，
 其余为 `rejected`。ACP/agent 更新失败不算协议升级失败。平台汇总按 daemon 去重计数，
 失败优先于待升级，未排队的 `rejected` 也计入待升级。
 

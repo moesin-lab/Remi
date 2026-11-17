@@ -343,6 +343,10 @@ const STATUS_PENDING = 0;
 const STATUS_ERROR = 2;
 const RESULT_BUFFER_BYTES = 64 * 1024 * 1024;
 const QUERY_TIMEOUT_MS = 60_000;
+const SQL_IDENTIFIER = '(?:[a-z_][a-z_0-9$]*|"(?:[^"]|"")+")';
+const TRANSACTION_CLEANUP = new RegExp(
+  `^\\s*(?:ROLLBACK(?:\\s+TO(?:\\s+SAVEPOINT)?\\s+${SQL_IDENTIFIER})?|RELEASE(?:\\s+SAVEPOINT)?\\s+${SQL_IDENTIFIER})\\s*;?\\s*$`, "i",
+);
 
 /**
  * Raised when a single statement's reply exceeds the bridge limit (MUL-386 C.1).
@@ -405,14 +409,16 @@ class PgBridge {
   }
 
   private request(msg: { init?: string; sql?: string; params?: unknown[]; timeoutMs?: number }): any {
+    const cleanup = msg.sql !== undefined && TRANSACTION_CLEANUP.test(msg.sql);
     // A healthy bridge has no cooldown to check. Avoid reading the wall clock
     // for every SQL statement (including when fixtures pin a ticking clock).
-    if (msg.sql && this.unavailableUntil > 0 && Date.now() < this.unavailableUntil && msg.sql.trim().toUpperCase() !== "ROLLBACK") {
+    if (msg.sql && this.unavailableUntil > 0 && Date.now() < this.unavailableUntil && !cleanup) {
       throw new DatabaseUnavailableError();
     }
+    const timeoutMs = databaseTimeoutMs({ cleanup });
     Atomics.store(this.ctl, 0, STATUS_PENDING);
     try {
-      this.worker.postMessage({ control: this.control, data: this.data, timeoutMs: databaseTimeoutMs(), ...msg });
+      this.worker.postMessage({ control: this.control, data: this.data, timeoutMs, ...msg });
     } catch (error) {
       throw new PgBridgeFailure(`postgres bridge send failed: ${String(error)}`, false);
     }

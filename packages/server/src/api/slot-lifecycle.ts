@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { withDatabaseDeadline } from "@shared/db/recovery.js";
 
 export const API_SHUTDOWN_TIMEOUT_MS = 25_000;
 
@@ -84,25 +85,38 @@ export class SlotLifecycle {
       if (this.guard) throw new Error("release the previous activation before retrying");
       this.state = "activating";
       const controller = new AbortController();
+      const deadline = performance.now() + this.config.lockTimeoutMs;
+      const checkDeadline = () => {
+        if (controller.signal.aborted || performance.now() >= deadline) {
+          controller.abort();
+          throw new Error("activation_timeout");
+        }
+      };
       let timer: ReturnType<typeof setTimeout> | undefined;
       let started = false;
       const activation = (async () => {
+        checkDeadline();
         const guard = await this.hooks.acquire(controller.signal);
-        if (controller.signal.aborted) { await guard.close(); return; }
+        if (controller.signal.aborted || performance.now() >= deadline) {
+          await guard.close();
+          checkDeadline();
+        }
         this.guard = guard;
-        const term = await this.hooks.fence?.(controller.signal) ?? null;
-        if (controller.signal.aborted) return;
+        checkDeadline();
+        const term = await withDatabaseDeadline(deadline, () => this.hooks.fence?.(controller.signal)) ?? null;
+        checkDeadline();
         this.term = term;
         started = true;
-        await this.hooks.start();
-        if (!controller.signal.aborted) this.state = "active";
+        await withDatabaseDeadline(deadline, () => this.hooks.start());
+        checkDeadline();
+        this.state = "active";
       })();
       try {
         await Promise.race([activation, new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
             controller.abort();
             reject(new Error("activation_timeout"));
-          }, this.config.lockTimeoutMs);
+          }, Math.max(0, Math.ceil(deadline - performance.now())));
         })]);
       } catch (error) {
         controller.abort();

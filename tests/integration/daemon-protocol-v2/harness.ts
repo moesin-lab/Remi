@@ -189,7 +189,7 @@ export class DaemonProtocolHarness {
   get url() { return `http://127.0.0.1:${this.server.port}`; }
 
   static async create(options: {
-    database?: "sqlite";
+    database?: "sqlite" | IntegrationDatabase;
     providers?: string[];
     runtimeId?: string;
     daemonOptions?: Pick<MultiremiDaemonOptions,
@@ -210,8 +210,9 @@ export class DaemonProtocolHarness {
     onReady?: (daemon: MultiremiDaemon, harness: DaemonProtocolHarness) => void;
     onRoundCard?: (taskId: string) => void;
   } = {}): Promise<DaemonProtocolHarness> {
-    const h = new DaemonProtocolHarness(process.env.MULTIREMI_TEST_POSTGRES_URL && options.database !== "sqlite"
-      ? await openIntegrationDatabase() : undefined);
+    const h = new DaemonProtocolHarness(typeof options.database === "object" ? options.database
+      : process.env.MULTIREMI_TEST_POSTGRES_URL && options.database !== "sqlite"
+        ? await openIntegrationDatabase() : undefined);
     try {
       h.store.ensureLocalWorkspace();
       const daemonId = options.omitDaemonId ? "protocol-fixture-device" : "dmn_fixture";

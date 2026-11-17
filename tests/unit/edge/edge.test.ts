@@ -3,6 +3,7 @@ import { UpstreamSocket } from '../../../packages/edge/src/websocket';
 import { Hono } from 'hono';
 import { Edge } from '../../../packages/edge/src/index';
 import { testHostname } from '../../helpers/edge/hostname';
+import { ownHttpHead, testTraffic } from '../../helpers/edge/traffic';
 import { connect } from 'node:net';
 import { statSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 const cleanups: (() => unknown)[] = [];
@@ -138,12 +139,14 @@ test('client abort removes hold waiter', async () => {
 });
 
 test('sent GET retries once, sent POST never replays', async () => {
+  const traffic = testTraffic();
+  const readHead = ownHttpHead(traffic.nonce);
   let attempts = 0;
-  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: { data(socket) { attempts++; if (attempts % 2) socket.end(); else socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok'); } } });
+  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: { data(socket, bytes) { if (!readHead(socket, bytes)) return; attempts++; if (attempts % 2) socket.end(); else socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok'); } } });
   cleanups.push(() => raw.stop(true));
   const e = edge({ backends: [{ id: 'raw', url: `http://${testHostname}:${raw.port}`, state: 'live' }] });
-  const response = await fetch(e.server.url); expect(response.status).toBe(200); expect(await response.text()).toBe('ok'); expect(attempts).toBe(2);
-  expect((await fetch(e.server.url, { method: 'POST', body: 'do not replay' })).status).toBe(502); expect(attempts).toBe(3);
+  const response = await fetch(e.server.url, { headers: traffic.headers }); expect(response.status).toBe(200); expect(await response.text()).toBe('ok'); expect(attempts).toBe(2);
+  expect((await fetch(e.server.url, { headers: traffic.headers, method: 'POST', body: 'do not replay' })).status).toBe(502); expect(attempts).toBe(3);
 });
 
 test('WS forwards auth, cookies, query, protocol and client close', async () => {
@@ -206,15 +209,17 @@ test('cumulative counters survive backend removal and stop cancels upstream HTTP
 });
 
 test('WS application rejection preserves status, headers and body without retries or health failures', async () => {
+  const traffic = testTraffic();
   let attempts = 0;
   const b = backend(req => {
+    if (!traffic.matches(req)) return new Response(null, { status: 404 });
     attempts++;
     const status = Number(new URL(req.url).pathname.slice(1));
     return new Response(`rejected:${status}`, { status, headers: { 'www-authenticate': 'Bearer', 'x-rejection': String(status) } });
   });
   const e = edge({ holdMaxMs: 1000, failureThreshold: 1, backends: [{ id: 'b', url: b.url.href, state: 'live' }] });
   for (const status of [401, 403, 426, 421, 503]) {
-    const response = await fetch(new URL(`/${status}`, e.server.url), { headers: { connection: 'Upgrade', upgrade: 'websocket' } });
+    const response = await fetch(new URL(`/${status}`, e.server.url), { headers: { ...traffic.headers, connection: 'Upgrade', upgrade: 'websocket' } });
     expect(response.status).toBe(status);
     expect(await response.text()).toBe(`rejected:${status}`);
     expect(response.headers.get('www-authenticate')).toBe('Bearer');
@@ -242,13 +247,15 @@ test('server contract permits 2 and 4 MiB frames in both relay directions', asyn
 });
 
 test('client aborts before HTTP headers and during WS handshake do not affect backend health', async () => {
+  const traffic = testTraffic();
+  const readHead = ownHttpHead(traffic.nonce);
   let attempts = 0;
-  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: { data() { attempts++; } } });
+  const raw = Bun.listen({ hostname: testHostname, port: 0, socket: { data(socket, bytes) { if (readHead(socket, bytes)) attempts++; } } });
   cleanups.push(() => raw.stop(true));
   const e = edge({ holdMaxMs: 1000, healthTimeoutMs: 1000, backends: [{ id: 'b', url: `http://${testHostname}:${raw.port}`, state: 'live' }] });
   for (const upgrade of [false, true]) for (let i = 0; i < 3; i++) {
     const before = attempts; const controller = new AbortController();
-    const pending = fetch(e.server.url, { signal: controller.signal, headers: upgrade ? { connection: 'Upgrade', upgrade: 'websocket' } : {} }).catch(() => null);
+    const pending = fetch(e.server.url, { signal: controller.signal, headers: upgrade ? { ...traffic.headers, connection: 'Upgrade', upgrade: 'websocket' } : traffic.headers }).catch(() => null);
     await until(() => attempts > before); controller.abort(); await pending;
     await until(() => e.status().backends[0].inFlight === 0);
   }
@@ -291,14 +298,16 @@ test('control socket restarts after SIGKILL but never replaces an active listene
 });
 
 test('HTTP keep-alive reuses a fully framed upstream connection', async () => {
+  const traffic = testTraffic();
+  const readHead = ownHttpHead(traffic.nonce);
+  const sockets = new WeakSet<object>();
   let connections = 0; let requests = 0;
   const raw = Bun.listen({ hostname: testHostname, port: 0, socket: {
-    open() { connections++; },
-    data(socket, bytes) { requests++; expect(bytes.toString().toLowerCase()).toContain('connection: keep-alive'); socket.write('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'); },
+    data(socket, bytes) { const head = readHead(socket, bytes); if (!head) return; if (!sockets.has(socket)) { sockets.add(socket); connections++; } requests++; expect(head.toLowerCase()).toContain('connection: keep-alive'); socket.write('HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'); },
   } });
   cleanups.push(() => raw.stop(true));
   const e = edge({ backends: [{ id: 'b', url: `http://${testHostname}:${raw.port}`, state: 'live' }] });
-  for (let i = 0; i < 5; i++) expect(await (await fetch(e.server.url)).text()).toBe('ok');
+  for (let i = 0; i < 5; i++) expect(await (await fetch(e.server.url, { headers: traffic.headers })).text()).toBe('ok');
   expect(requests).toBe(5); expect(connections).toBe(1);
 });
 
@@ -349,10 +358,10 @@ test('rejected upgrade body streams and remains in flight until drained', async 
   expect(await body).toBe('protocol:upgrade required'); await until(() => drained);
 });
 
-async function regressionProcess(url: string, wsStallTimeoutMs = 30000) {
-  type Report = { waitingBytes: number; baseline: number; peak: number; closeCalls: { code: number; reason: string }[]; relayTimers: number; activeRelays: number; status: ReturnType<Edge['status']> };
+async function regressionProcess(url: string, wsStallTimeoutMs = 30000, nonce = '') {
+  type Report = { ownWaiting: number; waitingBytes: number; baseline: number; peak: number; closeCalls: { code: number; reason: string }[]; relayTimers: number; activeRelays: number; status: ReturnType<Edge['status']> };
   let receive: ((data: Report) => void) | undefined;
-  const child = Bun.spawn([process.execPath, 'tests/helpers/edge/regression-process.ts', url, String(wsStallTimeoutMs)], {
+  const child = Bun.spawn([process.execPath, 'tests/helpers/edge/regression-process.ts', url, String(wsStallTimeoutMs), nonce], {
     stdout: 'pipe', stderr: 'inherit', ipc(data) { receive?.(data as Report); },
   });
   cleanups.push(async () => { child.send('stop'); await child.exited; });
@@ -362,28 +371,43 @@ async function regressionProcess(url: string, wsStallTimeoutMs = 30000) {
 }
 
 test('isolated edge bounds held uploads with a global byte budget and slot body limit', async () => {
+  const traffic = testTraffic();
+  const scannerHeaders = (url: string | URL) => ({ 'user-agent': 'persona-ports', host: `localhost:${new URL(url).port}` });
   let received = 0;
   const b = backend(async req => {
+    if (!traffic.matches(req)) return new Response('Unrelated probe', { status: 404 });
     if (req.method !== 'POST' || !req.body) throw new Error(`Unexpected held-upload backend request: ${req.method} ${req.url}`);
     let count = 0; for await (const bytes of req.body) count += bytes.length; received += count; return new Response(String(count));
   });
-  const child = await regressionProcess(b.url.href);
+  const child = await regressionProcess(b.url.href, 30000, traffic.nonce);
   for (const mode of ['hold', 'standby']) {
     await child.query(mode); await child.query('start');
+    const probeController = new AbortController();
+    const probe = fetch(child.url, { headers: scannerHeaders(child.url), signal: probeController.signal }).then(response => response.text(), error => {
+      if (error.name !== 'AbortError') throw error;
+    });
+    cleanups.push(async () => { probeController.abort(); await probe; });
+    // An actual unmarked waiter must remain visible in total Edge status.
+    let probeReport = await child.query('report');
+    for (let i = 0; probeReport.status.waiting < 1 && i < 200; i++) {
+      await sleep(5); probeReport = await child.query('report');
+    }
+    expect(probeReport.status.waiting).toBeGreaterThanOrEqual(1); expect(probeReport.ownWaiting).toBe(0);
+    expect((await fetch(b.url, { headers: scannerHeaders(b.url) })).status).toBe(404);
     for (const mib of [25, 50, 100]) {
-      const response = await fetch(`${child.url}?mode=${mode}&mib=${mib}`, { keepalive: false, method: 'POST', body: new Uint8Array(mib * 1024 * 1024) });
+      const response = await fetch(`${child.url}?mode=${mode}&mib=${mib}`, { headers: traffic.headers, keepalive: false, method: 'POST', body: new Uint8Array(mib * 1024 * 1024) });
       expect(response.status).toBe(503); expect(response.headers.get('retry-after')).toBe('1'); await response.text();
     }
     const report = await child.query('report');
     console.log(`held uploads ${mode}: RSS growth=${report.peak - report.baseline}`);
-    expect(report.status.waiting).toBe(0); expect(received).toBe(0);
+    expect(report.ownWaiting).toBe(0); expect(received).toBe(0);
     expect(report.peak - report.baseline).toBeLessThan(40 * 1024 * 1024);
     // A buffered prefix within budget survives admission, and its reservation
     // is released so the second hold cycle has the full budget again.
     const controller = new AbortController();
     // Delay the remainder to exercise slow clients / scheduling under load.
     // A waiter exists before its full prefix has reserved the shared budget.
-    const pending = fetch(child.url, { keepalive: false, method: 'POST', signal: controller.signal,
+    const pending = fetch(child.url, { headers: traffic.headers, keepalive: false, method: 'POST', signal: controller.signal,
       body: new ReadableStream<Uint8Array>({ async start(body) {
         body.enqueue(new Uint8Array(1024));
         await sleep(200);
@@ -396,12 +420,12 @@ test('isolated edge bounds held uploads with a global byte budget and slot body 
       while (ready.waitingBytes !== 4 * 1024 * 1024 && performance.now() < deadline) {
         await sleep(5); ready = await child.query('report');
       }
-      expect(ready.status.waiting).toBe(1);
+      expect(ready.ownWaiting).toBe(1);
       expect(ready.waitingBytes).toBe(4 * 1024 * 1024);
-      const overflow = await fetch(child.url, { keepalive: false, method: 'POST', body: new Uint8Array(6 * 1024 * 1024) });
+      const overflow = await fetch(child.url, { headers: traffic.headers, keepalive: false, method: 'POST', body: new Uint8Array(6 * 1024 * 1024) });
       expect(overflow.status).toBe(503); expect(overflow.headers.get('retry-after')).toBe('1'); await overflow.text();
       const held = await child.query('report');
-      expect(held.status.waiting).toBe(1); expect(held.waitingBytes).toBe(4 * 1024 * 1024);
+      expect(held.ownWaiting).toBe(1); expect(held.waitingBytes).toBe(4 * 1024 * 1024);
       expect(received).toBe(0);
       await child.query('live');
       const result = await pending;
@@ -416,6 +440,7 @@ test('isolated edge bounds held uploads with a global byte budget and slot body 
       const result = await pending;
       if (result.error && result.error.name !== 'AbortError') throw result.error;
     }
+    await probe;
     received = 0;
   }
   // Bun rejects a declared body beyond the same 128 MiB default used by slot.
@@ -431,9 +456,15 @@ test('isolated edge bounds held uploads with a global byte budget and slot body 
 }, 20000);
 
 test('isolated edge rejects nested encoded private paths for HTTP and WS', async () => {
+  const traffic = testTraffic();
   let attempts = 0;
-  const b = backend(() => { attempts++; return new Response('must not reach backend'); });
+  const b = backend(req => { if (!traffic.matches(req)) return new Response('Unrelated probe', { status: 404 }); attempts++; return new Response('must not reach backend'); });
   const child = await regressionProcess(b.url.href);
+  // Calibrate the nonce oracle through the real proxy before checking zero hits.
+  expect(await (await fetch(child.url, { headers: traffic.headers })).text()).toBe('must not reach backend');
+  expect(attempts).toBe(1); attempts = 0;
+  expect((await fetch(b.url)).status).toBe(404);
+  expect((await fetch(child.url)).status).toBe(404);
   for (const path of [
     '/internal', '/internal/x', '/internal/%252e%252e/api', '/internal/%2e%2e%2fapi',
     '/internal/%25252E%25252e%255capi', '/internal/%25%32%65%25%32%65%252fapi',
@@ -443,9 +474,9 @@ test('isolated edge rejects nested encoded private paths for HTTP and WS', async
     '/' + '%'.concat('25'.repeat(20), '69nternal/x'),
   ]) {
     for (const upgrade of [false, true]) {
-      const response = await fetch(child.url.replace(/\/$/, '') + path, { headers: upgrade ? {
+      const response = await fetch(child.url.replace(/\/$/, '') + path, { headers: upgrade ? { ...traffic.headers,
         connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
-      } : {} });
+      } : traffic.headers });
       expect(response.status).toBe(404);
     }
   }
@@ -453,16 +484,19 @@ test('isolated edge rejects nested encoded private paths for HTTP and WS', async
 });
 
 test('isolated edge preserves public encoded paths and literal percent signs for HTTP and Upgrade', async () => {
+  const traffic = testTraffic();
   let attempts = 0;
   const app = new Hono();
   app.all('*', c => { attempts++; return c.json({ path: new URL(c.req.url).pathname, query: new URL(c.req.url).search }); });
-  const b = backend(req => app.fetch(req));
+  const b = backend(req => traffic.matches(req) ? app.fetch(req) : new Response('Unrelated probe', { status: 404 }));
   const child = await regressionProcess(b.url.href);
+  expect((await fetch(b.url)).status).toBe(404);
+  expect((await fetch(child.url)).status).toBe(404);
   for (const path of ['/api/name%2Etxt', '/api/a%2Fb', '/api/100%25', '/api/a%5Cb',
     '/api/%ZZ', '/api/a%252Fb', '/api/' + '%'.concat('25'.repeat(20), '2Etxt')]) {
     for (const upgrade of [false, true]) {
-      const headers: HeadersInit = upgrade ? { connection: 'Upgrade', upgrade: 'websocket',
-        'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } : {};
+      const headers: HeadersInit = upgrade ? { ...traffic.headers, connection: 'Upgrade', upgrade: 'websocket',
+        'sec-websocket-version': '13', 'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==' } : traffic.headers;
       const direct = await fetch(b.url.origin + path + '?keep=%2F', { headers });
       const proxied = await fetch(new URL(child.url).origin + path + '?keep=%2F', { headers });
       const context = `${upgrade ? 'Upgrade' : 'HTTP'} ${path}`;
@@ -476,14 +510,15 @@ test('isolated edge preserves public encoded paths and literal percent signs for
 });
 
 test('isolated edge relays an immediate Bun backend WS close after 101', async () => {
+  const traffic = testTraffic();
   let attempts = 0; let code = 4001;
-  const b = Bun.serve({ hostname: testHostname, port: 0, fetch(req, server) { attempts++; if (server.upgrade(req)) return; return new Response('no'); },
+  const b = Bun.serve({ hostname: testHostname, port: 0, fetch(req, server) { if (!traffic.matches(req)) return new Response('Unrelated probe', { status: 404 }); attempts++; if (server.upgrade(req)) return; return new Response('no'); },
     websocket: { open(ws) { ws.close(code, 'restart'); }, message() {} } });
   cleanups.push(() => { void b.stop(true); });
   const child = await regressionProcess(b.url.href);
   for (code of [4001, 1012]) {
     const result = await new Promise<{ code: number; reason: string }>((resolve, reject) => {
-      const ws = new UpstreamSocket(new URL(child.url.replace('http:', 'ws:')), { headers: {}, protocols: [], limit: 4 * 1024 * 1024 });
+      const ws = new UpstreamSocket(new URL(child.url.replace('http:', 'ws:')), { headers: traffic.headers, protocols: [], limit: 4 * 1024 * 1024 });
       ws.onclose = resolve; ws.onerror = () => reject(new Error('Unexpected WS error'));
     });
     expect(result).toEqual({ code, reason: 'restart' });
@@ -566,20 +601,24 @@ test('standalone edge rejects an empty EDGE_PORT instead of binding an ephemeral
 });
 
 test('bodyless POST uses a fresh upstream connection and avoids stale keep-alive failures', async () => {
+  const traffic = testTraffic();
+  const readHead = ownHttpHead(traffic.nonce);
+  const sockets = new WeakSet<object>();
   let connections = 0; let requests = 0;
   const raw = Bun.listen({ hostname: testHostname, port: 0, socket: {
-    open() { connections++; },
     data(socket, bytes) {
+      const head = readHead(socket, bytes); if (!head) return;
+      if (!sockets.has(socket)) { sockets.add(socket); connections++; }
       requests++;
       // Advertise keep-alive but close the first connection immediately afterward.
       const response = 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok';
-      if (bytes.toString().startsWith('GET ')) socket.end(response); else socket.write(response);
+      if (head.startsWith('GET ')) socket.end(response); else socket.write(response);
     },
   } });
   cleanups.push(() => raw.stop(true));
   const e = edge({ backends: [{ id: 'b', url: `http://${testHostname}:${raw.port}`, state: 'live' }] });
-  expect(await (await fetch(e.server.url)).text()).toBe('ok');
-  const post = await fetch(e.server.url, { method: 'POST' });
+  expect(await (await fetch(e.server.url, { headers: traffic.headers })).text()).toBe('ok');
+  const post = await fetch(e.server.url, { headers: traffic.headers, method: 'POST' });
   expect(post.status).toBe(200); expect(await post.text()).toBe('ok');
   expect(connections).toBe(2); expect(requests).toBe(2);
   expect(e.status().backends[0].failures).toBe(0); expect(e.status().metrics.upstreamErrors).toBe(0);

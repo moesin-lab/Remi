@@ -36,7 +36,7 @@ Phase A 用于同一 PostgreSQL 数据库上的两个 `all` API（不配置 peer
 | `POST /internal/slot/release` | draining → 排空 HTTP → 关闭 WS → await 停止任务 → 解锁 → released |
 | `POST /internal/slot/exit` | 响应后执行关停；排空失败时终止进程，以进程死亡隔离旧写入 |
 
-激活锁竞争或 fence 失败返回 503，状态 failed，监听保留，可重试或 release。转换串行执行；重复 activate/release 幂等。released 可重新 activate。激活使用单一单调时钟绝对 deadline，在取锁、fence、启动的阶段边界检查，不能依赖事件循环定时器是否已执行；超预算不会进入 active。fence 和启动期间的同步 PG bridge 每次 SQL 都使用此 deadline 的剩余预算，沿用 worker 的查询超时和连接丢弃机制；钩子结束后，派生后台任务恢复各自的正常查询预算。同步 CPU 或其他未接入超时的原生阻塞不能被 JavaScript 定时器抢占，响应会等阻塞返回后失败；钩子须使用可取消或有界的操作。
+激活锁竞争或 fence 失败返回 503，状态 failed，监听保留，可重试或 release。转换串行执行；重复 activate/release 幂等。released 可重新 activate。激活使用单一单调时钟绝对 deadline，在取锁、fence、启动的阶段边界检查，不能依赖事件循环定时器是否已执行；超预算不会进入 active。fence 和启动期间的同步 PG bridge 每次 SQL 都使用此 deadline 的剩余预算，沿用 worker 的查询超时和连接丢弃机制；事务清理语句（ROLLBACK、ROLLBACK TO SAVEPOINT、RELEASE）不受激活 deadline 拒绝，使用独立的最多 5 秒查询预算（若调用者预算更短则沿用），确保事务与 worker 的连接丢失标记不会泄漏到后续请求；新 SQL 和 COMMIT 仍受激活 deadline 约束。钩子结束后，派生后台任务恢复各自的正常查询预算。同步 CPU 或其他未接入超时的原生阻塞不能被 JavaScript 定时器抢占，响应会等阻塞返回后失败；钩子须使用可取消或有界的操作。
 
 激活超时返回 503、状态 failed，不退出进程；尚未启动任务时，锁连接被取消并丢弃，迟到的 fence 不会启动任务。异步启动已开始时则保锁，待启动和停止均结束后回收；期间 release 返回 503。fence 接收 AbortSignal，钩子须尊重取消，避免迟到的外部副作用。停止任务失败时保留角色锁及 draining/failed 状态，须先成功 release，避免后台工作尚未结束就交接所有权。
 
@@ -51,6 +51,8 @@ Bun 1.3.14 在服务端关闭 WebSocket 后可能保留 `pendingWebSockets` 计�
 `slotFence` 是 A3 注入 live term 的异步钩子；A2 默认 `term:null`，没有实现持久化 term 或后台写入 fencing。supervisor 的顺序、路由切换及回滚由 A4 负责：release A 后 activate B；若 B 失败，可重新 activate A。
 
 ## 验证入口
+
+[PG deadline 事务清理回归](../../tests/integration/postgres-deadline-cleanup.test.ts)覆盖 worker 查询超时及语句之间预算过期，检查后续查询、事务状态、未提交写入、锁释放和独立进程接管，并覆盖嵌套事务与 savepoint 清理；需要隔离的 `MULTIREMI_TEST_POSTGRES_URL`。
 
 [真实进程 deadline 回归](../../tests/integration/slot-deadlines.test.ts)覆盖慢 PATCH + SQLite 写入 + PG 角色锁、排空失败回滚与退出、TCP/SQL 黑洞、迟到 fence 锁回收、同步 fence 阻塞、同步 PG 单条/多条 fence 的共同预算与真实角色锁回收、slot/legacy SIGTERM 总预算，以及全部 compose 层与 supervisor 宽限。
 

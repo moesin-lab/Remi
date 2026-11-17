@@ -6,11 +6,11 @@ useReportFleetFixtures("file");
 // Executions include queued downlinks/offers, through layer.drain(). PG runs
 // the same comparisons; its fixed totals need a real-backend capture.
 const SQLITE_BUDGETS = {
-  hb: { total: 64, reads: 48, writes: 16 },
-  'task.start': { total: 100, reads: 81, writes: 19 },
-  'task.progress': { total: 54, reads: 44, writes: 10 },
-  'task.workspace': { total: 47, reads: 38, writes: 9 },
-  'turn.input': { total: 105, reads: 85, writes: 20 },
+  hb: { total: 62, reads: 43, writes: 19 },
+  'task.start': { total: 96, reads: 77, writes: 19 },
+  'task.progress': { total: 50, reads: 40, writes: 10 },
+  'task.workspace': { total: 42, reads: 33, writes: 9 },
+  'turn.input': { total: 101, reads: 81, writes: 20 },
 };
 const fleets: Record<string, Awaited<ReturnType<typeof createReportScaleFixture>>> = {};
 const costs: Record<string, { total: number; reads: number; writes: number; statements: Record<string, number> }> = {};
@@ -18,11 +18,20 @@ afterAll(async () => {
   if (process.env.MULTIREMI_TEST_QUERY_PROFILE) await Bun.write(process.env.MULTIREMI_TEST_QUERY_PROFILE, JSON.stringify(costs, null, 2));
 });
 beforeAll(async () => {
-  for (const [name, scale] of Object.entries(REPORT_SCALES)) fleets[name] = await createReportScaleFixture(scale);
+  for (const [name, scale] of Object.entries(REPORT_SCALES)) fleets[name] = await createReportScaleFixture({ ...scale,
+    ...(process.env.MULTIREMI_TEST_SCALE_DIMENSIONS ? JSON.parse(process.env.MULTIREMI_TEST_SCALE_DIMENSIONS) : {}),
+    ...(name === 'stable' && process.env.MULTIREMI_TEST_STABLE_DIMENSIONS ? JSON.parse(process.env.MULTIREMI_TEST_STABLE_DIMENSIONS) : {}),
+  });
 }, 120_000);
 
 test('seed contains every requested scale dimension', () => {
   for (const f of Object.values(fleets)) {
+    expect(f.activeTasks).toHaveLength(f.scale.activeAttempts ?? 0);
+    expect(f.questionIds).toHaveLength(f.scale.pendingQuestions ?? 0);
+    for (const id of f.questionIds) expect(f.store.getQuestion(id)?.status).toBe('pending');
+    expect(Number(f.database.query("SELECT COUNT(*) AS n FROM multiremi_feishu_bot_outbound_deliveries WHERE id LIKE 'scale-pending-%' AND status IN ('pending','sending')").get()!.n))
+      .toBe(f.scale.pendingOutbound ?? 0);
+    for (const task of f.activeTasks) expect(['running','awaiting_human']).toContain(f.store.getTask(task.id)?.status!);
     expect(f.issues).toHaveLength(f.scale.issues);
     expect(f.sessionIds).toHaveLength(f.scale.sessions);
     expect(f.agents).toHaveLength(f.scale.agents);
@@ -116,3 +125,25 @@ test('batched downlink identities match individual lookups across runtime and st
     expect(sql).toHaveLength(1);
   }
 });
+
+test('batched snapshots retain every live interrupt and wrap-up and exclude foreign attempts', async () => {
+  for (const f of Object.values(fleets)) {
+    const tasks = f.activeTasks.filter(task => f.store.getTask(task.id)?.status === 'running');
+    const expected = tasks.map(task => f.store.sendChatMessage(task.chatSessionId!, { body: `Interrupt ${task.id}` }).message.id);
+    await settleReportFleet(f);
+    const turn = f.store.getTurnForAttempt(tasks[0]!.id)!;
+    const at = new Date().toISOString();
+    f.database.run('UPDATE multiremi_turns SET wrap_up_requested_at=? WHERE id=?', [at, turn.id]);
+    let result!: ReturnType<ReturnType<typeof f.store.getDaemonTurnBridge>['snapshot']>;
+    const sql = await countSql(f.database, f.layer, () => {
+      result = f.store.getDaemonTurnBridge().snapshot({ runtimeId: f.runtimeIds[0]!, daemonId: 'dm_cost_0', workspaceId: 'local' },
+        new Set([...tasks.map(task => task.id), f.peer.id, 'missing-attempt']));
+    });
+    expect(result.messages.map(input => input.message.id).sort()).toEqual(expected.sort());
+    expect(result.wrapUps).toEqual([{ turn_id: turn.id, attempt_id: tasks[0]!.id, requested_at: at }]);
+    expect(sql.length).toBeLessThanOrEqual(9);
+    const wrongHost = f.store.getDaemonTurnBridge().snapshot({ runtimeId: f.runtimeIds[0]!, daemonId: 'foreign-daemon', workspaceId: 'local' },
+      new Set(tasks.map(task => task.id)));
+    expect(wrongHost).toEqual({ messages: [], wrapUps: [] });
+  }
+}, 60_000);

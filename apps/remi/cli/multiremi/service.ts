@@ -43,6 +43,9 @@ export type DaemonRestartPlan =
  * Ask the manager for a restart instead. It replaces the entire cgroup with a
  * single process on the new binary, which also clears any pile left behind by
  * an older release.
+ * systemctl itself can receive SIGTERM from that stop job before returning;
+ * the caller must leave replacement to systemd rather than spawn in the dying
+ * cgroup when that happens.
  */
 export function planDaemonRestart(input: {
   platform: NodeJS.Platform;

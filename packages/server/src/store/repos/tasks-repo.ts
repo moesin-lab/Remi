@@ -49,7 +49,7 @@ import {
   type RuntimeUsageEntry,
 } from "@multiremi/store/helpers.js";
 import { selectChatLocalDirectory } from "@multiremi/contracts/chat-local-directory.js";
-import { activeRequestReadCache, cacheKey } from "@multiremi/store/request-read-cache.js";
+import { acquireTransactionLock, memoizeRequestRead, activeRequestReadCache, cacheKey } from "@multiremi/store/request-read-cache.js";
 import { afterCommit } from "@multiremi/store/db/postgres.js";
 import { taskMessagePageRows } from "@multiremi/store/task-message-pagination.js";
 import {
@@ -6304,10 +6304,9 @@ ${placementAfter.sql}
     const returnIssueId = returnSession.issueId;
     const returnOwnerScope = this.ctx.issueSessions().getIssueSessionWithOwnerScope(issueSessionId);
     if (returnOwnerScope?.ownerWorkspaceId !== returnSession.workspaceId) return { createdTasks: [], taskBySourceId: new Map() };
-    this.ctx.db.run(
-      "UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?",
-      [issueSessionId],
-    );
+    acquireTransactionLock(this.ctx.db, `session:${issueSessionId}`, () => {
+      this.ctx.db.run("UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?", [issueSessionId]);
+    });
     const reportRows = this.ctx.db.query(`SELECT task.*,snapshot.id AS terminal_report_id,snapshot.metadata AS terminal_report_metadata,
       (SELECT MAX(seq) FROM multiremi_conversation_log e WHERE e.session_id=task.issue_session_id AND e.task_id=t.id) AS terminal_event_seq
       FROM multiremi_turn_execution_records task JOIN multiremi_turns t ON t.id=task.turn_id AND t.current_attempt_id=task.id
@@ -7048,10 +7047,9 @@ ${placementAfter.sql}
       .filter((id): id is string => Boolean(id)))]
       .sort();
     for (const sessionId of sessionIds) {
-      this.ctx.db.run(
-        "UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?",
-        [sessionId],
-      );
+      acquireTransactionLock(this.ctx.db, `session:${sessionId}`, () => {
+        this.ctx.db.run("UPDATE multiremi_issue_sessions SET updated_at = updated_at WHERE id = ?", [sessionId]);
+      });
     }
   }
 
@@ -7305,10 +7303,14 @@ ${placementAfter.sql}
     return Boolean(row);
   }
 
+  private readTaskAutopilotRun(taskId: string): { id: string } | null {
+    return memoizeRequestRead(this.ctx.db, ['multiremi_autopilot_run_records'], `task-run:${taskId}`,
+      () => this.ctx.db.query("SELECT id FROM multiremi_autopilot_run_records WHERE task_id = ? ORDER BY created_at DESC LIMIT 1")
+        .get(taskId) as { id: string } | null);
+  }
+
   private withTaskAutopilotRun(task: MultiremiTask): MultiremiTask {
-    const row = this.ctx.db.query(
-      "SELECT id FROM multiremi_autopilot_run_records WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
-    ).get(task.id) as { id: string } | null;
+    const row = this.readTaskAutopilotRun(task.id);
     return { ...task, autopilotRunId: row?.id ?? task.autopilotRunId ?? null };
   }
 

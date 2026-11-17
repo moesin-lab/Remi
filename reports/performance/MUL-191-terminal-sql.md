@@ -10,10 +10,10 @@ SQLite，Bun 1.3.14，同一预算测试的 8 Runtime / 4 daemon / 双活动任�
 
 | 帧 | 基线读/写/总计 | 当前读/写/总计（小/大相同） | 降幅 | 要求 |
 |---|---|---|---|---|
-| turn.complete | 317 / 89 / 406 | 226 / 62 / **288** | 29.1% | ≤60，未达到 |
-| task.fail | 191 / 49 / 240 | 146 / 33 / **179** | 25.4% | ≤40，未达到 |
+| turn.complete | 317 / 89 / 406 | 209 / 49 / **258** | 36.5% | ≤60，未达到 |
+| task.fail | 191 / 49 / 240 | 137 / 26 / **163** | 32.1% | ≤40，未达到 |
 
-288/179 是当前实现的**实测可达预算**，不是理论下限，也未获需求方接受。测试先锁住这组数字并保留小/大相等断言；不能以它们恒定为由宣称完成小预算目标。complete 仍有 62 条写语句，仅继续做读缓存已不足以达标。
+258/163 是当前实现的**实测可达预算**，不是理论下限，也未获需求方接受。测试先锁住这组数字并保留小/大相等断言；不能以它们恒定为由宣称完成小预算目标。complete 仍有 49 条写语句，仅继续做读缓存已不足以达标。
 
 ## 已完成的合并与复用
 
@@ -21,6 +21,8 @@ SQLite，Bun 1.3.14，同一预算测试的 8 Runtime / 4 daemon / 双活动任�
 - 同步读取范围内显式复用 Agent、Skills、Issue、标签、Session/owner scope 和 usage 原始查询。所有依赖表分别登记；任一表写入、首锁或回滚会使结果失效。数据库之间不共享多表查询结果；水合继续产生消费者对象。
 - 终态事务将中间轮卡变更累积到最终一次投影/发布；revision 和 log_version 按原通知次数累加。失败事务丢弃通知批次，自动回复失败后的原有整笔重试仍保留。忽略返回值的终态 outcome 调用不再额外读取完整轮卡。
 - 下行队列复用既有 UNION 探测结果，只查询有待办/回收/擦除工作的 family；空队列不再逐个查询。已存在 platform maintenance 单例时不再执行 INSERT ON CONFLICT。
+
+本轮继续收敛：lane 创建与加锁由两条 SQL 合成一条 upsert；Session 锁在任务终态、消息写入与委派入口按同一事务复用；日志 allocator 由初始化两次再递增收敛成一次原子 upsert；attempt receipt、autopilot 归属、head、bot config 复用原始读；execution 单目标在赋值查询里读取已锁定 turn 身份，多目标保留顺序重读；已终态 attempt 只生成原有 task.cancelled 下行，不再向 live turn input snapshot 授权。
 
 ## 剩余 SQL 与边界
 
@@ -37,13 +39,15 @@ SQLite，Bun 1.3.14，同一预算测试的 8 Runtime / 4 daemon / 双活动任�
 
 ## 验证证据
 
-- `bun run test tests/unit/multiremi/daemon-report-query-budget.test.ts`：27 pass，0 fail；小/大 complete=288、fail=179。
-- 终态输入、轮卡字段、错误/replay、trace、lane/再响铃、队列等 10 文件：98 pass，62 个 PG 用例 skip，0 fail（其中新增锁/缓存/通知批次测试 3 pass）。
-- `bun run test tests/unit/multiremi/multiremi-request-read-cache.test.ts`：16 pass，0 fail。
-- 委派回程、follow lane、claim events 与 usage 等另 6 文件：93 pass，7 个 PG 用例 skip，0 fail。
-- 新增事务复用测试最终单独复跑：3 pass，0 fail，覆盖内层通知回滚和首锁失效。
-- `bunx tsc --noEmit`：通过。
-- 真实 PG：本机无 Docker socket 权限；仅 root UID 映射，隔离 PostgreSQL 无法启动；远端 `runtime.command.run` 返回 `current credential cannot run runtime.command.run`。SQLite skip 不计作 PG 通过。分支完整 Release build check 及真实 PG 证据待 CI。
+- `bun run test tests/unit/multiremi/daemon-report-query-budget.test.ts`：27 pass，0 fail；小/大 complete=258、fail=163。
+本轮验证（不等于当前 head 的 PG 通过）：
+
+- 预算全套：27 pass，0 fail；最终小/大 complete 单独复跑 2 pass（209/49/258），fail 2 pass（137/26/163）。
+- 日志并发分配、commit 通知、输入/ACK、lane 和缓存 7 文件：63 pass，56 PG skip，0 fail。
+- replay、终态字段、Chat 再响铃、委派、usage、日志 backfill 与评论 8 文件：109 pass，33 PG skip，0 fail。
+- 最终追加 6 文件联跑：76 pass、51 PG skip、1 fail（自动回复 COMMIT 用例 5s timeout）；单独复跑同一用例 1 pass、1 PG skip、0 fail，耗时 1.67s。保留原失败记录，没有把整组联跑写成全绿。并发文件完整单独复跑 20 pass、30 PG skip、0 fail（34.55s）。
+- `bunx tsc --noEmit` 通过；`npm run docs:test` 13 pass / 0 fail；`npm run docs:check` 通过。
+- 真实 PG：本机无 Docker socket 权限；仅 root UID 映射，隔离 PostgreSQL 无法启动；远端 `runtime.command.run` 返回 `current credential cannot run runtime.command.run`。SQLite skip 不计作 PG 通过。上一轮 head `cfbdb7ff5` 的完整 Release build check [44136414831](https://github.com/moesin-lab/Remi/actions/runs/44136414831) 尚在排队（后端 8 分片未开始）；当前 head 的完整 CI 需重新触发，不能沿用旧 head 的成功结论。
 - stable 8+ 并行轮次一小时、event_loop_lag_max < 1s、无 daemon_timeout：未执行，属于合并/部署后的验收；本任务没有合并/部署授权。
 
 复现逐语句：

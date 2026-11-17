@@ -1,6 +1,6 @@
 import { acquireTransactionLock } from "../request-read-cache.js";
 import type { TaskSessionContinuation } from "../repos/tasks-repo.js";
-import { attemptInputState } from './attempt-input.js';
+import { readAttemptInputRow, attemptInputState } from './attempt-input.js';
 import type { SendMessageInput, UnifiedMessage } from '@multiremi/contracts/unified-model.js';
 import type { CreateTaskInput } from '@multiremi/contracts/types.js';
 import { nowIso } from '@multiremi/ids.js';
@@ -15,11 +15,10 @@ import { settleQueueAfterTurnEndWithinTransaction } from './queued-messages.js';
 
 export function lockLane(ctx: StoreContext, sessionId: string, agentId: string, scope = ''): void {
   acquireTransactionLock(ctx.db, JSON.stringify(['lane', sessionId, agentId, scope]), () => {
-  const at = nowIso();
-  ctx.db.run(`INSERT INTO multiremi_session_lanes(session_id,reader_type,reader_id,execution_scope,created_at,updated_at)
-    VALUES(?,'agent',?,?,?,?) ON CONFLICT DO NOTHING`, [sessionId, agentId, scope, at, at]);
-  ctx.db.run(`UPDATE multiremi_session_lanes SET updated_at=updated_at
-    WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`, [sessionId, agentId, scope]);
+    const at = nowIso();
+    ctx.db.run(`INSERT INTO multiremi_session_lanes(session_id,reader_type,reader_id,execution_scope,created_at,updated_at)
+      VALUES(?,'agent',?,?,?,?) ON CONFLICT(session_id,reader_type,reader_id,execution_scope)
+      DO UPDATE SET updated_at=multiremi_session_lanes.updated_at`, [sessionId, agentId, scope, at, at]);
   });
 }
 
@@ -123,7 +122,7 @@ export class InputUnreadError extends Error {
 /** Folded/context bodies need a full CLI range read before a receipt may cross them. */
 export function assertOfferedInputRead(ctx:StoreContext,turn:any,toSeq:number):void {
   const state=attemptInputState(ctx,turn);
-  const attempt=ctx.db.query('SELECT session_id,attempt_no,input_trigger_ack FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);
+  const attempt=readAttemptInputRow(ctx, turn.current_attempt_id);
   const replay=Number(attempt.attempt_no)>1&&!attempt.session_id&&!attempt.input_trigger_ack;
   const from=replay?Math.min(state.read,Number(turn.input_from_seq??0)):Math.max(state.read,state.ack);
   // Validate the offered interval from its canonical rows in one read. Fetching

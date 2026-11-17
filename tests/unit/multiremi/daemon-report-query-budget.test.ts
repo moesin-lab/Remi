@@ -478,8 +478,8 @@ for (const size of [2, 40]) {
       expectConstantCost(type, size, sql.length);
       const budgets = {
         "task.workspace": 48,
-        "turn.complete": 288,
-        "task.fail": 179,
+        "turn.complete": 258,
+        "task.fail": 163,
         "task.usage": 40,
       };
       expect(sql.length).toBeLessThanOrEqual(

@@ -178,8 +178,14 @@ export function runTurnExecutionMutation(db:SqlDatabase,sql:string,...arguments_
     // already hold W/I/lane locks; this also makes standalone mutations atomic.
     db.run(`UPDATE multiremi_turns SET current_attempt_id=current_attempt_id WHERE id IN
       (SELECT turn_id FROM multiremi_turn_execution_records WHERE ${where})`,params.slice(executionParameterCount(assignments!)));
-    const targets=db.query(`SELECT id,turn_id,${fields.map((f,i)=>`(${f.expression}) AS mutation_${i}`).join(",")}
-      FROM multiremi_turn_execution_records WHERE ${where}`).all(...params);
+    // Evaluate assignments and the locked turn identity in the same statement.
+    // Nest the legacy predicate so unqualified execution columns remain unambiguous.
+    const targets=db.query(`SELECT target.*,owner.current_attempt_id AS mutation_current_attempt_id,
+      owner.session_id AS mutation_session_id,owner.agent_id AS mutation_agent_id,
+      owner.reply_message_id AS mutation_reply_message_id,owner.started_at AS mutation_started_at
+      FROM (SELECT id,turn_id,${fields.map((f,i)=>`(${f.expression}) AS mutation_${i}`).join(",")}
+        FROM multiremi_turn_execution_records WHERE ${where}) target
+      JOIN multiremi_turns owner ON owner.id=target.turn_id`).all(...params);
     const returned:any[]=[];
     for(const row of targets){
       const turn:Record<string,unknown>={},attempt:Record<string,unknown>={};
@@ -200,10 +206,14 @@ export function runTurnExecutionMutation(db:SqlDatabase,sql:string,...arguments_
         else if(key==='parent_task_id'){if(value!=null)throw new Error("Retry ancestry is represented by turn_id and attempt_no");}
         else throw new Error(`Unowned execution field: ${key}`);
       }
-      const current=db.query("SELECT current_attempt_id,session_id,agent_id FROM multiremi_turns WHERE id=?").get(row.turn_id);
+      // Multi-attempt mutations can update the same turn repeatedly. Preserve
+      // their sequential read-after-write semantics; terminal writes select one.
+      const current=targets.length===1
+        ? {current_attempt_id:row.mutation_current_attempt_id,session_id:row.mutation_session_id,
+          agent_id:row.mutation_agent_id,started_at:row.mutation_started_at,reply_message_id:row.mutation_reply_message_id}
+        : db.query("SELECT current_attempt_id,session_id,agent_id,started_at,reply_message_id FROM multiremi_turns WHERE id=?").get(row.turn_id);
       if(attempt.started_at!=null&&current.current_attempt_id===row.id){
-        const started=db.query('SELECT started_at FROM multiremi_turns WHERE id=?').get(row.turn_id);
-        if(started.started_at==null)turn.started_at=attempt.started_at;
+        if(current.started_at==null)turn.started_at=attempt.started_at;
       }
       if(attempt.failure_reason!=null&&turn.ended_at!=null)turn.ended_reason=attempt.failure_reason;
       if(current.current_attempt_id!==row.id){delete turn.status;delete turn.ended_at;}
@@ -211,7 +221,7 @@ export function runTurnExecutionMutation(db:SqlDatabase,sql:string,...arguments_
         let payload:any;try{payload=JSON.parse(String(reply));}catch{payload={output:String(reply)};}
         if(typeof payload==='string')payload={output:payload};
         const {output,...provenance}=payload??{};
-        let message=db.query("SELECT reply_message_id FROM multiremi_turns WHERE id=?").get(row.turn_id).reply_message_id;
+        let message=current.reply_message_id;
         const staged=!String(current.session_id).startsWith('auto_');
         try {
           if(!message){message=createId(String(current.session_id).startsWith('ises_')?'cmt':'msg');

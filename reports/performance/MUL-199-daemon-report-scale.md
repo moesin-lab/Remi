@@ -188,9 +188,9 @@
 
 ## 现场差距与未完成项
 
-本夹具没有充分复现现场所有形态：hb 64 仍低于现场 124–175，Project Chat progress 54 低于 263，start 318 低于 564，workspace 196 略低于 221–263。当前每 daemon 只报告两个 provider，只有两个主活跃轮和一个 bot 任务，历史轮次有数据但未模拟八个以上并行活轮；未放大活 AUQ、飞书 decision/reminder/operation 待回放组合。因此不能声称消除了所有真实规模维度的查询增长。需只读取得 stable 的每 daemon runtime 数、各 runtime 活 attempt 数、bot/AUQ/outbox pending 状态分布，再扩展参数并复测高频路径；当前无法访问 stable API（502）。没有帧频实测，不能从单帧成本推断总负载排序。
+本夹具没有充分复现现场所有形态：hb 64 仍低于现场 124–175，Project Chat progress 54 低于 263，start 318 低于 564，workspace 196 略低于 221–263。当前每 daemon 只报告两个 provider，只有两个主活跃轮和一个 bot 任务，历史轮次有数据但未模拟八个以上并行活轮；未放大活 AUQ、飞书 decision/reminder/operation 待回放组合。因此不能声称消除了所有真实规模维度的查询增长。需只读取得 stable 的每 daemon runtime 数、各 runtime 活 attempt 数、bot/AUQ/outbox pending 状态分布，再扩展参数并复测高频路径；尚未取得 stable 的这些只读统计。没有帧频实测，不能从单帧成本推断总负载排序。
 
-真实 PG 未验证：本地 Docker socket 拒绝访问；下载的 PG 15.20 无法用非 root 用户启动（runuser 无法 set groups）。未绕过启动门禁。完整 Release build check（含 PG 分片）未运行；PR、推送和跨单交接被凭据与 Remi API 故障阻断。部署及 8+ 并行轮次一小时现场验收未执行。
+真实 PG 未验证：本地 Docker socket 拒绝访问；下载的 PG 15.20 无法用非 root 用户启动（runuser 无法 set groups）。未绕过启动门禁。完整 Release build check（含 PG 分片）待当前 SHA 的 CI 证据。部署及 8+ 并行轮次一小时现场验收未执行。
 
 ## 可重复命令与实际结果
 
@@ -206,8 +206,6 @@ npm run docs:check
 
 本轮重跑规模文件 9 项通过、0 失败，9.60 秒（含单次建数和前置 ACK，低于 30 秒）。CI 自动由后端测试发现/分片纳入，不另行重复 seed；PG beforeAll 超时 120 秒，真实耗时未取得。相关九文件回归：218 pass、125 skip、0 fail，68.05 秒；skip 中包括未配置 PG 的测试，不能写成 PG 通过。TypeScript、文档测试和文档检查已通过。更多回归结果见交付评论。
 
-## 2026-11-18 本轮交付重试
+## 2026-11-18 交付续接
 
-SQLite 规模套件重跑：9 pass、0 fail、111 assertions，9.60 秒。推送夹具提交的 `git push origin agent/MUL-199` 失败：`fatal: could not read Username for 'https://github.com/moesin-lab/Remi.git': terminal prompts disabled`。Remi Issue、capabilities 和责任链 API 重试均返回 502，无法向 MUL-191 发送夹具交接或创建 PR。当前分支及提交保留供凭据/API 恢复后继续；不得将本报告作为已完成验收或真实 PG 证据。
-
-本轮相关回归命令：`bun test tests/unit/multiremi/daemon-report-query-budget.test.ts tests/unit/multiremi/multiremi-daemon-report-replay.test.ts tests/unit/multiremi/daemon-task-input-commit.test.ts tests/unit/multiremi/daemon-workspace-context.test.ts tests/unit/multiremi/turn-input-complete.test.ts tests/unit/multiremi/daemon-protocol-server.test.ts`。结果 64 pass、3 skip、0 fail，342 assertions，40.02 秒。三个跳过均为未配置真实 PG 的 daemon input commit 用例。`remi wiki status`、`remi wiki push` 和回复 cmt_9kg482kgiu12 也因 capabilities API 502 失败，未产生消息 ID。
+Remi API 可通过仅对 Remi CLI 去掉代理环境变量访问；Git 凭据需带仓库路径（credential.useHttpPath=true）。夹具已推送并创建草稿 PR #112，MUL-191 已普通合入夹具和 origin/main。上文 SQLite 数字于本轮复跑（9 pass / 0 fail，9.28 秒）；PG 与完整 CI 待后续记录。尚未合并或部署。

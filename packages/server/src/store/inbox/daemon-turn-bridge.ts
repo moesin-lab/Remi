@@ -140,7 +140,7 @@ export class DaemonTurnBridge {
           if(JSON.stringify(expected)!==JSON.stringify(payload.message_ids))throw new Error('input_gap');
           assertOfferedInputRead(this.ctx,turn,to);}
         acknowledgeInput(this.ctx,turn.id,Math.min(from,to),to);
-        acknowledgeAttemptInput(this.ctx,turn,to);
+        acknowledgeAttemptInput(this.ctx,turn,to,true);
         for (const message of this.messages(turn.session_id,from,to)) if (message.metadata.question_continuation === true && typeof message.metadata.root_question_id === 'string')
           new Questions(this.ctx).consumeContinuationInputWithinTransaction(message.metadata.root_question_id, turn.id, turn.current_attempt_id, message.id, events);
         return {ok:true,input_to_seq:Math.max(from,to)};

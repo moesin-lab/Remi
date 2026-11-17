@@ -61,7 +61,7 @@ async function setup({ store }: PendingTurnTestFixture, delegated = false, under
   const attempt = store.getTaskWithAgent(claimed.id)!;
   const offer = store.getDaemonTurnBridge().offerInput(attempt);
   store.recordSessionAgentRangeRead(session.id, agent.id, { seq: 1, offset: 0 }, { seq: offer.input_to_seq + 1, offset: 0 }, attempt.id);
-  const server = startMultiremiServer({ store, hostname: "127.0.0.1", port: 0, authToken: "callback-fixture" });
+  let server = startMultiremiServer({ store, hostname: "127.0.0.1", port: 0, authToken: "callback-fixture" });
   const frames: Array<Record<string, any>> = [];
   const client = new DaemonProtocolClient({ serverUrl: `http://127.0.0.1:${server.port}`, token: "callback-fixture",
     daemonId, cliVersion: DAEMON_MIN_CLI_VERSION, onFrame: f => { frames.push(f.raw); } });
@@ -112,6 +112,13 @@ async function setup({ store }: PendingTurnTestFixture, delegated = false, under
       await until(() => store.getTurn(offer.turn_id)?.status === "awaiting_human");
       return store.getMessage(store.getTurn(offer.turn_id)!.waiting_on_message_id!)!;
     },
+    async restartApi() {
+      const port = server.port;
+      server.stop(true);
+      await until(() => client.connectionState() !== "connected");
+      server = startMultiremiServer({ store, hostname: "127.0.0.1", port, authToken: "callback-fixture" });
+      await until(() => client.connectionState() === "connected");
+    },
     async close() { feed.stop(); client.stopLane(lane); await client.drain(); server.stop(true); },
   };
 }
@@ -140,6 +147,30 @@ pendingTurnBackendTests("decision callbacks over Store and native WS", fixture =
       expect(h.inbox.pendingTaskSteerMessages(h.attempt.id)).toEqual([]);
     } finally { await h.close(); }
   });
+  for (const readFirst of [false, true]) it(`MUL-178 reconciles steer input after the API socket layer restarts (read first: ${readFirst})`, async () => {
+    const h = await setup(fixture());
+    try {
+      const before = h.send("Steer before the API restart");
+      await until(() => h.inbox.pendingTaskSteerMessages(h.attempt.id).some(m => m.id === before.message.id));
+      // Inline steer is acknowledged before reconnect. Its read receipt must
+      // also cover this input so the next range can start at the offered cursor.
+      await h.inbox.consumeTaskSteerMessages(h.attempt.id, [before.message.id]);
+      await h.restartApi();
+      h.send("Ordinary context while the turn runs", "next_turn");
+      const after = h.send("Steer after reconnect");
+      await until(() => h.inbox.pendingTaskSteerMessages(h.attempt.id).some(m => m.id === after.message.id));
+      if (readFirst) await h.readRange(before.message.seq, after.message.seq);
+      await h.inbox.consumeTaskSteerMessages(h.attempt.id, [after.message.id]);
+      if (!readFirst) {
+        const hints = h.inbox.pendingTaskSteerMessages(h.attempt.id);
+        expect(hints.some(m => m.id.startsWith("input_resync:"))).toBe(true);
+        await h.readRange(before.message.seq, after.message.seq);
+        await h.inbox.consumeTaskSteerMessages(h.attempt.id, hints.map(m => m.id));
+      }
+      expect(h.store.getTurn(h.offer.turn_id)).toMatchObject({ status: "running", current_attempt_id: h.attempt.id, input_to_seq: after.message.seq });
+      expect(h.inbox.pendingTaskSteerMessages(h.attempt.id)).toEqual([]);
+    } finally { await h.close(); }
+  }, 30_000);
   it('MUL-40 keeps a running provider alive when a delegated child returns', async () => {
     const h = await setup(fixture());
     try {

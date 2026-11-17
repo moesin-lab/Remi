@@ -146,7 +146,7 @@ it("validates the platform manifest and skips missing identity/manifests on dire
     expect(readCurrentDaemonBuild(null, dir)).toBeNull();
     expect(readCurrentDaemonBuild(A, dir)).toBeNull();
     mkdirSync(join(dir, A));
-    const manifest = { schema: 1, version, commit: A, artifacts: [{ os: "linux", arch: "x64", file: "remi.tar.gz", sha256: "a".repeat(64), size: 10 }] };
+    const manifest = { schema: 1, version, commit: A, artifacts: [{ os: "linux", arch: "x64", file: "remi.tar.gz", sha256: "a".repeat(64), size: 10 }] } as const;
     writeFileSync(join(dir, A, "daemon-artifacts.json"), JSON.stringify(manifest));
     expect(readCurrentDaemonBuild(A, dir)).toEqual(manifest);
     writeFileSync(join(dir, A, "daemon-artifacts.json"), JSON.stringify({ ...manifest, commit: B }));

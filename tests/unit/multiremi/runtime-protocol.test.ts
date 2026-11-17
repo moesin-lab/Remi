@@ -87,7 +87,7 @@ describe("database-derived runtime protocol", () => {
       // Old DDL runs only before the unified-model migration marker exists.
       bootstrapPreUnifiedSchema(legacyDb as unknown as SqlDatabase);
       legacyDb.exec("ALTER TABLE multiremi_runtimes DROP COLUMN daemon_protocol_version");
-      const before = legacyDb.query("PRAGMA table_info(multiremi_runtime_update_requests)").all();
+      const before = legacyDb.query("PRAGMA table_info(multiremi_runtime_update_requests)").all() as Array<{ name: string }>;
       runMigrations(legacyDb as unknown as SqlDatabase);
       const expanded = legacyDb.query("PRAGMA table_info(multiremi_runtime_update_requests)").all() as Array<{ name: string }>;
       runMigrations(legacyDb as unknown as SqlDatabase);

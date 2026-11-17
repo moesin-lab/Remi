@@ -1,3 +1,4 @@
+import { DatabaseUnavailableError } from "@shared/db/recovery.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it, spyOn, setSystemTime } from "bun:test";
 import { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
@@ -54,6 +55,35 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
 }
 
 describe("A-3 task offers", () => {
+  it("backs off an unavailable database and resumes offers on the same session", async () => {
+    const h = fixture();
+    const task = h.task();
+    await h.hello();
+    await h.accept();
+    h.store.startTask(task.id);
+    h.store.completeTask(task.id, { output: "done" });
+    const next = h.task();
+    const original = h.store.getRuntimeLite.bind(h.store);
+    let attempts = 0;
+    const probe = spyOn(h.store, "getRuntimeLite").mockImplementation((...args) => {
+      attempts++;
+      if (attempts <= 2) throw new DatabaseUnavailableError();
+      return original(...args);
+    });
+    try {
+      h.offers.kick(); await h.layer.drain();
+      expect(attempts).toBe(1);
+      h.clock.advance(999); await h.layer.drain();
+      expect(attempts).toBe(1);
+      h.clock.advance(1); await h.layer.drain();
+      expect(attempts).toBe(2);
+      h.clock.advance(1999); await h.layer.drain();
+      expect(attempts).toBe(2);
+      h.clock.advance(1); await h.layer.drain();
+      expect(h.offered().at(-1)!.p.attempt_id).toBe(next.id);
+    } finally { probe.mockRestore(); }
+  });
+
   it("dispatches irreducible structure that exceeds the soft budget but fits the actual protocol hard limit", async () => {
     const h = fixture(async task => ({ id: task.id, prompt: task.prompt, repos: new Array(300_000).fill(0) }));
     const task = h.task(); await h.hello();

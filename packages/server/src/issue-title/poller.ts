@@ -1,3 +1,4 @@
+import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 import { createLogger } from "@shared/logger.js";
 import type { RelayHttpRequest } from "@multiremi/relay/http.js";
@@ -37,7 +38,7 @@ export class IssueTitleScheduler {
   private readonly now: () => Date;
   private readonly httpRequest?: RelayHttpRequest;
   private readonly retitle: typeof retitleIssue;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: DatabaseRetryLoop | null = null;
   private running = false;
   private tickPromise: Promise<IssueTitleRunResult> | null = null;
 
@@ -51,26 +52,21 @@ export class IssueTitleScheduler {
   }
 
   start(): void {
-    if (this.running) return;
+    if (this.timer) return;
     this.running = true;
-    void this.runOnce();
-    this.timer = setInterval(() => void this.runOnce(), this.intervalMs);
-    this.timer.unref?.();
+    this.timer = new DatabaseRetryLoop("issue-title.poll", () => this.runOnce(), this.intervalMs);
+    this.timer.start();
   }
 
   stop(): void {
     this.running = false;
-    if (this.timer) clearInterval(this.timer);
+    this.timer?.stop();
     this.timer = null;
   }
 
   runOnce(now: Date = this.now()): Promise<IssueTitleRunResult> {
     if (this.tickPromise) return this.tickPromise;
     this.tickPromise = withDbJob("issue-title.poll", () => this.runOnceInternal(now))
-      .catch((error) => {
-        log.warn(`Issue title scan failed: ${errorMessage(error)}`);
-        return { attempted: 0, applied: 0, skipped: 0, failed: 1 };
-      })
       .finally(() => {
         this.tickPromise = null;
       });
@@ -99,6 +95,7 @@ export class IssueTitleScheduler {
             httpRequest: this.httpRequest,
           });
         } catch (error) {
+          if (isDatabaseConnectionError(error) || error instanceof TypeError || error instanceof ReferenceError) throw error;
           result.failed += 1;
           log.warn(`Issue title generation failed for ${issue.key}: ${errorMessage(error)}`);
           continue;

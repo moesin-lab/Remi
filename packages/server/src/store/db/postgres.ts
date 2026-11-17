@@ -1,3 +1,4 @@
+import { DatabaseUnavailableError, databaseTimeoutMs } from "@shared/db/recovery.js";
 /**
  * Storage abstraction for MultiremiStore.
  *
@@ -53,6 +54,7 @@ export interface SqlDatabase {
    * backend rather than probing.
    */
   readonly dialect?: SqlDatabaseDialect;
+  readonly connectionUnavailable?: boolean;
   query(sql: string): SqlStatement;
   prepare(sql: string): SqlStatement;
   run(sql: string, ...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
@@ -392,18 +394,23 @@ class PgBridge {
   private readonly ctl = new Int32Array(this.control);
   private readonly buf: Uint8Array;
   private readonly worker: Worker;
+  private unavailableUntil = 0;
 
   constructor(url: string, resultBufferBytes = RESULT_BUFFER_BYTES) {
     this.data = new SharedArrayBuffer(resultBufferBytes);
     this.buf = new Uint8Array(this.data);
     this.worker = new Worker(new URL("./pg-worker.ts", import.meta.url).href);
-    this.request({ init: url });
+    try { this.request({ init: url }); }
+    catch (error) { this.worker.terminate(); throw error; }
   }
 
-  private request(msg: { init?: string; sql?: string; params?: unknown[] }): any {
+  private request(msg: { init?: string; sql?: string; params?: unknown[]; timeoutMs?: number }): any {
+    if (msg.sql && Date.now() < this.unavailableUntil && msg.sql.trim().toUpperCase() !== "ROLLBACK") {
+      throw new DatabaseUnavailableError();
+    }
     Atomics.store(this.ctl, 0, STATUS_PENDING);
     try {
-      this.worker.postMessage({ control: this.control, data: this.data, ...msg });
+      this.worker.postMessage({ control: this.control, data: this.data, timeoutMs: databaseTimeoutMs(), ...msg });
     } catch (error) {
       throw new PgBridgeFailure(`postgres bridge send failed: ${String(error)}`, false);
     }
@@ -446,13 +453,18 @@ class PgBridge {
       }
       const parseStartedAt = performance.now();
       try {
-        let obj: { error?: string; source?: string; rows?: any[]; count?: number; command?: string };
+        let obj: { error?: string; source?: string; connectionError?: boolean; rows?: any[]; count?: number; command?: string };
         try {
           obj = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(this.buf.slice(0, len)));
         } catch (error) {
           throw new PgBridgeFailure(`postgres bridge reply decode failed: ${String(error)}`, false);
         }
         if (status === STATUS_ERROR || obj.error) {
+          if (obj.source === "connection" || obj.connectionError) {
+            this.unavailableUntil = Date.now() + 1_000;
+            throw new DatabaseUnavailableError(obj.source === "connection"
+              ? "connection lost during transaction; the server rolled the transaction back" : undefined);
+          }
           throw new PgBridgeFailure(`postgres: ${obj.error}`, obj.source !== "reply");
         }
         return obj;
@@ -477,13 +489,15 @@ class PgBridge {
       // The size guardrail's message is user-facing: route handlers answer with
       // `c.json({ error: message })`, so appending SQL here would leak schema
       // details into an HTTP response body.
-      if (err instanceof PostgresReplyTooLargeError) throw err;
+      if (err instanceof PostgresReplyTooLargeError || err instanceof DatabaseUnavailableError) throw err;
       if (err instanceof PgBridgeFailure) {
         throw new PgBridgeFailure(`${err.message}\n  SQL: ${sql.slice(0, 400)}`, err.abortsTransaction);
       }
       throw new Error(`${(err as Error).message}\n  SQL: ${sql.slice(0, 400)}`);
     }
   }
+
+  get connectionUnavailable(): boolean { return Date.now() < this.unavailableUntil; }
 
   close(): void {
     this.worker.terminate();
@@ -567,6 +581,8 @@ export class PostgresSyncDatabase implements SqlDatabase {
   constructor(url: string, resultBufferBytes = RESULT_BUFFER_BYTES) {
     this.bridge = new PgBridge(url, resultBufferBytes);
   }
+  get connectionUnavailable(): boolean { return this.bridge.connectionUnavailable; }
+
   /** True while a `transaction()` callback runs; its writes are not committed yet. */
   get inTransaction(): boolean {
     return this.transactionDepth > 0;
@@ -676,6 +692,7 @@ export class PostgresSyncDatabase implements SqlDatabase {
         const result = fn(...args);
         if (outermost) {
           if (this.failedAtDepth != null) {
+            if (this.bridge.connectionUnavailable) throw new DatabaseUnavailableError();
             throw new Error(`Postgres transaction contains an unrecovered statement failure at depth ${this.failedAtDepth}`);
           }
           const reply = this.execute("COMMIT", []);

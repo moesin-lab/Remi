@@ -1,3 +1,4 @@
+import { DatabaseUnavailableError, isDatabaseConnectionError } from "@shared/db/recovery.js";
 /**
  * Postgres bridge worker.
  *
@@ -13,6 +14,7 @@
 const workerSelf = self as unknown as Worker;
 
 let sql: any = null;
+let databaseUrl = "";
 const STATUS_DONE = 1;
 const STATUS_ERROR = 2;
 
@@ -35,13 +37,26 @@ function transactionVerb(query: string | undefined): "BEGIN" | "COMMIT" | "ROLLB
   return verb === "BEGIN" || verb === "COMMIT" || verb === "ROLLBACK" ? verb : null;
 }
 
+function connect(url: string): any {
+  const client = new Bun.SQL(url, {
+    max: 1,
+    connectionTimeout: 2,
+    onconnect: () => { connectionGeneration += 1; },
+    onclose: () => {
+      if (sql === client && transactionGeneration !== null) transactionConnectionLost = true;
+    },
+  });
+  return client;
+}
+
 workerSelf.onmessage = async (event: MessageEvent) => {
-  const { control, data, init, sql: query, params } = event.data as {
+  const { control, data, init, sql: query, params, timeoutMs } = event.data as {
     control: SharedArrayBuffer;
     data: SharedArrayBuffer;
     init?: string;
     sql?: string;
     params?: unknown[];
+    timeoutMs?: number;
   };
   const ctl = new Int32Array(control);
   const buf = new Uint8Array(data);
@@ -51,7 +66,7 @@ workerSelf.onmessage = async (event: MessageEvent) => {
     let bytes = encoder.encode(payload);
     if (bytes.length > buf.length) {
       if (status === STATUS_ERROR) {
-        let original: { error?: unknown; source?: unknown } = {};
+        let original: { error?: unknown; source?: unknown; connectionError?: boolean } = {};
         try { original = JSON.parse(payload); } catch { /* Unknown error replies fail closed. */ }
         const error = typeof original.error === "string" ? original.error : "postgres bridge error result too large";
         const source = typeof original.source === "string" ? original.source : "unknown";
@@ -60,12 +75,12 @@ workerSelf.onmessage = async (event: MessageEvent) => {
         let high = error.length;
         while (low < high) {
           const mid = Math.ceil((low + high) / 2);
-          const candidate = encoder.encode(JSON.stringify({ error: error.slice(0, mid) + suffix, source }));
+          const candidate = encoder.encode(JSON.stringify({ error: error.slice(0, mid) + suffix, source, connectionError: original.connectionError }));
           if (candidate.length <= buf.length) low = mid;
           else high = mid - 1;
         }
-        bytes = encoder.encode(JSON.stringify({ error: error.slice(0, low) + suffix, source }));
-        if (bytes.length > buf.length) bytes = encoder.encode(JSON.stringify({ error: "postgres bridge error too large", source }));
+        bytes = encoder.encode(JSON.stringify({ error: error.slice(0, low) + suffix, source, connectionError: original.connectionError }));
+        if (bytes.length > buf.length) bytes = encoder.encode(JSON.stringify({ error: "postgres bridge error too large", source, connectionError: original.connectionError }));
       } else {
         bytes = encoder.encode(
           JSON.stringify({ error: `postgres bridge result too large (${bytes.length} > ${buf.length} bytes)`, source: "reply" }),
@@ -83,15 +98,8 @@ workerSelf.onmessage = async (event: MessageEvent) => {
   let queryCompleted = false;
   try {
     if (init) {
-      sql = new Bun.SQL(init, {
-        max: 1,
-        onconnect: () => {
-          connectionGeneration += 1;
-        },
-        onclose: () => {
-          if (transactionGeneration !== null) transactionConnectionLost = true;
-        },
-      });
+      databaseUrl = init;
+      sql = connect(init);
       await sql`select 1`;
       respond(STATUS_DONE, JSON.stringify({ ok: true }));
       return;
@@ -107,7 +115,27 @@ workerSelf.onmessage = async (event: MessageEvent) => {
       }
       return;
     }
-    const res = await sql.unsafe(query, params ?? []);
+    const client = sql;
+    const pending = client.unsafe(query, params ?? []);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let res: any;
+    try {
+      res = timeoutMs ? await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            // The outcome of a timed-out write may be unknown. Never replay SQL.
+            // Discard the session before any later request can use it.
+            if (transactionGeneration !== null) transactionConnectionLost = true;
+            void client.close({ timeout: 0 }).catch(() => {});
+            sql = connect(databaseUrl);
+            reject(new DatabaseUnavailableError());
+          }, timeoutMs);
+        }),
+      ]) : await pending;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     queryCompleted = true;
     if (verb === "BEGIN") {
       transactionGeneration = connectionGeneration;
@@ -122,7 +150,7 @@ workerSelf.onmessage = async (event: MessageEvent) => {
     const command = typeof (res as any)?.command === "string" ? (res as any).command : undefined;
     respond(STATUS_DONE, JSON.stringify({ rows, count, command }));
   } catch (err: any) {
-    respond(STATUS_ERROR, JSON.stringify({ error: String(err?.message ?? err), source: queryCompleted ? "reply" : "query" }));
+    respond(STATUS_ERROR, JSON.stringify({ error: String(err?.message ?? err), source: queryCompleted ? "reply" : "query", connectionError: isDatabaseConnectionError(err) }));
   } finally {
     if (verb === "COMMIT" || verb === "ROLLBACK") {
       transactionGeneration = null;

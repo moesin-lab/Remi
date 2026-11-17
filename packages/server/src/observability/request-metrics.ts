@@ -30,6 +30,7 @@
  * credential, which is precisely why the pattern is the only safe thing to emit.
  * No header, body, user, or token value is recorded anywhere in this module.
  */
+import { configureDbSources, drainDbSources, recordDbSourceQuery, resetDbSourceWindow, withDbSource, type DbSourceSummary } from "@shared/observability/db-sources.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Context, MiddlewareHandler } from "hono";
 import type { ApiRole } from "../config/api-role.js";
@@ -127,6 +128,10 @@ export interface MinuteSummary {
   routes: RouteSummary[];
   /** Opt-in HTTP attribution, ranked by SQL count; never another process total. */
   db_routes?: RouteDbSummary[];
+  /** Query-time, same-window attribution across HTTP, daemon frames and jobs. */
+  db_sources?: DbSourceSummary[];
+  db_attributed?: { http: number; ws: number; job: number };
+  db_unattributed?: number;
   peer: PeerSummary;
 }
 
@@ -352,8 +357,9 @@ export function recordDbQuery(waitMs: number, bytes: number): void {
   processDbCounters.dbMs += waited;
   processDbCounters.dbQueries += 1;
   processDbCounters.dbBytes += size;
+  const source = recordDbSourceQuery(waited);
   const request = requestContext.getStore();
-  if (request) {
+  if (request && (!source || source === "http")) {
     request.dbMs += waited;
     request.dbQueries += 1;
     request.dbBytes += size;
@@ -1284,6 +1290,7 @@ function emitSlowRequest(line: Record<string, unknown>): void {
  */
 export function createRequestMetricsMiddleware(options: RequestMetricsOptions): MiddlewareHandler {
   requestMetricsEnabled = options.enabled;
+  configureDbSources(options.enabled && options.summaryDbRoutes === true);
   const buffer = options.enabled ? ringFor(options.bufferCapacity) : null;
 
   return async (c, next) => {
@@ -1304,7 +1311,7 @@ export function createRequestMetricsMiddleware(options: RequestMetricsOptions): 
     const startedAt = performance.now();
     let thrown = false;
     try {
-      await requestContext.run(state, () => next());
+      await withDbSource("http", `${state.method} ${state.route}`, () => requestContext.run(state, () => next()));
     } catch (error) {
       // Hono's own errorHandler normally turns this into a 500 before it reaches
       // us; this branch exists so a handler that throws past that still gets
@@ -1383,6 +1390,8 @@ export interface RequestMetricsRuntime {
 export function startRequestMetricsSummary(options: RequestMetricsOptions): RequestMetricsRuntime | null {
   if (!options.enabled) return null;
   const buffer = ringFor(options.bufferCapacity);
+  configureDbSources(options.summaryDbRoutes === true);
+  resetDbSourceWindow();
 
   let lastDbMs = processDbCounters.dbMs;
   let lastDbQueries = processDbCounters.dbQueries;
@@ -1427,6 +1436,11 @@ export function startRequestMetricsSummary(options: RequestMetricsOptions): Requ
       role: options.role,
       peer,
     });
+    if (options.summaryDbRoutes) {
+      const attribution = drainDbSources(options.summaryTopRoutes);
+      Object.assign(summary, attribution, { db_unattributed: dbQueries
+        - attribution.db_attributed.http - attribution.db_attributed.ws - attribution.db_attributed.job });
+    }
     console.log(JSON.stringify(summary));
   };
 
@@ -1460,6 +1474,7 @@ export function startRequestMetricsSummary(options: RequestMetricsOptions): Requ
  */
 export function resetRequestMetricsForTest(): void {
   ring = null;
+  configureDbSources(false);
   processDbCounters.dbMs = 0;
   processDbCounters.dbQueries = 0;
   processDbCounters.dbBytes = 0;

@@ -1,3 +1,4 @@
+import { withDbJob } from "@shared/observability/db-sources.js";
 import { createLogger } from "@shared/logger.js";
 
 const log = createLogger("task-capability-monitor");
@@ -11,9 +12,9 @@ export class TaskCapabilityMonitor {
 
   start(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => this.sweep(), QUEUED_CAPABILITY_SWEEP_MS);
+    this.timer = setInterval(() => withDbJob("capability.sweep", () => this.sweep()), QUEUED_CAPABILITY_SWEEP_MS);
     this.timer.unref?.();
-    this.sweep();
+    withDbJob("capability.sweep", () => this.sweep());
   }
 
   stop(): void {

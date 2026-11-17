@@ -1,3 +1,4 @@
+import { withDbJob } from "@shared/observability/db-sources.js";
 import { randomUUID } from "node:crypto";
 import {
   MessageProviderError,
@@ -139,7 +140,7 @@ export class MessagingScheduler {
 
   runOnce(now: Date = this.now()): Promise<MessagingRunResult> {
     if (this.tickPromise) return this.tickPromise;
-    this.tickPromise = this.runOnceInternal(now).finally(() => {
+    this.tickPromise = withDbJob("messaging.sync", () => this.runOnceInternal(now)).finally(() => {
       this.tickPromise = null;
     });
     return this.tickPromise;

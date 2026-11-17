@@ -1,3 +1,4 @@
+import { withDbJob } from "@shared/observability/db-sources.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { createLogger } from "@shared/logger.js";
 import { abortable, clientWithDeadline, deadlineClient } from "./deadline.js";
@@ -246,7 +247,7 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     const abort = new AbortController();
     this.storageAbort = abort;
     const tick = async () => {
-      try { await this.runStorageJobs(abort.signal); }
+      try { await withDbJob("repository-wiki.storage", () => this.runStorageJobs(abort.signal)); }
       catch (error) { if (!abort.signal.aborted) log.warn(`Wiki storage worker failed: ${safeError(error)}`); }
       if (!abort.signal.aborted) {
         this.storageTimer = setTimeout(tick, 5_000);
@@ -950,7 +951,7 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
         throw new Error("Repository Wiki storage lease lost");
       }
     };
-    const renewal = setInterval(() => { try { assertLease(); } catch { abort.abort(); } }, 20_000);
+    const renewal = setInterval(() => { try { withDbJob("repository-wiki.lease", () => assertLease()); } catch { abort.abort(); } }, 20_000);
     const baseClient = this.requireClient();
     const client = deadlineClient(baseClient, scopedSignal);
     const rootUri = repositoryWikiRootUri(job.workspaceId, job.repositoryId);

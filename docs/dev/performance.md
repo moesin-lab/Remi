@@ -33,6 +33,18 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 - **风险推断：** 长 trace 的分页、全数组派生与 DOM 成本仍可能随事件数增长；断线补读可能与当前帧追赶叠加。需要用请求数、长任务和 React commit 测量实际成本。
 - **采集重点：** 固定事件数、平均文本长度、工具/子 agent 比例和每秒事件数；记录首次打开、滚动、实时追加与断线重连期间的请求数、长任务、React commit 时长与内存。
 
+## Agent 与 Skill 文件读取边界
+
+普通 `getAgent`、Agent 列表、`getSkill` 和 `listAgentSkills` 不读取关联的
+`multiremi_skill_files`；列表在有界批次中读取关联 Skill 信息。`includeArchived`
+不隐式启用文件。需要完整 bundle 的 Store 调用方必须传 `{ includeFiles: true }`。
+任务执行上下文（`getTaskWithAgent`，用于 claim/offer/workspace）、Skill 详情和 Skill
+创建/更新响应显式保留文件及二进制编码；权限检查不加载关联文件。历史 inline Skills
+仍来自 Agent 行，保留原合并优先级。本次没有增加缓存或改变轮询频率。
+
+[大文件复现与验证](../../reports/performance/MUL-85-skill-files.md)记录操作者 PostgreSQL
+采样与本地 1,277 文件夹具；本地 SQLite 耗时不能代表生产 PG 同步桥或部署后的性能。
+
 ## Daemon 保活与事件唤醒边界
 
 保活写入与业务变化通知分开：机器人相同状态报告仍更新 `reported_at`，SSH 相同状态心跳

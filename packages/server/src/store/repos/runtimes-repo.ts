@@ -2779,7 +2779,7 @@ export class RuntimesRepo {
   private hydrateRuntimeLocalSkillImportRequest(request: MultiremiRuntimeLocalSkillImportRequest): MultiremiRuntimeLocalSkillImportRequest {
     return {
       ...request,
-      skill: request.skill ?? (request.skillId ? this.ctx.agents().getSkill(request.skillId) : null),
+      skill: request.skill ?? (request.skillId ? this.ctx.agents().getSkill(request.skillId, { includeFiles: true }) : null),
     };
   }
 

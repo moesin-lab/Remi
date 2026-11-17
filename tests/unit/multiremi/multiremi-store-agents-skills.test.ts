@@ -79,7 +79,8 @@ describe("Multiremi store — agents, workspace skills, and members", () => {
 
     const attached = store.setAgentSkills(agent.id, { skill_ids: [skill.id!] });
     expect(attached[0].name).toBe("Review Helper");
-    expect(store.getAgent(agent.id)?.skills[0].files?.[0].content).toBe("Check list");
+    expect(store.getAgent(agent.id)?.skills[0].files).toEqual([]);
+    expect(store.getAgent(agent.id, { includeFiles: true })?.skills[0].files?.[0].content).toBe("Check list");
 
     const task = store.createTask({ agentId: agent.id, prompt: "Review this" });
     const runtime = store.registerRuntime({ name: "local", provider: "claude" });

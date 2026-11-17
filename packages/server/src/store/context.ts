@@ -421,7 +421,7 @@ export interface IssuesSurface {
 }
 
 export interface AgentsSurface {
-  getAgent(id: string): MultiremiAgent | null;
+  getAgent(id: string, options?: { includeFiles?: boolean }): MultiremiAgent | null;
   /** The Agent row without Skills or Skill files — eligibility decisions only. */
   getAgentLite(id: string): MultiremiAgent | null;
   listAgents(options?: { includeArchived?: boolean }): MultiremiAgent[];

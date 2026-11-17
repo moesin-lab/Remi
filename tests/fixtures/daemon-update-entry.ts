@@ -1,11 +1,11 @@
 /** Native candidate for the isolated update rehearsal; never a production CLI entry. */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
 import { multiremiVersion } from "@multiremi/version.js";
 import { AcpProvider } from "@acp/provider.js";
 import { acquireWorkspaceSupervisorLease } from "@daemon/agent-runtime/workspace/process-owner.js";
-import { buildMultiremiDaemonLaunchSpec } from "../../apps/remi/cli/multiremi/service.js";
+import { buildMultiremiDaemonLaunchSpec, planDaemonRestart } from "../../apps/remi/cli/multiremi/service.js";
 import { restartForegroundDaemonProcess } from "../../apps/remi/cli/multiremi.js";
 if (process.env.NODE_ENV !== "test" || process.env.MULTIREMI_UPDATE_REHEARSAL !== "1") throw new Error("Explicit isolated rehearsal required");
 if (process.argv.includes("--version")) { console.log(multiremiVersion); process.exit(0); }
@@ -23,12 +23,18 @@ const cliOptions = { server: process.env.MULTIREMI_SERVER_URL!, provider: "codex
 const workspaces = join(state, "workspaces");
 const lease = acquireWorkspaceSupervisorLease(workspaces, { basePort: null });
 const spec = buildMultiremiDaemonLaunchSpec(cliOptions, "remi", process.argv, process.execPath, true);
+const restartPlan = planDaemonRestart({ platform: process.platform, env: process.env,
+  cgroup: process.platform === "linux" ? readFileSync("/proc/self/cgroup", "utf8") : null });
+if (process.env.REHEARSAL_SYSTEMD === "1" && (restartPlan.kind !== "service-manager" ||
+    !restartPlan.args.at(-1)?.startsWith("remi-rehearsal-"))) throw new Error("Rehearsal must restart its own transient unit");
 const daemon = new MultiremiDaemon({
   serverUrl: process.env.MULTIREMI_SERVER_URL!, token: process.env.MULTIREMI_TOKEN!,
   daemonId: "mul28-rehearsal", provider: "codex", runtimeName: "MUL-28 candidate", workspaceId: "local",
   daemonPort: 0, workspacesRoot: workspaces, workspaceRootFence: lease.assertOwner,
   repoCacheRoot: join(state, "cache"), pluginCacheRoot: join(state, "plugins"), gcEnabled: false,
-  updateRestartSpec: { command: [spec.command, ...spec.args] }, updateVerifyTimeoutSeconds: 5,
+  updateRestartSpec: restartPlan.kind === "service-manager"
+    ? { command: [restartPlan.command, ...restartPlan.args], manager: "systemd" }
+    : { command: [spec.command, ...spec.args] }, updateVerifyTimeoutSeconds: process.env.REHEARSAL_SYSTEMD === "1" ? 60 : 5,
   sshMeshManager: { getHeartbeatStatus: () => ({ status: "disabled" }), reconcile: async () => {}, cleanupForRetirement: async () => {} },
   agentPluginProviderPreflight: async () => {},
   providerFactory: options => new AcpProvider({ ...options, agentType: "codex", executable: process.env.REHEARSAL_BUN!,

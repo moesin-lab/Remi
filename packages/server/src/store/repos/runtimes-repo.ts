@@ -1768,6 +1768,11 @@ export class RuntimesRepo {
       if (!current) throw new Error("update not found");
       const status = normalizeRuntimeUpdateStatus(input.status);
       const now = nowIso();
+      // A successful running receipt is permission to install. Only pending
+      // admission and an idempotent running retry may grant that permission.
+      if (current.scope === "cli" && status === "running" && current.status !== "pending" && current.status !== "running") {
+        throw Object.assign(new Error("CLI update is no longer runnable"), { code: "cli_update_not_runnable" });
+      }
       if (isTerminalRuntimeRequestStatus(current.status)) return current;
       if (current.scope === "cli") {
         if (current.status === "pending" && status === "running" && !this.admitCliUpdate(runtime, requestId)) {
@@ -1777,7 +1782,6 @@ export class RuntimesRepo {
           throw new Error("CLI completion requires target-version hello and startup self-check");
         }
         if (status === "restarting" && current.status !== "running" && current.status !== "restarting") throw new Error("Invalid restart transition");
-        if (status === "running" && current.status !== "pending" && current.status !== "running") return current;
         if (status === "rolled_back" && current.status !== "restarting" && current.status !== "verifying") throw new Error("Invalid rollback transition");
       } else if (status === "restarting" || status === "rolled_back") throw new Error("Only CLI updates restart");
       if (status === "restarting" || status === "rolled_back") {

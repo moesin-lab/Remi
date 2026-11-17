@@ -16,7 +16,7 @@ import { disabledSshMeshRuntime } from "../../helpers/ssh-mesh-isolation.js";
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const f of cleanup.splice(0).reverse()) await f(); resetMultiremiTestEnv(); });
 
-async function fixture(mode: "lost" | "outage" | "reject") {
+async function fixture(mode: "lost" | "lost-terminal" | "outage" | "reject") {
   const store = createLocalStore();
   store.registerRuntime({ id: "rt", daemonId: "machine", provider: "codex", name: "test", workspaceId: "local" });
   const token = await store.createAccessToken({ name: "daemon", type: "daemon", daemonId: "machine", workspaceId: "local" });
@@ -34,7 +34,8 @@ async function fixture(mode: "lost" | "outage" | "reject") {
       runningCalls++;
       if (mode === "outage") return new Response("unavailable", { status: 503 });
       const response = await app.fetch(req);
-      if (mode === "lost" && runningCalls === 1) {
+      if ((mode === "lost" || mode === "lost-terminal") && runningCalls === 1) {
+        if (mode === "lost-terminal") store.reportRuntimeUpdateResult("rt", a.id, { status: "failed", error: "ended while reply was lost" });
         // The DB committed running, but the client never receives its reply.
         await Bun.sleep(600);
       }
@@ -62,13 +63,13 @@ async function fixture(mode: "lost" | "outage" | "reject") {
   client.setReportTransport(daemonReportTransport({ connectionState: () => "connected" } as DaemonProtocolClient, () => "rt", () => outbox));
   const daemon = new MultiremiDaemon({ serverUrl: `http://127.0.0.1:${server.port}`, provider: "codex",
     sshMeshManager: disabledSshMeshRuntime(), workspacesRoot: root, repoCacheRoot: join(root, "repos") });
-  const state = daemon as unknown as { client: MultiremiDaemonClient; claimsPaused: boolean; updateRunner: () => string;
+  const state = daemon as unknown as { client: MultiremiDaemonClient; claimsPaused: boolean; restartRequestedFlag: boolean; updateRunner: () => string;
     handleHeartbeatAck(rt: string, ack: MultiremiDaemonHeartbeatConfigAck): Promise<boolean>;
     handleRuntimeUpdate(rt: string, id: string, version: string, scope: "cli", deadline: string): Promise<void> };
   state.client = client;
   let installs = 0;
   state.updateRunner = () => { installs++; return "installed"; };
-  return { store, a, b, state, outbox, delivered, updateStatuses, installs: () => installs, calls: () => runningCalls };
+  return { httpClient: new MultiremiDaemonClient(`http://127.0.0.1:${server.port}`, token.token), store, a, b, state, outbox, delivered, updateStatuses, installs: () => installs, calls: () => runningCalls };
 }
 
 it("confirms a committed running after losing the HTTP reply without a replayable running record", async () => {
@@ -141,6 +142,71 @@ it("discards only a legacy rejected running row and delivers the next result in 
   await f.outbox.flushAll();
   expect(await rejected).toMatchObject({ code: "cli_update_not_admitted", retryable: false });
   expect(f.store.getRuntimeUpdateRequest("rt", f.b.id)?.status).toBe("pending");
+  expect(f.store.getRuntimeCommandRequest("rt", command.id)?.status).toBe("completed");
+  expect(f.outbox.stats()).toMatchObject({ pending: 0, blocked: 0 });
+});
+
+
+it("rejects a terminal owner's late HTTP admission without touching the sibling drain", async () => {
+  const f = await fixture("reject");
+  f.store.reportRuntimeUpdateResult("owner", f.a.id, { status: "failed", error: "owner ended" });
+  const drain = f.store.getDaemonDrainStatus("local", "machine");
+  await expect(f.state.handleRuntimeUpdate("owner", f.a.id, "0.2.96", "cli", drain.deadline!))
+    .rejects.toMatchObject({ code: "cli_update_not_runnable", status: 409 });
+  expect(f.calls()).toBe(1);
+  expect(f.installs()).toBe(0);
+  expect(f.state.restartRequestedFlag).toBe(false);
+  expect(f.state.claimsPaused).toBe(false);
+  expect(f.updateStatuses).toEqual([]);
+  expect(f.store.getDaemonDrainStatus("local", "machine")).toEqual(drain);
+  expect(f.store.getRuntimeUpdateRequest("owner", f.a.id)?.status).toBe("failed");
+  expect(f.store.getRuntimeUpdateRequest("rt", f.b.id)?.status).toBe("pending");
+  // Other terminal reports retain their idempotent HTTP success.
+  await f.httpClient.reportRuntimeUpdateResult("owner", f.a.id, { status: "failed" });
+  expect(f.store.claimRuntimeUpdateRequest("rt")?.id).toBe(f.b.id);
+});
+
+it("does not install when a lost running receipt is followed by terminal rejection on retry", async () => {
+  const f = await fixture("lost-terminal");
+  const sibling = f.store.createRuntimeUpdateRequest("owner", { scope: "cli", targetVersion: "0.2.97" });
+  await expect(f.state.handleRuntimeUpdate("rt", f.a.id, "0.2.96", "cli", new Date(Date.now() + 3000).toISOString()))
+    .rejects.toMatchObject({ code: "cli_update_not_runnable", status: 409 });
+  expect(f.calls()).toBe(2);
+  expect(f.installs()).toBe(0);
+  expect(f.state.restartRequestedFlag).toBe(false);
+  expect(f.state.claimsPaused).toBe(false);
+  expect(f.updateStatuses).toEqual([]);
+  await f.outbox.pumpAll();
+  expect(f.store.getRuntimeUpdateRequest("rt", f.a.id)?.status).toBe("failed");
+  expect(f.store.claimRuntimeUpdateRequest("owner")?.id).toBe(sibling.id);
+});
+
+for (const status of ["restarting", "verifying"] as const) it(`rejects late HTTP running during ${status}`, async () => {
+  const f = await fixture("reject");
+  f.store.reportRuntimeUpdateResult("owner", f.a.id, { status: "failed" });
+  const requestId = f.b.id;
+  f.store.claimRuntimeUpdateRequest("rt");
+  f.store.reportRuntimeUpdateResult("rt", requestId, { status: "restarting" });
+  if (status === "verifying") f.store.recordDaemonProtocol("rt", "machine", 2, "0.2.97");
+  await expect(f.state.client.reportRuntimeUpdateResult("rt", requestId, { status: "running" }))
+    .rejects.toMatchObject({ code: "cli_update_not_runnable", status: 409 });
+  expect(f.store.getRuntimeUpdateRequest("rt", requestId)?.status).toBe(status);
+});
+
+it("discards a legacy terminal running rejection without blocking the rt partition", async () => {
+  const f = await fixture("reject");
+  f.store.reportRuntimeUpdateResult("owner", f.a.id, { status: "failed" });
+  f.store.reportRuntimeUpdateResult("rt", f.b.id, { status: "failed" });
+  const rejected = f.outbox.enqueueAndWait("rt:rt", "runtime.update_result", {
+    runtime_id: "rt", request_id: f.b.id, status: "running",
+  }, 1000).catch(error => error);
+  const command = f.store.createRuntimeCommandRequest("rt", { command: "pwd" });
+  await f.state.client.reportRuntimeCommandResult("rt", command.id, {
+    status: "completed", exit_code: 0, stdout: "ok", stderr: "", duration_ms: 1,
+  });
+  await f.outbox.flushAll();
+  expect(await rejected).toMatchObject({ code: "cli_update_not_runnable", retryable: false });
+  expect(f.store.getRuntimeUpdateRequest("rt", f.b.id)?.status).toBe("failed");
   expect(f.store.getRuntimeCommandRequest("rt", command.id)?.status).toBe("completed");
   expect(f.outbox.stats()).toMatchObject({ pending: 0, blocked: 0 });
 });

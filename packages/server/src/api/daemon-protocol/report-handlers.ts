@@ -358,11 +358,13 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
           if (!Array.isArray(result.acknowledgements)) reject();
           store.recordRuntimeExecutionBindingAcks(runtimeId, result.acknowledgements);
           break;
-        case "runtime.update_result":
-          if (exists(store.getRuntimeUpdateRequest(runtimeId, requestId))) break;
+        case "runtime.update_result": {
+          const request = store.getRuntimeUpdateRequest(runtimeId, requestId);
+          if (exists(request) && !(request?.scope === "cli" && result.status === "running")) break;
           if (!["running", "restarting", "completed", "rolled_back", "failed"].includes(string(result.status))) reject();
           store.reportRuntimeUpdateResult(runtimeId, requestId, result as unknown as ReportRuntimeUpdateInput);
           break;
+        }
         case "runtime.command_result":
           if (exists(store.getRuntimeCommandRequest(runtimeId, requestId))) break;
           if (!["completed", "failed", "timeout"].includes(string(result.status))) reject();
@@ -477,7 +479,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
       }
       return { ok: true };
     } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "cli_update_not_admitted") {
+      if (error instanceof Error && "code" in error && (error.code === "cli_update_not_admitted" || error.code === "cli_update_not_runnable")) {
         return { ok: false, code: error.code, retryable: false };
       }
       if (error instanceof TaskDaemonReportError) return { ok: false, code: error.code, retryable: error.retryable };

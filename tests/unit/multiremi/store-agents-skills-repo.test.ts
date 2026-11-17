@@ -56,7 +56,7 @@ describe("AgentsSkillsRepo", () => {
     const skillId = skill.id!;
     const attached = repo.setAgentSkills(agent.id, [skillId]);
     expect(attached.map((entry) => entry.id)).toEqual([skillId]);
-    expect(repo.listAgentSkills(agent.id)[0]!.files?.map((file) => file.path)).toEqual(["checklist.md"]);
+    expect(repo.listAgentSkills(agent.id, { includeFiles: true })[0]!.files?.map((file) => file.path)).toEqual(["checklist.md"]);
     expect(repo.listSkillFiles(skillId).map((file) => file.content)).toEqual(["- read the diff"]);
   });
 });

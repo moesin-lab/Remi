@@ -1,3 +1,4 @@
+import { isDatabaseConnectionError, withDatabaseTimeout } from "@shared/db/recovery.js";
 import { registerExecutionConfigRoutes } from "./routers/execution-config.js";
 import { Hono, type Handler } from "hono";
 import { registerDaemonTraceHandlers } from "./daemon-protocol/trace-handlers.js";
@@ -328,6 +329,8 @@ export interface MultiremiApiOptions {
    * starts a server that daemons treat as older, for mixed-version tests.
    */
   daemonWelcomeCaps?: readonly DaemonProtocolCap[];
+  /** Explicit timer seam for mixed-load integration profiles; production keeps its default. */
+  daemonOfferSweepMs?: number;
   store?: MultiremiStore;
   scheduler?: MultiremiScheduler | null;
   /** Undefined reads the opt-in env config; null explicitly disables it. */
@@ -558,6 +561,29 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   // be unmeasured — and auth's own `verifyAccessToken` DB lookup is part of the
   // request cost we need in `Server-Timing`.
   app.use("*", createRequestMetricsMiddleware(requestMetricsOptions));
+  app.use("*", cors());
+  // Probe before database-backed authentication and route-local error mappings.
+  // Liveness remains independent of storage; the bridge rate-limits failed probes.
+  app.use("*", async (c, next) => {
+    if (c.req.path === "/healthz" || c.req.path === "/health" || c.req.path === "/health/realtime") {
+      await next();
+      return;
+    }
+    try {
+      withDatabaseTimeout(2_000, () => store.checkDatabaseReady(c.req.path === "/readyz"));
+    } catch (error) {
+      if (!isDatabaseConnectionError(error)) throw error;
+      c.header("Retry-After", "1");
+      c.header("Cache-Control", "no-store");
+      return c.json({ ok: false, error: "Database temporarily unavailable", code: "database_unavailable", reason: "database_unavailable" }, 503);
+    }
+    await withDatabaseTimeout(2_000, () => next());
+    if (store.isDatabaseUnavailable()) {
+      c.header("Retry-After", "1");
+      c.header("Cache-Control", "no-store");
+      return c.json({ error: "Database temporarily unavailable", code: "database_unavailable" }, 503);
+    }
+  });
   // MUL-461: the role guard. `all` (the default, and the only value main ever runs
   // as) registers nothing, so the middleware chain, the handler order and every
   // response body stay exactly as they are on main. `ui` refuses the daemon
@@ -586,7 +612,6 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
     }
     await next();
   });
-  app.use("*", cors());
   // Server-rendered dashboard removed in D11 — the UI is now the Next.js app in frontend/.
   app.get("/", (c) => c.json({ service: "multiremi-api", ui: "frontend/apps/web" }));
   app.get("/favicon.ico", (c) => c.body(null, 204));
@@ -730,6 +755,11 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.use("*", createPlatformMaintenanceWriteGate(store));
 
   app.onError((err, c) => {
+    if (isDatabaseConnectionError(err)) {
+      c.header("Retry-After", "1");
+      c.header("Cache-Control", "no-store");
+      return c.json({ error: "Database temporarily unavailable", code: "database_unavailable" }, 503);
+    }
     // MUL-400 E1: the parent-status guard is a decision the caller must see, not
     // a server fault. The native Issue routes throw straight out of the store, so
     // the mapping lives here next to the other typed store errors.
@@ -1184,7 +1214,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   });
   const daemonTurnBridge = options.daemonTurnBridge ?? store.getDaemonTurnBridge();
   const offerProjectKnowledge = options.projectKnowledge ?? createProjectKnowledgeServiceFromEnv(store);
-  const offers = new DaemonTaskOffers({ store, layer: daemonProtocol,
+  const offers = new DaemonTaskOffers({ store, layer: daemonProtocol, sweepMs: options.daemonOfferSweepMs,
     prepare: (task, supportsWikiFetch) => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki,
       supportsWikiFetch, daemonTurnBridge.offerInput(task)),
     onRuntimeReady: (rt, ids) => downlinks.runtimeReady(rt, ids) });

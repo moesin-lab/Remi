@@ -1,3 +1,4 @@
+import { DatabaseUnavailableError } from "@shared/db/recovery.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { DaemonDownlinks, type DaemonDownlinkEntity } from "@multiremi/api/daemon-protocol/downlinks.js";
 import { DaemonProtocolLayer } from "@multiremi/api/daemon-protocol/index.js";
@@ -85,7 +86,7 @@ describe("A-4 downlink window execution", () => {
   it("retains the ACK claim until a transient DB failure has been retried", async () => {
     const h = await fixture(); let failing = true; let claimed = 0;
     h.entities.push({ key: "db_retry", type: "runtime.command", payload: { id: "db_retry" }, claimed: () => {
-      if (failing) throw new Error("Injected transaction failure"); claimed++;
+      if (failing) throw new DatabaseUnavailableError(); claimed++;
     } });
     const warn = spyOn(console, "warn").mockImplementation(() => {});
     try {

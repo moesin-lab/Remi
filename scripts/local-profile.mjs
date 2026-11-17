@@ -11,6 +11,7 @@ import { loadCiImages } from './ci-images.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const profilesRoot = resolve(process.env.REMI_PROFILES_ROOT || join(homedir(), '.remi', 'profiles'));
+let runtimeProxy = null;
 const settings = {
   stable: { webPort: 13000, apiPort: 16120, hostname: '127.0.0.1', backgroundJobs: '1' },
   dev: { webPort: 14000, apiPort: 16220, hostname: 'localhost', backgroundJobs: '0' },
@@ -45,9 +46,20 @@ function execute(command, args, options = {}) {
     const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === 'path') || 'Path';
     environment[pathKey] = `${helpers}${delimiter}${environment[pathKey] || ''}`;
   }
-  const { preserveWhitespace = false, ...spawnOptions } = options;
-  const result = spawnSync(command, args, { cwd: repository, env: environment, stdio: 'inherit', windowsHide: true, ...spawnOptions });
-  if (result.error) throw result.error;
+  const { preserveWhitespace = false, environmentOverrides = {}, redact = [], ...spawnOptions } = options;
+  Object.assign(environment, environmentOverrides);
+  let result;
+  if (redact.length) {
+    const secrets = [...redact, ...['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'].map((key) => process.env[key]).filter(Boolean)];
+    for (const value of [...secrets]) {
+      try { const url = new URL(value); secrets.push(url.username, url.password, decodeURIComponent(url.username), decodeURIComponent(url.password)); } catch {}
+    }
+    result = spawnSync(process.execPath, [join(repository, 'scripts/proxy-command.mjs'), '--run'], {
+      cwd: repository, env: environment, windowsHide: true, stdio: ['pipe', 'inherit', 'inherit'],
+      input: JSON.stringify({ command, args, input: spawnOptions.input, secrets, cwd: repository }),
+    });
+  } else result = spawnSync(command, args, { cwd: repository, env: environment, stdio: 'inherit', windowsHide: true, ...spawnOptions });
+  if (result.error) throw new Error(redact.length ? 'Docker runtime proxy command could not start' : result.error.message);
   if (result.status !== 0) throw new Error(`${command} ${args[0] || ''} failed (${result.status})`);
   return typeof result.stdout === 'string' && !preserveWhitespace ? result.stdout.trim() : result.stdout;
 }
@@ -129,10 +141,49 @@ function composeArgs(root, ...args) {
   return [...flags, ...args];
 }
 
+function runtimeProxyEnvironment(environment) {
+  const result = {};
+  for (const key of ['HTTP_PROXY', 'HTTPS_PROXY']) {
+    const value = environment[key] || environment[key.toLowerCase()];
+    if (!value) continue;
+    let url;
+    try {
+      url = new URL(value);
+      if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || /[\r\n]/u.test(value)) throw new Error();
+    } catch { throw new Error(`Invalid proxy URL in ${key}`); }
+    const host = url.hostname.toLowerCase();
+    if (host === 'localhost' || host === '[::1]' || (isIPv4(host) && host.startsWith('127.'))) url.hostname = 'host.docker.internal';
+    result[key] = result[key.toLowerCase()] = url.href;
+  }
+  if (!Object.keys(result).length) throw new Error('--runtime-proxy true requires HTTP_PROXY or HTTPS_PROXY');
+  const defaults = ['postgres', 'api', 'web', 'updater', 'localhost', '127.0.0.1', '::1', 'host.docker.internal', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '169.254.0.0/16', 'fc00::/7', 'fe80::/10'];
+  const entries = [...defaults, environment.NO_PROXY || '', environment.no_proxy || ''].flatMap((value) => value.split(',')).map((value) => value.trim()).filter(Boolean);
+  if (entries.some((value) => /[\r\n]/u.test(value))) throw new Error('Invalid NO_PROXY');
+  result.NO_PROXY = result.no_proxy = [...new Set(entries)].join(',');
+  return result;
+}
+
 function compose(root, ...args) {
   const command = composeArgs(root, ...args);
   const builds = args[0] === 'build' || args[0] === 'watch' || (args[0] === 'up' && args.includes('--build'));
-  if (!builds) return execute('docker', command);
+  const runtime = runtimeProxy && ['up', 'config', 'watch'].includes(args[0]);
+  const override = runtime ? { services: { api: {
+    environment: Object.fromEntries(Object.keys(runtimeProxy).map((key) => [key, '${REMI_RUNTIME_' + key.toUpperCase() + '}'])),
+    extra_hosts: ['host.docker.internal:host-gateway'],
+  } } } : { services: {} };
+  const invoke = () => {
+    if (!Object.keys(override.services).length) return execute('docker', command);
+    command.splice(command.indexOf(args[0]), 0, '-f', '-');
+    const options = { input: JSON.stringify(override), stdio: ['pipe', 'inherit', 'inherit'] };
+    if (runtime) options.environmentOverrides = Object.fromEntries(Object.entries(runtimeProxy).map(([key, value]) => ['REMI_RUNTIME_' + key.toUpperCase(), value]));
+    if (runtimeProxy) {
+      // Stream diagnostics through a separate redactor without a finite
+      // spawnSync output buffer, including for long-running watch sessions.
+      options.redact = Object.values(runtimeProxy);
+    }
+    return execute('docker', command, options);
+  };
+  if (!builds) return invoke();
 
   // Null Compose build args inherit the environment without putting credentials
   // in argv, profile files, or the override. Keep Docker's predefined proxy args
@@ -154,11 +205,11 @@ function compose(root, ...args) {
     } catch { throw new Error(`Invalid proxy URL in ${key}`); }
   });
   if (!network && loopback && process.platform === 'linux') network = 'host';
-  if (!keys.length && !network) return execute('docker', command);
+  if (!keys.length && !network) return invoke();
   const build = { ...(keys.length ? { args: Object.fromEntries(keys.map((key) => [key, null])) } : {}), ...(network ? { network } : {}) };
-  const override = JSON.stringify({ services: { api: { build }, web: { build } } });
-  command.splice(command.length - args.length, 0, '-f', '-');
-  return execute('docker', command, { input: override, stdio: ['pipe', 'inherit', 'inherit'] });
+  override.services.api = { ...override.services.api, build };
+  override.services.web = { build };
+  return invoke();
 }
 
 function writeComposeEnvironment(root, deployment) {
@@ -978,6 +1029,7 @@ async function main() {
     console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|restart|status|logs|watch|backup|token|host-preflight|host-stage|host-activate|host-recover|host-rollback-stage|host-rollback-activate|host-finalize|host-auth-refresh> [options]');
     console.log('stable deploy: pull verified CI images for a fixed commit, back up data, then update containers.');
     console.log('--image-manifest <path>: use a downloaded stable-images.json; --build-local true: explicitly compile locally.');
+    console.log('--runtime-proxy true: opt in to API runtime HTTP(S)_PROXY for deploy/up/watch; repeat on each container recreation.');
     console.log('dev deploy + dev watch: build current source, then sync changes without touching stable.');
     console.log('stable --lan-host: bind Web/API to 0.0.0.0 and persist the advertised LAN address across deploys.');
     return;
@@ -987,13 +1039,14 @@ async function main() {
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     const value = args[index + 1];
-    if (!['--ref', '--lan-host', '--operation-id', '--version', '--source-url', '--source-sha256', '--data-schema', '--preserve-data', '--image-manifest', '--build-local'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
+    if (!['--ref', '--lan-host', '--operation-id', '--version', '--source-url', '--source-sha256', '--data-schema', '--preserve-data', '--image-manifest', '--build-local', '--runtime-proxy'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
       throw new Error('Unsupported, missing, or duplicate --ref/--lan-host/host option');
     }
     flags[key] = value;
   }
   const actionOptions = {
-    prepare: ['--ref', '--lan-host'], deploy: ['--ref', '--lan-host', '--image-manifest', '--build-local'],
+    prepare: ['--ref', '--lan-host'], deploy: ['--ref', '--lan-host', '--image-manifest', '--build-local', '--runtime-proxy'],
+    up: ['--runtime-proxy'], watch: ['--runtime-proxy'],
     'host-stage': ['--operation-id', '--ref', '--version', '--source-url', '--source-sha256', '--data-schema', '--image-manifest', '--build-local'],
     'host-activate': ['--operation-id'],
     'host-rollback-stage': ['--operation-id', '--ref', '--preserve-data'],
@@ -1010,6 +1063,8 @@ async function main() {
     if (profile !== 'stable') throw new Error('--lan-host is only valid for stable; dev stays on loopback');
     validateLanHost(flags['--lan-host']);
   }
+  if (flags['--runtime-proxy'] && !['true', 'false'].includes(flags['--runtime-proxy'])) throw new Error('--runtime-proxy only accepts true or false');
+  if (flags['--runtime-proxy'] === 'true') runtimeProxy = runtimeProxyEnvironment(process.env);
   const root = join(profilesRoot, profile);
   if (profile === 'stable' && existsSync(join(root, 'compose.internal-updates.yml'))
     && (action.startsWith('host-') || ['prepare', 'deploy', 'build', 'restart', 'backup'].includes(action))) {

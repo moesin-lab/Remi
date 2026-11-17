@@ -30,6 +30,7 @@
  * credential, which is precisely why the pattern is the only safe thing to emit.
  * No header, body, user, or token value is recorded anywhere in this module.
  */
+import { configureDbSources, drainDbSources, recordDbSourceQuery, resetDbSourceWindow, withDbSource, type DbSourceSummary } from "@shared/observability/db-sources.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Context, MiddlewareHandler } from "hono";
 import type { ApiRole } from "../config/api-role.js";
@@ -103,6 +104,12 @@ export interface PeerSummary {
   duplicates: number;
 }
 
+export interface RouteDbSummary extends RouteSummary {
+  db_queries: number;
+  queries_per_request: number;
+  db_ms: number;
+}
+
 export interface MinuteSummary {
   event: "api_minute_summary";
   ts: string;
@@ -119,6 +126,12 @@ export interface MinuteSummary {
   /** MUL-461: which API role produced this window. */
   role: ApiRole;
   routes: RouteSummary[];
+  /** Opt-in HTTP attribution, ranked by SQL count; never another process total. */
+  db_routes?: RouteDbSummary[];
+  /** Query-time, same-window attribution across HTTP, daemon frames and jobs. */
+  db_sources?: DbSourceSummary[];
+  db_attributed?: { http: number; ws: number; job: number };
+  db_unattributed?: number;
   peer: PeerSummary;
 }
 
@@ -131,6 +144,8 @@ export interface RequestMetricsOptions {
   summaryIntervalMs: number;
   /** How many routes the summary keeps, ranked by `sum_ms`. */
   summaryTopRoutes: number;
+  /** Include SQL-ranked HTTP attribution in the existing minute summary. */
+  summaryDbRoutes?: boolean;
   /** Fixed window-buffer capacity; older samples are dropped once it wraps. */
   bufferCapacity: number;
   /**
@@ -342,8 +357,9 @@ export function recordDbQuery(waitMs: number, bytes: number): void {
   processDbCounters.dbMs += waited;
   processDbCounters.dbQueries += 1;
   processDbCounters.dbBytes += size;
+  const source = recordDbSourceQuery(waited);
   const request = requestContext.getStore();
-  if (request) {
+  if (request && (!source || source === "http")) {
     request.dbMs += waited;
     request.dbQueries += 1;
     request.dbBytes += size;
@@ -1075,6 +1091,7 @@ export interface WindowSummaryInput {
   dbQueries: number;
   eventLoopLagMaxMs: number;
   topRoutes: number;
+  summaryDbRoutes?: boolean;
   /** MUL-461: reported verbatim in the summary line. */
   role: ApiRole;
   /** MUL-462: peer-channel counters for this window. Omitted means a zeroed block. */
@@ -1089,7 +1106,7 @@ export interface WindowSummaryInput {
  */
 export function summarizeWindow(input: WindowSummaryInput): MinuteSummary {
   const windowMs = finite(input.windowMs);
-  const groups = new Map<string, { method: string; route: string; durations: number[] }>();
+  const groups = new Map<string, { method: string; route: string; durations: number[]; dbQueries: number; dbMs: number }>();
   let status5xx = 0;
   let slow = 0;
   for (const sample of input.samples) {
@@ -1097,8 +1114,12 @@ export function summarizeWindow(input: WindowSummaryInput): MinuteSummary {
     if (sample.slow) slow += 1;
     const key = `${sample.method} ${sample.route}`;
     const group = groups.get(key);
-    if (group) group.durations.push(sample.totalMs);
-    else groups.set(key, { method: sample.method, route: sample.route, durations: [sample.totalMs] });
+    if (group) {
+      group.durations.push(sample.totalMs);
+      group.dbQueries += sample.dbQueries;
+      group.dbMs += sample.dbMs;
+    } else groups.set(key, { method: sample.method, route: sample.route, durations: [sample.totalMs],
+      dbQueries: sample.dbQueries, dbMs: sample.dbMs });
   }
 
   const routes: RouteSummary[] = [...groups.values()].map((group) => ({
@@ -1114,6 +1135,13 @@ export function summarizeWindow(input: WindowSummaryInput): MinuteSummary {
     || `${left.method} ${left.route}`.localeCompare(`${right.method} ${right.route}`));
 
   const top = Math.max(0, Math.trunc(input.topRoutes));
+  const dbRoutes: RouteDbSummary[] | undefined = input.summaryDbRoutes ? routes.map(route => {
+    const group = groups.get(`${route.method} ${route.route}`)!;
+    return { ...route, db_queries: group.dbQueries,
+      queries_per_request: round2(group.dbQueries / route.count), db_ms: round1(group.dbMs) };
+  }).sort((left, right) => right.db_queries - left.db_queries
+    || right.db_ms - left.db_ms || right.sum_ms - left.sum_ms
+    || `${left.method} ${left.route}`.localeCompare(`${right.method} ${right.route}`)).slice(0, top) : undefined;
   return {
     event: "api_minute_summary",
     ts: (input.now ?? new Date()).toISOString(),
@@ -1128,6 +1156,7 @@ export function summarizeWindow(input: WindowSummaryInput): MinuteSummary {
     event_loop_lag_max_ms: round1(finite(input.eventLoopLagMaxMs)),
     role: input.role,
     routes: routes.slice(0, top),
+    ...(dbRoutes ? { db_routes: dbRoutes } : {}),
     peer: input.peer ?? {
       sent: 0, batches: 0, dropped: 0, failed: 0, rtt_p95_ms: 0,
       oversize_dropped: 0, degraded: 0, duplicates: 0,
@@ -1163,6 +1192,7 @@ export function resolveRequestMetricsOptions(
       DEFAULT_SUMMARY_INTERVAL_MS,
       1,
     ),
+    summaryDbRoutes: envEnabled(env.MULTIREMI_METRICS_DB_ROUTES?.trim() || undefined, false),
     summaryTopRoutes: envNumber(env.MULTIREMI_METRICS_SUMMARY_TOP_N, DEFAULT_SUMMARY_TOP_ROUTES, 0),
     bufferCapacity: envNumber(env.MULTIREMI_METRICS_BUFFER_SIZE, DEFAULT_BUFFER_CAPACITY, 1),
     role,
@@ -1260,6 +1290,7 @@ function emitSlowRequest(line: Record<string, unknown>): void {
  */
 export function createRequestMetricsMiddleware(options: RequestMetricsOptions): MiddlewareHandler {
   requestMetricsEnabled = options.enabled;
+  configureDbSources(options.enabled && options.summaryDbRoutes === true);
   const buffer = options.enabled ? ringFor(options.bufferCapacity) : null;
 
   return async (c, next) => {
@@ -1280,7 +1311,7 @@ export function createRequestMetricsMiddleware(options: RequestMetricsOptions): 
     const startedAt = performance.now();
     let thrown = false;
     try {
-      await requestContext.run(state, () => next());
+      await withDbSource("http", `${state.method} ${state.route}`, () => requestContext.run(state, () => next()));
     } catch (error) {
       // Hono's own errorHandler normally turns this into a 500 before it reaches
       // us; this branch exists so a handler that throws past that still gets
@@ -1359,6 +1390,8 @@ export interface RequestMetricsRuntime {
 export function startRequestMetricsSummary(options: RequestMetricsOptions): RequestMetricsRuntime | null {
   if (!options.enabled) return null;
   const buffer = ringFor(options.bufferCapacity);
+  configureDbSources(options.summaryDbRoutes === true);
+  resetDbSourceWindow();
 
   let lastDbMs = processDbCounters.dbMs;
   let lastDbQueries = processDbCounters.dbQueries;
@@ -1399,9 +1432,15 @@ export function startRequestMetricsSummary(options: RequestMetricsOptions): Requ
       dbQueries,
       eventLoopLagMaxMs: lag,
       topRoutes: options.summaryTopRoutes,
+      summaryDbRoutes: options.summaryDbRoutes,
       role: options.role,
       peer,
     });
+    if (options.summaryDbRoutes) {
+      const attribution = drainDbSources(options.summaryTopRoutes);
+      Object.assign(summary, attribution, { db_unattributed: dbQueries
+        - attribution.db_attributed.http - attribution.db_attributed.ws - attribution.db_attributed.job });
+    }
     console.log(JSON.stringify(summary));
   };
 
@@ -1435,6 +1474,7 @@ export function startRequestMetricsSummary(options: RequestMetricsOptions): Requ
  */
 export function resetRequestMetricsForTest(): void {
   ring = null;
+  configureDbSources(false);
   processDbCounters.dbMs = 0;
   processDbCounters.dbQueries = 0;
   processDbCounters.dbBytes = 0;

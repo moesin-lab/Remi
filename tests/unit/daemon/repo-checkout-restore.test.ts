@@ -76,6 +76,7 @@ describe("a reclaimed Chat checking its repository out again on demand", () => {
       ensureRepoReady: async () => {},
       assertWorkspaceRootOwner: () => {},
       workspaceCoAuthoredByEnabled: () => false,
+      workspaceSettings: new Map(),
     });
     const response = await daemon.handleLocalDaemonRequest(new Request("http://localhost/repo/checkout", {
       method: "POST",
@@ -115,6 +116,7 @@ describe("a reclaimed Chat checking its repository out again on demand", () => {
         ensureRepoReady: async () => {},
         assertWorkspaceRootOwner: () => {},
         workspaceCoAuthoredByEnabled: () => false,
+        workspaceSettings: new Map(),
       });
       const checkout = async (taskId: string) => {
         const response = await daemon.handleLocalDaemonRequest(new Request("http://localhost/repo/checkout", {
@@ -183,6 +185,7 @@ describe("a reclaimed Chat checking its repository out again on demand", () => {
       ensureRepoReady: async () => {},
       assertWorkspaceRootOwner: () => {},
       workspaceCoAuthoredByEnabled: () => false,
+      workspaceSettings: new Map(),
     });
 
     const response = await daemon.handleLocalDaemonRequest(new Request("http://localhost/repo/checkout", {

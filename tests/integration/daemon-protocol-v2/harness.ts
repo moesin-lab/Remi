@@ -1,3 +1,4 @@
+import type { RequestMetricsOptions } from "@multiremi/observability/request-metrics.js";
 import type { Database } from "bun:sqlite";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -179,6 +180,8 @@ export class DaemonProtocolHarness {
   private runError: unknown;
   private readonly readyProviders = new Set<string>();
   private createDaemons!: () => MultiremiDaemon[];
+  private requestMetrics?: RequestMetricsOptions;
+  private offerSweepMs?: number;
   private apiRole: "all" | "runtime" = "all";
   private peerChannel: PeerChannel | null = null;
   private peerSecret = "";
@@ -203,6 +206,8 @@ export class DaemonProtocolHarness {
     cliVersion?: string;
     updateRunner?: (version: string) => Promise<string>;
     apiRole?: "all" | "runtime";
+    requestMetrics?: RequestMetricsOptions;
+    offerSweepMs?: number;
     peerChannel?: PeerChannel;
     peerSecret?: string;
     liveHub?: LiveHub;
@@ -216,6 +221,8 @@ export class DaemonProtocolHarness {
       h.store.ensureLocalWorkspace();
       const daemonId = options.omitDaemonId ? "protocol-fixture-device" : "dmn_fixture";
       h.apiRole = options.apiRole ?? "all";
+      h.requestMetrics = options.requestMetrics;
+      h.offerSweepMs = options.offerSweepMs;
       h.peerChannel = options.peerChannel ?? null;
       h.peerSecret = options.peerSecret ?? "";
       h.liveHub = options.liveHub;
@@ -284,7 +291,7 @@ export class DaemonProtocolHarness {
   private startServer(port = 0): void {
     this.server = startMultiremiServer({
       store: this.store, scheduler: null, backgroundJobs: false, hostname: "127.0.0.1", port,
-      authToken: "fixture-master", apiRole: this.apiRole,
+      authToken: "fixture-master", apiRole: this.apiRole, requestMetrics: this.requestMetrics, daemonOfferSweepMs: this.offerSweepMs,
       liveHub: this.liveHub,
       peerChannel: this.peerChannel, peerSecret: this.peerSecret,
       onDaemonProtocol: layer => {

@@ -7,6 +7,8 @@ describe("deriveScmSettings", () => {
       changeSidebar: true,
       autoLink: true,
       completeIssueOnMerge: false,
+      coAuthorName: "Remi",
+      coAuthorEmail: "remi@openremi.fun",
       coAuthor: true,
     });
   });
@@ -23,8 +25,15 @@ describe("deriveScmSettings", () => {
       changeSidebar: false,
       autoLink: false,
       completeIssueOnMerge: true,
+      coAuthorName: "Remi",
+      coAuthorEmail: "remi@openremi.fun",
       coAuthor: false,
     });
+  });
+
+  it("trims custom identity and falls back independently for invalid legacy fields", () => {
+    expect(deriveScmSettings({ settings: { co_authored_by_name: " Custom ", co_authored_by_email: " custom@example.test " } })).toMatchObject({ coAuthorName: "Custom", coAuthorEmail: "custom@example.test" });
+    expect(deriveScmSettings({ settings: { co_authored_by_name: "Custom", co_authored_by_email: "invalid" } })).toMatchObject({ coAuthorName: "Custom", coAuthorEmail: "remi@openremi.fun" });
   });
 
   it("does not honor deleted GitHub-only settings", () => {
@@ -38,6 +47,8 @@ describe("deriveScmSettings", () => {
       changeSidebar: true,
       autoLink: true,
       completeIssueOnMerge: false,
+      coAuthorName: "Remi",
+      coAuthorEmail: "remi@openremi.fun",
       coAuthor: true,
     });
   });

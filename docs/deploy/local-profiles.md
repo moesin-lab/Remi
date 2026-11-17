@@ -71,6 +71,55 @@ node scripts/local-profile.mjs dev watch
 
 stable 只打包已提交的 Git 内容；未提交修改不会进入快照。`--ref` 可以指定已检查的 commit。dev 读取当前工作树；watch 运行期间同步源码并在依赖清单改变时重建，忽略 node_modules、`.next`、Git 元数据和环境文件。Compose 2.30 不支持首次自动全量同步，因此每次启动 watch 都先构建；关闭 watch 终端只停止同步，不停止容器。
 
+## API 运行时宿主代理
+
+构建代理与运行时代理独立。默认不向容器注入代理；在部署进程设置
+`HTTP_PROXY` / `HTTPS_PROXY`（也支持小写），然后显式开启：
+
+```bash
+# 只在专用的隔离 profile 根目录演练；不要指向已有 stable 数据。
+export REMI_PROFILES_ROOT="$HOME/.remi/proxy-validation"
+export HTTPS_PROXY=http://127.0.0.1:17890
+node scripts/local-profile.mjs dev deploy --runtime-proxy true
+# 已 prepare 的配置也可用：
+node scripts/local-profile.mjs dev up --runtime-proxy true
+```
+
+`deploy`、`up`、`watch` 支持 `--runtime-proxy true|false`。开关不保存；每次重建
+容器都须重新传入开关和环境变量，普通 restart 保留现有容器环境。
+同一变量同时提供大小写时，大写非空值优先；API 内注入一致的大小写变量。
+只支持 HTTP/HTTPS 代理 URL。`localhost`、IPv4 回环（含 `127.0.0.1`）、`::1`
+改写为 `host.docker.internal`，同时加入 `host-gateway` 映射。
+
+**改写不能让只监听回环的代理自动对容器开放。** 宿主代理（例如 mihomo）需额外
+监听 Docker 网桥地址，或监听 `0.0.0.0` 并用防火墙限制仅 Docker 网段访问。
+监听与防火墙调整由宿主所有者执行；本脚本不修改它们。Docker 需支持
+`host-gateway`。Docker Desktop 也使用相同映射，实际可达性需在该机器验证。
+
+默认 `NO_PROXY` / `no_proxy` 合并两种大小写的用户条目，去重并保留 `postgres`、
+`api`、`web`、`updater`、loopback、宿主网关及 RFC 1918、链路本地和 IPv6 私网段。
+内部域名的直连不依赖客户端是否支持 CIDR；不同工具的 CIDR 匹配能力仍需各自验证。
+Web、PostgreSQL 和 updater 不注入运行时代理。
+
+代理只经当前 Compose 进程环境和标准输入覆盖传递，不写入 profile、备份或镜像层。
+运行时 Compose 输出中的代理 URL 与凭据会脱敏；不要使用 `docker inspect`、
+非 quiet 的 `compose config` 或 `env` 把容器凭据打印到共享日志。Docker 管理员仍可
+读取容器环境。带凭据 URL 应由私有环境注入，避免直接输入 shell 历史。
+
+在上述隔离 dev 环境验证（如镜像中有 curl，也可用 curl）：
+
+```bash
+docker exec remi-dev-api-1 bun -e 'for (const u of ["https://raw.githubusercontent.com/moesin-lab/Remi/main/README.md", "https://api.github.com/repos/moesin-lab/Remi"]) { const r = await fetch(u, {signal: AbortSignal.timeout(15000)}); console.log(new URL(u).hostname, r.status); }'
+# 检查真实 HTTP 内部请求绕过代理：对照代理访问日志，应无 api:6120 请求。
+docker exec remi-dev-api-1 bun -e 'const r = await fetch("http://api:6120/readyz"); console.log(r.status)'
+# 停止隔离测试用代理后确认数据库仍可直连（不修改线上代理）：
+docker exec remi-dev-api-1 bun -e 'import { SQL } from "bun"; const db = new SQL(process.env.MULTIREMI_DATABASE_URL); console.log(await db`SELECT 1`); await db.close()'
+```
+
+GitHub 的 403/429 仅证明 HTTP 可达，不等于成功导入；结合代理访问日志确认请求实际
+经宿主代理。PostgreSQL 驱动使用直连 TCP；HTTP 内部服务还需检查代理日志。
+验证后扫描隔离 profile 和部署日志是否含测试代理 URL/凭据，勿把扫描匹配内容输出。
+
 ## stable 内网访问
 
 在主机选择实际的 RFC 1918 内网 IPv4 地址，然后部署；下面的 IP 仅为示例，需要替换：

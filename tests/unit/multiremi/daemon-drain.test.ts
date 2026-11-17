@@ -1,3 +1,4 @@
+import { withRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,6 +38,23 @@ function ack(store: MultiremiStore, count: number) {
 }
 
 describe("daemon drain", () => {
+  it("invalidates joined runtime drain state on writes and never leaks it across requests", () => {
+    const { store } = fixture();
+    withRequestReadCache(() => {
+      expect(store.hasCliUpdateDrainForRuntime("rt_a")).toBe(false);
+      expect(store.hasCliUpdateDrainForRuntime("rt_a_other")).toBe(false);
+      store.beginDaemonDrain("local", "machine-a");
+      expect(store.hasCliUpdateDrainForRuntime("rt_a")).toBe(true);
+      expect(store.hasCliUpdateDrainForRuntime("rt_a_other")).toBe(true);
+      expect(store.nextDaemonDrainWakeAt("rt_a")).toBe(start.getTime() + 300_000);
+      store.undrainDaemon("local", "machine-a");
+      expect(store.hasCliUpdateDrainForRuntime("rt_a")).toBe(false);
+      expect(store.nextDaemonDrainWakeAt("rt_a")).toBeNull();
+    });
+    store.beginDaemonDrain("local", "machine-a");
+    withRequestReadCache(() => expect(store.hasCliUpdateDrainForRuntime("rt_a_other")).toBe(true));
+  });
+
   for (const status of ["pending", "running", "restarting", "verifying"] as const) {
     it(`persists the ${status} CLI update fence across startup and rejects undrain`, () => {
       const { store, agent } = fixture();

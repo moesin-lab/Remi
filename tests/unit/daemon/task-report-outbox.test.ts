@@ -18,16 +18,23 @@ import {
   type MultiremiOutboxKind,
   type MultiremiOutboxRecord,
 } from "@multiremi/worker/outbox.js";
+import { assertNoOpenFilesUnder } from "../../helpers/open-file-handles.js";
 
 let tempDirs: string[] = [];
 let outboxes: MultiremiTaskReportOutbox[] = [];
 
 afterEach(async () => {
-  for (const outbox of outboxes) await outbox.close().catch(() => {});
-  outboxes = [];
-  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
-  tempDirs = [];
-  resetMultiremiTestEnv();
+  const closing = outboxes.splice(0);
+  const directories = tempDirs.splice(0);
+  try {
+    const results = await Promise.allSettled(closing.map(outbox => outbox.close()));
+    const errors = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+    if (errors.length) throw new AggregateError(errors, "outbox cleanup failed");
+    assertNoOpenFilesUnder(directories);
+    for (const dir of directories) rmSync(dir, { recursive: true, force: true });
+  } finally {
+    resetMultiremiTestEnv();
+  }
 });
 
 function tempPath(): string {
@@ -227,9 +234,10 @@ describe("MultiremiTaskReportOutbox", () => {
     // Hold the retry clock still so this tests enqueue bypass, not wall time.
     const now = Date.now();
     const clock = spyOn(Date, "now").mockReturnValue(now);
+    let outbox: MultiremiTaskReportOutbox | undefined;
     try {
       let attempts = 0;
-      const outbox = track(new MultiremiTaskReportOutbox({
+      outbox = track(new MultiremiTaskReportOutbox({
         path: ":memory:",
         backoffScheduleMs: [100],
         deliver: async () => {
@@ -248,7 +256,7 @@ describe("MultiremiTaskReportOutbox", () => {
       expect(attempts).toBe(1);
       expect(outbox.stats().pending).toBe(20);
     } finally {
-      clock.mockRestore();
+      try { await outbox?.close(); } finally { clock.mockRestore(); }
     }
   });
 
@@ -357,9 +365,10 @@ describe("MultiremiTaskReportOutbox", () => {
     first.enqueue("old-task", "usage", { usageSnapshot: { version: 2, runId: "accepted", revision: 1, complete: true, units: [] } });
     await first.close();
     const persisted = openSqliteDatabase(path);
-    persisted.run("UPDATE outbox_events SET status='blocked',last_error='authority_revoked'");
-    persisted.run("INSERT INTO outbox_meta(key,value) VALUES('blocked:old-task','authority_revoked'),('blocked-code:old-task','authority_revoked')");
-    persisted.close();
+    try {
+      persisted.run("UPDATE outbox_events SET status='blocked',last_error='authority_revoked'");
+      persisted.run("INSERT INTO outbox_meta(key,value) VALUES('blocked:old-task','authority_revoked'),('blocked-code:old-task','authority_revoked')");
+    } finally { persisted.close(true); }
     const sent: string[] = [];
     const second = track(new MultiremiTaskReportOutbox({ path, deliver: async record => { sent.push(record.kind); return { ok: true }; } }));
     expect(await second.waitForTaskDrain("old-task")).toBe("delivered");
@@ -399,9 +408,10 @@ describe("MultiremiTaskReportOutbox", () => {
     first.enqueue("task", "usage", { usageSnapshot: { version: 2, runId: "accepted", revision: 1, complete: true, units: [] } });
     await first.close();
     const persisted = openSqliteDatabase(path);
-    persisted.run("UPDATE outbox_events SET status='blocked'");
-    persisted.run("INSERT INTO outbox_meta(key,value) VALUES(?,?),(?,?)", ["blocked:task", revoked ? "POST /report returned 401: unauthorized" : "daemon RPC failed: invalid_report", "blocked-code:task", "invalid_report"]);
-    persisted.close();
+    try {
+      persisted.run("UPDATE outbox_events SET status='blocked'");
+      persisted.run("INSERT INTO outbox_meta(key,value) VALUES(?,?),(?,?)", ["blocked:task", revoked ? "POST /report returned 401: unauthorized" : "daemon RPC failed: invalid_report", "blocked-code:task", "invalid_report"]);
+    } finally { persisted.close(true); }
     const sent: string[] = [];
     const second = track(new MultiremiTaskReportOutbox({ path, deliver: async record => {
       sent.push(record.kind);
@@ -874,11 +884,14 @@ describe("MultiremiTaskReportOutbox", () => {
     const path = tempPath();
     const first = track(new MultiremiTaskReportOutbox({ path, canSend: () => false, deliver: async () => {} }));
     const db = openSqliteDatabase(path);
-    db.exec("CREATE TRIGGER crash_import BEFORE INSERT ON outbox_events WHEN NEW.kind = 'complete' BEGIN SELECT RAISE(ABORT, 'injected crash'); END");
-    expect(() => first.importLegacy(sourcePath, "runtime")).toThrow("injected crash");
-    expect(first.stats().pending).toBe(0);
-    expect(existsSync(sourcePath)).toBe(true);
-    db.exec("DROP TRIGGER crash_import"); db.close(); await first.close();
+    try {
+      db.exec("CREATE TRIGGER crash_import BEFORE INSERT ON outbox_events WHEN NEW.kind = 'complete' BEGIN SELECT RAISE(ABORT, 'injected crash'); END");
+      expect(() => first.importLegacy(sourcePath, "runtime")).toThrow("injected crash");
+      expect(first.stats().pending).toBe(0);
+      expect(existsSync(sourcePath)).toBe(true);
+      db.exec("DROP TRIGGER crash_import");
+    } finally { db.close(true); }
+    await first.close();
     const delivered: number[] = [];
     const second = track(new MultiremiTaskReportOutbox({ path, deliver: async record => { delivered.push(record.id); } }));
     second.importLegacy(sourcePath, "runtime");

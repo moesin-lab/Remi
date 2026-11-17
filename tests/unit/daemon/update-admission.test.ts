@@ -13,9 +13,18 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore, resetMultiremiTestEnv } from "../multiremi/helpers.js";
 import { reportFrame } from "../../fixtures/report-session.js";
 import { disabledSshMeshRuntime } from "../../helpers/ssh-mesh-isolation.js";
+import { assertNoOpenFilesUnder } from "../../helpers/open-file-handles.js";
 
 const cleanup: Array<() => void | Promise<void>> = [];
-afterEach(async () => { for (const f of cleanup.splice(0).reverse()) await f(); resetMultiremiTestEnv(); });
+afterEach(async () => {
+  const errors: unknown[] = [];
+  try {
+    for (const f of cleanup.splice(0).reverse()) {
+      try { await f(); } catch (error) { errors.push(error); }
+    }
+  } finally { resetMultiremiTestEnv(); }
+  if (errors.length) throw new AggregateError(errors, "admission fixture cleanup failed");
+});
 
 async function fixture(mode: "lost" | "lost-terminal" | "outage" | "reject") {
   const store = createLocalStore();
@@ -46,7 +55,10 @@ async function fixture(mode: "lost" | "lost-terminal" | "outage" | "reject") {
   } });
   cleanup.push(() => server.stop(true));
   const root = mkdtempSync(join(tmpdir(), "update-admission-"));
-  cleanup.push(() => rmSync(root, { recursive: true, force: true }));
+  cleanup.push(() => {
+    assertNoOpenFilesUnder([root]);
+    rmSync(root, { recursive: true, force: true });
+  });
   const client = new MultiremiDaemonClient(`http://127.0.0.1:${server.port}`, token.token, { requestTimeoutMs: 250 });
   const delivered: string[] = [];
   const updateStatuses: unknown[] = [];
@@ -220,14 +232,15 @@ for (const code of ["cli_update_not_admitted", "cli_update_not_runnable", "proto
   // Construct the exact disk state left by a pre-upgrade daemon, then close
   // SQLite before starting the upgraded outbox against the same file.
   const db = openSqliteDatabase(f.outboxPath);
-  const insert = db.query(`INSERT INTO outbox_events
-    (idempotency_key,task_id,kind,payload,seq,status,last_error,next_attempt_at,created_at)
-    VALUES (?, 'rt:rt', ?, ?, ?, 'blocked', 'legacy rejection', 9999999999999, ?)`);
-  insert.run("legacy-running", "runtime.update_result", JSON.stringify({ runtime_id: "rt", request_id: f.b.id, status: "running" }), 1, new Date().toISOString());
-  insert.run("legacy-command", "runtime.command_result", JSON.stringify({ runtime_id: "rt", request_id: command.id,
-    status: "completed", exit_code: 0, stdout: "recovered", stderr: "", duration_ms: 1 }), 2, new Date().toISOString());
-  db.run("INSERT INTO outbox_meta (key,value) VALUES (?,?),(?,?)", ["blocked:rt:rt", "legacy rejection", "blocked-code:rt:rt", code]);
-  db.close();
+  try {
+    const insert = db.query(`INSERT INTO outbox_events
+      (idempotency_key,task_id,kind,payload,seq,status,last_error,next_attempt_at,created_at)
+      VALUES (?, 'rt:rt', ?, ?, ?, 'blocked', 'legacy rejection', 9999999999999, ?)`);
+    insert.run("legacy-running", "runtime.update_result", JSON.stringify({ runtime_id: "rt", request_id: f.b.id, status: "running" }), 1, new Date().toISOString());
+    insert.run("legacy-command", "runtime.command_result", JSON.stringify({ runtime_id: "rt", request_id: command.id,
+      status: "completed", exit_code: 0, stdout: "recovered", stderr: "", duration_ms: 1 }), 2, new Date().toISOString());
+    db.run("INSERT INTO outbox_meta (key,value) VALUES (?,?),(?,?)", ["blocked:rt:rt", "legacy rejection", "blocked-code:rt:rt", code]);
+  } finally { db.close(true); }
   const delivered: string[] = [];
   const recovered = new MultiremiTaskReportOutbox({ path: f.outboxPath, deliver: async record => {
     delivered.push(record.kind);
@@ -237,7 +250,7 @@ for (const code of ["cli_update_not_admitted", "cli_update_not_runnable", "proto
   } });
   cleanup.push(() => recovered.close());
   const inspect = openSqliteDatabase(f.outboxPath);
-  cleanup.push(() => inspect.close());
+  cleanup.push(() => inspect.close(true));
   const admission = code !== "protocol_violation";
   expect(inspect.query("SELECT status,last_error,next_attempt_at FROM outbox_events WHERE idempotency_key='legacy-command'").get())
     .toEqual(admission ? { status: "pending", last_error: null, next_attempt_at: null }

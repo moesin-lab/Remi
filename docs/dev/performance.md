@@ -178,6 +178,41 @@ bun run tests/manual/smoke-request-metrics.ts
 
 冒烟脚本默认用 0 ms 阈值和 5 s 汇总间隔以便一次跑完就同时看到两个事件；`MUL367_SMOKE_PORT` / `MUL367_SMOKE_SUMMARY_MS` 可覆盖。它只连 127.0.0.1 的临时实例和内存 SQLite，不读凭证、不碰生产。上线后需要真实基线数字时，按本文档开头「复现顺序与记录」的模板记录环境、并发和样本数，**不要**把本页的示例行情当作实测结论。
 
+## SQL 来源排行（MUL-85）
+
+`MULTIREMI_METRICS_DB_ROUTES=1` 在现有 `api_minute_summary` 中增加 `db_routes`，默认关闭。
+仓库所有者可通过 API 部署环境启用并重启 API，采集完成后撤销；没有新增业务接口或逐请求日志。
+此项复用已有请求缓冲区与 DB 计数，不增加 SQL。`routes` 仍按累计耗时排序；`db_routes`
+独立按 `db_queries`、`db_ms`、`sum_ms` 排序，防止高频短请求被耗时榜截掉。
+每项包含 method、路由模式、count、db_queries、queries_per_request、db_ms、sum_ms、p50_ms、p95_ms。
+`count × queries_per_request` 是该路由窗口内的 SQL 总数（均值保留两位小数）。
+前 N 项沿用 `MULTIREMI_METRICS_SUMMARY_TOP_N`，定位时至少为 10；保留 pid、role 和 window_ms。
+
+线上代采（由有宿主机权限的仓库所有者执行，按实际容器名替换）：
+
+```sh
+docker logs --since 5m multiremi-platform-app-api-1 2>&1 | grep -E '"event":"(api_minute_summary|ws_minute_summary|api_slow_request)"'
+```
+
+同时记录活跃 daemon/runtime/Agent/lane 数、浏览器标签数及采集 SHA。两版必须保持同等规模和
+请求节奏，比较每分钟进程 db_queries、event_loop_lag_max_ms、turns/inbox 的窗口 p50。
+采样总量超过缓冲容量时 `dropped>0`，路由归因仅覆盖保留样本；进程计数仍覆盖全窗口，不能
+把路由计数总和当作进程总量。请求跨窗时按完成时刻入样；异步派生工作也不能强行归为同窗 HTTP。
+SQLite 不经过 PG bridge，生产指标的 db_queries 在 SQLite 下不能代替驱动级 SQL 计数。
+
+Daemon RPC 使用实际帧 type（如 `turn.*`）和 direction 读取 `ws_minute_summary.types`；
+`db_queries/count` 是近似每方法成本。该旧指标用进程计数差分，异步并发可能重叠，不能与 HTTP
+归因相加或声称是精确互斥分解。心跳的排队下行与派活成本需通过完整 drain 的驱动级测试核对。
+
+隔离 HTTP 来源采样：`bun run test tests/manual/profile-api-load.test.ts`，输出 `MUL85_PROFILE` JSON。
+固定 8 Agent、60 Chat Session、1 Runtime、100 未读消息；12 个真实路由各预热一次、采样十次，
+按执行 SQL 总数排行，同时保留累计耗时、p50 和最频繁 SQL 模板。显式 PostgreSQL 失败不回落。
+该夹具没有运行 daemon，等频 HTTP 请求也不是生产流量；不能由它推出线上前三来源或每分钟负载。
+
+列表成本回归：`bun run test tests/unit/multiremi/first-screen-hotspots-inbox-attachments.test.ts`。
+MUL-85 用真实鉴权和 SQLite/显式 PostgreSQL 数据库，校验 turns/inbox 返回 1、10、50 条时
+SQL 数一致；本地夹具通过不代表已复现生产规模、PG 延迟或部署后性能改善。
+
 ## WebSocket 帧汇总：`ws_minute_summary`（MUL-417）
 
 daemon 的流量从 HTTP 轮询搬到协议 v2 的 socket 之后，它的 DB 时间不再落在任何 HTTP 路由上，

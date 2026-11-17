@@ -362,6 +362,7 @@ describe("MUL-367 request metrics — environment switches", () => {
       slowRequestMs: 500,
       summaryIntervalMs: 60_000,
       summaryTopRoutes: 10,
+      summaryDbRoutes: false,
       bufferCapacity: 4096,
       role: "all",
     });
@@ -461,6 +462,33 @@ describe("MUL-367 request metrics — window aggregation", () => {
     expect(summary.requests).toBe(3);
     expect(summary.db_queries).toBe(42);
     expect(summary.event_loop_lag_max_ms).toBe(12.3);
+  });
+
+  it("MUL-85 keeps SQL-heavy routes even when they fall outside the latency top N", () => {
+    const input = {
+      windowMs: 60_000, role: "all" as const, dropped: 0, dbMs: 500, dbQueries: 1000,
+      eventLoopLagMaxMs: 0, topRoutes: 10,
+      samples: [
+        ...Array.from({ length: 10 }, (_, i) => sample({ route: `/api/slow-${i}`, totalMs: 1000 })),
+        sample({ route: "/api/sql", totalMs: 2, dbQueries: 30, dbMs: 1 }),
+        sample({ route: "/api/sql", totalMs: 4, dbQueries: 10, dbMs: 2 }),
+        sample({ method: "POST", route: "/api/sql", totalMs: 1, dbQueries: 8 }),
+      ],
+    };
+    expect(summarizeWindow(input)).not.toHaveProperty("db_routes");
+    const summary = summarizeWindow({ ...input, summaryDbRoutes: true });
+    expect(summary.routes).toHaveLength(10);
+    expect(summary.routes.some(route => route.route === "/api/sql")).toBe(false);
+    expect(summary.db_routes).toHaveLength(10);
+    expect(summary.db_routes![0]).toEqual({ method: "GET", route: "/api/sql", count: 2,
+      db_queries: 40, queries_per_request: 20, db_ms: 3, sum_ms: 6, p50_ms: 2, p95_ms: 4 });
+    expect(summary.db_routes![1]).toMatchObject({ method: "POST", route: "/api/sql", count: 1, db_queries: 8 });
+    // Process total also includes daemon/background SQL; attribution never replaces it.
+    expect(summary.db_queries).toBe(1000);
+    expect(resolveRequestMetricsOptions("all", { MULTIREMI_METRICS_DB_ROUTES: "1" }).summaryDbRoutes).toBe(true);
+    for (const value of ["off", "", "  "]) {
+      expect(resolveRequestMetricsOptions("all", { MULTIREMI_METRICS_DB_ROUTES: value }).summaryDbRoutes).toBe(false);
+    }
   });
 
   it("computes db_busy_pct from process DB time over the window", () => {
@@ -588,6 +616,35 @@ describe("MUL-367 request metrics — minute summary timer", () => {
     ]);
 
     runtime!.stop();
+  });
+
+  it("MUL-85 emits the opt-in SQL ranking in the existing summary and drains each window", async () => {
+    const options = { ...OPTIONS, summaryDbRoutes: true };
+    const app = new Hono();
+    app.use("*", createRequestMetricsMiddleware(options));
+    app.get("/api/shares/:token", c => {
+      recordDbQuery(2, 512);
+      recordDbQuery(3, 128);
+      return c.json({ ok: true });
+    });
+    const runtime = startRequestMetricsSummary(options)!;
+    try {
+      const { lines } = await captureConsoleLog(async () => {
+        await app.request("/api/shares/secret-token?private=value");
+        runtime.flush();
+        runtime.flush();
+      });
+      expect(lines).toHaveLength(2);
+      const summaries = lines.map(line => JSON.parse(line));
+      expect(summaries[0].event).toBe("api_minute_summary");
+      expect(summaries[0].db_routes).toEqual([expect.objectContaining({
+        method: "GET", route: "/api/shares/:token", count: 1,
+        db_queries: 2, queries_per_request: 2, db_ms: 5,
+      })]);
+      expect(summaries[1].db_routes).toEqual([]);
+      expect(lines.join("\n")).not.toContain("secret-token");
+      expect(lines.join("\n")).not.toContain("private=value");
+    } finally { runtime.stop(); }
   });
 
   it("carries MUL-461's role and MUL-462's peer block in the same summary line", async () => {

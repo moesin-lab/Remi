@@ -344,5 +344,6 @@ it("requires a target-version hello and self-check; keeps rollback terminal", ()
   repo.claimRuntimeUpdateRequest("rt_upgrade");
   repo.reportRuntimeUpdateResult("rt_upgrade", rollback.id, { status: "restarting" });
   expect(repo.reportRuntimeUpdateResult("rt_upgrade", rollback.id, { status: "rolled_back", error: "startup crash" })).toMatchObject({ status: "rolled_back", error: "startup crash" });
-  expect(repo.reportRuntimeUpdateResult("rt_upgrade", rollback.id, { status: "running" }).status).toBe("rolled_back");
+  expect(() => repo.reportRuntimeUpdateResult("rt_upgrade", rollback.id, { status: "running" })).toThrow("no longer runnable");
+  expect(repo.getRuntimeUpdateRequest("rt_upgrade", rollback.id)?.status).toBe("rolled_back");
 });

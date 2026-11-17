@@ -410,7 +410,9 @@ class PgBridge {
 
   private request(msg: { init?: string; sql?: string; params?: unknown[]; timeoutMs?: number }): any {
     const cleanup = msg.sql !== undefined && TRANSACTION_CLEANUP.test(msg.sql);
-    if (msg.sql && Date.now() < this.unavailableUntil && !cleanup) {
+    // A healthy bridge has no cooldown to check. Avoid reading the wall clock
+    // for every SQL statement (including when fixtures pin a ticking clock).
+    if (msg.sql && this.unavailableUntil > 0 && Date.now() < this.unavailableUntil && !cleanup) {
       throw new DatabaseUnavailableError();
     }
     Atomics.store(this.ctl, 0, STATUS_PENDING);
@@ -502,7 +504,7 @@ class PgBridge {
     }
   }
 
-  get connectionUnavailable(): boolean { return Date.now() < this.unavailableUntil; }
+  get connectionUnavailable(): boolean { return this.unavailableUntil > 0 && Date.now() < this.unavailableUntil; }
 
   close(): void {
     this.worker.terminate();

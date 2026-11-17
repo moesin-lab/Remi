@@ -175,6 +175,8 @@ describe("MUL-473 runtimes list", () => {
         workspace_id: source.workspaceId,
         daemon_id: source.daemonId,
         daemon_display_name: source.daemonDisplayName,
+        cli_commit: null,
+        cli_commit_matches_platform: null,
         name: source.name,
         runtime_mode: source.runtimeMode,
         provider: source.provider,

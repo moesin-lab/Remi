@@ -162,6 +162,8 @@ async function getInboxSummary(
   harness: Harness,
   timezoneOffset: number,
 ): Promise<{ body: { unread: number; attention: number }; statements: number; bytes: number }> {
+  // Preserve the business budget independently of the readiness TTL.
+  harness.store.checkDatabaseReady(true);
   harness.probe.reset();
   const beforeBytes = readProcessDbCounters().dbBytes;
   const response = await harness.app.request("/api/inbox"+`?timezone_offset=${timezoneOffset}`, {
@@ -238,6 +240,7 @@ describe("MUL-85 list query budgets", () => {
       expect((await h.app.request(path, { headers: h.headers })).status).toBe(200);
       const measurements = [];
       for (const limit of [1, 10, 50]) {
+        h.store.checkDatabaseReady(true);
         h.probe.reset();
         const response = await h.app.request(`${path}?limit=${limit}`, { headers: h.headers });
         const page = await response.json();

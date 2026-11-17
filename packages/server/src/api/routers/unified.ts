@@ -116,11 +116,12 @@ export function registerUnifiedRoutes(app: Hono, deps: RouterDeps): void {
       if (unread && store.getAgent(unread)?.workspaceId !== conversation.workspaceId) throw new InputError("invalid unread_by");
       const thread = c.req.query("thread");
       if (thread && store.getMessage(thread)?.session_id !== conversation.id) throw new InputError("invalid thread");
-      const visible = delegated ? (message: UnifiedMessage) => canReadDelegationResult(c, store, message.id)
-        : conversationEntryVisibility(c, store), rows: UnifiedMessage[] = [];
+      const rows: UnifiedMessage[] = [];
       let from = after;
       for (;;) {
         const page = store.listMessages(conversation.id, { from, limit: n + 1, thread, unread_by: unread, message_kind: kind });
+        const visible = delegated ? (message: UnifiedMessage) => canReadDelegationResult(c, store, message.id)
+          : conversationEntryVisibility(c, store, { prefetch: page, chatSession: "chatSession" in conversation ? conversation.chatSession : undefined });
         rows.push(...page.filter(visible));
         if (page.length < n + 1 || rows.length > n) break;
         from = page.at(-1)!.seq;

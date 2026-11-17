@@ -196,10 +196,9 @@ export class DaemonTaskOffers {
   }
 
   kickWorkspace(workspaceId: string): void {
-    for (const session of this.options.layer.registry.listSessions()) {
-      for (const rt of session.runtimeIds) {
-        if ((this.options.store.getRuntimeLite(rt)?.workspaceId ?? "local") === workspaceId) this.kick(rt);
-      }
+    const ids = this.options.layer.registry.listSessions().flatMap(session => session.runtimeIds);
+    for (const runtime of this.options.store.getRuntimesLite(ids)) {
+      if ((runtime.workspaceId ?? "local") === workspaceId) this.kick(runtime.id);
     }
   }
 

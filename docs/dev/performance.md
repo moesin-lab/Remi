@@ -97,6 +97,19 @@ awaiting_human 状态覆盖及 unknown offer 保留的共享目录租约。索�
 扫描恢复派发时记 warn 和 `offer_sweep_recovered`，用于定位遗漏事件；测试环境默认禁用扫描。
 线上延迟与一小时稳定性仍需部署后测量。
 
+## Daemon 报告和消息接口的历史放大
+
+Daemon turn 输入范围直接批量读取消息；Chat retry ancestry 在 attempts 基表中一次回溯，
+历史消息的来源任务只批量读取 queue status。批量 task 水合对整个批次求 usage，
+workspace offer 扇出批量读取 Runtime 和 drain 围栏。会话 messages 的分页和 from/to 范围
+复用当前页的 related-message/source-subject 预取及原权限判定。
+
+workspace 报告只唤醒派活条件；飞书结果只刷新已验证 bot host 的 pending 队列。
+消息和终态事件刷新活跃任务、bot、后台 lane 与 drain host 的输入，配置和维护事件保留完整扇出。
+同步读取范围退出即关闭，后台异步工作重新读取。
+[预算和复现报告](../../reports/performance/MUL-182-daemon-report-queries.md)区分历史放大消除、
+终态仍有的固定 SQL 成本、隐藏页/Question 权限查询边界与未完成的 stable 现场验收。
+
 ## Issue 详情首屏的工作区读取
 
 Issue 详情首屏的三个只读 GET 路由（详情、Sessions、timeline）启用请求级读取缓存。

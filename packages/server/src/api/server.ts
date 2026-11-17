@@ -175,7 +175,7 @@ import { runtimeInputSnapshot } from "./daemon-protocol/runtime-input-snapshot.j
 import { wsFrameMetricsFromHttp } from "./daemon-protocol/metrics.js";
 import { registerDaemonReportHandlers, registerDaemonMaintenanceHandlers } from "./daemon-protocol/report-handlers.js";
 import type { DaemonProtocolSession } from "./daemon-protocol/session.js";
-import { withRequestReadCache } from "@multiremi/store/request-read-cache.js";
+import { withRequestReadCache, withSynchronousRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import { ScmPollingScheduler } from "@multiremi/scm/poller.js";
 import { IssueTitleScheduler } from "@multiremi/issue-title/poller.js";
 import { BodyHtmlBackfillTask } from "@multiremi/render/body-html-backfill.js";
@@ -1225,11 +1225,13 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       return deadlines.length ? Math.min(...deadlines) : null;
     },
     snapshot: function* (rt, session, activeIds, mode) {
-      store.reconcileDaemonDrain(rt);
-      yield* withRequestReadCache(() => taskInputSnapshot(store, rt, session.daemonId, activeIds,
-        id => downlinks.forgetTask(rt, id), daemonTurnBridge));
-      yield* withRequestReadCache(() => backgroundTaskSnapshot(store, rt, session));
-      yield* withRequestReadCache(() => runtimeInputSnapshot(store, rt, session, mode));
+      yield* withSynchronousRequestReadCache(() => {
+        store.reconcileDaemonDrain(rt);
+        return taskInputSnapshot(store, rt, session.daemonId, activeIds,
+          id => downlinks.forgetTask(rt, id), daemonTurnBridge);
+      });
+      yield* withSynchronousRequestReadCache(() => backgroundTaskSnapshot(store, rt, session));
+      yield* withSynchronousRequestReadCache(() => runtimeInputSnapshot(store, rt, session, mode));
     } });
   daemonProtocol.registerSessionHooks({ heartbeat: session => {
     // A fresh zero-inflight acknowledgement can make an update deliverable
@@ -1267,6 +1269,14 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   // the process's effective role and forwards to the peer. `all` (the default)
   // retains both browser and daemon delivery.
   const buildFanout = options.createRealtimeFanout ?? createRealtimeFanout;
+  const runtimeWorkspaceLookup = () => {
+    let workspaces: Map<string, string> | undefined;
+    return (id: string): string | null => {
+      workspaces ??= new Map(store.getRuntimesLite(daemonProtocol.registry.listSessions().flatMap(s => s.runtimeIds))
+        .map(runtime => [runtime.id, runtime.workspaceId ?? "local"]));
+      return workspaces.get(id) ?? store.getRuntimeLite(id)?.workspaceId ?? null;
+    };
+  };
   const realtimeFanout = buildFanout({
     role: effectiveApiRole,
     store,
@@ -1290,11 +1300,12 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       downlinks.taskChanged(task.runtimeId, task.id);
       if (["task:completed", "task:failed", "task:cancelled"].includes(type)) {
         offers.terminal(task.id, task.runtimeId);
-        downlinks.kickWorkspace(task.workspaceId, rt => store.getRuntimeLite(rt)?.workspaceId ?? "local");
+        for (const rt of store.daemonInputRuntimeIds(task.workspaceId)) downlinks.kick(rt, "pending");
       }
     },
     onDaemonWorkspaceEvent: event => wakeDaemonWorkspaceEvent(event, { downlinks, offers,
-      runtimeWorkspace: rt => store.getRuntimeLite(rt)?.workspaceId ?? null }),
+      pendingRuntimeIds: workspaceId => store.daemonInputRuntimeIds(workspaceId),
+      runtimeWorkspace: runtimeWorkspaceLookup() }),
   });
   const server = Bun.serve<MultiremiWebSocketData>({
     port,

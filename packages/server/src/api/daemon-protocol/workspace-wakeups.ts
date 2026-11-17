@@ -7,6 +7,7 @@ export function wakeDaemonWorkspaceEvent(event: PeerWorkspaceEvent, options: {
   downlinks: DaemonDownlinks;
   offers: DaemonTaskOffers;
   runtimeWorkspace(runtimeId: string): string | null;
+  pendingRuntimeIds?(workspaceId: string): readonly string[];
 }): void {
   // These notify browsers; neither changes a daemon's desired input or eligibility.
   // PR 6: the background-task registry's realtime event, like PR 5's
@@ -21,9 +22,12 @@ export function wakeDaemonWorkspaceEvent(event: PeerWorkspaceEvent, options: {
   const runtimeId = typeof id === "string" && id.length ? id : null;
   const workspace = runtimeId ? options.runtimeWorkspace(runtimeId) : null;
   if (workspace !== null && workspace !== event.workspaceId) return;
-  const downlink = (mode: "full" | "pending" = "full") => runtimeId
-    ? options.downlinks.kick(runtimeId, mode)
-    : options.downlinks.kickWorkspace(event.workspaceId, rt => options.runtimeWorkspace(rt) ?? "local", mode);
+  const downlink = (mode: "full" | "pending" = "full") => {
+    if (runtimeId) options.downlinks.kick(runtimeId, mode);
+    else if (mode === "pending" && options.pendingRuntimeIds) {
+      for (const id of options.pendingRuntimeIds(event.workspaceId)) options.downlinks.kick(id, mode);
+    } else options.downlinks.kickWorkspace(event.workspaceId, rt => options.runtimeWorkspace(rt) ?? "local", mode);
+  };
   const offer = () => runtimeId
     ? options.offers.kick(runtimeId)
     : options.offers.kickWorkspace(event.workspaceId);
@@ -34,6 +38,10 @@ export function wakeDaemonWorkspaceEvent(event: PeerWorkspaceEvent, options: {
       // They can be different machines; retain the workspace scope for this multi-recipient input.
       options.downlinks.kickWorkspace(event.workspaceId, rt => options.runtimeWorkspace(rt) ?? "local", "pending");
       return;
+    case "inbox:new":
+    case "comment:created":
+    case "comment:updated":
+    case "comment:deleted":
     case "message:created":
     case "message:updated":
     case "decision:created":
@@ -46,12 +54,14 @@ export function wakeDaemonWorkspaceEvent(event: PeerWorkspaceEvent, options: {
       return;
     case "daemon:pending_changed":
     case "daemon:feishu_changed":
+      if (event.payload.pending_only === true) { downlink("pending"); return; }
     case "daemon:ssh_mesh_changed":
       // Pending commands, bot delivery and mesh configuration do not create task capacity.
       downlink();
       return;
     case "daemon:models_updated":
     case "daemon:dispatch_conditions_changed":
+      if (event.payload.dispatch_only === true) { offer(); return; }
     case "agent_plugin:runtime_state":
     case "agent_plugin:runtime_capability":
       downlink();

@@ -84,3 +84,69 @@ for (const kind of ["nested transaction", "optional savepoint"] as const) {
     } finally { await database.close(); }
   });
 }
+
+for (const cleanup of ["ROLLBACK", "ROLLBACK TO SAVEPOINT probe", "RELEASE SAVEPOINT probe"]) {
+  pgTest(`hung ${cleanup} drops the backend and permits independent takeover`, async () => {
+    const database = await openIntegrationDatabase();
+    const observer = new PostgresSyncDatabase(database.url!);
+    const proxy = new Worker(new URL("../fixtures/pg-cleanup-lock-proxy.ts", import.meta.url).href);
+    let injected = false;
+    let db: PostgresSyncDatabase | undefined;
+    const lock = 168103;
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        proxy.onerror = reject;
+        proxy.onmessage = ({ data }) => {
+          if (data.port) resolve(data.port);
+          if (data.injected) injected = true;
+        };
+        proxy.postMessage({ url: database.url, cleanup: cleanup.toUpperCase(), lock });
+      });
+      const url = new URL(database.url!);
+      url.port = String(port);
+      url.searchParams.set("sslmode", "disable");
+      db = new PostgresSyncDatabase(url.toString());
+      db.exec("CREATE TABLE deadline_probe (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)");
+      db.run("INSERT INTO deadline_probe VALUES (1, 0)");
+      const pid = Number(db.query("SELECT pg_backend_pid() AS pid").get().pid);
+      // Keep the blocker held through every assertion: the injected query can
+      // never finish naturally, unlike pg_sleep. The old backend owns a role
+      // lock and a partial write while it waits for this independent observer.
+      observer.query("SELECT pg_advisory_lock(?)").get(lock);
+      expect(db.query("SELECT pg_try_advisory_lock(hashtext('remi:hub:runtime')) AS locked").get().locked).toBe(true);
+      db.exec("BEGIN");
+      db.exec("SAVEPOINT probe");
+      db.run("UPDATE deadline_probe SET value = 1 WHERE id = 1");
+      const started = performance.now();
+      await expect(withDatabaseDeadline(performance.now() - 1, () => db!.exec(cleanup))).rejects.toThrow("Database temporarily unavailable");
+      const elapsed = performance.now() - started;
+      expect(elapsed).toBeGreaterThan(4_500);
+      expect(elapsed).toBeLessThan(6_000); // 5s budget plus scheduling tolerance
+      await Bun.sleep(20); // deliver the proxy's injection notification
+      expect(injected).toBe(true);
+      expect(observer.query("SELECT state FROM pg_stat_activity WHERE pid = ?").get(pid)).toBeNull();
+      expect(observer.query("SELECT COUNT(*)::int AS n FROM pg_locks WHERE pid = ?").get(pid).n).toBe(0);
+      expect(observer.query("SELECT value FROM deadline_probe WHERE id = 1").get().value).toBe(0);
+      if (cleanup !== "ROLLBACK") db.exec("ROLLBACK"); // clear the lost-transaction flag
+      await Bun.sleep(1_050); // normal outage cooldown, no SQL to hide a leak
+      expect(db.query("SELECT 42 AS ok").get().ok).toBe(42);
+      const successor = Bun.spawn([process.execPath, "--no-env-file", "-e", `
+        import { PostgresSyncDatabase } from './packages/server/src/store/db/postgres.ts';
+        const db = new PostgresSyncDatabase(process.env.DEADLINE_TEST_DATABASE_URL);
+        try {
+          db.exec("SET lock_timeout = '500ms'");
+          if (!db.query("SELECT pg_try_advisory_lock(hashtext('remi:hub:runtime')) AS locked").get().locked) throw Error('role lock retained');
+          db.run('UPDATE deadline_probe SET value = 2 WHERE id = 1');
+          console.log('takeover-ok');
+        } finally { db.close(); }
+      `], { env: { ...process.env, DEADLINE_TEST_DATABASE_URL: database.url! }, stdout: "pipe", stderr: "pipe" });
+      const [code, stdout, stderr] = await Promise.all([
+        successor.exited, new Response(successor.stdout).text(), new Response(successor.stderr).text(),
+      ]);
+      expect(code, stderr).toBe(0);
+      expect(stdout).toContain("takeover-ok");
+    } finally {
+      db?.close(); proxy.terminate(); observer.close(); await database.close();
+    }
+  }, 15_000);
+}

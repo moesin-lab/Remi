@@ -415,9 +415,10 @@ class PgBridge {
     if (msg.sql && this.unavailableUntil > 0 && Date.now() < this.unavailableUntil && !cleanup) {
       throw new DatabaseUnavailableError();
     }
+    const timeoutMs = databaseTimeoutMs({ cleanup });
     Atomics.store(this.ctl, 0, STATUS_PENDING);
     try {
-      this.worker.postMessage({ control: this.control, data: this.data, timeoutMs: databaseTimeoutMs({ cleanup }), ...msg });
+      this.worker.postMessage({ control: this.control, data: this.data, timeoutMs, ...msg });
     } catch (error) {
       throw new PgBridgeFailure(`postgres bridge send failed: ${String(error)}`, false);
     }

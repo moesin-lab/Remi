@@ -99,6 +99,9 @@ contract 的 release 必须晚于其 expandRelease，也必须晚于库中该 le
 现代 `dataSchema` 对 `{format, expandLevel, contractLevel}` 的规范 JSON 计算哈希，
 源码排版/重构和 reader 区间改变不会改变 schema 指纹；旧发布归档仍用原算法验真。
 声明损坏失败，不能用源码哈希代替现代 level。打包继续核对镜像和解包归档。
+updater 的 bootstrap 通过构建时 macro 嵌入 fingerprint 源码，避免 Bun 为同一模块的
+源码嵌入与可执行导入复用 text loader；资源内容和 control hash 顺序保持一致。
+application-driver 回归同时检查隔离 bootstrap 加载及真实 updater 入口的打包。
 
 [prepare-schema-rollback.ts](../../scripts/prepare-schema-rollback.ts) 从 GitHub 已发布的稳定平台
 Release 解析上一版，建立独立 worktree；[check-schema-rollback.ts](../../scripts/check-schema-rollback.ts)

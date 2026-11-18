@@ -229,8 +229,9 @@ it("retains a suspended checkpoint across a real SQLite close/open and serialize
     store.claimTask(scope.runtimeId); store.startTask(task.id);
     store.beginDaemonDrain(scope.workspaceId, scope.daemonId);
     const h = store.plannedRestarts().request(task.id, scope);
+    const savedInput = db.query("SELECT input_ack_seq FROM multiremi_turn_attempts WHERE id=?").get(task.id) as { input_ack_seq: number | null };
     const checkpoint: PlannedRestartCheckpoint = { version: 1, session_id: null, work_dir: null,
-      trace_head: 42, input_ack_seq: Number(db.query("SELECT input_ack_seq FROM multiremi_turn_attempts WHERE id=?").get(task.id).input_ack_seq ?? 0), delivered_message_ids: [] };
+      trace_head: 42, input_ack_seq: Number(savedInput.input_ack_seq ?? 0), delivered_message_ids: [] };
     store.plannedRestarts().suspend(task.id, h.handoff_id, 0, checkpoint, scope);
     db.close();
     db = openSqliteDatabase(path);

@@ -537,6 +537,12 @@ jobs:
               .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at));
             if (!stable.length) throw new Error('No stable CLI release available for N-1 smoke');
             core.setOutput('tag', stable[0].tag_name);
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
       - name: Prepare release checkout and dependencies
         env:
           PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}

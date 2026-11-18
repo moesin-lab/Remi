@@ -1245,7 +1245,8 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       yield* withSynchronousRequestReadCache(() => {
         store.reconcileDaemonDrain(rt);
         return taskInputSnapshot(store, rt, session.daemonId, activeIds,
-          id => downlinks.forgetTask(rt, id), daemonTurnBridge);
+          id => downlinks.forgetTask(rt, id), daemonTurnBridge)
+          .filter(entity => entity.type !== "turn.restart" || session.supportsPlannedRestart);
       });
       yield* withSynchronousRequestReadCache(() => backgroundTaskSnapshot(store, rt, session));
       yield* withSynchronousRequestReadCache(() => runtimeInputSnapshot(store, rt, session, mode));

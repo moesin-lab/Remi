@@ -169,13 +169,13 @@ for (const unresponsive of ["cancel", "close"] as const) test(`planned restart b
 }, 20_000);
 
 
-test("old capability fixture cancels through the real socket and admits CLI update after the deadline", async () => {
+for (const httpProbe of [false, true]) test(`${httpProbe ? "version 1 HTTP probe without named capability" : "old capability fixture"} cancels through the real socket and admits CLI update after the deadline`, async () => {
   let entered = false;
   const h = await DaemonProtocolHarness.create({
     onReady: daemon => {
       (daemon.daemonProtocolClient() as any).extraCaps.delete("turn.restart");
       const capabilities = (daemon as any).runtimeCapabilities.bind(daemon);
-      (daemon as any).runtimeCapabilities = () => {
+      if (!httpProbe) (daemon as any).runtimeCapabilities = () => {
         const { planned_restart: _unsupported, ...legacy } = capabilities();
         return legacy;
       };
@@ -199,9 +199,19 @@ test("old capability fixture cancels through the real socket and admits CLI upda
     const runtimeId = runtime.id, daemonId = runtime.daemonId!;
     expect(h.store.getRuntimeLite(runtimeId)?.metadata.planned_restart).toBe(0);
     // A legacy reconnect must clear previously stored support too.
-    h.store.heartbeatRuntime(runtimeId, { claimPending: false, plannedRestartProtocol: 1 });
+    h.store.heartbeatRuntime(runtimeId, { claimPending: false, plannedRestartNegotiated: true, plannedRestartProtocol: 1 });
     await h.disconnect(); await h.reconnect(); await h.settleHeartbeat();
     expect(h.store.getRuntimeLite(runtimeId)?.metadata.planned_restart).toBe(0);
+    expect(h.store.getRuntimeLite(runtimeId)?.metadata.planned_restart_negotiated).toBe(false);
+    if (httpProbe) {
+      expect((h.daemon as any).runtimeCapabilities().planned_restart).toBe(1);
+      // The upgrade probe uses HTTP while the current socket lacks the handler.
+      const response = await fetch(`${h.url}/api/daemon/heartbeat`, { method: "POST",
+        headers: { Authorization: "Bearer fixture-master", "Content-Type": "application/json" },
+        body: JSON.stringify({ runtime_id: runtimeId, planned_restart: 1 }) });
+      expect(response.status).toBe(200);
+      expect(h.store.getRuntimeLite(runtimeId)?.metadata.planned_restart).toBe(0);
+    }
     const agent = h.store.createAgent({ name: "Legacy capability", provider: "claude", runtimeId });
     const issue = createResponsibleTestIssue(h.store, { title: "Legacy update", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
     const task = h.store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Legacy long work", maxAttempts: 3 });
@@ -212,6 +222,7 @@ test("old capability fixture cancels through the real socket and admits CLI upda
     (h.daemon as any).claimsPaused = true;
     const began = performance.now();
     await Bun.sleep(110); h.store.reconcileDaemonDrain(runtimeId);
+    h.store.reconcileDaemonDrain(runtimeId);
     await waitFor(() => (h.daemon as any).activeTaskCount === 0, "legacy cancellation reaches provider", 5_000);
     await h.settleHeartbeat();
     expect(h.store.plannedRestarts().get(task.id)).toBeNull();
@@ -219,7 +230,7 @@ test("old capability fixture cancels through the real socket and admits CLI upda
     expect(h.received.some(frame => frame.t === "task.cancelled")).toBe(true);
     expect(h.store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery", attempt: 1 });
     expect(h.store.listTasksForIssue(issue.id).some(retry => retry.attempt === 2 && retry.status === "queued")).toBe(true);
-    expect(h.store.getDaemonDrainStatus("local", daemonId)).toMatchObject({ remaining_tasks: 0, awaiting_daemon_ack: false });
+    expect(h.store.getDaemonDrainStatus("local", daemonId)).toMatchObject({ status: "drained_forced", remaining_tasks: 0, awaiting_daemon_ack: false });
     const update = h.store.createRuntimeUpdateRequest(runtimeId, { scope: "cli", targetVersion: "0.2.96" });
     expect(h.store.claimRuntimeUpdateRequest(runtimeId)?.id).toBe(update.id);
     h.store.reportRuntimeUpdateResult(runtimeId, update.id, { status: "restarting" });

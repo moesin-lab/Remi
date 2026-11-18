@@ -1298,6 +1298,10 @@ hello / welcome 协商命名能力 `turn.restart`，且
 `hello.runtimes[].capabilities.planned_restart` 与心跳能力中的 `planned_restart: 1`
 表示 daemon 已实现 `turn.restart`、磁盘 journal 与同 attempt 恢复协议。缺失或未知版本按不支持处理，
 每次 socket hello/heartbeat 均覆盖旧能力，防止降级后遗留支持标记。
+服务端分别保存命名能力协商结果 `planned_restart_negotiated` 与有效协议版本
+`planned_restart`，只有两者同时满足才创建 checkpoint 或下发 `turn.restart`；
+下发时还检查当前 socket 的协商结果。HTTP heartbeat（包括升级探针）只能保留支持或降为 0，
+不能把 0 提升为 1；缺字段或未知版本撤销支持，必须由 socket hello/heartbeat 重新协商才能恢复。
 manual、deploy、CLI update 的 drain 到期时，只有支持的 runtime 请求安全点 checkpoint；
 旧 daemon 回退到 MUL-45 的中断与自动重试，消耗原有重试预算，不创建 requested checkpoint。
 更新仍等待旧进程的零活跃 ACK，再进入安装；不会因无法确认新帧而永久停留在 requested。

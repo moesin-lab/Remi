@@ -89,7 +89,7 @@ daemon 上的四类东西：
 | 项 | 规则 |
 |---|---|
 | 什么算结束 | Issue：done / completed / closed / cancelled，或服务端应答 `moved`（已迁到别的工作区，只告诉执行过它的 daemon）。Chat：被归档；不活跃超过 `chat_idle_days`（默认 14 天）自动归档；归档的 Chat 收到新消息自动恢复活跃。自动化开的 Chat：运行结束且被标记为安静时自动归档 |
-| 什么时候回收 | 结束后超过 `ttl_ms`（默认 72 小时；自动化开的 Chat 用 `automation_ttl_ms`，默认 24 小时）；或已结束且仍占用工作区的主体超过 `max_retained`（默认 50）时淘汰最久未用的 |
+| 什么时候回收 | 结束后超过 `ttl_ms`（默认 24 小时；自动化开的 Chat 用 `automation_ttl_ms`，默认 24 小时）；或已结束且仍占用工作区的主体超过 `max_retained`（默认 20）时淘汰最久未用的 |
 | 不回收 | 有正在跑的执行；Chat 被置顶；Issue 未结束；用户注册的本地目录（只清运行环境） |
 | 旧一代运行环境 | 同一会话线下低于最高代的目录，修改时间超过 `ttl_ms` 后按回收规则清理，不等主体结束；这一代里（私有 `work/`、provider home、插件运行目录）有无法保存的未保存工作时保留这一代 |
 | 执行私有临时目录 | 执行结束立即删；每轮删除不在运行的执行留下的残留 |
@@ -182,9 +182,9 @@ GC 只读 `registry/`，不遍历目录树。磁盘占用（`du`）不在回收�
 
 | 键 | 环境变量覆盖 | 默认 |
 |---|---|---|
-| `ttl_ms` | `MULTIREMI_GC_TTL_MS` | 72 小时 |
+| `ttl_ms` | `MULTIREMI_GC_TTL_MS` | 24 小时 |
 | `automation_ttl_ms` | `MULTIREMI_GC_AUTOMATION_TTL_MS` | 24 小时 |
-| `max_retained` | `MULTIREMI_GC_MAX_RETAINED` | 50（0 为不限） |
+| `max_retained` | `MULTIREMI_GC_MAX_RETAINED` | 20（0 为不限） |
 | `orphan_ttl_ms` | `MULTIREMI_GC_ORPHAN_TTL_MS` | 72 小时 |
 | `snapshot_max_bytes` | `MULTIREMI_GC_SNAPSHOT_MAX_BYTES` | 256 MB |
 | `chat_idle_days` | — | 14（0 为不自动归档） |

@@ -99,6 +99,15 @@ beforeEach(() => {
 });
 
 describe("DaemonStorageCard", () => {
+  it("warns about critical disk space with thresholds and paused claims", () => {
+    renderCard(<DaemonStorageCard daemon={makeDaemon({ report: makeReport({ disk: {
+      free_bytes: 1024 ** 3, total_bytes: 100 * 1024 ** 3, level: "critical", measured_at: new Date().toISOString(),
+      thresholds: { pressure_free_percent: 15, pressure_free_bytes: 20 * 1024 ** 3, critical_free_percent: 5, critical_free_bytes: 5 * 1024 ** 3 },
+    } }) })} canManage />);
+    expect(screen.getByRole("alert")).toHaveTextContent("Disk critical");
+    expect(screen.getByRole("alert")).toHaveTextContent("Claims paused");
+    expect(screen.getByRole("alert")).toHaveTextContent("Pressure: 15%");
+  });
   it("summarises disk usage, subjects, retention reasons and the last round", () => {
     renderCard(<DaemonStorageCard daemon={makeDaemon()} canManage />);
 

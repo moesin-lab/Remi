@@ -18,12 +18,12 @@ function record(subject: StorageSubjectRef, usedAgoMs: number): SubjectRecord {
 const known = (reply: ReclaimCheckReply): SubjectProbe => ({ kind: "known", reply });
 const ago = (ms: number) => new Date(NOW - ms).toISOString();
 
-function classify(subject: StorageSubjectRef, probe: SubjectProbe, options: { usedAgoMs?: number; running?: boolean } = {}) {
+function classify(subject: StorageSubjectRef, probe: SubjectProbe, options: { usedAgoMs?: number; running?: boolean; policy?: typeof policy } = {}) {
   return classifySubject({
     record: record(subject, options.usedAgoMs ?? 200 * HOUR),
     probe,
     running: options.running ?? false,
-    policy,
+    policy: options.policy ?? policy,
     now: NOW,
   });
 }
@@ -64,7 +64,7 @@ describe("classifySubject", () => {
     });
 
     test("is kept while its last use is within the TTL", () => {
-      expect(classify(issue, moved, { usedAgoMs: 71 * HOUR })).toEqual({
+      expect(classify(issue, moved, { usedAgoMs: 23 * HOUR })).toEqual({
         outcome: { action: "keep", reason: "within_ttl" }, ended: true,
       });
     });
@@ -139,13 +139,13 @@ describe("classifySubject", () => {
         .toEqual({ outcome: { action: "keep", reason: "pinned" }, ended: false });
     });
 
-    test("a Chat opened by an automation run uses the shorter TTL", () => {
+    test("a Chat opened by an automation run uses its own TTL", () => {
       const reply = (origin: ReclaimCheckReply["origin"]): ReclaimCheckReply => ({
         status: "archived", updated_at: ago(30 * HOUR), pinned: false, origin,
       });
       expect(classify(chat, known(reply({ autopilot_id: "ap_1", run_id: "run_1" }))).outcome)
         .toEqual({ action: "reclaim", reason: "ended_ttl" });
-      expect(classify(chat, known(reply(null))).outcome).toEqual({ action: "keep", reason: "within_ttl" });
+      expect(classify(chat, known(reply(null)), { policy: { ...policy, ttl_ms: 72 * HOUR } }).outcome).toEqual({ action: "keep", reason: "within_ttl" });
     });
 
     test("activity after archiving counts as use", () => {

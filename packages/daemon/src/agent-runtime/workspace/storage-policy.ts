@@ -15,6 +15,10 @@ import {
 
 const ENV_OVERRIDES: Partial<Record<keyof StorageSettings, string>> = {
   ttl_ms: "MULTIREMI_GC_TTL_MS",
+  pressure_free_percent: "MULTIREMI_GC_PRESSURE_FREE_PERCENT",
+  pressure_free_bytes: "MULTIREMI_GC_PRESSURE_FREE_BYTES",
+  critical_free_percent: "MULTIREMI_GC_CRITICAL_FREE_PERCENT",
+  critical_free_bytes: "MULTIREMI_GC_CRITICAL_FREE_BYTES",
   automation_ttl_ms: "MULTIREMI_GC_AUTOMATION_TTL_MS",
   max_retained: "MULTIREMI_GC_MAX_RETAINED",
   orphan_ttl_ms: "MULTIREMI_GC_ORPHAN_TTL_MS",

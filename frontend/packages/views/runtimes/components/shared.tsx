@@ -30,6 +30,7 @@ export function ProviderChip({ provider }: { provider: string }) {
 // Maps each derived 4-state runtime health to a semantic colour class.
 // Labels flow through useT — see useHealthLabel below.
 const HEALTH_VISUAL: Record<RuntimeHealth, { dot: string; tone: string }> = {
+  degraded: { dot: "bg-warning", tone: "bg-warning/10 text-warning" },
   online: { dot: "bg-success", tone: "bg-success/10 text-success" },
   recently_lost: { dot: "bg-warning", tone: "bg-warning/10 text-warning" },
   offline: { dot: "bg-muted-foreground/40", tone: "bg-muted text-muted-foreground" },
@@ -70,6 +71,7 @@ const HEALTH_ICON: Record<
   RuntimeHealth,
   { Icon: typeof Wifi; tone: string }
 > = {
+  degraded: { Icon: WifiHigh, tone: "text-warning" },
   online: { Icon: Wifi, tone: "text-success" },
   recently_lost: { Icon: WifiHigh, tone: "text-warning" },
   offline: { Icon: WifiOff, tone: "text-muted-foreground" },
@@ -94,6 +96,7 @@ export function HealthIcon({
 // (e.g. column factory builders). Translated call sites should use the
 // `useHealthLabel` hook below instead.
 const HEALTH_LABEL_EN: Record<RuntimeHealth, string> = {
+  degraded: "Degraded",
   online: "Online",
   recently_lost: "Recently lost",
   offline: "Offline",

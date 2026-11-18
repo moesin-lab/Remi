@@ -27,7 +27,7 @@ export function normalizeDaemonTurnOffer(payload: Record<string, unknown>): Daem
   return task as DaemonTurnTask;
 }
 
-export type OfferRejection = "capacity" | "claims_paused" | "draining" | "binary_skill_files_unsupported";
+export type OfferRejection = "disk_critical" | "capacity" | "claims_paused" | "draining" | "binary_skill_files_unsupported";
 
 export function registerDaemonOfferHandler(client: DaemonProtocolClient, options: {
   runtimeId(): string | null;

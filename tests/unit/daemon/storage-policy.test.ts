@@ -69,3 +69,11 @@ describe("resolveStorageMachineOptions", () => {
       .toMatchObject({ intervalMs: 0, legacyKeepDays: 0 });
   });
 });
+
+test("machine disk thresholds override workspace values, including disabled conditions", () => {
+  const policy = resolveStoragePolicy({ storage: { pressure_free_percent: 25 } }, {
+    MULTIREMI_GC_PRESSURE_FREE_PERCENT: "30", MULTIREMI_GC_CRITICAL_FREE_PERCENT: "0",
+    MULTIREMI_GC_PRESSURE_FREE_BYTES: "100000000000", MULTIREMI_GC_CRITICAL_FREE_BYTES: "0",
+  });
+  expect(policy).toMatchObject({ pressure_free_percent: 30, critical_free_percent: 0, pressure_free_bytes: 100000000000, critical_free_bytes: 0 });
+});

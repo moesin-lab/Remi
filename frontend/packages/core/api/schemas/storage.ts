@@ -18,6 +18,10 @@ export const StorageReportSchema = z.object({
   generated_at: z.string(),
   mode: z.string(),
   root: z.string().default(""),
+  disk: z.object({
+    free_bytes: z.number(), total_bytes: z.number(), level: z.enum(["ok", "pressure", "critical"]), measured_at: z.string(),
+    thresholds: z.object({ pressure_free_percent: z.number(), pressure_free_bytes: z.number(), critical_free_percent: z.number(), critical_free_bytes: z.number() }).optional(),
+  }).optional(),
   bytes: z.object({
     work: z.number(),
     env: z.number(),
@@ -50,6 +54,11 @@ const StorageSettingsOverridesSchema = z.object({
   orphan_ttl_ms: z.number().optional(),
   snapshot_max_bytes: z.number().optional(),
   chat_idle_days: z.number().optional(),
+  pressure_free_percent: z.number().optional(),
+  pressure_free_bytes: z.number().optional(),
+  critical_free_percent: z.number().optional(),
+  critical_free_bytes: z.number().optional(),
+
 }).loose();
 
 export const WorkspaceStorageResponseSchema = z.object({
@@ -60,6 +69,11 @@ export const WorkspaceStorageResponseSchema = z.object({
     orphan_ttl_ms: z.number(),
     snapshot_max_bytes: z.number(),
     chat_idle_days: z.number(),
+    pressure_free_percent: z.number().default(15),
+    pressure_free_bytes: z.number().default(21474836480),
+    critical_free_percent: z.number().default(5),
+    critical_free_bytes: z.number().default(5368709120),
+
   }).loose(),
   overrides: StorageSettingsOverridesSchema.default({}),
 }).loose();

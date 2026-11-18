@@ -13,12 +13,14 @@ const DAY_MS = 24 * HOUR_MS;
 describe("storage settings defaults", () => {
   it("pins the ADR 0018 defaults and bounds", () => {
     expect(STORAGE_SETTINGS_DEFAULTS).toEqual({
-      ttl_ms: 72 * HOUR_MS,
+      ttl_ms: 24 * HOUR_MS,
       automation_ttl_ms: 24 * HOUR_MS,
-      max_retained: 50,
+      max_retained: 20,
       orphan_ttl_ms: 72 * HOUR_MS,
       snapshot_max_bytes: 256 * 1024 * 1024,
       chat_idle_days: 14,
+      pressure_free_percent: 15, pressure_free_bytes: 20 * 1024 ** 3,
+      critical_free_percent: 5, critical_free_bytes: 5 * 1024 ** 3,
     });
     expect(STORAGE_SETTINGS_BOUNDS).toEqual({
       ttl_ms: { min: HOUR_MS, max: 365 * DAY_MS },
@@ -27,6 +29,8 @@ describe("storage settings defaults", () => {
       orphan_ttl_ms: { min: HOUR_MS, max: 365 * DAY_MS },
       snapshot_max_bytes: { min: 1024 * 1024, max: 10 * 1024 * 1024 * 1024 },
       chat_idle_days: { min: 0, max: 3650 },
+      pressure_free_percent: { min: 0, max: 100 }, critical_free_percent: { min: 0, max: 100 },
+      pressure_free_bytes: { min: 0, max: Number.MAX_SAFE_INTEGER }, critical_free_bytes: { min: 0, max: Number.MAX_SAFE_INTEGER },
     });
   });
 
@@ -50,7 +54,7 @@ describe("resolveStorageSettings", () => {
   it("returns a copy so callers cannot mutate the defaults", () => {
     const resolved = resolveStorageSettings({});
     resolved.ttl_ms = 1;
-    expect(STORAGE_SETTINGS_DEFAULTS.ttl_ms).toBe(72 * HOUR_MS);
+    expect(STORAGE_SETTINGS_DEFAULTS.ttl_ms).toBe(24 * HOUR_MS);
   });
 
   it("merges valid keys over the defaults and ignores unknown keys", () => {

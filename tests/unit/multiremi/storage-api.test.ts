@@ -43,6 +43,26 @@ async function fixture() {
 }
 
 describe("workspace storage policy", () => {
+  it("validates critical against the merged pressure settings, including resets", async () => {
+    const { request, workspace } = await fixture();
+    const path = `/api/workspaces/${workspace.id}/storage`;
+    expect((await request("admin", "PUT", path, { critical_free_percent: 99 })).status).toBe(400);
+    expect((await request("admin", "PUT", path, { pressure_free_percent: 100, critical_free_percent: 99 })).status).toBe(200);
+    expect((await request("admin", "PUT", path, { pressure_free_percent: null })).status).toBe(400);
+    expect((await request("admin", "PUT", path, { pressure_free_bytes: 0 })).status).toBe(400);
+    expect((await request("admin", "PUT", path, { pressure_free_bytes: 0, critical_free_bytes: 0 })).status).toBe(200);
+  });
+  it("persists heartbeat health orthogonally to online status and exposes it through runtime APIs", async () => {
+    const { store, request, workspace } = await fixture();
+    const runtime = store.registerRuntime({ workspaceId: workspace.id, name: "disk-test", provider: "codex", daemonId: "disk-test" });
+    const health = { state: "degraded" as const, reasons: [{ code: "disk_critical" as const, detail: { path: "/tmp/workspaces", free_bytes: 1, total_bytes: 100 } }] };
+    store.heartbeatRuntime(runtime.id, { claimPending: false, health });
+    expect(store.getRuntime(runtime.id)?.metadata.health).toEqual(health);
+    const response = await request("admin", "GET", `/api/runtimes/${runtime.id}`);
+    expect(JSON.stringify(await response.json())).toContain("disk_critical");
+    store.heartbeatRuntime(runtime.id, { claimPending: false, health: { state: "ok", reasons: [] } });
+    expect(store.getRuntime(runtime.id)?.metadata.health).toEqual({ state: "ok", reasons: [] });
+  });
   it("serves defaults, stores overrides under settings.storage and resets them with null", async () => {
     const { store, workspace, request } = await fixture();
     const path = `/api/workspaces/${workspace.id}/storage`;

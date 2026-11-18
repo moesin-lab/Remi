@@ -241,6 +241,10 @@
     "about_to_gc": {
       "label": "まもなく削除",
       "description": "6 日以上オフラインです。再接続しない限り、7 日目に自動削除されます。"
+    },
+    "degraded": {
+      "label": "Degraded",
+      "description": "Disk space critical; new offers are refused."
     }
   },
   "detail": {
@@ -847,13 +851,15 @@
       "error": "エラー",
       "ended_ttl": "保持期間超過",
       "over_cap": "保持数の上限超過",
-      "orphan": "サーバーで削除済み"
+      "orphan": "サーバーで削除済み",
+      "pressure": "Disk pressure"
     },
     "last_round": "直近のラウンド",
     "modes": {
       "periodic": "定期",
       "dry_run": "ドライラン",
-      "run": "回収"
+      "run": "回収",
+      "pressure": "Pressure"
     },
     "last_round_summary": "解放 {{size}} · 回収 {{reclaimed}} 件 · 破棄 {{forgotten}} 件",
     "errors_title_other": "{{count}} 件のエラー",
@@ -869,7 +875,8 @@
     "plan_title": {
       "periodic": "直近のラウンドの項目",
       "dry_run": "ドライラン: 回収で行われる内容",
-      "run": "回収結果"
+      "run": "回収結果",
+      "pressure": "Pressure reclaim plan"
     },
     "plan": {
       "subject": "項目",
@@ -893,7 +900,11 @@
       "task": "タスク"
     },
     "load_failed": "ストレージレポートを読み込めませんでした",
-    "retry": "再試行"
+    "retry": "再試行",
+    "disk_warning": "Disk {{level}}: {{free}} free / {{total}}",
+    "claims_paused": "Claims paused",
+    "claims_allowed": "Claims allowed",
+    "disk_thresholds": "Pressure: {{pressure}}% / {{pressureBytes}}; critical: {{critical}}% / {{criticalBytes}}"
   },
   "magpie": {
     "loading": "読み込み中…",

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { ContainerApplicationDriver, LocalProfileCommandRunner, writeApplicationBootstrap } from '@remi-platform/updater/application-driver.js';
 import { assertApplicationCompatible, parseApplicationManifest, type ApplicationManifest } from '@remi-platform/updater/application-manifest.js';
 import { DATA_SCHEMA, READY_GATE, safetyCommand, testBackup } from './helpers.js';
@@ -298,11 +298,27 @@ describe('container application updates', () => {
 it('loads the production rehearsal runtime from an isolated bootstrap directory', async () => {
   const root = await mkdtemp(join(tmpdir(), 'remi-bootstrap-')); roots.push(root);
   await writeApplicationBootstrap(root);
+  expect(await readFile(join(root, 'schema-fingerprint.mjs'), 'utf8')).toBe(
+    await readFile(new URL('../../../packages/platform-updater/src/schema-fingerprint.mjs', import.meta.url), 'utf8'),
+  );
   expect((await readdir(root)).sort()).toEqual([
     'data-schema-inputs.json', 'host-write-fence.ts', 'runtime.mjs', 'schema-fingerprint.mjs',
   ]);
   // A separate process resolves imports only from the copied runtime, not the repository.
   const result = Bun.spawnSync([process.execPath, '--eval', `await import(${JSON.stringify(join(root, 'runtime.mjs'))})`], { cwd: root });
   expect(result.stderr.toString()).toBe('');
+  expect(result.exitCode).toBe(0);
+});
+
+it('bundles the updater with executable fingerprint exports and embedded bootstrap source', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'remi-updater-bundle-')); roots.push(root);
+  const repository = resolve(import.meta.dir, '../../..');
+  // Source-mode tests do not expose Bun's conflicting text/JavaScript loaders.
+  // Build the real entry point in a fresh process, as the standalone CI build does.
+  const result = Bun.spawnSync([
+    process.execPath, 'build', '--target=bun', 'apps/platform-updater/main.ts',
+    '--outfile', join(root, 'updater.mjs'),
+  ], { cwd: repository });
+  expect(result.stderr.toString()).not.toContain('error:');
   expect(result.exitCode).toBe(0);
 });

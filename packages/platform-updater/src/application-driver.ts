@@ -13,15 +13,14 @@ import { API_BASE_INPUTS, assertApplicationCompatible, parseApplicationManifest,
 // Bun embeds these resources in the standalone Windows/macOS/Linux updater.
 // @ts-ignore -- Bun's text loader returns the source, not the JS module exports.
 import runtimeSource from './container-runtime.mjs' with { type: 'text' };
-// @ts-ignore -- embedded alongside runtime.mjs in the bootstrap directory.
-import fingerprintSource from './schema-fingerprint.mjs' with { type: 'text' };
+import { schemaFingerprintSource } from './bootstrap-source.js' with { type: 'macro' };
 // @ts-ignore -- the preload is deliberately embedded rather than executed here.
 import fenceSource from '../../../deploy/docker/host-write-fence.ts' with { type: 'text' };
 
 // One embedded resource set for production control containers and rehearsal fixtures.
 const APPLICATION_BOOTSTRAP_FILES = {
   'runtime.mjs': runtimeSource,
-  'schema-fingerprint.mjs': fingerprintSource,
+  'schema-fingerprint.mjs': schemaFingerprintSource(),
   'data-schema-inputs.json': JSON.stringify(DATA_SCHEMA_INPUTS),
   'host-write-fence.ts': fenceSource,
 };

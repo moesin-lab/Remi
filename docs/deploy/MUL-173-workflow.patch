@@ -1,6 +1,6 @@
 --- a/.github/workflows/release-build-check.yml
 +++ b/.github/workflows/release-build-check.yml
-@@ -72,6 +72,57 @@
+@@ -72,6 +72,60 @@
    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
  
  jobs:
@@ -33,6 +33,9 @@
 +          bun run test tests/arch/startup-schema-ddl.test.ts
 +          tests/unit/multiremi/schema-levels.test.ts
 +          tests/unit/multiremi/schema-levels-postgres.test.ts
++          tests/unit/multiremi/schema-ddl.test.ts
++          tests/unit/multiremi/schema-catalog.test.ts
++          tests/unit/multiremi/schema-catalog-postgres.test.ts
 +          tests/unit/multiremi/store-migrations.test.ts
 +          tests/unit/multiremi/unified-model-migration.test.ts
 +          tests/unit/multiremi/usage-startup-postgres.test.ts
@@ -58,7 +61,7 @@
    im-platform-smoke:
      runs-on: ubuntu-latest
      timeout-minutes: 15
-@@ -667,7 +718,7 @@
+@@ -667,7 +721,7 @@
    # dependency can become a green full-run release gate.
    build:
      if: always()

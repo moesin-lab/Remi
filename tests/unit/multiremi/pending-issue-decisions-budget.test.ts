@@ -63,6 +63,9 @@ function setup(f: PendingTurnTestFixture) {
 }
 
 pendingTurnBackendTests('MUL-208 pending decision query budget', (fixture, backend) => {
+  // This includes 1202-row seeding and the deliberately linear legacy oracle
+  // (6011 PG reads). The performance contract below is the fixed SQL budget,
+  // not Bun's default 5s deadline for the entire fixture and comparison.
   it('keeps 2 and 1202 native decisions at four reads and zero writes, including UNION deduplication', () => {
     const h = setup(fixture());
     h.clone();
@@ -76,7 +79,7 @@ pendingTurnBackendTests('MUL-208 pending decision query budget', (fixture, backe
     const beforeLarge = measure(h.db, h.oracle);
     expect(beforeLarge.result).toBe(large.result);
     console.log(`[MUL-208 ${backend}] native before(2/1202): ${before.reads}/${beforeLarge.reads} reads/${before.writes} writes; after 2/1202: ${small.reads}/${large.reads} reads, ${small.writes}/${large.writes} writes`);
-  });
+  }, 30_000);
 
   it('keeps mixed historical records at a small fixed budget and matches Questions.get()', () => {
     const h = setup(fixture());

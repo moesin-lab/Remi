@@ -93,6 +93,8 @@ function createLoopDaemon(options: {
     runtimeCodexProfile: null,
     runtimeClaudeProfile: null,
     runtimeModelRefreshTask: null,
+    runtimeBindingProbeTasks: new Set<Promise<void>>(),
+    diskMonitor: { check: async () => {} },
     runtimeModelListRequests: new Map(),
     runtimeModelRetryWake: null,
     runtimeModelRefreshAbort: null,

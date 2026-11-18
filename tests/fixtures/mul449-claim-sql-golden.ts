@@ -36,8 +36,6 @@ export const MUL449_CLAIM_SQL_GOLDEN = String.raw`UPDATE multiremi_turn_executio
                AND runtime_active.status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
            ) < ?
            AND COALESCE(t.workspace_id, 'local') = ?
-           AND (t.issue_id IS NULL OR t.holds_workspace = 0 OR ? = 1)
-           AND (t.issue_id IS NULL OR ? = 1)
            AND (t.runtime_workspace_id IS NULL OR (? = 1 AND EXISTS (
              SELECT 1 FROM multiremi_runtime_workspaces rw
              WHERE rw.id = t.runtime_workspace_id AND rw.workspace_id = t.workspace_id

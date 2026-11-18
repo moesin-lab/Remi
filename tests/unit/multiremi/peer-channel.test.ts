@@ -923,6 +923,17 @@ describe("peer channel — receiving", () => {
     expect(channel.stats()).toMatchObject({ sent: 0, received: 1 });
   });
 
+  it("delivers future envelopes with unknown fields and counts them as received", () => {
+    channel = createPeerChannel({ url: "http://peer:6120", secret: "s", fetchImpl: fakePeer().fetchImpl, origin: "a" });
+    const seen: unknown[] = [];
+    channel.subscribe(PEER_REALTIME_TOPIC, payload => seen.push(payload));
+    const event = { v: 42, origin: "b", kind: "workspace_event", future: true,
+      payload: { event: { type: "future-compatible", workspaceId: "local", payload: {}, extra: 1 } } };
+    expect(channel.receive(PEER_REALTIME_TOPIC, [event])).toMatchObject({ accepted: 1, rejected: 0 });
+    expect(seen).toEqual([event]);
+    expect(channel.stats()).toMatchObject({ received: 1, rejected: 0 });
+  });
+
   it("rejects our own origin echoed back, and anything that is not an envelope", () => {
     const peer = fakePeer();
     channel = createPeerChannel({ url: "http://peer:6120", secret: "s", fetchImpl: peer.fetchImpl, origin: "process-a" });
@@ -931,7 +942,7 @@ describe("peer channel — receiving", () => {
 
     const result = channel.receive(PEER_REALTIME_TOPIC, [
       { v: 1, origin: "process-a", kind: "task_event", payload: { type: "task:done", task: { id: "tsk_1" } } },
-      { v: 2, origin: "process-b", kind: "task_event", payload: {} },
+      { v: 0, origin: "process-b", kind: "task_event", payload: {} },
       { v: 1, origin: "process-b", kind: "not_a_kind", payload: {} },
       { nope: true },
       { v: 1, origin: "process-b", kind: "workspace_event", payload: { event: { type: "x", workspaceId: "local", payload: {} } } },

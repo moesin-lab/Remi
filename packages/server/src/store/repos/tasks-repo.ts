@@ -208,7 +208,6 @@ const TRIGGER_SUMMARY_MAX_LENGTH = 200;
 const TASK_PROMPT_MAX_BYTES = 2 * 1024 * 1024;
 /** The Remi Chat block the daemon writes is capped at 32 KiB; anything larger is not one. */
 const TASK_PROMPT_INSTRUCTIONS_MAX_BYTES = 64 * 1024;
-const ISSUE_WORKSPACE_MIN_CLI_VERSION = [0, 2, 26] as const;
 
 // MUL-336: how long a transient-throttle retry waits before it may be claimed
 // again. Used only when the provider did not send an explicit Retry-After.
@@ -417,15 +416,6 @@ const TASK_CLAIM_FROM_SQL = `FROM multiremi_turn_execution_records t
 
 interface SqlFragment { sql: string; params: unknown[] }
 
-/** Version bits and the explicit Runtime workspace an Issue task may carry. */
-function placementIssueSupportSql(runtime: MultiremiRuntime): SqlFragment {
-  return {
-    sql: `           AND (t.issue_id IS NULL OR t.holds_workspace = 0 OR ? = 1)
-           AND (t.issue_id IS NULL OR ? = 1)`,
-    params: [runtimeSupportsIssueWorkspaces(runtime) ? 1 : 0, runtimeSupportsParallelExecution(runtime) ? 1 : 0],
-  };
-}
-
 /** An explicit Runtime workspace pins the task to that daemon. */
 function placementRuntimeWorkspaceSql(runtime: MultiremiRuntime): SqlFragment {
   return {
@@ -471,15 +461,13 @@ function placementIssueWorkspaceSql(runtime: MultiremiRuntime): SqlFragment {
 
 /** Everything that must hold BEFORE the Project device-routing predicate. */
 function placementBeforeRoutingSql(runtime: MultiremiRuntime): SqlFragment {
-  const issueSupport = placementIssueSupportSql(runtime);
   const runtimeWorkspace = placementRuntimeWorkspaceSql(runtime);
   const issueWorkspace = placementIssueWorkspaceSql(runtime);
   return {
     sql: `           AND COALESCE(t.workspace_id, 'local') = ?
-${issueSupport.sql}
 ${runtimeWorkspace.sql}
 ${issueWorkspace.sql}`,
-    params: [runtime.workspaceId ?? "local", ...issueSupport.params, ...runtimeWorkspace.params, ...issueWorkspace.params],
+    params: [runtime.workspaceId ?? "local", ...runtimeWorkspace.params, ...issueWorkspace.params],
   };
 }
 
@@ -842,25 +830,6 @@ function sharedChatWorkspaceSql(queued: string, active: string): string {
     AND ${queued}.runtime_workspace_id IS NULL AND ${active}.runtime_workspace_id IS NULL
     AND (${queued}.issue_session_id IS NULL OR ${queued}.issue_id IS NULL)
     AND (${active}.issue_session_id IS NULL OR ${active}.issue_id IS NULL))`;
-}
-
-function runtimeSupportsParallelExecution(runtime: MultiremiRuntime): boolean {
-  // Versionless runtimes are in-process integrations, as with Issue workspace support.
-  return runtime.metadata.parallel_agent_execution === 1
-    || !(runtime.metadata.cli_version ?? runtime.metadata.cliVersion);
-}
-
-function runtimeSupportsIssueWorkspaces(runtime: MultiremiRuntime): boolean {
-  const rawVersion = runtime.metadata.cli_version ?? runtime.metadata.cliVersion;
-  if (typeof rawVersion !== "string" || !rawVersion.trim()) return true;
-  const match = rawVersion.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
-  if (!match) return true;
-  const version = match.slice(1, 4).map(Number);
-  for (let index = 0; index < ISSUE_WORKSPACE_MIN_CLI_VERSION.length; index += 1) {
-    const delta = version[index] - ISSUE_WORKSPACE_MIN_CLI_VERSION[index];
-    if (delta !== 0) return delta > 0;
-  }
-  return true;
 }
 
 /**
@@ -4271,8 +4240,6 @@ ${routing.sql}
       && this.runtimeCanRunTaskAgent(runtime, task.agent, task)
       && this.runtimeHasReadyTaskPlugins(runtime, task)
       && this.runtimeMatchesCodeSnapshot(runtime, task)
-      && (!task.issueId || !task.holdsWorkspace || runtimeSupportsIssueWorkspaces(runtime))
-      && (!task.issueId || runtimeSupportsParallelExecution(runtime))
       && this.runtimePassesProjectDeviceRouting(runtime, task.id);
   }
 

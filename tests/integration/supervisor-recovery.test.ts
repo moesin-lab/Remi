@@ -27,7 +27,7 @@ async function fixture() {
     if (launchError) attempts++;
     if (launchError === 'sync') throw new Error('Release is incomplete');
     return { cwd: join(root, id!), executable: launchError === 'spawn' ? join(root, 'missing-runtime') : process.execPath,
-      args: [resolve('tests/fixtures/supervisor-slot.ts')], version: id!, env: process.env };
+      args: [resolve('tests/fixtures/supervisor-slot.ts')], version: id!, env: { ...process.env, REMI_TEST_TERM_FILE: join(root, 'term') } };
   }, { ports, standbyWait: 800, activateWait: 800, confirmWait: 50 });
   const desired = { mode: 'run' as const, releaseId: 'old', revision: 'initial' };
   await controller.reconcile(desired);
@@ -103,7 +103,7 @@ test('recovery: real supervisor interrupted during candidate standby restores pr
   const statusPath = join(control, 'api/status.json');
   let child: ReturnType<typeof Bun.spawn> | undefined;
   const start = () => Bun.spawn([process.execPath, resolve('packages/platform-updater/src/supervisor.mjs')], {
-    env: { ...process.env, REMI_SUPERVISOR_ROLE: 'api', REMI_SLOT_SWITCH: '1', REMI_SUPERVISOR_SOURCE: source,
+    env: { ...process.env, REMI_TEST_TERM_FILE: join(root, 'term'), REMI_SUPERVISOR_ROLE: 'api', REMI_SLOT_SWITCH: '1', REMI_SUPERVISOR_SOURCE: source,
       REMI_SUPERVISOR_CONTROL: control, REMI_APPLICATION_ROOT: program, REMI_SUPERVISOR_SEED: join(root, 'seed'),
       REMI_SUPERVISOR_FENCE: resolve('deploy/docker/host-write-fence.ts'), REMI_APPLICATION_BASE_VERSION: 'old',
       REMI_APPLICATION_BASE_REF: 'test', MULTIREMI_PORT: String(port), MULTIREMI_HOST: '127.0.0.1',

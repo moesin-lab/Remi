@@ -7,7 +7,6 @@ summary: 单 all API 的同指纹切换、观察期回退、状态与关闭开�
 # Internal updater 双 slot 运维
 
 [internal-updates Compose](../../deploy/docker/compose.internal-updates.yml) 的 API
-默认保持单子进程路径；API/updater 容器显式设置 `REMI_SLOT_SWITCH=1` 后，
 默认保留单子进程路径。仅显式设置 `REMI_SLOT_SWITCH=1` 并重新创建 API/updater 容器后，
 supervisor 才在进程内持有 edge，公开端口仍为 6120。A5 验收后再评估默认开启。两个 API 子进程只监听回环
 6121/6122，并信任 edge 的回环转发头。edge 的控制 socket 位于控制卷
@@ -15,8 +14,8 @@ supervisor 才在进程内持有 edge，公开端口仍为 6120。A5 验收后�
 必须先采用包含本实现的 API 基础镜像；应用包不能更新 image-owned supervisor/edge。
 web 仍按旧协议重启。
 
-仅无 peer 的 `all` API，且 live `/readyz` 返回有效 A3 term 时，声明 `slotSwitch:true`。
-未接入 A3 的旧版本继续走原更新路径；候选缺少 term 时在放流前回退。updater 在更新/回退的目标与当前
+仅无 peer 的 `all` API 启用双 slot；每次激活必须从 `/readyz` 取得有效 A3 term，才放流并声明 `slotSwitch:true`。
+在线候选的 term 必须大于旧 live term；候选缺少或未推进 term 时在放流前回退。updater 在更新/回退的目标与当前
 `dataSchema` 指纹完全相等时使用 switch；其他情况（包括 restart）保留 drain、
 write-fence、停止、备份、隔离 rehearsal、运行和验证流程。旧路径持有 host fence 时，仅真实回环来源且专用 token 正确的 slot 生命周期 POST 可通过；
 业务写请求与 WebSocket 仍受围栏保护。指纹清单扩充后的第一版

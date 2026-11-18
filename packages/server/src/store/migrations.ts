@@ -1,3 +1,4 @@
+import { LIVE_TERM_SCHEMA } from "./live-term-fence.js";
 import { migrateExecutionEndpoints } from "./execution-endpoint-migration.js";
 import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
 import { ensureTurnListIndexes } from './turn-list-indexes.js';
@@ -82,6 +83,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
   const migrate = () => withModernSqliteAlterTable(db, resolveSqlDialect(db, options.dialect), () => advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () => {
     // The directory may have become unwritable while waiting for the lock.
     prepareMigrationReportDirectory(reportDir);
+    db.exec(LIVE_TERM_SCHEMA);
     const tables=existingTableNames(db);
     if (tables.has("multiremi_turn_attempts")) addColumnIfMissing(db, "multiremi_turn_attempts", "execution_connection TEXT");
     if(tables.has("multiremi_users"))backfillOwnerExternalId(db);

@@ -82,8 +82,8 @@ export class MultiremiScheduler {
         this.sync();
       } catch (error) {
         // A failed tick can leave its whole claimed batch at next_run_at=NULL.
-        // Use startup recovery on the next tick, scheduling from now rather
-        // than replaying work whose commit may already have succeeded.
+        // The next serialized tick recovers only while its immutable term is
+        // still current. Store SQL fences recovery against a replacement slot.
         if (isDatabaseConnectionError(error)) recovered = false;
         throw error;
       }

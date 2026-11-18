@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const config = JSON.parse(readFileSync('behavior.json', 'utf8'));
 if (config.pidFile) writeFileSync(config.pidFile, String(process.pid));
 if (config.immediateExit) process.exit(1);
+let term: string | null = null;
 let state = process.env.MULTIREMI_SLOT_START === 'standby' ? 'standby' : 'active', healthy = true;
 Bun.serve({ hostname: '127.0.0.1', port: Number(process.env.MULTIREMI_PORT), async fetch(request) {
   const path = new URL(request.url).pathname;
@@ -12,6 +13,12 @@ Bun.serve({ hostname: '127.0.0.1', port: Number(process.env.MULTIREMI_PORT), asy
       if (config.activateDelay) await Bun.sleep(config.activateDelay);
       if (config.reactivateDelay && state !== 'standby') await Bun.sleep(config.reactivateDelay);
       if (config.activateFails) return new Response('', { status: 503 });
+      if (state !== 'active') {
+        const termFile = process.env.REMI_TEST_TERM_FILE || 'term';
+        let previous = 0n;
+        try { previous = BigInt(readFileSync(termFile, 'utf8')); } catch {}
+        term = String(previous + 1n); writeFileSync(termFile, term);
+      }
       state = 'active';
       if (config.unhealthyAfter) setTimeout(() => { healthy = false; }, config.unhealthyAfter);
       if (config.crashAfter) setTimeout(() => process.exit(1), config.crashAfter);
@@ -24,6 +31,6 @@ Bun.serve({ hostname: '127.0.0.1', port: Number(process.env.MULTIREMI_PORT), asy
     if (path.endsWith('/exit')) setTimeout(() => process.exit(0), 10);
     return Response.json({ state: config.neverStandby ? 'starting' : state });
   }
-  if (path === '/readyz') return Response.json({ term: config.noTerm ? null : '1' }, { status: state === 'active' && healthy && !config.neverReady ? 200 : 503 });
+  if (path === '/readyz') return Response.json({ term: config.noTerm ? null : config.term ?? term }, { status: state === 'active' && healthy && !config.neverReady ? 200 : 503 });
   return new Response(config.name, { status: state === 'active' ? 200 : 503 });
 } });

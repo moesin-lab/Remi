@@ -111,7 +111,7 @@ pendingTurnBackendTests('MUL-506 DaemonTurnBridge',fixture=>{
       expect(snapshot.messages.filter(row=>row.attempt_id===id).map(row=>row.message.id)).toContain(interrupt.message.id);
       expect(Number(f.db.query('SELECT projection_to_seq FROM multiremi_turn_attempts WHERE id=?').get(id)!.projection_to_seq)).toBeGreaterThanOrEqual(interrupt.message.seq);
     }
-    expect(f.db.query("SELECT COUNT(*) AS n FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope='' ").get(f.session.id,f.agent.id)!.n).toBe(1);
+    expect(Number(f.db.query("SELECT COUNT(*) AS n FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope='' ").get(f.session.id,f.agent.id)!.n)).toBe(1);
     expect(f.store.getSessionAgentReadProgress(f.session.id,f.agent.id)).toEqual(before);
   });
   it('snapshots only new now input for the current lane and folds large bodies',()=>{const f=setup();

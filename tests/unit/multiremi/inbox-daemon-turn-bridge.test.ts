@@ -92,6 +92,28 @@ pendingTurnBackendTests('MUL-506 DaemonTurnBridge',fixture=>{
   it('reply write failure completes without a reply pointer',()=>{const f=setup();const write=spyOn(IssuesRepo.prototype,'createIssueCommentWithinTransaction').mockImplementation(()=>{throw new Error('injected reply write failure');});
     try{expect(f.bridge.complete({payload:{turn_id:f.sent.turn_id!,attempt_id:f.attempt.id,input_to_seq:f.offer.input_to_seq,reply:{body_md:'done',message_kind:'reply'}},completionFields:null},f.scope).ok).toBe(true);
       expect(f.store.getTurn(f.sent.turn_id!)?.status).toBe('completed');expect(f.store.getTurn(f.sent.turn_id!)?.reply_message_id).toBeNull();}finally{write.mockRestore();}},120_000);
+  it('MUL-191 snapshots duplicate live lanes without aborting the runtime downlink',()=>{
+    const f=setup();
+    // Model two current live attempts on a legacy/inconsistent lane. The bulk
+    // upsert must visit that lane once (PostgreSQL rejects duplicate targets).
+    f.store.registerRuntime({id:f.scope.runtimeId,daemonId:f.scope.daemonId,name:'Bridge runtime',provider:'codex',workspaceId:'local',maxConcurrency:2});
+    const peerIssue=createResponsibleTestIssue(f.store,{title:'Duplicate lane',assigneeType:'agent',assigneeId:f.agent.id});
+    const peerSession=f.store.getOrCreateDefaultIssueSession(peerIssue.id);
+    const peer=f.store.sendMessage({session_id:peerSession.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:f.agent.id},message_kind:'request',wake_requested:'now',body_md:'peer start'});
+    const attempt=f.store.claimTask(f.scope.runtimeId)!;f.store.startTask(attempt.id);
+    f.db.run('UPDATE multiremi_turns SET session_id=?,seq=seq+1 WHERE id=?',[f.session.id,peer.turn_id!]);
+    f.store.wrapUpTurn(f.sent.turn_id!);f.store.wrapUpTurn(peer.turn_id!);
+    const interrupt=f.store.sendMessage({session_id:f.session.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:f.agent.id},message_kind:'request',wake_requested:'now',body_md:'shared interrupt'});
+    const before=f.store.getSessionAgentReadProgress(f.session.id,f.agent.id);
+    const snapshot=f.bridge.snapshot(f.scope,new Set([f.attempt.id,attempt.id]));
+    expect(snapshot.wrapUps.map(row=>row.attempt_id).sort()).toEqual([f.attempt.id,attempt.id].sort());
+    for(const id of [f.attempt.id,attempt.id]) {
+      expect(snapshot.messages.filter(row=>row.attempt_id===id).map(row=>row.message.id)).toContain(interrupt.message.id);
+      expect(Number(f.db.query('SELECT projection_to_seq FROM multiremi_turn_attempts WHERE id=?').get(id)!.projection_to_seq)).toBeGreaterThanOrEqual(interrupt.message.seq);
+    }
+    expect(Number(f.db.query("SELECT COUNT(*) AS n FROM multiremi_session_lanes WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope='' ").get(f.session.id,f.agent.id)!.n)).toBe(1);
+    expect(f.store.getSessionAgentReadProgress(f.session.id,f.agent.id)).toEqual(before);
+  });
   it('snapshots only new now input for the current lane and folds large bodies',()=>{const f=setup();
     const send=(body:string,wake:'now'|'next_turn',to=f.agent.id)=>f.store.sendMessage({session_id:f.session.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:to},message_kind:'request',wake_requested:wake,body_md:body});
     send('later','next_turn');const other=f.store.createAgent({name:'Other',provider:'codex'});send('other','now',other.id);

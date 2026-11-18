@@ -21,6 +21,23 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 - **风险推断：** 并行 HTTP 请求无法自动消除主线程同步数据库等待；额外 SQL 往返和较大的响应序列化可能放大排队，影响同进程其他请求。吞吐拐点与 PostgreSQL 网络延迟的影响尚未测量。
 - **采集重点：** 冷/热页面请求数量、单请求 SQL 数与响应 bytes、列表可操作时间，以及 API 并发升高时的 p50/p95、错误率和事件循环延迟。
 
+### Issue 待人工 decision 计数
+
+`countPendingIssueDecisions` 不再为每条候选调用 `Questions.get()`。空候选为一次读；
+非空原生 Question 使用四次读（候选、会话归属、迁移审计、来源 attempt/head/issue），
+不写库；候选只投影 metadata 和来源身份，不读取正文或卡片字段。
+历史 decision 额外用一次递归查询读取责任链与负责人事实，复用同一个 resolver；
+总共五次读，不随 decision 数量、asker、会话数或祖先层数增长。批量参数使用 JSON rowset，
+不按 ID 数量拆 SQL，也不依赖 SQLite bind 上限。
+
+计数复用原生记录的 read-time upgrade、来源 integrity 与会话迁移审计，保留无效来源、
+跨工作区、退休会话、非 human stage、普通 choice 和已结束记录的排除规则；只省去
+计数不需要的 wait/answer/action 视图展开。
+[查询预算与等价测试](../../tests/unit/multiremi/pending-issue-decisions-budget.test.ts)
+覆盖 2/1202 条原生 Question（四读、零写）、2/102 条混合历史记录（五读、零写），
+并以原逐条 `Questions.get()` 谓词核对结果。测试在 SQLite 和配置了真实服务的 PostgreSQL
+两种后端运行；缺少 PG 时的 skip 不构成 PG 验证。
+
 ### 2. 搜索：候选 issue → 逐 issue 搜评论 → 过滤与分页
 
 - **实现事实：** [IssuesRepo.searchIssues / searchIssueCommentSnippet](../../packages/server/src/store/repos/issues-repo.ts) 先调用 `listIssues({ includeArchived: true })`；启用评论正文搜索时逐 issue 查询评论，再在 JavaScript 中筛 workspace、匹配字段、排序和截取页面。`includeCommentBodies` 默认启用，传 `false` 才跳过评论查询。
@@ -132,17 +149,17 @@ workspace 报告只唤醒所属 daemon（含别名对应的 provider）的派活
 同步读取范围退出即关闭，后台异步工作重新读取。
 [预算和复现报告](../../reports/performance/MUL-182-daemon-report-queries.md)区分历史放大消除、
 终态仍有的固定 SQL 成本、隐藏页/Question 权限查询边界与未完成的 stable 现场验收。
-[MUL-199 规模测量](../../reports/performance/MUL-199-daemon-report-scale.md)提供 100 Issue、40 会话各 501 日志等共享夹具、逐语句差异与 SQLite 固定预算；真实 PG、更多活跃轮与现场数据分布、完整 Release 检查尚待验证。
+[MUL-199 规模测量](../../reports/performance/MUL-199-daemon-report-scale.md)提供 100 Issue、40 会话各 501 日志等共享夹具、逐语句差异与固定预算；七类帧在真实 PG 与 SQLite 的 small/stable 计数一致，Release 证据见下文。更多现场数据分布与 stable 一小时验收仍待验证。
 
 终态事务复用 workspace/lane 首锁，savepoint/嵌套事务回滚恢复入口锁集合；
 终态轮卡通知在事务内累积，最终一次投影并按原次数累计 revision/log_version。
 Session/owner scope、Issue/标签、Agent/Skills 与 usage 的显式原始读缓存登记所有依赖表，
 任一依赖写入、事务首锁或回滚后重读；跨异步范围不复用。
 下行快照只查询既有 UNION 探测命中的队列，platform maintenance 单例存在时无需重复插入。
-[MUL-191 逐语句报告](../../reports/performance/MUL-191-terminal-sql.md)记录共享 stable 规模夹具的 SQLite complete 250（201 读/49 写）、fail 158（137 读/21 写），两档相同；
+[MUL-191 逐语句报告](../../reports/performance/MUL-191-terminal-sql.md)记录共享 stable 规模夹具的 SQLite/PG complete 227（175 读/52 写）、fail 141（116 读/25 写），两档相同；
 派活工作区唤醒只检查 queued/dispatched 的 runtime（未分配任务保留全宿主 admission）；
 Skill 文件按关联 Skill 批量读取；Chat queue 的浏览器失效通知不唤醒 daemon，释放消息仍走正常任务通知。
-这仍未达到 60/40，真实 PG 与完整 Release build check 需单独提供证据。
+这仍未达到 60/40；真实 PG 与 SQLite 查询数一致，完整 [Release build check 44194827781](https://github.com/moesin-lab/Remi/actions/runs/44194827781) 全绿（含真实 PG 后端分片）。该运行验证的是合并 main 前的 head；后续改动需重新验证。
 
 ## Issue 详情首屏的工作区读取
 

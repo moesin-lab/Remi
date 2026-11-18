@@ -374,6 +374,9 @@ node scripts/local-profile.mjs stable prune-releases
 及其 `.d/*.conf`（按文件名字典序，空 `ExecStart=` 清空先前命令），保护生效的
 ExecStart 在本 profile releases 下引用的 SHA，以及从新到旧最近 N 个不同 daemon SHA。
 N 同样使用 `REMI_RELEASES_KEEP`，默认 3；回滚到更早的 daemon 版本需重新部署。
+daemon 生效与历史引用同时保护路径中的 SHA 和符号链接解析后仍在 `releases/` 下的 SHA。
+引用的 SHA 目录不存在时忽略；若目录或链接存在但真实路径无法解析（如断链、循环或权限错误），
+则在任何删除之前警告并放弃整次修剪，dry-run 也遵循相同规则。解析到 releases 外的目标不加入保护。
 dry-run 输出会注明 daemon 引用的保留原因。unit 或 drop-in 目录不存在视为无引用；
 存在但无法读取、语法错误或 executable 使用无法解析的扩展时，警告并放弃整次修剪。
 受保护 ref 对应的 tar 也保留；新解压的 tar 始终立即删除。

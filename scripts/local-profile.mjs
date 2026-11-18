@@ -617,12 +617,15 @@ function pruneReleases(root, dryRun = false) {
     if (!existsSync(releases)) return;
     if (canonicalPath(releases) !== join(canonicalPath(root), 'releases')) throw new Error('Release path escapes profile root');
     const protectedRefs = new Set();
-    const protect = (source) => {
+    const protect = (source, refs = protectedRefs) => {
       if (!source) return;
       const path = resolve(source);
-      if (dirname(path) === resolve(releases)) protectedRefs.add(basename(path));
-      const canonical = canonicalPath(path);
-      if (dirname(canonical) === canonicalPath(releases)) protectedRefs.add(basename(canonical));
+      if (dirname(path) === resolve(releases)) refs.add(basename(path));
+      // A missing release is harmless, but an existing link whose target cannot
+      // be resolved must abort the entire plan before any deletion takes place.
+      try { lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      const canonical = realpathSync(path);
+      if (dirname(canonical) === canonicalPath(releases)) refs.add(basename(canonical));
     };
     const readOptional = (path) => existsSync(path) ? readJson(path) : null;
     for (const name of ['active.json', 'deployment.json']) protect(readOptional(join(root, name))?.source);
@@ -645,7 +648,8 @@ function pruneReleases(root, dryRun = false) {
       protect(active.source);
       protectedRefs.add(active.ref);
     }
-    const daemonRefs = daemonReleaseRefs(releases, keep);
+    const daemonRefs = new Set();
+    for (const ref of daemonReleaseRefs(releases, keep)) protect(join(releases, ref), daemonRefs);
     for (const ref of daemonRefs) protectedRefs.add(ref);
     // Validate the entire deletion plan before changing anything. Only real
     // source directories and regular tar files are eligible; never follow links.

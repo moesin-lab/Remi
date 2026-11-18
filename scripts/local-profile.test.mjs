@@ -1379,6 +1379,82 @@ test('prune protects effective daemon and latest distinct drop-in refs in system
   assert.ok(existsSync(join(releases, OLD_REF)));
 });
 
+for (const keep of [0, 3]) for (const historical of [false, true]) {
+  test(`daemon ${historical ? 'historical' : 'effective'} symlink protects its target with keep=${keep}`, (t) => {
+    const f = fixture(t); f.activate();
+    const releases = join(f.profileRoot(), 'releases');
+    const targetRef = 'c'.repeat(40), obsoleteRef = 'd'.repeat(40);
+    const target = join(releases, targetRef), link = join(releases, NEW_REF);
+    mkdirSync(join(target, 'daemon-bin'), { recursive: true });
+    writeFileSync(join(target, 'daemon-bin/remi'), 'daemon executable');
+    writeFileSync(`${target}.tar`, 'archive');
+    mkdirSync(join(releases, obsoleteRef));
+    symlinkSync(target, link, 'dir');
+    const unit = join(f.root, 'home/.config/systemd/user/multiremi-daemon.service');
+    mkdirSync(`${unit}.d`, { recursive: true });
+    writeFileSync(unit, `[Service]\nExecStart="${join(link, 'daemon-bin/remi')}" daemon start\n`);
+    if (historical) writeFileSync(join(`${unit}.d`, '99-current.conf'),
+      `[Service]\nExecStart=\nExecStart="${join(releases, OLD_REF, 'daemon-bin/remi')}" daemon start\n`);
+    const environment = { REMI_RELEASES_KEEP: String(keep) };
+    const retained = !historical || keep > 0;
+    const dry = f.run('stable', 'prune-releases', { environment, args: ['--dry-run'] }); succeeds(dry);
+    assert.doesNotMatch(dry.stderr, /Release pruning failed/);
+    for (const ref of [NEW_REF, targetRef]) {
+      assert.equal(dry.stdout.includes(`Keeping release for daemon reference: ${join(releases, ref)}`), retained);
+    }
+    assert.equal(dry.stdout.includes(`Would remove release: ${target}\n`), !retained);
+    assert.ok(existsSync(join(target, 'daemon-bin/remi'))); // dry-run never deletes
+    const result = f.run('stable', 'prune-releases', { environment }); succeeds(result);
+    assert.doesNotMatch(result.stderr, /Release pruning failed/);
+    assert.equal(existsSync(join(target, 'daemon-bin/remi')), retained);
+    assert.equal(existsSync(`${target}.tar`), retained);
+    assert.ok(lstatSync(link).isSymbolicLink());
+    assert.ok(!existsSync(join(releases, obsoleteRef)));
+  });
+}
+
+for (const historical of [false, true]) for (const cyclic of [false, true]) {
+  test(`daemon ${historical ? 'historical' : 'effective'} ${cyclic ? 'cyclic' : 'broken'} link aborts pruning`, (t) => {
+    const f = fixture(t); f.activate();
+    const releases = join(f.profileRoot(), 'releases');
+    const link = join(releases, NEW_REF), obsolete = join(releases, 'c'.repeat(40));
+    mkdirSync(obsolete);
+    symlinkSync(cyclic ? link : join(releases, 'missing'), link, 'dir');
+    const unit = join(f.root, 'home/.config/systemd/user/multiremi-daemon.service');
+    mkdirSync(`${unit}.d`, { recursive: true });
+    writeFileSync(unit, `[Service]\nExecStart="${join(link, 'daemon-bin/remi')}" daemon start\n`);
+    if (historical) writeFileSync(join(`${unit}.d`, '99-current.conf'),
+      '[Service]\nExecStart=\nExecStart=/usr/bin/remi daemon start\n');
+    for (const args of [['--dry-run'], []]) {
+      const result = f.run('stable', 'prune-releases', { args }); succeeds(result);
+      assert.match(result.stderr, /Release pruning failed/);
+      assert.doesNotMatch(result.stdout, /(?:Would remove|Removing) release:/);
+      assert.ok(existsSync(obsolete));
+      assert.ok(lstatSync(link).isSymbolicLink());
+    }
+  });
+}
+
+test('missing daemon release and daemon link outside releases do not abort pruning', (t) => {
+  const f = fixture(t); f.activate();
+  const releases = join(f.profileRoot(), 'releases');
+  const outside = join(f.root, 'outside-daemon'), link = join(releases, NEW_REF);
+  mkdirSync(outside); symlinkSync(outside, link, 'dir');
+  const obsolete = join(releases, 'c'.repeat(40)); mkdirSync(obsolete);
+  const unit = join(f.root, 'home/.config/systemd/user/multiremi-daemon.service');
+  mkdirSync(dirname(unit), { recursive: true });
+  writeFileSync(unit, `[Service]\nExecStart="${join(link, 'daemon-bin/remi')}" daemon start\nExecStart="${join(releases, 'd'.repeat(40), 'daemon-bin/remi')}" daemon start\n`);
+  const dry = f.run('stable', 'prune-releases', { args: ['--dry-run'] }); succeeds(dry);
+  assert.doesNotMatch(dry.stderr, /Release pruning failed/);
+  assert.ok(dry.stdout.includes(`Would remove release: ${obsolete}`));
+  assert.ok(!dry.stdout.includes(`Keeping release for daemon reference: ${outside}`));
+  const result = f.run('stable', 'prune-releases'); succeeds(result);
+  assert.doesNotMatch(result.stderr, /Release pruning failed/);
+  assert.ok(!existsSync(obsolete));
+  assert.ok(existsSync(outside));
+  assert.ok(lstatSync(link).isSymbolicLink());
+});
+
 test('daemon empty ExecStart clears active references and keep zero retains only effective command', (t) => {
   const f = fixture(t); f.activate();
   const releases = join(f.profileRoot(), 'releases');

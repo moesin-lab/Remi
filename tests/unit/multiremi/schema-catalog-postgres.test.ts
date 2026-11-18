@@ -294,6 +294,53 @@ INSERT INTO ${schema}.pieces VALUES('c'';d')`;
       });
     }
   }
+  // R12: inherited helpers and private adapter methods must never escape.
+  for (const factory of ['query', 'prepare'] as const) {
+    for (const change of ['SET standard_conforming_strings=off', 'SET LOCAL standard_conforming_strings=off',
+      "SELECT set_config('standard_conforming_strings','off',true)"]) {
+      for (const escape of ['valueOf', 'execute'] as const) it(`sealed facade blocks ${factory}.${escape} after ${change}`, () => {
+        const schema = fixture();
+        db.exec(`CREATE TABLE ${schema}.retained(id integer); INSERT INTO ${schema}.retained VALUES(42)`);
+        const sql = String.raw`SELECT '\''; TRUNCATE ${schema}.retained; -- '`;
+        const migration = step(`sealed-${serial}`, sql);
+        migration.run = guarded => {
+          const statement = guarded[factory](sql) as any;
+          guarded.transaction(() => { guarded.query(change).run(); })();
+          if (escape === 'valueOf') statement.valueOf().run();
+          else statement.execute(statement.sql, []);
+        };
+        assertSealedFailure(migration, schema, `${factory}.${escape} after ${change}`);
+      });
+    }
+  }
+  for (const escape of ['valueOf', 'execute'] as const) it(`sealed facade blocks database ${escape}`, () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.retained(id integer); INSERT INTO ${schema}.retained VALUES(42)`);
+    const sql = String.raw`SELECT '\''; TRUNCATE ${schema}.retained; -- '`;
+    const migration = step(`sealed-db-${serial}`, sql);
+    migration.run = guarded => {
+      guarded.query(sql);
+      guarded.transaction(() => { guarded.query('SET standard_conforming_strings=off').run(); })();
+      const handle = guarded as any;
+      if (escape === 'valueOf') handle.valueOf().query(sql).run();
+      else handle.execute(sql, []);
+    };
+    assertSealedFailure(migration, schema, `database.${escape}`);
+  });
+  function assertSealedFailure(migration: SchemaMigration, schema: string, label: string) {
+    const levels = readSchemaLevels(db);
+    try {
+      let failure: unknown;
+      try { runSchemaExpands(db, [migration], '9.0.0', {minLevel:0,maxLevel:100}); } catch (error) { failure = error; }
+      const rows = db.query(`SELECT id FROM ${schema}.retained`).all();
+      const steps = db.query('SELECT id FROM multiremi_schema_steps').all();
+      console.info(`SEALED ${label}: error=${String(failure)}; rows=${JSON.stringify(rows)}; steps=${JSON.stringify(steps)}; levels=${JSON.stringify(readSchemaLevels(db))}`);
+      expect(failure).toBeInstanceOf(TypeError);
+      expect(rows).toEqual([{id:42}]);
+      expect(steps).toEqual([]);
+      expect(readSchemaLevels(db)).toEqual(levels);
+    } finally { db.exec('SET standard_conforming_strings=on; DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
+  }
   it('refuses standard_conforming_strings=off before any expand work', () => {
     const schema = fixture();
     db.exec(`CREATE TABLE ${schema}.retained(id integer); INSERT INTO ${schema}.retained VALUES(42)`);

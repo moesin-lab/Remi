@@ -109,47 +109,50 @@ export function runSchemaContracts(db: SqlDatabase, steps: readonly SchemaMigrat
   for (const step of pending) apply(db, step);
 }
 
-/** Guard prepared statements as well as exec, including helper-generated SQL. */
+/** Closed capabilities: raw adapter and statement objects stay in closures. */
 function expandOnlyDatabase(db: SqlDatabase): SqlDatabase {
-  return new Proxy(db, {
-    get(target, key) {
-      const value = Reflect.get(target, key, target);
-      if (['exec', 'run', 'query', 'prepare'].includes(String(key))) {
-        return (sql: string, ...args: unknown[]) => {
-          const unsupported = unsupportedSchemaSqlReason(sql);
-          if (unsupported) throw new Error(unsupported);
-          if (hasDestructiveSchemaStatement(sql)) throw new Error('Destructive DDL is forbidden in an expand migration; declare a later-release contract step');
-          if (key === 'exec') {
-            // Split with the very same tokens the guard inspected, never with
-            // the bridge splitter. Validate the full batch before executing.
-            const statements = splitSchemaStatements(sql);
-            for (const statement of statements) {
-              assertExpandSqlPremise(target);
-              target.query(statement).run();
-            }
-            return;
-          }
-          assertExpandSqlPremise(target);
-          const result = value.call(target, sql, ...args);
-          if (key !== 'query' && key !== 'prepare') return result;
-          return new Proxy(result, {
-            get(statement, method) {
-              const execute = Reflect.get(statement, method, statement);
-              if (typeof execute !== 'function') return execute;
-              if (['run', 'get', 'all', 'values', 'iterate'].includes(String(method))) {
-                return (...params: unknown[]) => {
-                  assertExpandSqlPremise(target);
-                  return execute.apply(statement, params);
-                };
-              }
-              return execute.bind(statement);
-            },
-          });
-        };
+  function checkSql(sql: string): void {
+    const unsupported = unsupportedSchemaSqlReason(sql);
+    if (unsupported) throw new Error(unsupported);
+    if (hasDestructiveSchemaStatement(sql)) throw new Error('Destructive DDL is forbidden in an expand migration; declare a later-release contract step');
+  }
+  function statement(factory: 'query' | 'prepare', sql: string): ReturnType<SqlDatabase['query']> {
+    checkSql(sql);
+    assertExpandSqlPremise(db);
+    const original = db[factory](sql);
+    return Object.freeze(Object.assign(Object.create(null), {
+      get: (...params: unknown[]) => { assertExpandSqlPremise(db); return original.get(...params); },
+      all: (...params: unknown[]) => { assertExpandSqlPremise(db); return original.all(...params); },
+      run: (...params: unknown[]) => { assertExpandSqlPremise(db); return original.run(...params); },
+      values: (...params: unknown[]) => { assertExpandSqlPremise(db); return original.values(...params); },
+    }));
+  }
+  const facade: Pick<SqlDatabase, 'dialect' | 'inTransaction' | 'exec' | 'run' | 'query' | 'prepare' | 'transaction'> = {
+    dialect: db.dialect,
+    get inTransaction() { return db.inTransaction; },
+    exec(sql: string): void {
+      // Check the full batch, then execute guard-tokenized segments without the
+      // bridge splitter. Recheck the premise before each segment executes.
+      checkSql(sql);
+      for (const segment of splitSchemaStatements(sql)) {
+        assertExpandSqlPremise(db);
+        db.query(segment).run();
       }
-      // Preserve receiver-sensitive SQLite methods. Transaction callbacks must
-      // still use the supplied guarded handle, never a captured raw database.
-      return typeof value === 'function' ? value.bind(target) : value;
     },
-  });
+    run(sql: string, ...params: unknown[]) {
+      checkSql(sql);
+      assertExpandSqlPremise(db);
+      return db.run(sql, ...params);
+    },
+    query: sql => statement('query', sql),
+    prepare: sql => statement('prepare', sql),
+    transaction<T>(fn: (...args: any[]) => T) {
+      // Never return the adapter's transaction function (or its .deferred).
+      // Do not forward the raw adapter receiver into the migration callback.
+      return (...args: any[]): T => db.transaction((...a) => fn.apply(undefined, a))(...args);
+    },
+  };
+  // Preserve the getter without inheriting Object.prototype helpers. The
+  // narrower runtime surface deliberately omits close and optional adapter APIs.
+  return Object.freeze(Object.create(null, Object.getOwnPropertyDescriptors(facade))) as SqlDatabase;
 }

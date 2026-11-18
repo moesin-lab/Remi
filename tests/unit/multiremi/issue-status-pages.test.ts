@@ -1,10 +1,17 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { createStatusPagesHarness, STATUS_PAGE_STATUSES as STATUSES } from "../../fixtures/multiremi/issue-status-pages-fixture.js";
 
 describe(`MUL-395 status pages (${process.env.MULTIREMI_TEST_POSTGRES_URL ? "Postgres" : "SQLite"})`, () => {
   let h: Awaited<ReturnType<typeof createStatusPagesHarness>>;
   beforeAll(async () => { h = await createStatusPagesHarness(process.env.MULTIREMI_TEST_POSTGRES_URL); }, 20000);
   afterAll(async () => { await h?.close(); });
+
+  async function measuredRequest(path: string) {
+    // A warm HTTP request can hit a readiness TTL that is about to expire.
+    // Refresh it before the harness resets the SQL probe, for every sample.
+    h.store.checkDatabaseReady(true);
+    return h.request(path);
+  }
 
   async function equivalent(filter = "", statuses = STATUSES, limit = 50) {
     const grouped = await h.request(`/api/issues/status-pages?statuses=${statuses.join(",")}&limit=${limit}${filter}`);
@@ -55,15 +62,49 @@ describe(`MUL-395 status pages (${process.env.MULTIREMI_TEST_POSTGRES_URL ? "Pos
     await equivalent("&project_id=prj_status_primary", STATUSES, 0);
   });
   it("only counts archives when requested, using the workspace-wide count", async () => {
-    await h.request("/api/issues/status-pages?statuses=todo&limit=0");
-    const without = await h.request("/api/issues/status-pages?statuses=todo&limit=50&project_id=prj_status_primary");
-    const withCount = await h.request("/api/issues/status-pages?statuses=todo&limit=50&project_id=prj_status_primary&include_archived_total=true");
+    const without = await measuredRequest("/api/issues/status-pages?statuses=todo&limit=50&project_id=prj_status_primary");
+    const withCount = await measuredRequest("/api/issues/status-pages?statuses=todo&limit=50&project_id=prj_status_primary&include_archived_total=true");
     const single = await h.request("/api/issues?archived_only=true&limit=0");
     expect(without.body).not.toHaveProperty("archived_total");
     expect(withCount.body.archived_total).toBe(single.body.total);
     expect(withCount.body.archived_total).toBe(21);
     expect(withCount.dbq).toBe(without.dbq + 1);
     expect(single.body).not.toHaveProperty("archived_total");
+  });
+  it("reproduces the archive budget mismatch at readiness expiry and measures a fresh TTL", async () => {
+    const path = "/api/issues/status-pages?statuses=todo&limit=50&project_id=prj_status_primary";
+    const readySql = "SELECT 1 AS ready";
+    let now = Date.now();
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      for (const request of [h.request, measuredRequest]) {
+        h.store.checkDatabaseReady(true);
+        now += 999;
+        const warm = await h.request("/api/issues/status-pages?statuses=todo&limit=0");
+        expect(warm.statements).not.toContain(readySql);
+        now++;
+        const without = await request(path);
+        const withCount = await request(`${path}&include_archived_total=true`);
+        expect(without.status).toBe(200);
+        expect(withCount.status).toBe(200);
+        expect(withCount.body.archived_total).toBe(21);
+        const { archived_total, ...body } = withCount.body;
+        expect(body).toEqual(without.body);
+        expect(withCount.statements).not.toContain(readySql);
+        if (request === h.request) {
+          // Exactly the reported 9 != 10 mechanism: the extra archive SQL
+          // replaces the readiness SQL charged only to the baseline request.
+          expect(without.statements.filter(sql => sql === readySql)).toHaveLength(1);
+          expect(withCount.dbq).toBe(without.dbq);
+        } else {
+          expect(without.statements).not.toContain(readySql);
+          expect(withCount.dbq).toBe(without.dbq + 1);
+        }
+      }
+    } finally {
+      clock.mockRestore();
+      h.store.checkDatabaseReady(true);
+    }
   });
   it("keeps counts in the selected workspace while shared humans can select another", async () => {
     const grouped = await h.request("/api/issues/status-pages?statuses=todo&include_archived_total=true");
@@ -81,11 +122,10 @@ describe(`MUL-395 status pages (${process.env.MULTIREMI_TEST_POSTGRES_URL ? "Pos
     }
   });
   it("assignee boards opt into the same workspace archive count without changing default responses", async () => {
-    await h.request("/api/issues/grouped?group_by=assignee&project_id=prj_absent");
     for (const prefix of ["/api/issues", "/api/multiremi/issues"]) {
       const path = `${prefix}/grouped?group_by=assignee&project_id=prj_absent`;
-      const without = await h.request(path);
-      const withCount = await h.request(`${path}&include_archived_total=true`);
+      const without = await measuredRequest(path);
+      const withCount = await measuredRequest(`${path}&include_archived_total=true`);
       expect(without.body).not.toHaveProperty("archived_total");
       const { archived_total, ...groups } = withCount.body;
       expect(groups).toEqual(without.body);
@@ -97,15 +137,11 @@ describe(`MUL-395 status pages (${process.env.MULTIREMI_TEST_POSTGRES_URL ? "Pos
     }
   });
   it("dbq golden: stays constant across 1/4/7 statuses and 1/60/300 issues per status", async () => {
-    await h.request("/api/issues/status-pages?statuses=todo&limit=0");
-    // The warm request can reuse a nearly expired readiness cache from the
-    // previous test. Start a full TTL before measuring the fixed SQL budget.
-    h.store.checkDatabaseReady(true);
     const measurements: number[] = [];
     const profiles: unknown[] = [];
     for (const count of [1, 60, 300]) {
       for (const width of [1, 4, 7]) {
-        const result = await h.request(`/api/issues/status-pages?statuses=${STATUSES.slice(0, width).join(",")}&project_id=prj_status_scale${count}&limit=50&include_archived_total=true`);
+        const result = await measuredRequest(`/api/issues/status-pages?statuses=${STATUSES.slice(0, width).join(",")}&project_id=prj_status_scale${count}&limit=50&include_archived_total=true`);
         expect(result.status).toBe(200);
         expect(Object.values(result.body.groups).map((group: any) => group.total)).toEqual(Array(width).fill(count));
         measurements.push(result.dbq);
@@ -114,7 +150,7 @@ describe(`MUL-395 status pages (${process.env.MULTIREMI_TEST_POSTGRES_URL ? "Pos
     }
     if (new Set(measurements).size !== 1) console.info('STATUS_SQL_DIFF', JSON.stringify(profiles));
     expect(new Set(measurements).size).toBe(1);
-    const single = await h.request("/api/issues?status=todo&limit=50&project_id=prj_status_scale300");
+    const single = await measuredRequest("/api/issues?status=todo&limit=50&project_id=prj_status_scale300");
     expect(measurements[8]!).toBeLessThanOrEqual(single.dbq * 2);
   });
   it("snapshot: state moves, labels and archives remain consistent across reads", async () => {

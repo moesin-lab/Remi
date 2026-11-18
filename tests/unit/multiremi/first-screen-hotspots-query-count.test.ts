@@ -125,6 +125,7 @@ interface Harness {
 }
 
 async function createHarness(options: FirstScreenHotspotsFixtureOptions = {}): Promise<Harness> {
+  const started = performance.now();
   const database = await openHotspotDatabase();
   databases.push(database);
   const db = database.db;
@@ -134,6 +135,7 @@ async function createHarness(options: FirstScreenHotspotsFixtureOptions = {}): P
     ...options,
     run: (sql, params) => { db.run(sql, params as SQLQueryBindings[]); },
   });
+  const seeded = performance.now();
   const app = createMultiremiApp({ store, authToken: AUTH_TOKEN });
   const credential = await store.createAccessToken({
     name: "MUL-473 hotspot test",
@@ -142,6 +144,13 @@ async function createHarness(options: FirstScreenHotspotsFixtureOptions = {}): P
     workspaceId: fixture.workspaceId,
     purpose: "session",
   });
+  // Setup is outside every measured SQL/byte window. Keep its cost visible in CI
+  // so a slow seed can be distinguished from a business-query regression.
+  console.info(`REMI_TEST_HOTSPOT_SETUP_STATS ${JSON.stringify({
+    dialect: db.dialect, sessions: fixture.counts.sessions, issues: fixture.counts.issues,
+    seedMs: fixture.seedMs, databaseAndStoreMs: seeded - started - fixture.seedMs,
+    appAndCredentialMs: performance.now() - seeded,
+  })}`);
   return {
     store,
     db,
@@ -216,7 +225,9 @@ describe("MUL-473 first-screen hotspot response shapes", () => {
     } finally {
       restoreIds();
     }
-  }, 20000);
+    // Pinned clock/PRNG intentionally disables migrated-template reuse, so this
+    // case includes a cold PG migration plus the full 50-Chat/300-inbox seed.
+  }, process.env.MULTIREMI_TEST_POSTGRES_URL ? 90000 : 20000);
 });
 
 describe("MUL-473 first-screen hotspot query counts", () => {
@@ -315,7 +326,9 @@ describe("MUL-473 first-screen hotspot query counts", () => {
     // QA workspace, because a `usr_` ref was probed against every Agent *with*
     // its Skill bodies. 9 is the cost of the exact historical search order.
     expect(Math.max(...byUserId)).toBeLessThanOrEqual(9);
-  }, 30000);
+    // Three independently seeded PG databases; CI run 44307088058 took 33–35s.
+    // SQL/byte assertions above retain their original budgets and fixture scale.
+  }, process.env.MULTIREMI_TEST_POSTGRES_URL ? 90000 : 30000);
 
   it("keeps the untyped fallback affordable for the shapes that reach it", async () => {
     // The three refs that cannot be prefix-locked, so all three kinds are read:
@@ -342,7 +355,9 @@ describe("MUL-473 first-screen hotspot query counts", () => {
         expect((measured.body as { total: number }).total > 0).toBe(budget === 9);
       }
     }
-  }, 30000);
+    // Three independently seeded PG databases; CI run 44307088058 took 33–35s.
+    // SQL/byte assertions above retain their original budgets and fixture scale.
+  }, process.env.MULTIREMI_TEST_POSTGRES_URL ? 90000 : 30000);
 
   it("still resolves name-shaped and ambiguous refs through the alias tiers", async () => {
     const harness = await createHarness({ issues: 60, sessions: 1, inboxRows: 0 });

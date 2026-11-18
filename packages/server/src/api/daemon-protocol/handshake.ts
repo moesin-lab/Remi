@@ -30,6 +30,7 @@ import {
   type DaemonRejectPayload,
   type DaemonRuntimeCapabilities,
 } from "@multiremi/contracts/daemon-protocol.js";
+import { hasDaemonCapability } from "@multiremi/contracts/daemon-compatibility.js";
 import { readInteger, readPayload, readString } from "./frames.js";
 
 /** Why a handshake was refused, as the close code the daemon must act on. */
@@ -141,8 +142,8 @@ export const DAEMON_SERVER_WELCOME_CAPS: readonly DaemonProtocolCap[] = ["lane.b
 /** `welcome.caps`: what the hello declared and this server supports, in the hello's order. */
 export function negotiateWelcomeCaps(helloCaps: readonly string[],
   supported: readonly DaemonProtocolCap[] = DAEMON_SERVER_WELCOME_CAPS): DaemonProtocolCap[] {
-  const offered = new Set(supported);
-  return [...new Set(helloCaps)].filter((cap): cap is DaemonProtocolCap => offered.has(cap as DaemonProtocolCap));
+  // Echo the offered spelling so old daemons understand renamed capabilities.
+  return [...new Set(helloCaps)].filter((cap): cap is DaemonProtocolCap => hasDaemonCapability(supported, cap));
 }
 
 /**

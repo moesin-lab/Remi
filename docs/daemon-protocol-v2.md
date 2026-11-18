@@ -267,7 +267,7 @@ PR 6 起载荷可选带 `running_background_tasks`（该尝试运行中或暂停
 **后台任务（PR 6）。** 帧与载荷类型在 `daemon-protocol.ts`，都受能力位
 `lane.background` 约束：daemon 在 `hello.caps` 声明，服务端支持时在 `welcome.caps` 回显；双方都有时
 daemon 才在尝试结束后保留仍有后台任务的 Chat 会话线进程，否则在尝试结束时停止这些任务。
-`welcome.caps` 是 hello 声明的能力与服务端支持集（`DAEMON_SERVER_WELCOME_CAPS`，今天只有 `lane.background`）的交集，
+`welcome.caps` 是 hello 声明的能力与服务端支持集（`DAEMON_SERVER_WELCOME_CAPS`，包含 `lane.background` 与 `input_unread`）的交集，
 旧服务端恒答 `[]`；`startMultiremiServer` 的 `daemonWelcomeCaps: []` 可让新服务端表现为旧服务端（混合版本测试）。
 
 | 帧 | 方向与类别 | 载荷 | 说明 |
@@ -1064,7 +1064,7 @@ DaemonTraceReader.read({ taskId, runtimeId, view: "events", afterSeq = 0, limit 
 
 线上载荷是 `{task_id, view: "turn", item_cursor, limit, max_bytes}` 或
 `{task_id, view: "events", after_seq, limit, max_bytes}`。没有已知 `view` 的请求按 `protocol_violation`
-拒绝：只有过了版本门槛（§7.4b）的服务端才会连上新 daemon，它们总是带 `view`。
+拒绝：`trace.read` 必须带 `view`；§7.4b 的 contract 基线保证已接受 daemon 理解当前 trace 语义。
 服务端的 socket reader 校验应答的形状与请求的视图一致，不一致按 `daemon_timeout` 处理。
 
 | `view` | 运行中 | 已关闭 | v1 文件 |
@@ -1128,9 +1128,9 @@ server → reject  { code: "daemon_protocol_upgrade_required", min_protocol: 2,
 `hb` 更新。上述能力缺失均按 false/0 处理，不能沿用数据库里的旧值。`feishu_concierge_protocol`
 达到服务端支持版本时同时表示 `supportsFeishuBotConfig`。
 
-服务端在 `hello` 时按 `protocol` 与 `cli_version` 双重判定。载荷级语义变化随发布用
-`min_cli_version` 把关，协议号只在传输与帧封装变化时升；统一消息/轮载荷仍使用协议 2。
-新 daemon 收到旧服务端的 `welcome.min_cli_version` 时进入 `upgrade_wait`，停止领轮。
+服务端在 `hello` 时按 `protocol` 与 contract 的 `min_cli_version` 判定准入；
+具名能力单独协商，不能通过 CLI 版本推断。只有自身低于服务端 contract 门槛才进入 `upgrade_wait`。
+普通版本保留 N-1 路径；统一消息/轮载荷仍使用协议 2，见 §7.4b。
 旧形状的 `task.complete` 返回 `report_shape_retired`（`retryable: false`），outbox 隔离该分区。
 
 ### 7.2 v1 被拒后怎么升级
@@ -1186,21 +1186,43 @@ daemon protocol rejected by server (min X, self Y); waiting for pending_update, 
 
 `launched_by = desktop` 的 daemon 会拒绝 CLI 更新（现有逻辑），fleet 里目前没有这种情况。
 
-### 7.4b `DAEMON_MIN_CLI_VERSION` 与载荷发布版本
+### 7.4b N-1 与 contract 发布
 
-当前 `DAEMON_MIN_CLI_VERSION` 为首个写「轮 + 条目」trace 的正式版本 `0.2.90`
-（PR 2，[ADR 0019](adr/0019-turn-and-item-traces.md) 决策 9）。已发布的 `0.2.89` 写片段 trace、
-回答不带 `view` 的 `trace.read`，与更早版本一并被拒绝；`DAEMON_PROTOCOL_VERSION` 仍为 2。
-`package.json` 与依赖快照由 `bun run release:prepare --version 0.2.90` 与门槛同批改到 `0.2.90`（`release:check` 要求二者一致）。
-发布前，发布负责人核对 `v0.2.90` tag、package 版本、依赖快照、Release 资产和目标 main SHA。
-v0.2.90 同时是 [ADR 0018](adr/0018-local-records-and-recyclable-workspaces.md) 的首个发版（PR #417 不在 v0.2.89 里）；
-API 上线后门槛立即为每台 daemon 自动排队升级，所以 ADR 0018 的前置步骤要在部署 API 之前做完。
-旧 Web 读 trace 带 `after_seq` 不带 `view`，会被 `parseTraceWindow` 以 400 拒绝，所以 Web 与 API 同批上线。
-部署顺序（细节见 ADR 0019 决策 9）：updater drain 暂停派活 → 运行中的轮与 outbox 排空（含 R10 飞书投递核对）→
-ADR 0018 前置步骤（核对 66-8 工作区根下不属于新布局的目录；删除关闭 GC 的 systemd 覆盖文件并设
-`MULTIREMI_GC_DRY_RUN=true`；在每台 daemon 上导出 `codex-usage-v6` 期间的 Codex 原生用量，并保留 API 主机的
-`REMI_SESSION_ARCHIVE_ROOT`，见 [Codex 原生用量补录](usage-accounting.md#codex-原生用量补录)）→ API（含迁移）与 Web 同批 → daemon 自动升级，先在一台上核对预演再去掉
-`MULTIREMI_GC_DRY_RUN` → 解除 drain。门槛不表示 fleet 已升级。
+当前 contract 最低版本保持 `0.2.90`（首个「轮 + 条目」trace，ADR 0019）。
+普通发布只增加字段、帧和具名能力，不能抬高 `min_cli_version`，也不能从 CLI 版本或 build 号推断能力。
+只有明确声明的 contract 发布才能移除旧语义或抬高门槛，须在
+[`daemon-compatibility.ts`](../packages/contracts/src/daemon-compatibility.ts) 的 contract ledger
+记录版本、最低版本和原因，并在该版本发布时执行；CI 的
+[`check-daemon-contract.ts`](../scripts/check-daemon-contract.ts) 与基线比较并阻止普通版本修改门槛。
+
+[`能力决策架构守卫`](../tests/arch/helpers/daemon-capability-guard.ts) 按目录/glob 扫描
+worker、握手、任务 claim/recheck、调度与 runtime 准入源码。它在单个文件内按词法符号追踪
+`const`/`let`/`var` 初始化、解构（重命名、嵌套、默认值）和赋值链；版本来源一经登记便保守保留，
+不做分支路径推断。比较任一侧含 CLI/version/build 来源、`compare*Version` 调用（包括具名导入别名、
+namespace 访问）和 semver 调用均检查。`typeof` 返回类型标签，不视为版本值比较。
+准入、升级、展示或其它协议格式的合法比较，须逐条登记「文件 + 完整表达式 + 理由」，
+不能按文件整体豁免。守卫不做跨文件或通用数据流分析，尤其不能保证发现经辅助函数参数或返回值
+转手的版本来源；这类间接决策仍须代码审阅，不能以守卫通过证明不存在。
+解构的计算属性键支持字符串字面量和无替换模板字面量；动态计算键不在追踪范围内。
+比较函数的局部 `const` 别名（包括别名链和导入后的别名）按同文件词法符号追踪。
+
+能力名称、旧名、加入时的源码版本和计划 contract 版本集中登记在该兼容文件。
+`contract: null` 表示尚无移除计划。读取 hello/welcome 时接受规范名和旧名；welcome 回显
+hello 使用的拼写；daemon 的首次 hello 使用旧名以兼容尚未声明能力的新旧服务端。
+例如 `input.unread` 与 `input_unread` 等价。未声明能力即按旧端处理，未知能力忽略。
+`lane.background` 和未读输入处理须双方声明；不支持时保留非驻留/旧输入处理路径。
+Issue 工作区与并行执行已包含在 `0.2.90` 基线内，不再额外从 runtime 版本或元数据推断。
+接单测试使用已满足 contract 的 daemon，不要求重复声明 `parallel_agent_execution`；
+低于基线的旧 daemon（包括 `0.2.66`）由 hello 准入回归验证拒绝，不在 Store placement 重复判断。
+
+daemon 仅在自身 CLI 低于服务端声明的 contract 最低版本时进入 `upgrade_wait`；
+旧服务端声明更低的最低版本或缺少 caps 不阻止接单。
+真正低于 contract 的 daemon 仍由服务端拒绝并通过既有 HTTP 通道升级。
+
+CI 常态运行两组真实发布源码混版：上一稳定发布 daemon × 当前服务端，当前 daemon × 上一稳定发布服务端。
+[`混版冒烟`](../tests/integration/daemon-n-minus-one/run.ts) 使用独立进程、真实 Store、HTTP 与 WebSocket，
+验证派单、完成一轮和运行中取消（检查 provider 收到 abort）；模型 provider 为确定性测试实现，
+不验证外部模型服务。CI 从 GitHub Release 选择最新稳定的 SemVer 发布 tag，记录两端 SHA。
 
 ### 7.5 升级失败的提示
 
@@ -1294,7 +1316,7 @@ See [IM platform management](dev/im-platforms.md#机器人菜单) for persistenc
 
 ### 计划内重启的混合版本门槛
 
-hello / welcome 协商命名能力 `turn.restart`，且
+hello / welcome 通过 `hasDaemonCapability` 协商注册表中的命名能力 `turn.restart`（introduced `0.2.96`，无别名，不提高准入版本），且
 `hello.runtimes[].capabilities.planned_restart` 与心跳能力中的 `planned_restart: 1`
 表示 daemon 已实现 `turn.restart`、磁盘 journal 与同 attempt 恢复协议。缺失或未知版本按不支持处理，
 每次 socket hello/heartbeat 均覆盖旧能力，防止降级后遗留支持标记。

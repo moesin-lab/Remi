@@ -88,3 +88,27 @@ pg_stat_statements 时，将其安装 schema 代入第二段，在 t0 和 t0+10m
 本地 Bun 1.3.14：协议 Session、WS metrics 与来源归因 83 pass/0 fail；规模预算与
 query-budget 37 pass/0 fail（SQLite）。本地完整 Release build check 不等于以上针对性测试；
 最终 CI 状态、真实 PG 分片和未执行项以 PR 描述及本会话交付评论为准。
+
+
+## MUL-224 审阅补测：真实 WebSocket 与去修复反证
+
+在 Linux 开发机、Bun 1.3.14 上新增两个真实 WebSocket 回归（来源汇总开启/关闭）。
+隔离服务使用 `startMultiremiServer`，8 个独立 daemon/runtime 经真实 upgrade/hello/message
+进入注册的 trace.head RPC；每帧先查询一次，全部到达屏障后，插入 HTTP/job/无来源查询，
+释放屏障，再各查询一次。测试同时断言回包、每帧计数 2、实际 flushMetrics 输出的
+ws_minute_summary 为 8 帧/16 次，以及 db_sources 的 trace.head 来源为 16 次（启用时）。
+监听 metrics ring 使用 call-through spy，不替换 Session、传输或汇总实现。
+配置真实 PG URL 时查询均经过 PG bridge；本地没有 PG URL，SQL 完成钩子替身仅验证
+真实 WS 的上下文/输出接线，不作为 PG 通过证据。
+
+去修复反证在 `/tmp/mul209-old-attribution` 的隔离 archive 执行：保留新测试，
+将 session.ts、daemon-protocol/index.ts、api/server.ts 恢复为基线 8cc817d2c 的全局差值接线。
+同一测试命令得到 0 pass / 2 fail，均在每帧计数断言失败：实际为
+19,18,17,16,15,14,13,12（合计 124），预期八个 2（合计 16）。
+未更改任务工作树中的运行实现。命令为
+`bun test tests/unit/multiremi/daemon-protocol-server.test.ts --test-name-pattern 'MUL-209 real'`。
+
+补测版本的四文件协议/归因回归为 98 pass / 0 fail，类型检查通过。
+旧 head fc3e045c575129a34ac32f28edd04b537a48a655 的完整 Release build check
+[44280138146](https://github.com/moesin-lab/Remi/actions/runs/44280138146) 已核实 completed/success，
+8 个真实 PG backend 分片均 success。这不代替补测后新 head 的完整 CI；新结果以 PR 描述为准。

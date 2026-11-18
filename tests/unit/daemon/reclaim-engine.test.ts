@@ -2218,3 +2218,111 @@ describe("a daemon that inherited a repository from its environment", () => {
     expect(report.retained).toEqual({ snapshot_failed: 1 });
   });
 });
+
+describe("curated Codex cache sweep", () => {
+  function cache(home: string) {
+    const tmp = join(home, ".tmp");
+    for (const name of ["plugins", "plugins-clone-Ab12xy", "plugins-backup-Z9x8w7"]) {
+      mkdirSync(join(tmp, name), { recursive: true });
+      writeFileSync(join(tmp, name, "blob"), Buffer.alloc(1024 * 1024, 1));
+    }
+    for (const name of ["plugins.sha", "plugins.sync.lock", "plugins-other", "plugins-clone-not-ours", "unrelated"]) {
+      writeFileSync(join(tmp, name), "keep-or-clean");
+    }
+    for (const name of ["projects", "sessions", "work"]) {
+      mkdirSync(join(home, name), { recursive: true });
+      writeFileSync(join(home, name, "history"), "preserved");
+    }
+    return tmp;
+  }
+  function cacheBytes(tmp: string): number {
+    let bytes = 0;
+    for (const name of ["plugins", "plugins-clone-Ab12xy", "plugins-backup-Z9x8w7"]) {
+      if (existsSync(join(tmp, name, "blob"))) bytes += readFileSync(join(tmp, name, "blob")).byteLength;
+    }
+    for (const name of ["plugins.sha", "plugins.sync.lock"]) {
+      if (existsSync(join(tmp, name))) bytes += readFileSync(join(tmp, name)).byteLength;
+    }
+    return bytes;
+  }
+
+  for (const mode of ["periodic", "run"] as const) {
+    test(`${mode} removes idle caches by bytes without registry records; running subject stays intact`, async () => {
+      const f = reclaimFixture();
+      const homes = Array.from({ length: 4 }, (_, n) => {
+        const lane = f.lane(issue(900 + n), 1);
+        // Cover both direct lane homes and execution-fingerprint homes.
+        return n % 2 ? join(lane, "home") : join(lane, "executions", "fp", "home");
+      });
+      const tmp = homes.map(cache);
+      const before = tmp.map(cacheBytes);
+      expect(before.every((bytes) => bytes > 3 * 1024 * 1024)).toBe(true);
+      const finish = executionTrackerFor(f.root).begin(issue(900).id, "tsk_cache_running");
+      try {
+        const preview = await f.engine().run("dry_run");
+        expect(tmp.map(cacheBytes)).toEqual(before);
+        expect(preview.codex_plugin_cache).toEqual({ planned_homes: 3, cleaned_homes: 0 });
+        const report = await f.engine().run(mode);
+        expect(tmp.map(cacheBytes)).toEqual([before[0]!, 0, 0, 0]);
+        expect(report.codex_plugin_cache).toEqual({ planned_homes: 3, cleaned_homes: 3 });
+        expect(report.errors).toEqual([]);
+        for (let n = 0; n < homes.length; n++) {
+          for (const name of ["projects", "sessions", "work"]) {
+            expect(readFileSync(join(homes[n]!, name, "history"), "utf8")).toBe("preserved");
+          }
+          for (const name of ["plugins-other", "plugins-clone-not-ours", "unrelated"]) {
+            expect(readFileSync(join(tmp[n]!, name), "utf8")).toBe("keep-or-clean");
+          }
+        }
+      } finally { finish(); }
+      await f.engine().run(mode);
+      expect(tmp.map(cacheBytes)).toEqual([0, 0, 0, 0]);
+    });
+  }
+
+  test("forced dry run plans caches; failed safe deletion reports errors and continues", async () => {
+    const f = reclaimFixture();
+    const home = join(f.lane(issue(940), 1), "home");
+    const tmp = cache(home);
+    const before = cacheBytes(tmp);
+    const preview = await f.engine({ dryRun: true }).run("periodic");
+    expect(preview.mode).toBe("dry_run");
+    expect(preview.codex_plugin_cache).toEqual({ planned_homes: 1, cleaned_homes: 0 });
+    expect(cacheBytes(tmp)).toBe(before);
+    // A non-private quarantine is rejected by safe-remove on every platform,
+    // even under root. Files after the failed directories must still be swept.
+    const quarantine = join(f.root, ".daemon", "quarantine");
+    mkdirSync(quarantine, { recursive: true });
+    chmodSync(quarantine, 0o777);
+    const report = await f.engine().run("run");
+    expect(report.errors.some((error) => error.message.includes("Codex curated cache:") && error.message.includes("quarantine"))).toBe(true);
+    expect(report.codex_plugin_cache).toEqual({ planned_homes: 1, cleaned_homes: 0 });
+    expect(existsSync(join(tmp, "plugins", "blob"))).toBe(true);
+    expect(existsSync(join(tmp, "plugins.sha"))).toBe(false);
+    expect(existsSync(join(tmp, "plugins.sync.lock"))).toBe(false);
+  });
+
+  test("respects lifecycle locks and does not follow home, tmp, execution or cache links", async () => {
+    const f = reclaimFixture();
+    const lane = f.lane(issue(950), 1);
+    const target = join(f.scratch, "outside");
+    const outsideTmp = cache(target);
+    symlinkSync(target, join(lane, "executions"), "dir");
+    symlinkSync(outsideTmp, join(lane, "home", ".tmp"), "dir");
+    const other = f.lane(issue(951), 1);
+    rmSync(join(other, "home"), { recursive: true });
+    symlinkSync(target, join(other, "home"), "dir");
+    const linkedCache = join(f.lane(issue(952), 1), "home", ".tmp");
+    mkdirSync(linkedCache);
+    symlinkSync(target, join(linkedCache, "plugins"), "dir");
+    const lockedTmp = cache(join(f.lane(issue(953), 1), "home"));
+    const release = await f.locker.acquireShared(issue(953).id);
+    const before = cacheBytes(outsideTmp);
+    try {
+      await f.engine().run("run");
+      expect(cacheBytes(outsideTmp)).toBe(before);
+      expect(cacheBytes(lockedTmp)).toBe(before);
+      expect(existsSync(join(linkedCache, "plugins"))).toBe(false);
+    } finally { release(); }
+  });
+});

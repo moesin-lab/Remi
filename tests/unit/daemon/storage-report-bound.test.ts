@@ -16,6 +16,7 @@ function report(overrides: Partial<StorageReport>): StorageReport {
     reclaimed_this_round: 0,
     forgotten_this_round: 0,
     freed_bytes: 0,
+    codex_plugin_cache: { planned_homes: 999999, cleaned_homes: 999999 },
     plan: [],
     errors: [],
     ...overrides,

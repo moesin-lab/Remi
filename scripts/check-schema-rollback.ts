@@ -34,7 +34,7 @@ const name = `mul173_mixed_${crypto.randomUUID().replaceAll('-', '')}`;
 const url = new URL(process.env.MULTIREMI_TEST_POSTGRES_URL);
 if (!['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Requires an isolated local test PostgreSQL service');
 const previousReportDir = process.env.MULTIREMI_MIGRATION_REPORT_DIR;
-process.env.MULTIREMI_MIGRATION_REPORT_DIR = join(temporary, 'candidate-reports');
+process.env.MULTIREMI_MIGRATION_REPORT_DIR = join(temporary, 'reports');
 const admin = new Bun.SQL(url.toString(), { max: 1 });
 let created = false;
 try {
@@ -44,7 +44,7 @@ try {
   const runOld = () => {
     const result = Bun.spawnSync([process.execPath, probe], { cwd: previousRoot,
       env: { PATH: process.env.PATH, HOME: temporary, NODE_ENV: 'test', MULTIREMI_DATABASE_URL: url.toString(),
-        MULTIREMI_MIGRATION_REPORT_DIR: join(temporary, 'previous-reports') }, stdout: 'pipe', stderr: 'pipe' });
+        MULTIREMI_MIGRATION_REPORT_DIR: join(temporary, 'reports') }, stdout: 'pipe', stderr: 'pipe' });
     console.log(result.stdout.toString());
     if (result.exitCode !== 0) throw new Error(`Previous release core tests failed (${result.exitCode}): ${result.stderr.toString()}`);
     assert.equal(JSON.parse(result.stdout.toString().trim().split('\n').at(-1)!).pass, true);

@@ -20,6 +20,9 @@ write-fence、停止、备份、隔离 rehearsal、运行和验证流程。旧�
 业务写请求与 WebSocket 仍受围栏保护。指纹清单扩充后的第一版
 可能与旧发布不同，仍需旧路径及已有的跨指纹人工审核。
 
+updater 上报的预检会按已解析目标重算：同指纹 switch 不要求离线 rehearsal/备份工具就绪，
+异指纹保留严格预检。
+
 switch 先做在线一致性 `pg_dump` 并用 `pg_restore --list` 检查，失败记入 journal 的
 `backupError` 后继续。在线备份仅包含数据库，不是 HOME 的完整灾备快照；此路径不
 自动恢复数据库。随后启动 standby，等待就绪，hold edge，release 旧 slot，activate

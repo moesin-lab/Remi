@@ -90,7 +90,10 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
     upgradeWaiting: () => protocol.connectionState() === "upgrade_wait",
     bestEffort(type, payload) {
       if (protocol.connectionState() !== "connected") return;
-      try { protocol.send({ t: type, rt: runtime() ?? undefined, p: payload }); }
+      const taskId = typeof payload.task_id === "string" ? payload.task_id : null;
+      const generation = taskId ? executionGeneration(taskId) : 0;
+      try { protocol.send({ t: type, rt: runtime() ?? undefined,
+        p: { ...(generation ? { generation } : {}), ...payload } }); }
       catch (error) { if (!(error instanceof DaemonProtocolRpcError)) throw error; }
     },
   };

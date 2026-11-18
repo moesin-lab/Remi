@@ -10,7 +10,7 @@ const originalFetch = globalThis.fetch;
 
 describe("Chat attachment transport", () => {
   it.each(["headers", "body"])("bounds a stalled attachment download while waiting for %s", async (phase) => {
-    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (_input: unknown, init?: RequestInit) => {
       if (phase === "headers") return rejectWhenAborted(init?.signal);
       return new Response(new ReadableStream({ start(controller) {
         init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason), { once: true });
@@ -22,7 +22,7 @@ describe("Chat attachment transport", () => {
 
   it("advertises the binary delivery protocol and preserves attachment descriptors over heartbeat", async () => {
     let payload: Record<string, any> = {};
-    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (_input: unknown, init?: RequestInit) => {
       payload = JSON.parse(String(init?.body));
       return Response.json({ pending_feishu_outbound: {
         id: "fbo_binary", claim_token: "lease", chat_id: "oc_1", body: "",
@@ -39,7 +39,7 @@ describe("Chat attachment transport", () => {
 
   it("uploads multipart bytes with runtime authority before submitting attachment IDs", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
-    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (input: unknown, init?: RequestInit) => {
       requests.push({ url: String(input), init });
       return Response.json(requests.length === 1 ? { attachment: { id: "att_uploaded" } } : { taskId: "tsk_1" });
     }) as typeof fetch;
@@ -58,13 +58,13 @@ describe("Chat attachment transport", () => {
     expect(form.get("revision")).toBe("3");
     expect(await (form.get("file") as File).text()).toBe("pdf");
     expect(new Headers(requests[0]!.init!.headers).get("authorization")).toBe("Bearer daemon-test-token");
-    expect(new Headers(requests[0]!.init!.headers).has("content-type")).toBe(false);
+    expect(new Headers(requests[0]!.init!.headers).get("content-type")).toStartWith("multipart/form-data; boundary=");
     expect(JSON.parse(String(requests[1]!.init!.body)).attachment_ids).toEqual(["att_uploaded"]);
   });
 
   it("downloads through scoped credentials and never follows external redirects", async () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
-    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (input: unknown, init?: RequestInit) => {
       requests.push({ url: String(input), init });
       return requests.length === 3
         ? new Response(null, { status: 302, headers: { location: "https://other.example/file" } })
@@ -101,7 +101,7 @@ afterEach(() => {
 describe("MultiremiDaemonClient request deadlines", () => {
   it.each(["default_branch", "defaultBranch"])("normalizes %s in task and intake repository claims", async (field) => {
     const repos = [{ url: "https://example.test/repo.git", [field]: "workflow-dev" }];
-    globalThis.fetch = (async () => Response.json({ task: {
+    globalThis.fetch = inspectFetch(async () => Response.json({ task: {
       id: "tsk_default", workspace_id: "local", agent_id: "agt_default", prompt: "Inspect", repos,
       project_contexts: [{ project: { id: "prj_default", title: "Default" }, resources: [], docs: [], repos }],
     } })) as unknown as typeof fetch;
@@ -112,7 +112,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
 
   it("reports complete baseline refs and commits through the reliable workspace frame", async () => {
     let httpCalls = 0;
-    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (_input: unknown, init?: RequestInit) => {
       httpCalls++;
       return Response.json({});
     }) as typeof fetch;
@@ -138,7 +138,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
     ["POST", "/api/daemon/heartbeat", (client: MultiremiDaemonClient) => client.heartbeatRuntime("runtime-1")],
   ] as const)("bounds a stalled %s request without automatically replaying it", async (method, path, request) => {
     let attempts = 0;
-    globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch((_input: RequestInfo | URL, init?: RequestInit) => {
       attempts++;
       return rejectWhenAborted(init?.signal);
     }) as unknown as typeof globalThis.fetch;
@@ -155,7 +155,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
 
   it("queues one model snapshot immediately without HTTP even while HTTP is stalled", async () => {
     let httpCalls = 0;
-    globalThis.fetch = (() => { httpCalls++; return new Promise(() => {}); }) as unknown as typeof fetch;
+    globalThis.fetch = inspectFetch(() => { httpCalls++; return new Promise(() => {}); }) as unknown as typeof fetch;
     const client = new MultiremiDaemonClient("https://remi.example", "daemon-token");
     const calls = captureReports(client);
     expect(await client.updateRuntimeModels("runtime-1", [])).toEqual([]);
@@ -165,7 +165,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
   });
 
   it.each([200, 503])("keeps the deadline active while reading an HTTP %s response body", async (status) => {
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => ({
+    globalThis.fetch = inspectFetch(async (_input: RequestInfo | URL, init?: RequestInit) => ({
       ok: status === 200,
       status,
       text: () => rejectWhenAborted(init?.signal),
@@ -177,7 +177,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
   });
 
   it.each(["", JSON.stringify({ runtimes: [] })])("rejects registration when an aborted response body resolves with %j", async (body) => {
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => ({
+    globalThis.fetch = inspectFetch(async (_input: RequestInfo | URL, init?: RequestInit) => ({
       ok: true,
       status: 200,
       text: () => new Promise<string>(resolve => {
@@ -194,7 +194,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
   });
 
   it.each([401, 403, 410])("preserves HTTP %s authority failures when the response body times out", async (status) => {
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => ({
+    globalThis.fetch = inspectFetch(async (_input: RequestInfo | URL, init?: RequestInit) => ({
       ok: false,
       status,
       text: () => rejectWhenAborted(init?.signal),
@@ -209,7 +209,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
 
   it("preserves a received authority failure when the caller cancels its response body", async () => {
     const caller = new AbortController();
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => ({
+    globalThis.fetch = inspectFetch(async (_input: RequestInfo | URL, init?: RequestInit) => ({
       ok: false,
       status: 403,
       text: () => {
@@ -225,7 +225,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
   });
 
   it("preserves a received authority failure when its response body disconnects", async () => {
-    globalThis.fetch = (async () => ({
+    globalThis.fetch = inspectFetch(async () => ({
       ok: false,
       status: 401,
       text: async () => { throw new Error("connection closed during body read"); },
@@ -238,7 +238,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
   });
 
   it("enforces a deadline even when the caller supplies a signal", async () => {
-    globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => rejectWhenAborted(init?.signal)) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = inspectFetch((_input: RequestInfo | URL, init?: RequestInit) => rejectWhenAborted(init?.signal)) as unknown as typeof globalThis.fetch;
     const caller = new AbortController();
     const error = await new MultiremiDaemonClient("https://remi.example", null, { requestTimeoutMs: 30 })
       .getSshMeshConfig("runtime-1", caller.signal).catch((value: unknown) => value);
@@ -248,7 +248,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
 
   it("does not send a request that was already cancelled", async () => {
     let attempts = 0;
-    globalThis.fetch = (async () => { attempts++; return Response.json({}); }) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = inspectFetch(async () => { attempts++; return Response.json({}); }) as unknown as typeof globalThis.fetch;
     const caller = new AbortController();
     const reason = new Error("already stopped");
     caller.abort(reason);
@@ -259,7 +259,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
 
   it.each([200, 403])("cleans up the timer after a completed HTTP %s response", async (status) => {
     let requestSignal: AbortSignal | undefined;
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (_input: RequestInfo | URL, init?: RequestInit) => {
       requestSignal = init?.signal ?? undefined;
       return Response.json({}, { status });
     }) as unknown as typeof globalThis.fetch;
@@ -277,7 +277,7 @@ describe("MultiremiDaemonClient request deadlines", () => {
 
 describe("MultiremiDaemonClient HTTP failures", () => {
   it.each([401, 403, 410])("classifies HTTP %s as a terminal daemon authority failure", async (status) => {
-    globalThis.fetch = (async () => new Response(
+    globalThis.fetch = inspectFetch(async () => new Response(
       JSON.stringify({ error: "daemon is no longer authorized", code: "daemon_retired" }),
       { status, headers: { "Content-Type": "application/json" } },
     )) as unknown as typeof globalThis.fetch;
@@ -292,7 +292,7 @@ describe("MultiremiDaemonClient HTTP failures", () => {
   });
 
   it("keeps transient server failures retryable", async () => {
-    globalThis.fetch = (async () => new Response(
+    globalThis.fetch = inspectFetch(async () => new Response(
       JSON.stringify({ error: "temporarily unavailable" }),
       { status: 503, headers: { "Content-Type": "application/json" } },
     )) as unknown as typeof globalThis.fetch;
@@ -306,7 +306,7 @@ describe("MultiremiDaemonClient HTTP failures", () => {
   });
 
   it("preserves the desired Plugin revision from the heartbeat ack", async () => {
-    globalThis.fetch = (async () => Response.json({
+    globalThis.fetch = inspectFetch(async () => Response.json({
       status: "ok",
       agent_plugins: { revision: "rev-abc" },
     })) as unknown as typeof globalThis.fetch;
@@ -316,7 +316,7 @@ describe("MultiremiDaemonClient HTTP failures", () => {
   });
 
   it("drops a malformed desired Plugin revision instead of caching garbage", async () => {
-    globalThis.fetch = (async () => Response.json({
+    globalThis.fetch = inspectFetch(async () => Response.json({
       status: "ok",
       agent_plugins: { revision: "" },
     })) as unknown as typeof globalThis.fetch;
@@ -328,14 +328,14 @@ describe("MultiremiDaemonClient HTTP failures", () => {
   });
 
   it("omits the desired Plugin revision when the ack has no such field", async () => {
-    globalThis.fetch = (async () => Response.json({ status: "ok" })) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = inspectFetch(async () => Response.json({ status: "ok" })) as unknown as typeof globalThis.fetch;
     const response = await new MultiremiDaemonClient("https://remi.example", "daemon-token")
       .heartbeatRuntime("rt_1");
     expect(response.agent_plugins).toBeUndefined();
   });
 
   it("treats an old server without Agent Plugin routes as protocol zero", async () => {
-    globalThis.fetch = (async () => new Response("404 Not Found", { status: 404 })) as unknown as typeof globalThis.fetch;
+    globalThis.fetch = inspectFetch(async () => new Response("404 Not Found", { status: 404 })) as unknown as typeof globalThis.fetch;
 
     await expect(new MultiremiDaemonClient("https://remi.example", "daemon-token")
       .getRuntimeAgentPluginDesired("runtime-1"))
@@ -347,7 +347,7 @@ describe("MultiremiDaemonClient HTTP failures", () => {
   });
 
   it("does not hide a structured runtime-not-found Agent Plugin response", async () => {
-    globalThis.fetch = (async () => new Response(
+    globalThis.fetch = inspectFetch(async () => new Response(
       JSON.stringify({ error: "runtime not found", code: "runtime_not_found" }),
       { status: 404, headers: { "Content-Type": "application/json" } },
     )) as unknown as typeof globalThis.fetch;
@@ -364,7 +364,7 @@ describe("MultiremiDaemonClient daemon protocol", () => {
   it("preserves the native CoT checkpoint and private-chat interaction recipient over heartbeat", async () => {
     const presentation = { version: "native_cot_v1", startedAt: Date.now(), throughSeq: 7, interactions: {},
       cot: { status: "active", cotId: "cot_recovered", messageId: "om_process" } };
-    globalThis.fetch = (async () => Response.json({ pending_feishu_outbound: {
+    globalThis.fetch = inspectFetch(async () => Response.json({ pending_feishu_outbound: {
       id: "fbo_native", claim_token: "lease", task_id: "tsk_live", chat_id: "oc_private", body: "",
       presentation, interaction_open_id: "ou_requester", mention: { mode: "none", resolvedOpenId: null },
       receipt_message_ids: ["om_initial", "om_steer"],
@@ -376,7 +376,7 @@ describe("MultiremiDaemonClient daemon protocol", () => {
     });
   });
   it("normalizes proactive Task identity and existing message checkpoints", async () => {
-    globalThis.fetch = (async () => Response.json({ pending_feishu_outbound: {
+    globalThis.fetch = inspectFetch(async () => Response.json({ pending_feishu_outbound: {
       id: "fbo_stream", claim_token: "lease", task_id: "tsk_live", resume_message_id: "om_card",
       chat_id: "oc_group", body: "", body_origin: "agent", idempotency_key: "fbo_stream",
     } })) as unknown as typeof globalThis.fetch;
@@ -388,7 +388,7 @@ describe("MultiremiDaemonClient daemon protocol", () => {
 
   it("normalizes outbound body origin and defaults old-server payloads to Issue", async () => {
     let bodyOrigin: string | undefined = "agent";
-    globalThis.fetch = (async () => Response.json({
+    globalThis.fetch = inspectFetch(async () => Response.json({
       status: "ok",
       pending_feishu_outbound: {
         id: "fbo_origin",
@@ -407,7 +407,7 @@ describe("MultiremiDaemonClient daemon protocol", () => {
   });
 
   it("normalizes pending bound Issue updates from a task claim", async () => {
-    globalThis.fetch = (async () => Response.json({
+    globalThis.fetch = inspectFetch(async () => Response.json({
       task: {
         id: "tsk_bound_updates",
         prompt: "Continue",
@@ -429,7 +429,7 @@ describe("MultiremiDaemonClient daemon protocol", () => {
   });
 
   it("normalizes a bound Issue identity from either daemon wire casing", async () => {
-    globalThis.fetch = (async () => Response.json({
+    globalThis.fetch = inspectFetch(async () => Response.json({
       task: {
         id: "tsk_bound_issue",
         prompt: "Continue",
@@ -455,7 +455,7 @@ describe("MultiremiDaemonClient daemon protocol", () => {
       status: "in_progress",
     });
 
-    globalThis.fetch = (async () => Response.json({
+    globalThis.fetch = inspectFetch(async () => Response.json({
       task: {
         id: "tsk_bound_issue_camel",
         prompt: "Continue",
@@ -478,7 +478,7 @@ describe("MultiremiDaemonClient daemon protocol", () => {
 
   it("does not renew a dispatch lease or fall back to the HTTP status endpoint", () => {
     const requests: Array<{ method: string; path: string }> = [];
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = new URL(String(input)).pathname;
       requests.push({ method: init?.method ?? "GET", path });
       if (path.endsWith("/dispatch-lease")) return new Response("Not Found", { status: 404 });
@@ -492,7 +492,7 @@ describe("MultiremiDaemonClient daemon protocol", () => {
 
   it("does not advertise the removed personal-bot side channel", async () => {
     const requestBodies: Record<string, unknown>[] = [];
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
       requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       if (String(input).endsWith("/api/daemon/register")) {
         return Response.json({
@@ -524,7 +524,7 @@ describe("MultiremiDaemonClient daemon protocol", () => {
 describe("MultiremiDaemonClient SSH Mesh wire", () => {
   it("advertises the protocol and reports machine state on heartbeat", async () => {
     let requestBody: Record<string, unknown> | null = null;
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (_input: RequestInfo | URL, init?: RequestInit) => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return Response.json({ status: "ok" });
     }) as unknown as typeof globalThis.fetch;
@@ -557,7 +557,7 @@ describe("MultiremiDaemonClient SSH Mesh wire", () => {
   it("fetches private configuration only from the authenticated daemon route", async () => {
     let requestedUrl = "";
     let authorization = "";
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
       requestedUrl = String(input);
       authorization = new Headers(init?.headers).get("authorization") ?? "";
       return Response.json({
@@ -582,7 +582,7 @@ describe("MultiremiDaemonClient SSH Mesh wire", () => {
   it("forwards cancellation to the SSH Mesh configuration request", async () => {
     let requestSignal: AbortSignal | null = null;
     let requestReleased = false;
-    globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch((_input: RequestInfo | URL, init?: RequestInit) => {
       requestSignal = init?.signal ?? null;
       return new Promise<Response>((_resolve, reject) => {
         requestSignal?.addEventListener("abort", () => {
@@ -610,7 +610,7 @@ describe("MultiremiDaemonClient workspace configuration", () => {
     let requestedUrl = "";
     let authorization = "";
     let requestBody: unknown;
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
       requestedUrl = String(input);
       authorization = new Headers(init?.headers).get("authorization") ?? "";
       requestBody = JSON.parse(String(init?.body));
@@ -630,7 +630,7 @@ describe("MultiremiDaemonClient workspace configuration", () => {
 
   it("advertises bot menu capability without personal-bot side-channel fields", async () => {
     let requestBody: Record<string, unknown> | null = null;
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = inspectFetch(async (_input: RequestInfo | URL, init?: RequestInit) => {
       requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return Response.json({ status: "ok" });
     }) as unknown as typeof globalThis.fetch;
@@ -647,7 +647,7 @@ describe("MultiremiDaemonClient workspace configuration", () => {
   });
 
   it("returns heartbeat-delivered settings and Relay configuration", async () => {
-    globalThis.fetch = (async () => Response.json({
+    globalThis.fetch = inspectFetch(async () => Response.json({
       status: "ok",
       workspace_settings: {
         storage: { ttl_ms: 7_200_000, max_retained: 20 },
@@ -671,3 +671,15 @@ describe("MultiremiDaemonClient workspace configuration", () => {
     expect(ack.relay?.claude).toMatchObject({ revision: 3, auth_token: "relay-secret" });
   });
 });
+
+/** Inspect the wire request for either standard fetch(input, init) or fetch(Request). */
+function inspectFetch(handler: (url: string, init: RequestInit) => unknown): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const body = !request.body ? undefined
+      : request.headers.get("content-type")?.startsWith("multipart/form-data")
+        ? await request.formData() : await request.text();
+    return handler(request.url, { method: request.method, headers: request.headers,
+      body, signal: request.signal, redirect: request.redirect });
+  }) as typeof fetch;
+}

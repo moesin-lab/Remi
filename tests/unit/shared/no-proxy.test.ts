@@ -33,3 +33,10 @@ describe("NO_PROXY matching", () => {
     expect(shouldBypassProxy("http://10.36.0.223", { no_proxy: "", NO_PROXY: "*" })).toBe(false);
   });
 });
+
+// WebSocket default ports must use the same port-qualified matching as HTTP.
+it("matches default WebSocket ports", () => {
+  expect(matchesNoProxy("wss://api.example", "api.example:443")).toBe(true);
+  expect(matchesNoProxy("ws://api.example", "api.example:80")).toBe(true);
+  expect(matchesNoProxy("wss://api.example", "api.example:80")).toBe(false);
+});

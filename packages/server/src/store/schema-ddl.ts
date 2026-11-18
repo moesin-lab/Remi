@@ -2,7 +2,7 @@
  * Template placeholders are opaque identifiers for the architecture scanner. */
 function sqlTokens(sql: string): string[] {
   const tokens: string[] = [];
-  const pattern = /\s+|--[^\n]*|'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|\$([a-z_][a-z_0-9]*)?\$[\s\S]*?\$\1\$|(?:\$\{[^}]*\}|[\p{L}_](?:[\p{L}\p{N}_]|\$(?!\{))*|\$[0-9]+|\?)+|[^\s]/giu;
+  const pattern = /\s+|--[^\n]*|E'(?:\\[\s\S]|''|[^'\\])*'(?:[^\S\n]*\n\s*'(?:\\[\s\S]|''|[^'\\])*')*|'(?:''|[^'])*'(?:[^\S\n]*\n\s*'(?:''|[^'])*')*|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|\$([a-z_][a-z_0-9]*)?\$[\s\S]*?\$\1\$|(?:\$\{[^}]*\}|[\p{L}_](?:[\p{L}\p{N}_]|\$(?!\{))*|\$[0-9]+|\?)+|[^\s]/giu;
   let offset = 0;
   while (offset < sql.length) {
     if (sql.startsWith('/*', offset)) {
@@ -30,10 +30,16 @@ function sqlTokens(sql: string): string[] {
     // the name, never action tokens. Comments/whitespace were removed above.
     if (/^u$/i.test(token) && tokens[i + 1] === '&' && tokens[i + 2]?.startsWith('"')) {
       i += 2;
-      if (tokens[i + 1]?.toUpperCase() === 'UESCAPE' && tokens[i + 2]?.startsWith("'")) i += 2;
+      if (tokens[i + 1]?.toUpperCase() === 'UESCAPE') {
+        // Consume one complete constant (including newline continuations).
+        // Its contents are deliberately opaque; PG validates the escape value.
+        const escape = tokens[i + 2];
+        if (escape && /^(?:E?'[\s\S]*'|\$([a-z_][a-z_0-9]*)?\$[\s\S]*\$\1\$)$/i.test(escape)) i += 2;
+        else normalized.push('<unrecognized-uescape>');
+      }
       normalized.push('<identifier-or-value>');
     } else {
-      normalized.push(/^["'$`\[]/.test(token) ? '<identifier-or-value>' : token.toUpperCase());
+      normalized.push(/^(?:["'$`\[]|E')/i.test(token) ? '<identifier-or-value>' : token.toUpperCase());
     }
   }
   return normalized;
@@ -100,15 +106,29 @@ function truncateCandidate(s: string[]): boolean {
   return i === s.length;
 }
 
-/** Shared fail-fast/arch lint. Runtime authority is the transactional catalog diff.
- * First require a SQL candidate shape: source strings also contain prose/shell.
- * Inside that closed candidate vocabulary deny everything except additive forms. */
+/** Source lint first disambiguates SQL candidates from prose/shell strings. */
 export function hasDestructiveSchemaSql(sql: string): boolean {
+  return destructiveSchemaSql(sql, false);
+}
+
+/** Known SQL: fail closed on TRUNCATE regardless of shape and on unrecognized
+ * UESCAPE constants. Catalog diffs cannot detect TRUNCATE's data deletion. */
+export function hasDestructiveSchemaStatement(sql: string): boolean {
+  return destructiveSchemaSql(sql, true);
+}
+
+function destructiveSchemaSql(sql: string, knownSql: boolean): boolean {
   return splitTopLevel(sqlTokens(sql), ';').some(s => {
+    if (knownSql && s.includes('<unrecognized-uescape>')) return true;
     if (s[0] === 'DO') return s[1] === '<identifier-or-value>' || s[1] === 'LANGUAGE'
       || (s[1] === 'E' && s[2] === '<identifier-or-value>')
       || (s[1] === 'U' && s[2] === '&' && s[3] === '<identifier-or-value>');
-    if (s[0] === 'TRUNCATE') return truncateCandidate(s);
+    if (s[0] === 'TRUNCATE') {
+      // Known SQL never needs prose disambiguation. Explicit arch candidates
+      // also fail closed on any tail, including syntax unknown to this lexer.
+      return knownSql || ['TABLE', 'ONLY', '<identifier-or-value>'].includes(s[1]!)
+        || truncateCandidate(s);
+    }
     if (s[0] === 'REVOKE') {
       let depth=0;
       return s.some(token => {

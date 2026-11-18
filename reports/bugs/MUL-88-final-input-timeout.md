@@ -146,3 +146,10 @@ CI 进行中、缺失、跳过不计为 PG 分片通过。未合并、未部署�
  tests/integration/daemon-protocol-v2/shutdown-recovery.test.ts`：42 pass、32 skip（本地无 PG）、
 0 fail、314 assertions。`bun run test tests/unit/daemon/poll-cadence.test.ts`：14 pass、
 0 fail、49 assertions。最终 PG 实跑以新 head 完整工作流证据为准。
+
+首轮完整 run 最后结束的分片 1 另有一例失败：#117 的 PG 1202-row 查询预算
+测试完成了 4/4 reads、0/0 writes 与结果断言，但因包含 6011 次旧算法对照读取，
+整例耗时 9.126 秒，被 Bun 默认 5 秒 test deadline 判失败。仅为该大数据用例设置
+30 秒 test deadline，保留 1202 条规模、四读取/零写入和 oracle 的全部断言；
+不改变 MUL-88 的报告/RPC 超时时长与故障断言。该文件本地实跑 6 pass、8 skip、
+0 fail、53 assertions（本地无 PG）。新 full run 负责真实 PG 验证。

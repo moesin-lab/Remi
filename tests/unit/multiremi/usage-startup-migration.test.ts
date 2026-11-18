@@ -283,13 +283,31 @@ describe("automatic scalar usage cutover", () => {
     expect(marker()).not.toBeNull();
   });
 
-  it("refuses the HTTP listener and background jobs on startup migration failure", () => {
+  it("retains checkpoints on background failure and resumes after repair", async () => {
     const { store } = fixture();
     db!.exec("CREATE TRIGGER reject_usage_startup BEFORE INSERT ON multiremi_usage_legacy_audit BEGIN SELECT RAISE(ABORT,'startup failed'); END");
-    let started = false;
-    expect(() => startMultiremiServer({ store, port: 0, backgroundJobs: true, scheduler: { start() { started = true; } } as any })).toThrow("startup failed");
-    expect(started).toBe(false);
+    const worker = store.startUsageAccountingBackfill();
     expect(marker()).toBeNull();
+    await worker.done;
+    expect(worker.failure).toBeDefined();
+    expect(marker()).toBeNull();
+    await worker.stop();
+    db!.exec("DROP TRIGGER reject_usage_startup");
+    const resumed = store.startUsageAccountingBackfill();
+    await resumed.done;
+    expect(resumed.failure).toBeUndefined();
+    expect(marker()).not.toBeNull();
+    await resumed.stop();
+  });
+
+  it("cancels before the first background batch and resumes committed checkpoints", async () => {
+    const { store } = fixture(3);
+    const worker = store.startUsageAccountingBackfill();
+    await worker.stop();
+    expect(marker()).toBeNull();
+    const resumed = store.startUsageAccountingBackfill();
+    await resumed.done;
+    expect(marker()).not.toBeNull();
   });
 
   it("bounds startup duration and resumes after a timeout", async () => {

@@ -1,3 +1,4 @@
+import schemaContract from './schema-compatibility.json';
 import type { SqlDatabase } from './db/postgres.js';
 
 export interface SchemaLevels { expandLevel: number; contractLevel: number }
@@ -5,8 +6,8 @@ export interface SchemaCompatibility { minLevel: number; maxLevel: number }
 
 // Level 1 introduces the versioned migration protocol. Historical migrations
 // predate this contract and must finish before a database is enrolled.
-export const SCHEMA_COMPATIBILITY: Readonly<SchemaCompatibility> = { minLevel: 1, maxLevel: 1 };
-export const SCHEMA_EXPAND_LEVEL = 1;
+export const SCHEMA_COMPATIBILITY: Readonly<SchemaCompatibility> = { minLevel: schemaContract.minLevel, maxLevel: schemaContract.maxLevel };
+export const SCHEMA_EXPAND_LEVEL = schemaContract.expandLevel;
 
 function level(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
@@ -70,4 +71,10 @@ export function ensureSchemaMeta(db: SqlDatabase): void {
     applied_at TEXT NOT NULL
   );`);
   db.run('INSERT INTO multiremi_schema_meta(singleton, expand_level, contract_level) VALUES(1, 0, 0) ON CONFLICT(singleton) DO NOTHING');
+}
+
+/** Read-only integration surface for the updater and slot control plane. */
+export function querySchemaCompatibility(db: SqlDatabase) {
+  const levels = readSchemaLevels(db);
+  return { ...levels, compatibility: { ...SCHEMA_COMPATIBILITY } };
 }

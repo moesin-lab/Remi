@@ -9,6 +9,7 @@ import {
 export { USAGE_STARTUP_CUTOVER_MARKER } from "./usage-accounting.js";
 export const DEFAULT_USAGE_MIGRATION_TIMEOUT_MS = 300_000;
 export interface UsageStartupMigrationOptions {
+  signal?: AbortSignal;
   batchSize?: number;
   timeoutMs?: number;
   onBatch?: (batch: { migrated: number; hasMore: boolean }) => void;
@@ -83,14 +84,33 @@ function startupMigration(db: SqlDatabase, options: UsageStartupMigrationOptions
   };
 }
 
-/** CLI startup yields between batches, before jobs or an HTTP listener exist. */
+/** Maintenance/background loop: every bounded batch commits before yielding. */
 export async function prepareUsageAccountingStartup(db: SqlDatabase, options: UsageStartupMigrationOptions = {}): Promise<void> {
   const step = startupMigration(db, options);
-  while (!step()) await Bun.sleep(0);
+  for (;;) {
+    options.signal?.throwIfAborted();
+    if (step()) return;
+    await Bun.sleep(0);
+  }
 }
 
-/** Embedded synchronous server entry keeps its public signature and the same gate. */
+/** Explicit synchronous maintenance/test entry; never called by production startup. */
 export function ensureUsageAccountingStartup(db: SqlDatabase, options: UsageStartupMigrationOptions = {}): void {
   const step = startupMigration(db, options);
   while (!step()) { /* Each bounded batch commits independently. */ }
+}
+
+/** A cancellable, resumable worker. Schedule the first batch after the listener
+ * exists; release/exit waits for the last committed batch before closing DB. */
+export function startUsageAccountingBackfill(db: SqlDatabase, options: UsageStartupMigrationOptions = {}) {
+  const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+  let failure: unknown;
+  const done = (async () => {
+    await Bun.sleep(0);
+    await prepareUsageAccountingStartup(db, { ...options, signal });
+  })().catch(error => {
+    if (!signal.aborted) { failure = error; console.error('Usage backfill failed; checkpoints retained. Restart after resolving source evidence:', error); }
+  });
+  return { done, get failure() { return failure; }, async stop() { controller.abort(); await done; } };
 }

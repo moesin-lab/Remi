@@ -1,4 +1,4 @@
-import { assertSchemaBeforeExpand, SCHEMA_COMPATIBILITY } from "./schema-levels.js";
+import { assertSchemaBeforeExpand, readSchemaLevels, SCHEMA_COMPATIBILITY } from "./schema-levels.js";
 import { runSchemaExpands } from "./schema-migration-runner.js";
 import { SCHEMA_MIGRATIONS } from "./schema-migrations.js";
 import { version as SCHEMA_RELEASE } from "../../../../package.json";
@@ -11,7 +11,7 @@ import { widenAttemptCounters,separateLaneProviderProgress } from './inbox/attem
 import { migrateAttemptInput } from './inbox/attempt-input.js';
 import { createMemberInboxReadProjection } from './inbox/member-records.js';
 import { createAutopilotRunReadProjection } from './autopilot-run-records.js';
-import { runUnifiedModelMigration, unifiedModelPreflight, UnifiedModelPreflightError, collectUnifiedBeforeReport, writeUnifiedModelReport } from "./unified-model-migration.js";
+import { assertUnifiedMigrationReports, runUnifiedModelMigration, unifiedModelPreflight, UnifiedModelPreflightError, collectUnifiedBeforeReport, writeUnifiedModelReport } from "./unified-model-migration.js";
 import { foldLegacyWorkspacePrompts } from "../prompts/workspace-settings.js";
 import { joinProjectInstructions } from "@multiremi/contracts/remi-rules.js";
 import { BACKGROUND_TASKS_ATTEMPT_COLUMNS, BACKGROUND_TASKS_MIGRATION, BACKGROUND_TASKS_SCHEMA, CHAT_FOLLOW_UP_QUEUE_LANE_COLUMNS, CHAT_FOLLOW_UP_QUEUE_MIGRATION, CHAT_FOLLOW_UP_QUEUE_SCHEMA, UNIFIED_LANE_SWEEP_INDEX, UNIFIED_MODEL_MIGRATION } from "./unified-model-schema.js";
@@ -75,7 +75,7 @@ const LOCAL_RECORDS_MIGRATION = "20261013_local_records_recyclable_workspaces";
 // instead of creating a duplicate. Overridable via MULTIREMI_OWNER_OPEN_ID.
 const DEFAULT_OWNER_OPEN_ID = "ou_e6b7ffc662b392317275b817295c0b44";
 
-export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseDialect } = {}): void {
+export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseDialect; historicalMaintenance?: boolean; requireEnrolled?: boolean } = {}): void {
   const reportDir = resolveMigrationReportDirectory();
   // Refuse an unwritable report directory before creating the SQLite lock file.
   prepareMigrationReportDirectory(reportDir);
@@ -85,9 +85,19 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
   // migration cannot strand it.
   const migrate = () => withModernSqliteAlterTable(db, resolveSqlDialect(db, options.dialect), () => advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () => {
     assertSchemaBeforeExpand(db);
+    // Enrollment certifies the frozen historical chain completed. Reopening
+    // an enrolled database must never replay rebuilds or historical backfills.
+    if (!options.historicalMaintenance && readSchemaLevels(db).expandLevel >= 1) {
+      assertUnifiedMigrationReports(reportDir);
+      runSchemaExpands(db, SCHEMA_MIGRATIONS, SCHEMA_RELEASE, SCHEMA_COMPATIBILITY);
+      return;
+    }
     // The directory may have become unwritable while waiting for the lock.
     prepareMigrationReportDirectory(reportDir);
     const tables=existingTableNames(db);
+    if (options.requireEnrolled && readSchemaLevels(db).expandLevel === 0 && [...tables].some(table => table.startsWith('multiremi_'))) {
+      throw new Error('Historical schema preparation required: stop all API slots and workers, run remi db prepare, then restart. Historical rebuilds and backfills never run during a slot startup.');
+    }
     if (tables.has("multiremi_turn_attempts")) addColumnIfMissing(db, "multiremi_turn_attempts", "execution_connection TEXT");
     if(tables.has("multiremi_users"))backfillOwnerExternalId(db);
     if (tables.has("multiremi_feishu_bot_configs")) {
@@ -131,6 +141,11 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     if (lock.inTransaction) lock.exec('ROLLBACK');
     lock.close();
   }
+}
+
+/** Production entry: populated pre-protocol databases require offline preparation. */
+export function runStartupMigrations(db: SqlDatabase): void {
+  runMigrations(db, { requireEnrolled: true });
 }
 
 /** Historical schema bootstrap used by offline migration fixtures, never a runtime read path. */

@@ -21,6 +21,7 @@ export function registerUsageAccountingRoutes(app: Hono, { store }: RouterDeps):
       const days = c.req.query("days");
       const include = c.req.query("include"), detailLimit = c.req.query("detail_limit");
       if (include !== undefined && include !== "day_model") throw new UsageValidationError("Invalid report include");
+      if (!store.usageAccountingBackfillReady()) return c.json({ error: 'usage_backfill_pending', message: 'Historical usage is being prepared; retry after the background migration completes.' }, 503);
       return c.json(store.getUsageReport({ workspaceId, projectId, runtimeId, tz: c.req.query("tz"),
         days: days === "all" ? null : days === undefined ? undefined : Number(days), since: c.req.query("since"), until: c.req.query("until"),
         include, detailLimit: detailLimit === undefined ? undefined : Number(detailLimit), detailCursor: c.req.query("detail_cursor") }));

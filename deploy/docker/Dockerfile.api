@@ -49,7 +49,7 @@ COPY . .
 RUN chmod 0755 /app/deploy/docker/api-entrypoint.sh
 
 RUN mkdir -p /usr/local/lib/remi /remi-control /remi-program /remi-seed \
-  && cp /app/packages/platform-updater/src/supervisor.mjs /app/packages/platform-updater/src/container-runtime.mjs /app/packages/platform-updater/src/data-schema-inputs.json /app/deploy/docker/host-write-fence.ts /usr/local/lib/remi/ \
+  && cp /app/packages/platform-updater/src/supervisor.mjs /app/packages/platform-updater/src/container-runtime.mjs /app/packages/platform-updater/src/data-schema-inputs.json /app/packages/platform-updater/src/schema-fingerprint.mjs /app/deploy/docker/host-write-fence.ts /usr/local/lib/remi/ \
   && chown 1000:1000 /remi-control /remi-program /remi-seed
 
 EXPOSE 6120

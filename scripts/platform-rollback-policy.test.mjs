@@ -23,3 +23,16 @@ test('rejects stale, malformed, unreviewed and mismatched declarations', () => {
   ]) assert.throws(() => rollbackPolicy(manifest, { ...review, ...patch }));
   assert.throws(() => rollbackPolicy(manifest, null));
 });
+
+test('accepts only complete target-bound mixed-version evidence', () => {
+  const target = { ...manifest, dataSchema: 'd'.repeat(64) };
+  const evidence = { format: 1, targetRef: target.ref, dataSchema: target.dataSchema,
+    previousRelease: { ...review.previousRelease, ref: 'e'.repeat(40) },
+    schema: { expandLevel: 1, contractLevel: 0 },
+    checks: ['previous-startup', 'previous-create-start-complete-cancel', 'candidate-expand-startup', 'previous-startup-after-expand', 'previous-create-start-complete-cancel-after-expand'],
+    rollbackSafeFrom: [review.previousDataSchema] };
+  assert.deepEqual(rollbackPolicy(target, undefined, evidence), [review.previousDataSchema]);
+  for (const change of [{ targetRef: 'f'.repeat(40) }, { dataSchema: 'c'.repeat(64) },
+    { checks: [] }, { rollbackSafeFrom: [] }, { schema: { expandLevel: 1, contractLevel: 1 } },
+    { previousRelease: undefined }]) assert.throws(() => rollbackPolicy(target, undefined, { ...evidence, ...change }));
+});

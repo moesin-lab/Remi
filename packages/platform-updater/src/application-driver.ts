@@ -13,6 +13,8 @@ import { API_BASE_INPUTS, assertApplicationCompatible, parseApplicationManifest,
 // Bun embeds these resources in the standalone Windows/macOS/Linux updater.
 // @ts-ignore -- Bun's text loader returns the source, not the JS module exports.
 import runtimeSource from './container-runtime.mjs' with { type: 'text' };
+// @ts-ignore -- embedded alongside runtime.mjs in the bootstrap directory.
+import fingerprintSource from './schema-fingerprint.mjs' with { type: 'text' };
 // @ts-ignore -- the preload is deliberately embedded rather than executed here.
 import fenceSource from '../../../deploy/docker/host-write-fence.ts' with { type: 'text' };
 
@@ -295,10 +297,11 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
 
   private async prepareControl(installation: Installation): Promise<Installation> {
     await mkdir(this.controlDir, { recursive: true, mode: 0o755 });
-    const digest = createHash('sha256').update(runtimeSource).update(JSON.stringify(DATA_SCHEMA_INPUTS)).update(fenceSource).digest('hex').slice(0, 16);
+    const digest = createHash('sha256').update(runtimeSource).update(fingerprintSource).update(JSON.stringify(DATA_SCHEMA_INPUTS)).update(fenceSource).digest('hex').slice(0, 16);
     const bootstrap = join(this.controlDir, digest);
     await mkdir(bootstrap, { recursive: true, mode: 0o755 });
     await writeFile(join(bootstrap, 'runtime.mjs'), runtimeSource, { mode: 0o644 });
+    await writeFile(join(bootstrap, 'schema-fingerprint.mjs'), fingerprintSource, { mode: 0o644 });
     await writeFile(join(bootstrap, 'data-schema-inputs.json'), JSON.stringify(DATA_SCHEMA_INPUTS), { mode: 0o644 });
     await writeFile(join(bootstrap, 'host-write-fence.ts'), fenceSource, { mode: 0o644 });
     const found = await this.runner.run('docker', ['volume', 'ls', '--format', '{{.Name}}', '--filter', `name=^${installation.volume}$`]);

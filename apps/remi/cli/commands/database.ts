@@ -9,8 +9,27 @@ export function databaseCommandSpecs(): CommandSpec[] {
     run: async () => {
       const db = await openDatabase();
       try {
-        const { readSchemaLevels, SCHEMA_COMPATIBILITY } = await import('@multiremi/store/schema-levels.js');
-        console.log(JSON.stringify({ ...readSchemaLevels(db), compatibility: SCHEMA_COMPATIBILITY }));
+        const { querySchemaCompatibility } = await import('@multiremi/store/schema-levels.js');
+        console.log(JSON.stringify(querySchemaCompatibility(db)));
+      } finally { db.close(); }
+    },
+  }, {
+    id: 'db.prepare', path: ['db', 'prepare'],
+    description: 'Prepare a historical PostgreSQL schema offline; completed steps resume on retry',
+    mutation: 'destructive', outputs: ['json'],
+    run: async () => {
+      const db = await openDatabase();
+      try {
+        const { advisoryLock } = await import('@multiremi/store/db/postgres.js');
+        const { MIGRATION_ADVISORY_LOCK_KEY } = await import('@multiremi/store/advisory-locks.js');
+        const { assertSchemaContractClientsOffline } = await import('@multiremi/store/schema-contracts.js');
+        const { runMigrations } = await import('@multiremi/store/migrations.js');
+        const { querySchemaCompatibility } = await import('@multiremi/store/schema-levels.js');
+        advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () => {
+          assertSchemaContractClientsOffline(db);
+          runMigrations(db, { historicalMaintenance: true });
+        });
+        console.log(JSON.stringify(querySchemaCompatibility(db)));
       } finally { db.close(); }
     },
   }, {

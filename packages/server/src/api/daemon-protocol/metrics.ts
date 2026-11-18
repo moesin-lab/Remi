@@ -32,7 +32,7 @@ export interface WsFrameSample {
   errorCode: string | null;
   /** Wall time spent in the handler. */
   totalMs: number;
-  /** Increase of the process-wide DB counters during the handler. */
+  /** SQL time attributed exclusively to this frame’s async source context. */
   dbMs: number;
   dbQueries: number;
   /** True when the frame violated the protocol (oversized or unknown). */

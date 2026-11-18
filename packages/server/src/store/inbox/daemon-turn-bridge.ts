@@ -7,6 +7,7 @@ import type { MultiremiTaskWithAgent } from '@multiremi/contracts/types.js';
 import type { DaemonTaskCompletionFields } from '@multiremi/contracts/daemon-protocol.js';
 import type { UnifiedMessage,DecisionOption } from '@multiremi/contracts/unified-model.js';
 import { sendMessageWithinTransaction,getMessage,messageFromRow } from './send-message.js';
+import { plannedRestartDeliveredInputs } from './attempt-input.js';
 import { InputUnreadError, lockLane,acknowledgeInput,assertOfferedInputRead } from './lane-machine.js';
 import { deriveIssueStatusWithinTransaction } from './issue-status.js';
 import { patchDecisionRecord } from './decision-records.js';
@@ -58,7 +59,8 @@ export class DaemonTurnBridge {
   }
   private messages(sessionId:string,from:number,to:number):UnifiedMessage[]{return this.ctx.db.query("SELECT * FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND deleted_at IS NULL AND visibility='shown' ORDER BY seq").all(sessionId,from,to).map(messageFromRow);}
   private inputMessages(turn:any,from:number,to:number):UnifiedMessage[] {
-    const messages=this.messages(turn.session_id,from,to);
+    const delivered=plannedRestartDeliveredInputs(this.ctx,turn.current_attempt_id);
+    const messages=this.messages(turn.session_id,from,to).filter(message=>!delivered.has(message.id));
     const attempt=this.ctx.db.query('SELECT session_id,attempt_no,input_trigger_ack FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);
     // A cold provider needs the original task even when the reader has already
     // acknowledged it. Supply it separately from the unread interval.
@@ -170,7 +172,8 @@ export class DaemonTurnBridge {
       for(const row of rows){
         const id=String(row.snapshot_attempt_id),head=Number(row.snapshot_head);
         const from=Number(row.input_ack_seq??(row.provider_session_id?row.lane_cursor:0)??0);
-        const read=Number(row.input_read_seq??from),window=windows.get(id)??[];
+        const delivered=plannedRestartDeliveredInputs(this.ctx,id);
+        const read=Number(row.input_read_seq??from),window=(windows.get(id)??[]).filter(message=>!delivered.has(message.id));
         const interrupts=window.filter(m=>m.wake_applied==='now'&&m.to_agent_id===row.agent_id
           &&(m.metadata.execution_scope??'')===row.execution_scope&&m.seq>Number(row.wake_seq));
         for(const message of this.project(interrupts,row,from,head,window,read))messages.push({turn_id:row.id,attempt_id:id,message});

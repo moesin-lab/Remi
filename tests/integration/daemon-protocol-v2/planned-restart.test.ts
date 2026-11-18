@@ -320,3 +320,54 @@ for (const kind of ["permission", "question"] as const) for (const answerAt of [
     } finally { await h.dispose(); }
   }, 25_000);
 }
+
+test("planned restart reconciles a delivered steer and an undelivered steer without replay or loss", async () => {
+  let replacement = false, entered = false;
+  const injected: string[] = [], resumedPrompts: string[] = [];
+  const h = await DaemonProtocolHarness.create({ providerFactory: () => ({
+    async *sendStream(message, options) {
+      options?.onPromptStarted?.();
+      if (replacement) {
+        resumedPrompts.push(String(message));
+        yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "Both steer instructions applied" }] } as any;
+        return;
+      }
+      entered = true;
+      await new Promise<never>((_resolve, reject) => {
+        const stop = () => reject(new Error("Cancelled"));
+        if (options?.signal?.aborted) stop();
+        else options?.signal?.addEventListener("abort", stop, { once: true });
+      });
+    },
+    steer: async text => { injected.push(text); return { outcome: "injected" as const }; },
+    getLastResponse: () => ({ text: replacement ? "Both steer instructions applied" : "", sessionId: "steer-checkpoint-session", usage: [], toolCalls: [] } as any),
+    close: async () => { replacement = true; },
+  }) });
+  try {
+    await h.startDaemon(); await h.settleHeartbeat();
+    const runtimeId = h.store.listRuntimes()[0]!.id;
+    const daemonId = h.store.getRuntimeLite(runtimeId)!.daemonId!;
+    const agent = h.store.createAgent({ name: "Steer checkpoint", provider: "claude", runtimeId });
+    const task = h.store.createTask({ agentId: agent.id, runtimeId, prompt: "Long steer fixture", maxAttempts: 1 });
+    await waitFor(() => entered, "original prompt entered");
+    const delivered = h.store.createTaskSteerMessage({ taskId: task.id, kind: "steer", content: "DELIVERED_BEFORE_RESTART" });
+    await waitFor(() => injected.some(text => text.includes("DELIVERED_BEFORE_RESTART")), "native steer accepted");
+    h.store.beginDaemonDrain("local", daemonId, "manual", 60_000);
+    const handoff = h.store.plannedRestarts().request(task.id, { workspaceId: "local", runtimeId, daemonId });
+    await waitFor(() => h.store.plannedRestarts().get(task.id)?.state === "suspended", "steer checkpoint persisted");
+    await waitFor(() => (h.daemon as any).activeTaskCount === 0, "original provider released");
+    expect(h.store.plannedRestarts().get(task.id)?.checkpoint?.delivered_message_ids).toContain(delivered.id);
+    await h.stopDaemon();
+    const pending = h.store.createTaskSteerMessage({ taskId: task.id, kind: "steer", content: "UNDELIVERED_DURING_RESTART" });
+    h.store.undrainDaemon("local", daemonId);
+    await h.recreateDaemon();
+    await waitFor(() => h.store.getTask(task.id)?.status === "completed", "resumed steer completion", 10_000);
+    expect(injected.filter(text => text.includes("DELIVERED_BEFORE_RESTART"))).toHaveLength(1);
+    expect(resumedPrompts.join("\n")).not.toContain("DELIVERED_BEFORE_RESTART");
+    expect(resumedPrompts.join("\n")).toContain("UNDELIVERED_DURING_RESTART");
+    expect(h.store.getMessage(pending.id)).not.toBeNull();
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1 });
+    expect(h.db.query("SELECT id FROM multiremi_turn_attempts WHERE turn_id=?").all(handoff.turn_id)).toHaveLength(1);
+    expect(h.ledger.some(event => event.type === "task.fail")).toBe(false);
+  } finally { await h.dispose(); }
+}, 25_000);

@@ -1294,6 +1294,7 @@ See [IM platform management](dev/im-platforms.md#机器人菜单) for persistenc
 
 ### 计划内重启的混合版本门槛
 
+hello / welcome 协商命名能力 `turn.restart`，且
 `hello.runtimes[].capabilities.planned_restart` 与心跳能力中的 `planned_restart: 1`
 表示 daemon 已实现 `turn.restart`、磁盘 journal 与同 attempt 恢复协议。缺失或未知版本按不支持处理，
 每次 socket hello/heartbeat 均覆盖旧能力，防止降级后遗留支持标记。

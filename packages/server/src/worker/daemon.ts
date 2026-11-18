@@ -1636,7 +1636,7 @@ export class MultiremiDaemon {
         }));
     }
     // Co-resident lanes share a client whose construction-time caps may be empty.
-    this.protocolClient.advertiseCaps(["input_unread"]);
+    this.protocolClient.advertiseCaps(["input_unread", "turn.restart"]);
     // PR 6 §5.3: this lane keeps Chat processes alive for background tasks; it parks only when the server echoes the cap.
     if (this.options.asyncTasks) this.protocolClient.advertiseCaps(["lane.background"]);
     this.parkedLanes = new ParkedLanes({

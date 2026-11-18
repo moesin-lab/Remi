@@ -108,7 +108,7 @@ CLI 更新在 runtimes-repo 创建带 requestId 的持久化 daemon drain，等�
 保持 pending；`daemon.drain` 状态显示排空进度，无需新增请求状态。默认期限沿用
 MUL-68 的 5 分钟，`MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS` 可覆盖，避免引入两套期限。
 服务端排空后才下发更新，HTTP heartbeat 与 WebSocket 下行携带持久化 deadline。
-manual/deploy/CLI update 到期对上报 `capabilities.planned_restart: 1` 的 runtime 发出计划内 checkpoint 请求；
+manual/deploy/CLI update 到期对已协商 `turn.restart` 且上报 `capabilities.planned_restart: 1` 的 runtime 发出计划内 checkpoint 请求；
 缺失或不支持该能力的旧 daemon 回退到 MUL-45 中断/自动重试，不创建无法确认的 requested 记录。
 能力随 socket hello/heartbeat 重报并清除旧值。只有服务端确认挂起且 daemon
 报告本地执行归零，才允许更新。人工/部署 drain 不被更新接管或释放。

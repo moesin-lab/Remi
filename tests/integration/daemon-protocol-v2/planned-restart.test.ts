@@ -44,6 +44,7 @@ test("daemon joins provider shutdown before preparing and acknowledging the same
     h.store.beginDaemonDrain("local", daemonId, "manual", 60_000);
     const handoff = h.store.plannedRestarts().request(task.id, { workspaceId: "local", runtimeId, daemonId });
     await waitFor(() => h.received.some(f => f.t === "turn.restart"), "restart request delivered");
+    expect(h.client.sharesCap("turn.restart")).toBe(true);
     expect(providerClosed).toBe(false);
     expect(h.store.plannedRestarts().get(task.id)?.state).toBe("requested");
     expect((h.daemon as any).restartJournal.entries()).toHaveLength(0);
@@ -172,6 +173,7 @@ test("old capability fixture cancels through the real socket and admits CLI upda
   let entered = false;
   const h = await DaemonProtocolHarness.create({
     onReady: daemon => {
+      (daemon.daemonProtocolClient() as any).extraCaps.delete("turn.restart");
       const capabilities = (daemon as any).runtimeCapabilities.bind(daemon);
       (daemon as any).runtimeCapabilities = () => {
         const { planned_restart: _unsupported, ...legacy } = capabilities();
@@ -228,3 +230,18 @@ test("old capability fixture cancels through the real socket and admits CLI upda
     console.log(`legacy fixture: drain 100ms, cancellation/ACK/update admission ${Math.round(performance.now() - began)}ms`);
   } finally { await h.dispose(); }
 }, 20_000);
+
+
+test("per-runtime restart version cannot grant support without the negotiated hello capability", async () => {
+  const h = await DaemonProtocolHarness.create({ beforeStart: harness => {
+    (harness.client as any).extraCaps.delete("turn.restart");
+  } });
+  try {
+    await h.startDaemon(); await h.settleHeartbeat();
+    const runtimeId = h.store.listRuntimes()[0]!.id;
+    expect((h.daemon as any).runtimeCapabilities().planned_restart).toBe(1);
+    expect(h.store.getRuntimeLite(runtimeId)?.metadata.planned_restart).toBe(0);
+    expect(h.ledger.find(entry => entry.type === "hello")?.frame.p.caps).not.toContain("turn.restart");
+    expect(h.client.sharesCap("turn.restart")).toBe(false);
+  } finally { await h.dispose(); }
+}, 10_000);

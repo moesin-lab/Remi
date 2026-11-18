@@ -69,6 +69,7 @@ function createLoopDaemon(options: {
     liveUpdateProviders: new Map(),
     // The workspace layout is not what these tests are about.
     sweepLegacyLayout: async () => {},
+    diskMonitor: { check: async () => {} },
     startedAt: new Date(),
     pollAbort: new AbortController(),
     activeTaskCount: 0,
@@ -92,6 +93,7 @@ function createLoopDaemon(options: {
     runtimeGoneInflight: new Set<string>(),
     runtimeCodexProfile: null,
     runtimeClaudeProfile: null,
+    runtimeBindingProbeTasks: new Set<Promise<void>>(),
     runtimeModelRefreshTask: null,
     runtimeModelListRequests: new Map(),
     runtimeModelRetryWake: null,

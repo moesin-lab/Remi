@@ -38,4 +38,5 @@ it("keeps the F398 overflow fixture across independent pending agent lanes", asy
   } finally {
     db.close();
   }
-});
+// Seeds the full shared browser fixture, including hundreds of messages.
+}, 20_000);

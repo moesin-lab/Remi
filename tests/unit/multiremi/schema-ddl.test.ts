@@ -29,6 +29,23 @@ for (const table of tables) {
 positive.push('SELECT 1; ALTER TABLE t ALTER c SET\nNOT NULL', 'ALTER /* comment */ TABLE t ADD c int, DROP d');
 negative.push('ALTER TABLE t ALTER "DROP" SET DEFAULT $$a,b; DROP TABLE t$$, ALTER c DROP NOT NULL');
 
+positive.push(
+  '/* outer /* inner */ outer */ ALTER TABLE t DROP c',
+  'ALTER TABLE té DROP c', 'ALTER TABLE t ALTER café TYPE bigint USING café::bigint',
+  'DO $$ BEGIN ALTER TABLE t DROP COLUMN c; END $$',
+  "DO LANGUAGE plpgsql 'BEGIN NULL; END'", 'DO $body$ BEGIN NULL; END $body$',
+  'DROP SCHEMA aux CASCADE', 'DROP TYPE mood CASCADE', 'DROP SEQUENCE seq CASCADE',
+  'DROP FUNCTION f(int)', 'DROP MATERIALIZED VIEW IF EXISTS v',
+  'ALTER INDEX idx RENAME TO idx2', 'ALTER SEQUENCE seq RENAME TO seq2',
+  'ALTER TYPE mood RENAME TO mood2', 'ALTER SCHEMA aux RENAME TO aux2',
+  'ALTER VIEW v RENAME COLUMN c TO d',
+);
+negative.push(
+  '/* outer /* DROP TABLE t */ outer */ SELECT 1',
+  'ALTER TABLE té ALTER café DROP NOT NULL', 'ALTER TABLE té ALTER café DROP DEFAULT',
+  "ALTER TABLE té ALTER café SET DEFAULT 'RENAME'", 'SELECT $$DO $$',
+);
+
 describe('shared schema DDL action detector', () => {
   for (const sql of positive) it(`rejects ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(true));
   for (const sql of negative) it(`allows ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(false));

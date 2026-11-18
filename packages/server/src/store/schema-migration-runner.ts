@@ -1,3 +1,4 @@
+import { snapshotSchemaCatalog, assertAdditiveSchemaCatalog } from './schema-catalog.js';
 import { hasDestructiveSchemaSql } from "./schema-ddl.js";
 import type { SqlDatabase } from './db/postgres.js';
 import { assertSchemaCompatible, validateSchemaCompatibility, ensureSchemaMeta, readSchemaLevels, type SchemaCompatibility } from './schema-levels.js';
@@ -63,7 +64,9 @@ function applied(db: SqlDatabase, step: SchemaMigration): boolean {
 function apply(db: SqlDatabase, step: SchemaMigration): void {
   if (applied(db, step)) return;
   db.transaction(() => {
+    const before = step.phase === 'expand' ? snapshotSchemaCatalog(db) : undefined;
     step.run(step.phase === "expand" ? expandOnlyDatabase(db) : db);
+    if (before) assertAdditiveSchemaCatalog(before, snapshotSchemaCatalog(db));
     db.run('INSERT INTO multiremi_schema_steps(id, phase, level, release, applied_at) VALUES(?,?,?,?,?)',
       [step.id, step.phase, step.level, step.release, new Date().toISOString()]);
     const column = step.phase === 'expand' ? 'expand_level' : 'contract_level';

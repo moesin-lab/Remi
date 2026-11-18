@@ -37,7 +37,13 @@ MUL-170/A4 消费该接口；本单不改变 supervisor 切换条件、编排或
 
 每个新步骤声明 `id`、`phase`、`level`、`expandRelease`、`release`。
 expand 的 SQL、完成标记和 level 更新位于同一事务；失败可重试。
-重复 ID、倒序 level、改写已应用元数据都会失败。受保护句柄禁止动态破坏性 DDL。
+重复 ID、倒序 level、改写已应用元数据都会失败。**运行时以 catalog diff 为准，文本检测仅为 lint**：
+每个 expand 在同一事务内、回调前后读取实际目录，拒绝删除或改名既有对象、列类型变化和 nullable→NOT NULL，
+抛错后步骤标记与 level 均不推进。PostgreSQL 覆盖非系统 schema（排除 `pg_catalog`、`information_schema`、
+`pg_toast*`）、表/分区表/外部表、视图/物化视图、序列、类型（含 enum 标签）、列、索引和命名约束。
+SQLite 同样执行 expand，使用 `sqlite_schema`、`pragma_table_info`、`pragma_index_list` 和 CREATE SQL 中的命名约束。
+新增对象、默认值设置/修改/删除、DROP NOT NULL 允许；默认值变更仍须评估依赖默认值的旧 writer。
+受保护句柄共用文本检测器提供 fail-fast，但函数调用等间接 DDL 由事务内目录对比拦截。
 不得捕获原始句柄绕过 guard；新 schema 变化必须提升 level，不能塞入已冻结的历史链。
 
 ## 后台回填
@@ -96,7 +102,10 @@ PLATFORM_SCHEMA_ROLLBACK_EVIDENCE=ci-schema/rollback-evidence.json node scripts/
 owner 在本 PR 合入后另开 PR 应用补丁，经 CI 通过再合入；因此该 job 在补丁合入前尚未常态运行。
 补丁可用 `git apply --check docs/deploy/MUL-173-workflow.patch` 检查。
 
-[arch test](../../tests/arch/startup-schema-ddl.test.ts) 扫描所有非测试 `packages/server/src/**`（含自动后台回填和新文件），仅按固定路径排除显式 contract 模块，禁止新 DROP、RENAME、
+[arch test](../../tests/arch/startup-schema-ddl.test.ts) 扫描所有非测试 `packages/server/src/**`（含自动后台回填和新文件），
+按 tsconfig 解析并递归扫描运行时 import、export-from、动态 import 的仓库依赖（跳过 type-only）；
+解析失败报错。仅按固定路径排除显式 contract 模块；从 `packages/server/src/api/server.ts`（standby 初始化、
+active 后台任务入口）的传递运行时依赖图断言这两个模块不可达。禁止新 DROP、RENAME、
 改类型、SET NOT NULL 和 TRUNCATE。历史 bootstrap 的 [冻结 allowlist](../../tests/arch/startup-schema-ddl-allowlist.json)
 精确绑定表达式及次数，只减不增；CI 设置 `SCHEMA_DDL_BASE_REF` 校验基线。历史一次性 DDL 仍是显式例外。
 A4 切换接入和 A5 live 验收不由本单实现；本地 PG 混跑不等于已验证 slot 零失败或生产部署。

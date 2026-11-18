@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { startupSchemaDdl } from '../../scripts/startup-schema-ddl.js';
+import { startupSchemaDdl, assertStartupContractIsolation } from '../../scripts/startup-schema-ddl.js';
 import { hasDestructiveSchemaSql } from '../../packages/server/src/store/schema-ddl.js';
 import historical from './startup-schema-ddl-allowlist.json';
 
@@ -26,6 +26,9 @@ describe('startup migration expand discipline', () => {
       expect(counts.get(entry.fingerprint) ?? 0).toBeGreaterThan(0);
       counts.set(entry.fingerprint, (counts.get(entry.fingerprint) ?? 0) - 1);
     }
+  });
+  it('keeps explicit contract modules outside the API startup dependency graph', () => {
+    assertStartupContractIsolation(root);
   });
   it('rejects new destructive statements anywhere in non-test server source', () => {
     const allowed = new Map<string, number>();
@@ -57,6 +60,28 @@ describe('startup migration expand discipline', () => {
       expect(startupSchemaDdl(fixture)).toEqual([]);
       writeFileSync(resolve(store, 'new-background-job.ts'), 'export const run = db => db.exec("ALTER TABLE t RENAME c TO d");');
       expect(startupSchemaDdl(fixture).map(entry => entry.file)).toEqual(['packages/server/src/store/new-background-job.ts']);
+      const shared = resolve(fixture, 'packages/shared/src');
+      mkdirSync(shared, { recursive: true });
+      writeFileSync(resolve(fixture, 'tsconfig.json'), JSON.stringify({ compilerOptions: {
+        moduleResolution: 'bundler', module: 'esnext', paths: { '@fixture/*': ['./packages/shared/src/*'] },
+      } }));
+      writeFileSync(resolve(store, 'indirect.ts'), "export { run } from '@fixture/barrel.js';");
+      writeFileSync(resolve(shared, 'barrel.ts'), "export async function run() { return import('./helper.js'); }");
+      writeFileSync(resolve(shared, 'helper.ts'), 'export const sql = "ALTER TABLE t DROP c";');
+      expect(startupSchemaDdl(fixture).map(e => e.file)).toContain('packages/shared/src/helper.ts');
+      writeFileSync(resolve(shared, 'helper.ts'), "import type { T } from './missing.js'; export const sql = 'SELECT 1';");
+      expect(startupSchemaDdl(fixture)).toHaveLength(1);
+      writeFileSync(resolve(shared, 'helper.ts'), "export { value } from './missing.js';");
+      expect(() => startupSchemaDdl(fixture)).toThrow('Unresolved runtime dependency');
+      writeFileSync(resolve(shared, 'helper.ts'), "export const sql = 'SELECT 1';");
+      const api = resolve(fixture, 'packages/server/src/api');
+      mkdirSync(api, { recursive: true });
+      writeFileSync(resolve(api, 'server.ts'), "import '../store/indirect.js';");
+      writeFileSync(resolve(shared, 'helper.ts'), "import '../../server/src/store/schema-contracts.js';");
+      writeFileSync(resolve(store, 'schema-contracts.ts'), 'export const marker = true;');
+      expect(() => assertStartupContractIsolation(fixture)).toThrow('Explicit contract module reachable');
+      writeFileSync(resolve(shared, 'helper.ts'), "export const sql = 'SELECT 1';");
+      expect(() => assertStartupContractIsolation(fixture)).not.toThrow();
       writeFileSync(resolve(store, 'schema-contracts.ts'), 'export const run = db => db.exec("DROP TABLE retired");');
       writeFileSync(resolve(store, 'ignored.test.ts'), 'const sql = "DROP TABLE test_table";');
       expect(startupSchemaDdl(fixture)).toHaveLength(1);

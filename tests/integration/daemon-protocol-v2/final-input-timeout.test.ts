@@ -117,3 +117,64 @@ test("start report timeout before a final preserves the existing execution failu
   expect(h.store.getTask(task.id)?.error).toContain("daemon_timeout");
   expect(providerRuns).toBe(0);
 }, 10_000);
+
+for (const blockedReport of ["turn.input", "task.usage", "turn.complete"] as const) {
+  for (const restart of [false, true]) {
+    test(`delivered steer → final → ${blockedReport} timeout → ${restart ? "restart" : "recovery"} never re-executes`, async () => {
+      let blocked = true;
+      let timedReportSent = false;
+      let providerRuns = 0;
+      let steerDelivered = false;
+      let taskId = "";
+      let steerId = "";
+      const h = await DaemonProtocolHarness.create({
+        daemonOptions: { taskDrainTimeoutMs: 30 }, outboxBackoffMs: [5],
+        providerFactory: () => ({
+          async *sendStream(_prompt, options) {
+            providerRuns++;
+            options?.onPromptStarted?.();
+            // Deliver ordinary input through the real downlink/native pump,
+            // then let the same prompt produce its final response naturally.
+            steerId = h.store.createTaskSteerMessage({ taskId, kind: "steer", content: "finish exactly once" }).id;
+            await waitFor(() => steerDelivered, "native steer delivered");
+            yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "steered durable final" }] } as any;
+          },
+          steer: async () => { steerDelivered = true; return { outcome: "injected" as const }; },
+          getLastResponse: () => ({ text: "steered durable final", sessionId: "fixture-session", usage: [], toolCalls: [] } as any),
+          close: async () => {},
+        }),
+        beforeSend(frame) {
+          if (blocked && frame.t === blockedReport) { timedReportSent = true; return false; }
+        },
+      });
+      fixtures.push(h);
+      const fail = spyOn(h.store, "failTask");
+      try {
+        await h.startDaemon(); await h.settleHeartbeat();
+        const runtimeId = h.ledger.find(entry => entry.type === "hello")!.frame.p.runtimes[0].runtime_id;
+        const agent = h.store.createAgent({ name: "steered receipt", provider: "claude", runtimeId });
+        const task = h.store.createTask({ agentId: agent.id, prompt: "start once", maxAttempts: 3 });
+        taskId = task.id;
+        await waitFor(() => timedReportSent && h.daemon.traceStore().head(taskId)?.closed === true, "final durably queued");
+        expect((h.daemon as any).ensureOutbox().taskIdsWithPendingTerminal(runtimeId)).toContain(taskId);
+        h.clock.advance(30_000);
+        await Bun.sleep(20);
+        expect(h.daemon.traceStore().snapshotPart(taskId, 0)?.turn?.error).toBeNull();
+        expect(h.store.getTask(taskId)?.status).toBe("running");
+        blocked = false;
+        h.clock.advance(5); // release the manual-clock outbox retry backoff
+        if (restart) await h.recreateDaemon();
+        await waitFor(() => h.store.getTask(taskId)?.status === "completed" && h.daemon.outboxStats()?.pending === 0,
+          "steered completion replay", 5_000);
+        expect(h.store.getTask(taskId)).toMatchObject({ status: "completed", result: "steered durable final", error: null });
+        expect(providerRuns).toBe(1);
+        expect(h.store.listTurnAttempts(taskId)).toHaveLength(1);
+        expect(fail.mock.calls.filter(([id]) => id === taskId)).toHaveLength(0);
+        expect(h.received.filter(frame => frame.t === "task.offer" && frame.p.attempt_id === taskId)).toHaveLength(1);
+        expect(h.ledger.some(entry => entry.type === "turn.input" && entry.frame.p.message_ids?.includes(steerId))).toBe(true);
+        const turn = h.store.getTurn(taskId)!;
+        expect(h.store.listMessages(turn.session_id).filter(message => message.body_md === "steered durable final")).toHaveLength(1);
+      } finally { fail.mockRestore(); }
+    }, 15_000);
+  }
+}

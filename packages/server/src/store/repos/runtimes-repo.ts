@@ -1660,9 +1660,9 @@ export class RuntimesRepo {
       if (!this.daemonDrainRuntimeRows(workspaceId, daemonId).length) throw new Error("daemon not found");
       const now = nowIso();
       // Idempotent requests cannot extend a drain indefinitely or replace a manual fence.
-      this.ctx.db.run(`INSERT INTO multiremi_daemon_drains (workspace_id, daemon_id, started_at, deadline, reason, update_request_id)
-        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, daemon_id) DO NOTHING`,
-        [workspaceId, daemonId, now, new Date(Date.now() + duration).toISOString(), reason, updateRequestId ?? null]);
+      this.ctx.db.run(`INSERT INTO multiremi_daemon_drains (workspace_id, daemon_id, started_at, deadline, reason, update_request_id, drain_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, daemon_id) DO NOTHING`,
+        [workspaceId, daemonId, now, new Date(Date.now() + duration).toISOString(), reason, updateRequestId ?? null, createId("drain")]);
     })();
     this.notifyDaemonDrainChanged(workspaceId);
     return this.getDaemonDrainStatus(workspaceId, daemonId);
@@ -1753,9 +1753,9 @@ export class RuntimesRepo {
     if (sibling) {
       const duration = Number(process.env.MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS ?? DEFAULT_DAEMON_DRAIN_MS);
       if (!Number.isSafeInteger(duration) || duration < 1 || duration > 86_400_000) throw new Error("drain deadline must be between 1ms and 24h");
-      this.ctx.db.run(`UPDATE multiremi_daemon_drains SET update_request_id = ?, started_at = ?, deadline = ?
+      this.ctx.db.run(`UPDATE multiremi_daemon_drains SET update_request_id = ?, started_at = ?, deadline = ?, drain_id = ?
         WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`,
-        [String(sibling.id), nowIso(), new Date(Date.now() + duration).toISOString(), workspaceId, daemonId, ownerId]);
+        [String(sibling.id), nowIso(), new Date(Date.now() + duration).toISOString(), createId("drain"), workspaceId, daemonId, ownerId]);
     } else {
       this.ctx.db.run(`DELETE FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`,
         [workspaceId, daemonId, ownerId]);

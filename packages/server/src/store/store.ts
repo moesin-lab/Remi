@@ -1,3 +1,4 @@
+import { PlannedRestarts } from "./planned-restarts.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
@@ -3489,6 +3490,8 @@ runMigrations(this.db);
   getRuntimeUpdateRequest(runtimeId: string, requestId: string): MultiremiRuntimeUpdateRequest | null {
     return this.runtimes.getRuntimeUpdateRequest(runtimeId, requestId);
   }
+
+  plannedRestarts(): PlannedRestarts { return new PlannedRestarts(this.ctx); }
 
   beginDaemonDrain(...args: Parameters<RuntimesRepo["beginDaemonDrain"]>) { return this.runtimes.beginDaemonDrain(...args); }
   undrainDaemon(...args: Parameters<RuntimesRepo["undrainDaemon"]>) { return this.runtimes.undrainDaemon(...args); }

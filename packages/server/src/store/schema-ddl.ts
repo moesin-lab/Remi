@@ -2,7 +2,7 @@
  * Template placeholders are opaque identifiers for the architecture scanner. */
 function sqlTokens(sql: string): string[] {
   const tokens: string[] = [];
-  const pattern = /\s+|--[^\n]*|E'(?:\\[\s\S]|''|[^'\\])*'(?:[^\S\n]*\n\s*'(?:\\[\s\S]|''|[^'\\])*')*|'(?:''|[^'])*'(?:[^\S\n]*\n\s*'(?:''|[^'])*')*|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|\$([a-z_][a-z_0-9]*)?\$[\s\S]*?\$\1\$|(?:\$\{[^}]*\}|[\p{L}_](?:[\p{L}\p{N}_]|\$(?!\{))*|\$[0-9]+|\?)+|[^\s]/giu;
+  const pattern = /\s+|--[^\n]*|E'(?:\\[\s\S]|''|[^'\\])*'|'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|\$([a-z_][a-z_0-9]*)?\$[\s\S]*?\$\1\$|(?:\$\{[^}]*\}|[\p{L}_](?:[\p{L}\p{N}_]|\$(?!\{))*|\$[0-9]+|\?)+|[^\s]/giu;
   let offset = 0;
   while (offset < sql.length) {
     if (sql.startsWith('/*', offset)) {
@@ -15,6 +15,13 @@ function sqlTokens(sql: string): string[] {
       }
       continue;
     }
+    // Registered SQL deliberately excludes PG Unicode escapes. Do not try to
+    // parse UESCAPE or its string continuations: reject the whole statement.
+    if (/^u&["']/i.test(sql.slice(offset, offset + 3))) {
+      tokens.push('<unsupported-unicode-escape>');
+      offset += 2;
+      continue;
+    }
     pattern.lastIndex = offset;
     const match = pattern.exec(sql)!;
     const token = match[0];
@@ -22,27 +29,8 @@ function sqlTokens(sql: string): string[] {
     if (/^(?:\s|--)/.test(token)) continue;
     tokens.push(token);
   }
-  const normalized: string[] = [];
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i]!;
-    // PG Unicode quoted names are a single identifier, including UESCAPE.
-    // Keep the payload opaque: decoded keywords/punctuation are still part of
-    // the name, never action tokens. Comments/whitespace were removed above.
-    if (/^u$/i.test(token) && tokens[i + 1] === '&' && tokens[i + 2]?.startsWith('"')) {
-      i += 2;
-      if (tokens[i + 1]?.toUpperCase() === 'UESCAPE') {
-        // Consume one complete constant (including newline continuations).
-        // Its contents are deliberately opaque; PG validates the escape value.
-        const escape = tokens[i + 2];
-        if (escape && /^(?:E?'[\s\S]*'|\$([a-z_][a-z_0-9]*)?\$[\s\S]*\$\1\$)$/i.test(escape)) i += 2;
-        else normalized.push('<unrecognized-uescape>');
-      }
-      normalized.push('<identifier-or-value>');
-    } else {
-      normalized.push(/^(?:["'$`\[]|E')/i.test(token) ? '<identifier-or-value>' : token.toUpperCase());
-    }
-  }
-  return normalized;
+  return tokens.map(token => token === '<unsupported-unicode-escape>' ? token : /^(?:["'$`\[]|E')/i.test(token)
+    ? '<identifier-or-value>' : token.toUpperCase());
 }
 
 function splitTopLevel(tokens: string[], separator: string): string[][] {
@@ -111,18 +99,23 @@ export function hasDestructiveSchemaSql(sql: string): boolean {
   return destructiveSchemaSql(sql, false);
 }
 
-/** Known SQL: fail closed on TRUNCATE regardless of shape and on unrecognized
- * UESCAPE constants. Catalog diffs cannot detect TRUNCATE's data deletion. */
+/** Unicode escape identifiers/strings are outside the registered SQL subset. */
+export function hasUnsupportedSchemaSql(sql: string): boolean {
+  return sqlTokens(sql).includes('<unsupported-unicode-escape>');
+}
+
+/** Known SQL fails closed on TRUNCATE regardless of shape. Catalog diffs
+ * cannot detect TRUNCATE's data deletion. */
 export function hasDestructiveSchemaStatement(sql: string): boolean {
   return destructiveSchemaSql(sql, true);
 }
 
 function destructiveSchemaSql(sql: string, knownSql: boolean): boolean {
-  return splitTopLevel(sqlTokens(sql), ';').some(s => {
-    if (knownSql && s.includes('<unrecognized-uescape>')) return true;
+  const tokens = sqlTokens(sql);
+  if (tokens.includes('<unsupported-unicode-escape>')) return true;
+  return splitTopLevel(tokens, ';').some(s => {
     if (s[0] === 'DO') return s[1] === '<identifier-or-value>' || s[1] === 'LANGUAGE'
-      || (s[1] === 'E' && s[2] === '<identifier-or-value>')
-      || (s[1] === 'U' && s[2] === '&' && s[3] === '<identifier-or-value>');
+      || (s[1] === 'E' && s[2] === '<identifier-or-value>');
     if (s[0] === 'TRUNCATE') {
       // Known SQL never needs prose disambiguation. Explicit arch candidates
       // also fail closed on any tail, including syntax unknown to this lexer.

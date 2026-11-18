@@ -43,6 +43,8 @@ positive.push(
   'ALTER VIEW v RENAME COLUMN c TO d',
 );
 negative.push(
+  `SELECT 'U&"literal"'`, `SELECT $$U&'literal'$$`, `/* U&"comment" */ SELECT 1`,
+  `-- U&'comment'\nSELECT 1`,
   '/* outer /* DROP TABLE t */ outer */ SELECT 1',
   'ALTER TABLE té ALTER café DROP NOT NULL', 'ALTER TABLE té ALTER café DROP DEFAULT',
   "ALTER TABLE té ALTER café SET DEFAULT 'RENAME'", 'SELECT $$DO $$',
@@ -86,14 +88,14 @@ for (const [open, close] of [['"', '"'], ['`', '`'], ['[', ']']]) {
     `ALTER TABLE ${t} ALTER ${c} DROP NOT NULL`, `ALTER TABLE ${t} ALTER ${c} SET DEFAULT 1`);
 }
 
-// PostgreSQL Unicode quotes, including custom escapes, are one opaque name.
+// Registered migrations reject PostgreSQL Unicode escape syntax.
 for (const table of ['U&"retained"', String.raw`u&"ret\0061ined"`,
   `U&"ret!0061ined" UESCAPE '!'`, `u&"ret!0061ined" /* escape */ uescape '!'`,
   `U&"a""b,;DROP TABLE x"`, String.raw`U&"face\+01F600"`]) {
   positive.push(`TRUNCATE TABLE ${table}`, `DROP TABLE ${table}`,
     `ALTER TABLE ${table} ALTER U&"c!006fl" UESCAPE '!' TYPE bigint`,
     `ALTER TABLE ${table} RENAME TO replacement`);
-  negative.push(`ALTER TABLE ${table} ADD COLUMN fresh TEXT`,
+  positive.push(`ALTER TABLE ${table} ADD COLUMN fresh TEXT`,
     `ALTER TABLE ${table} ALTER U&"c!006fl" UESCAPE '!' DROP NOT NULL`,
     `ALTER TABLE ${table} ALTER U&"col" SET DEFAULT 1`);
 }
@@ -103,8 +105,8 @@ describe('shared schema DDL action detector', () => {
   for (const sql of negative) it(`allows ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(false));
 });
 
-// Reviewer counterexamples: UESCAPE consumes a complete string constant.
-const escapes = ["E'!'", '$$!$$', "'!'\n''", "$escape$!$escape$", String.raw`E'\''`];
+// Reviewer counterexamples: all Unicode escape forms are unsupported.
+const escapes = ["E'!'", '$$!$$', "'!'\n''", "'!'\n-- continuation\n''", "E'!'\n-- continuation\n''", "$escape$!$escape$", String.raw`E'\''`];
 describe('known SQL fail-closed boundary', () => {
   for (const escape of escapes) {
     const name = `U&"ret!0061ined" UESCAPE ${escape}`;
@@ -112,10 +114,10 @@ describe('known SQL fail-closed boundary', () => {
       expect(hasDestructiveSchemaSql(`TRUNCATE TABLE ${name}`)).toBe(true);
       expect(hasDestructiveSchemaStatement(`TRUNCATE TABLE ${name}`)).toBe(true);
     });
-    it(`accepts additive ALTER with ${escape}`, () => {
+    it(`rejects unsupported additive ALTER with ${escape}`, () => {
       const sql = `ALTER TABLE ${name} ADD COLUMN U&"c!006fl" UESCAPE ${escape} text`;
-      expect(hasDestructiveSchemaSql(sql)).toBe(false);
-      expect(hasDestructiveSchemaStatement(sql)).toBe(false);
+      expect(hasDestructiveSchemaSql(sql)).toBe(true);
+      expect(hasDestructiveSchemaStatement(sql)).toBe(true);
     });
   }
   for (const sql of ['TRUNCATE t unexpected @ tail', 'SELECT 1; TRUNCATE ?',
@@ -132,4 +134,13 @@ describe('known SQL fail-closed boundary', () => {
     expect(hasDestructiveSchemaSql('TRUNCATE this log message')).toBe(false);
     expect(hasDestructiveSchemaStatement('TRUNCATE this log message')).toBe(true);
   });
+});
+
+for (const sql of [
+  `TRUNCATE public.U&"ret!0061ined" UESCAPE '!'\n-- continuation\n''`,
+  `TRUNCATE public.U&"ret!0061ined" UESCAPE E'!'\n-- continuation\n''`,
+  `SELECT u&'hello'`, `SELECT U&"name"`,
+]) it(`rejects Unicode escapes regardless of candidate head: ${sql}`, () => {
+  expect(hasDestructiveSchemaSql(sql)).toBe(true);
+  expect(hasDestructiveSchemaStatement(sql)).toBe(true);
 });

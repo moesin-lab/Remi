@@ -133,12 +133,13 @@ SET DEFAULT/DROP DEFAULT/DROP NOT NULL 的 ALTER TABLE、ALTER TYPE ADD VALUE、
 IMPORT FOREIGN SCHEMA。CREATE OR REPLACE 的既有定义保护由运行时 catalog 承担。
 候选对象类封闭常量及 PostgreSQL 16 SQL Commands / SQLite VIRTUAL TABLE 来源见
 [schema-ddl.ts](../../packages/server/src/store/schema-ddl.ts)；支持嵌套注释、Unicode、模板标识符与位置参数，以及双引号、反引号和 SQLite 方括号引用标识符；
-arch 与 expand guard 使用相同的 token 归一化。PostgreSQL `U&"…"`（含可选 `UESCAPE`、注释和大小写变体）
-整体按不透明标识符处理，转义内容不会成为 SQL 关键字；同样支持这类名称上的加法 ALTER。
-UESCAPE 消费完整字符串常量：普通单引号、含反斜杠转义的 `E'…'`、dollar-quote，
-以及单引号字符串的换行续接；不解码转义内容，由 PostgreSQL 校验其合法性。
+arch 与 expand guard 使用相同的 token 归一化。登记迁移禁止 PostgreSQL `U&"…"` 和 `U&'…'`
+Unicode 转义标识符/字符串（不区分大小写，包括所有 UESCAPE/注释/续接变体），即使是加法 ALTER 也拒绝。
+迁移 SQL 由项目维护，不需要这种语法；为保证 fail-closed，不尝试实现完整 PostgreSQL lexer。
+请改用普通双引号标识符或普通字符串。运行时在执行前明确报错，不记账、不推进 level；
+arch 对含该 token 的源码 SQL 字符串无条件报违规，不依赖语句头消歧。
 运行时面对已知 SQL，任何顶层语句以 TRUNCATE 开头都直接拒绝，不依赖尾部形态或 catalog diff；
-无法识别的 UESCAPE 常量也拒绝执行。arch 仅作 fail-fast：TRUNCATE 后接 TABLE、ONLY 或引用名称时
+arch 仅作 fail-fast：TRUNCATE 后接 TABLE、ONLY 或引用名称时
 不论尾部是否可识别都拒绝；只有裸单词名称仍需形态检查以区分散文。
 DO 执行体、DROP（含 ON table）、其它 ALTER、TRUNCATE、REVOKE 等候选一律拒绝。
 散文、事件名、shell 字符串不构成 DDL 候选；VACUUM/ANALYZE/REINDEX/CLUSTER/REFRESH/DISCARD 不由 lint 检查。

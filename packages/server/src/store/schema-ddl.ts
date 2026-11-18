@@ -72,6 +72,12 @@ function destructiveDrop(statement: string[]): boolean {
       if (statement[index] !== ',') break;
       index++;
     } while (index < statement.length);
+    if (statement[index] === 'USING' && identifier(statement[index + 1])) index += 2;
+    if (statement[index] === 'WITH' && statement[index + 1] === '(') {
+      index += 2;
+      while (index < statement.length && statement[index] !== ')') index++;
+      if (statement[index] === ')') index++;
+    }
     if (statement[index] === 'CASCADE' || statement[index] === 'RESTRICT') index++;
     if (valid && index === statement.length) return true;
   }
@@ -83,7 +89,9 @@ export function hasDestructiveSchemaSql(sql: string): boolean {
   return splitTopLevel(sqlTokens(sql), ';').some(statement => {
     if (statement[0] === 'TRUNCATE' && statement.length > 1) return true;
     // DO bodies are opaque executable SQL, unlike dollar-quoted SELECT values.
-    if (statement[0] === 'DO' && (statement[1] === '<identifier-or-value>' || statement[1] === 'LANGUAGE')) return true;
+    if (statement[0] === 'DO' && (statement[1] === '<identifier-or-value>' || statement[1] === 'LANGUAGE'
+      || (statement[1] === 'E' && statement[2] === '<identifier-or-value>')
+      || (statement[1] === 'U' && statement[2] === '&' && statement[3] === '<identifier-or-value>'))) return true;
     // Parse the shape rather than enumerate object kinds. Up to three words
     // cover multiword kinds such as FOREIGN DATA WRAPPER / TEXT SEARCH CONFIGURATION.
     if (statement[0] === 'DROP' && destructiveDrop(statement)) return true;

@@ -1,4 +1,5 @@
 import { createResponsibleTestIssue } from './helpers.js';
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { describe, expect, it, spyOn } from "bun:test";
 import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
@@ -17,6 +18,7 @@ describe("MUL-427 merge rulings", () => {
         const issue=historical.createIssue({title:"Legacy return window"});
         const parent=historical.getOrCreateDefaultIssueSession(issue.id);
         historical.appendSessionEvent(parent.id,{kind:"delegation_report",authorType:"system",body:"Trailing legacy report"});
+        runMigrations(db, { historicalMaintenance: true });
         const store=new MultiremiStore(db);
         expect(store.getConversationLogHead(parent.id)?.headSeq).toBe(1);
         for(const inheritMode of ["snapshot","follow"] as const){

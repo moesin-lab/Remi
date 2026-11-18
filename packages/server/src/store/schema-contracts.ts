@@ -5,7 +5,7 @@ import { runSchemaContracts } from './schema-migration-runner.js';
 import { SCHEMA_MIGRATIONS } from './schema-migrations.js';
 import { SCHEMA_CONTRACT_MIGRATIONS } from './schema-contract-migrations.js';
 import { readSchemaLevels, SCHEMA_COMPATIBILITY } from './schema-levels.js';
-import { version } from '../../../../package.json';
+import { PACKAGE_VERSION as version } from '@shared/package-version.js';
 
 export function contractSchema(db: SqlDatabase, targetLevel: number): ReturnType<typeof readSchemaLevels> {
   // There is no reliable inventory of already-open, idle SQLite handles.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { Database } from 'bun:sqlite';
+import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
 import { snapshotSchemaCatalog } from '@multiremi/store/schema-catalog.js';
 import { ensureSchemaMeta, readSchemaLevels } from '@multiremi/store/schema-levels.js';
 import { runSchemaExpands } from '@multiremi/store/schema-migration-runner.js';
@@ -9,7 +9,7 @@ describe('SQLite expand catalog authority', () => {
     'ALTER TABLE retained DROP COLUMN d', 'ALTER TABLE retained DROP COLUMN generated', 'ALTER TABLE retained RENAME COLUMN c TO gone',
     'ALTER TABLE retained RENAME TO gone', 'DROP INDEX retained_unique', 'DROP VIEW retained_view',
   ]) it(`rolls back indirect ${sql}`, () => {
-    const db = new Database(':memory:');
+    const db = openSqliteDatabase(':memory:');
     try {
       ensureSchemaMeta(db);
       db.exec('CREATE TABLE retained (id integer PRIMARY KEY, c text, d text, generated text GENERATED ALWAYS AS (c) VIRTUAL); CREATE UNIQUE INDEX retained_unique ON retained(c); CREATE VIEW retained_view AS SELECT id FROM retained');
@@ -28,7 +28,7 @@ describe('SQLite expand catalog authority', () => {
     ['named constraint replacement', 'c integer, d text, CONSTRAINT named_check CHECK (c > 1)'],
     ['named constraint removal', 'c integer, d text'],
   ]) it(`rejects opaque table reconstruction with ${label}`, () => {
-    const db = new Database(':memory:');
+    const db = openSqliteDatabase(':memory:');
     try {
       ensureSchemaMeta(db);
       db.exec('CREATE TABLE retained (c integer, d text, CONSTRAINT named_check CHECK(c > 0))');
@@ -44,7 +44,9 @@ describe('SQLite expand catalog authority', () => {
     } finally { db.close(); }
   });
   it('allows additive SQLite schema on a raw unmarked SQLite handle', () => {
-    const db = new Database(':memory:');
+    const db = openSqliteDatabase(':memory:');
+    // Exercise legacy handles without dialect metadata through the approved entry.
+    Reflect.deleteProperty(db, 'dialect');
     try {
       db.exec('CREATE TABLE retained (c integer)');
       runSchemaExpands(db, [{ id: 'additive', phase: 'expand', level: 1,
@@ -63,7 +65,7 @@ describe('SQLite expand catalog authority', () => {
     'DROP VIEW retained_view; CREATE VIEW retained_view AS SELECT d FROM retained',
     'DROP TRIGGER retained_trigger; CREATE TRIGGER retained_trigger AFTER INSERT ON retained BEGIN SELECT 2; END',
   ]) it(`rejects opaque definition/restriction change ${sql}`, () => {
-    const db = new Database(':memory:');
+    const db = openSqliteDatabase(':memory:');
     try {
       ensureSchemaMeta(db);
       db.exec('CREATE TABLE retained(c integer,d text); CREATE VIEW retained_view AS SELECT c FROM retained; CREATE TRIGGER retained_trigger AFTER INSERT ON retained BEGIN SELECT 1; END');

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { executionGroupModelCatalog } from "@multiremi/api/helpers/agents.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
-import { bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { historicalWriters } from "./unified-model-test-backends.js";
 import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
@@ -220,6 +220,8 @@ describe("Execution groups", () => {
         VALUES (?, 'Legacy', 'codex', 'local', 'machine', 'local', 'old-group', ?, ?)`, [runtimeId, at, at]);
       database.run("UPDATE multiremi_agents SET runtime_id = ? WHERE id = ?", [runtimeId, agent.id]);
       database.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", ["execution_groups_v1"]);
+      // Historical cutover is explicit maintenance; startup only runs expands.
+      runMigrations(database, { historicalMaintenance: true });
       const reopened = new MultiremiStore(database);
       expect(reopened.getAgent(agent.id)).toMatchObject({ runtimeId, executionGroupId: "old-group", ownerId: "local" });
       expect(reopened.getExecutionGroup("old-group")?.managed).toBe(false);

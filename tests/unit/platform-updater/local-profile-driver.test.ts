@@ -148,7 +148,7 @@ function createFixture() {
             }
             return { exitCode: 0, stdout: "", stderr: "" };
           }
-          if (command === "docker") return { exitCode: 0, stdout: args.includes("cat") ? SCHEMA_SOURCE : "", stderr: "" };
+          if (command === "docker") return { exitCode: 0, stdout: (args.includes("cat") || args.some(arg => arg.includes("schema-compatibility.json"))) ? SCHEMA_SOURCE : "", stderr: "" };
           throw new Error(`unexpected command ${command}`);
         },
       };

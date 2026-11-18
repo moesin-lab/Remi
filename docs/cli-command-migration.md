@@ -1063,6 +1063,7 @@ a replacement.
 
 ## 本机数据库维护
 
+`remi db prepare` 在所有数据库客户端停止后显式准备历史 schema，已完成步骤可续跑；
 `remi db schema` 读取 PostgreSQL schema level 与代码兼容区间；
 `remi db contract --level <n>` 显式执行已声明、晚于 expand release 的收缩步骤。
 这两个 Registry 命令直接使用 `MULTIREMI_DATABASE_URL`，不使用平台 token；

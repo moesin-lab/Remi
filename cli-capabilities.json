@@ -57,6 +57,18 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "db.prepare": {
+      "command": "remi db prepare",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "destructive",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "db.contract": {
       "command": "remi db contract",
       "aliases": [],

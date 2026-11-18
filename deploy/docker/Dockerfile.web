@@ -52,7 +52,7 @@ ENV REMI_APPLICATION_BASE_VERSION=$REMI_APP_VERSION REMI_APPLICATION_BASE_REF=$R
 COPY --from=builder --chown=node:node /app/frontend/apps/web/.next/standalone ./
 COPY --from=builder --chown=node:node /app/frontend/apps/web/.next/static ./frontend/apps/web/.next/static
 COPY --from=builder --chown=node:node /app/frontend/apps/web/public ./frontend/apps/web/public
-COPY packages/platform-updater/src/supervisor.mjs packages/platform-updater/src/container-runtime.mjs packages/platform-updater/src/data-schema-inputs.json /usr/local/lib/remi/
+COPY packages/platform-updater/src/supervisor.mjs packages/platform-updater/src/container-runtime.mjs packages/platform-updater/src/data-schema-inputs.json packages/platform-updater/src/schema-fingerprint.mjs /usr/local/lib/remi/
 RUN mkdir -p /remi-control /remi-program /remi-seed /tmp/remi-next-cache \
   && chown node:node /remi-control /remi-program /remi-seed /tmp/remi-next-cache
 

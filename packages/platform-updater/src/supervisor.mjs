@@ -1,12 +1,13 @@
 // Stable image-owned supervisor. Updates replace only the application child,
 // including its bundled Bun/Node executable; no Docker control socket is used.
+import { schemaLevelFingerprint } from './schema-fingerprint.mjs';
 import { spawn, execFileSync } from 'node:child_process';
 import { cp, mkdir, readFile, rename, rm, open, readdir } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { DATA_SCHEMA_INPUTS, API_BASE_INPUTS } from './container-runtime.mjs';
+import { API_BASE_INPUTS } from './container-runtime.mjs';
 
 export async function readJson(path) {
   try { return JSON.parse(await readFile(path, 'utf8')); }
@@ -42,7 +43,7 @@ export async function syncDirectory(path) {
   try { await parent.sync(); } finally { await parent.close(); }
 }
 export async function schemaFingerprint(root) {
-  return digest((await Promise.all(DATA_SCHEMA_INPUTS.map(path => readFile(join(root, path), 'utf8')))).join(''));
+  return schemaLevelFingerprint(root);
 }
 export async function syncTree(root) {
   for (const entry of await readdir(root, { withFileTypes: true })) {

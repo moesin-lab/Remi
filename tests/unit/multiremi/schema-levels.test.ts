@@ -4,7 +4,7 @@ import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { assertSchemaCompatible, assertSchemaBeforeExpand, ensureSchemaMeta, readSchemaLevels } from '@multiremi/store/schema-levels.js';
 import { runSchemaContracts, runSchemaExpands, validateSchemaMigrations, type SchemaMigration } from '@multiremi/store/schema-migration-runner.js';
 import { contractSchema } from '@multiremi/store/schema-contracts.js';
-import { runMigrations } from '@multiremi/store/migrations.js';
+import { runMigrations, runStartupMigrations } from '@multiremi/store/migrations.js';
 
 let database: ReturnType<typeof openSqliteDatabase>;
 afterEach(() => database?.close());
@@ -37,6 +37,22 @@ describe('schema compatibility protocol', () => {
     const before = database.query('SELECT total_changes() AS count').get();
     expect(() => runMigrations(database)).toThrow('contract_level=2 exceeds code maxLevel=1');
     expect(database.query('SELECT total_changes() AS count').get()).toEqual(before);
+  });
+  it('requires maintenance for populated pre-protocol databases and never replays enrolled history', () => {
+    const database = db();
+    database.exec('CREATE TABLE multiremi_before_protocol (id INTEGER)');
+    expect(() => runStartupMigrations(database)).toThrow('run remi db prepare');
+    runMigrations(database, { historicalMaintenance: true });
+    const original = database.exec.bind(database);
+    const guarded = new Proxy(database, { get(target, key) {
+      if (key === 'exec') return (sql: string) => {
+        if (/RENAME|DROP|CREATE OR REPLACE/i.test(sql)) throw new Error('Historical DDL replayed');
+        return original(sql);
+      };
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    expect(() => runStartupMigrations(guarded)).not.toThrow();
   });
   it('rejects an empty/corrupt metadata table instead of treating it as legacy', () => {
     const database = db(); ensureSchemaMeta(database);

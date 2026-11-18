@@ -1,5 +1,6 @@
 // This file is embedded in the host updater. It runs with Bun (management/API)
 // or Node (Web launcher) inside the existing base images, without a Docker socket.
+import { schemaLevelFingerprint } from './schema-fingerprint.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { cp, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, statfs, symlink } from 'node:fs/promises';
@@ -29,6 +30,7 @@ async function atomic(path, value) {
   try { await directory.sync(); } finally { await directory.close(); }
 }
 async function fingerprint(root, inputs = DATA_SCHEMA_INPUTS) {
+  if (inputs === DATA_SCHEMA_INPUTS) return schemaLevelFingerprint(root);
   const source = (await Promise.all(inputs.map(path => readFile(root + '/' + path, 'utf8')))).join('').replaceAll('\r\n', '\n');
   return createHash('sha256').update(source).digest('hex');
 }

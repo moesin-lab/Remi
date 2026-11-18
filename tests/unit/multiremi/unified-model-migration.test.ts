@@ -8,7 +8,7 @@ import { runUnifiedModelMigration, reconcileUnifiedModel, retryChains,
 import { UNIFIED_MODEL_MIGRATION } from "@multiremi/store/unified-model-schema.js";
 import { dropRetiredTables, RETIRED_TABLE_SETS, RETIRED_COLUMN_SETS } from "../../../scripts/drop-retired-tables.js";
 import { historicalWriters, unifiedModelBackendTests } from "./unified-model-test-backends.js";
-import { bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { createReplacementAttemptWithinTransaction } from "@multiremi/store/turn-attempts.js";
 import { ensureUsageAccountingSchema } from "@multiremi/store/usage-accounting.js";
@@ -87,6 +87,7 @@ unifiedModelBackendTests("MUL-505 normalized model migration", fixture => {
     db.run("INSERT INTO multiremi_usage_runs(task_id,run_id,revision,complete) VALUES(?,'existing',1,1)", [task.id]);
     db.run(`INSERT INTO multiremi_usage_units(task_id,run_id,unit_id,revision,workspace_id,agent_id,provider,model,scope,source,accuracy,input_tokens,output_tokens,occurred_at)
       VALUES(?,'existing','request',1,'local',?,'claude','opus','request','provider_request','exact',5,2,'2026-10-01T00:00:00.000Z')`, [task.id, agent.id]);
+    runMigrations(db, { historicalMaintenance: true });
     const current = new MultiremiStore(db);
     current.ensureUsageAccountingStartup();
     expect(current.getTask(task.id)?.usage).toMatchObject([{ inputTokens: 5, outputTokens: 2, totalTokens: 7 }]);
@@ -234,7 +235,7 @@ unifiedModelBackendTests("MUL-505 normalized model migration", fixture => {
       db.run("INSERT INTO multiremi_autopilot_runs(id,autopilot_id,task_id,source_task_id,status,result,source,triggered_at,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?)",[id,'aut_history',task,source,'completed','historic ledger result','manual',at,at,at]);
     const dir=reportDir(),previous=process.env.MULTIREMI_MIGRATION_REPORT_DIR;
     process.env.MULTIREMI_MIGRATION_REPORT_DIR=dir;
-    try{new MultiremiStore(db);}finally{if(previous==null)delete process.env.MULTIREMI_MIGRATION_REPORT_DIR;else process.env.MULTIREMI_MIGRATION_REPORT_DIR=previous;}
+    try{runMigrations(db, { historicalMaintenance: true }); new MultiremiStore(db);}finally{if(previous==null)delete process.env.MULTIREMI_MIGRATION_REPORT_DIR;else process.env.MULTIREMI_MIGRATION_REPORT_DIR=previous;}
     expect(Number(db.query('SELECT COUNT(*) AS n FROM multiremi_turns').get().n)).toBe(2);
     expect(db.query('SELECT session_id FROM multiremi_turns WHERE id=?').get(b.id).session_id).toBe('auto_aut_history');
     expect(db.query('SELECT status,result FROM multiremi_autopilot_run_records WHERE id=?').get('run_b')).toEqual({status:'completed',result:'historic ledger result'});
@@ -268,7 +269,7 @@ unifiedModelBackendTests("MUL-505 normalized model migration", fixture => {
       const dir=reportDir();
       expect(()=>runUnifiedModelMigration(db,{reportDir:dir})).toThrow(UnifiedModelPreflightError);
       const prior=process.env.MULTIREMI_MIGRATION_REPORT_DIR;process.env.MULTIREMI_MIGRATION_REPORT_DIR=dir;
-      try{expect(()=>new MultiremiStore(db)).toThrow(UnifiedModelPreflightError);}
+      try{expect(()=>runMigrations(db, { historicalMaintenance: true })).toThrow(UnifiedModelPreflightError);}
       finally{if(prior==null)delete process.env.MULTIREMI_MIGRATION_REPORT_DIR;else process.env.MULTIREMI_MIGRATION_REPORT_DIR=prior;}
       expect(db.query("SELECT * FROM multiremi_tasks ORDER BY id").all()).toEqual(before);
       expect(db.query("SELECT id FROM multiremi_schema_migrations WHERE id=?").get(UNIFIED_MODEL_MIGRATION)).toBeNull();
@@ -309,7 +310,7 @@ unifiedModelBackendTests("MUL-505 normalized model migration", fixture => {
       db.run("UPDATE multiremi_schema_migrations SET applied_at=? WHERE id=?",[new Date(now.getTime()-8*86_400_000).toISOString(),UNIFIED_MODEL_MIGRATION]);
       const previous=process.env.MULTIREMI_MIGRATION_REPORT_DIR;
       process.env.MULTIREMI_MIGRATION_REPORT_DIR=dir;
-      try { new MultiremiStore(db); } finally {
+      try { runMigrations(db, { historicalMaintenance: true }); new MultiremiStore(db); } finally {
         if(previous===undefined)delete process.env.MULTIREMI_MIGRATION_REPORT_DIR;
         else process.env.MULTIREMI_MIGRATION_REPORT_DIR=previous;
       }

@@ -16,7 +16,8 @@ web 仍按旧协议重启。
 仅无 peer 的 `all` API，且 live `/readyz` 返回有效 A3 term 时，声明 `slotSwitch:true`。
 未接入 A3 的旧版本继续走原更新路径；候选缺少 term 时在放流前回退。updater 在更新/回退的目标与当前
 `dataSchema` 指纹完全相等时使用 switch；其他情况（包括 restart）保留 drain、
-write-fence、停止、备份、隔离 rehearsal、运行和验证流程。指纹清单扩充后的第一版
+write-fence、停止、备份、隔离 rehearsal、运行和验证流程。旧路径持有 host fence 时，仅真实回环来源且专用 token 正确的 slot 生命周期 POST 可通过；
+业务写请求与 WebSocket 仍受围栏保护。指纹清单扩充后的第一版
 可能与旧发布不同，仍需旧路径及已有的跨指纹人工审核。
 
 switch 先做在线一致性 `pg_dump` 并用 `pg_restore --list` 检查，失败记入 journal 的

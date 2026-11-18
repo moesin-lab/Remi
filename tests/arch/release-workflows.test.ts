@@ -59,7 +59,9 @@ describe("release workflows", () => {
     expect(ci.on).toHaveProperty("workflow_dispatch");
     expect(ci.jobs.backend.strategy.matrix.shard).toBe("${{ fromJSON(needs.backend-plan.outputs.shards) }}");
     const backend = ci.jobs.backend.steps.find((step: any) => step.name === "Backend test shard");
-    expect(ci.jobs["backend-plan"].if).toBe("github.event_name != 'pull_request'");
+    expect(ci.jobs["backend-plan"].if).toBeUndefined();
+    expect(ci.jobs.backend.if).toBe("needs.backend-plan.outputs.required == 'true'");
+    for (const job of ["platform-updater", "runtime-platform", "backend"]) expect(ci.jobs[job].strategy["fail-fast"]).toBe(false);
     expect(backend.run).toContain("scripts/ci-backend.ts run --plan");
     expect(ci.jobs.build.steps.some((step: any) => step.name === "Backend test suite")).toBe(false);
   });
@@ -126,15 +128,21 @@ describe("release workflows", () => {
   test("the real summary rejects any failed full gate even when diagnostics pass", () => {
     const ci = readWorkflow("release-build-check.yml");
     const summary = ci.jobs.build.steps[0].run;
-    const run = (event: string, retry: string, failures: Record<string, string> = {}) => {
-      const skipped = event === "pull_request" ? ["backend-plan", "backend", "backend-evidence", "backend-retry"] : retry ? [] : ["backend-retry"];
+    const run = (event: string, retry: string, failures: Record<string, string> = {}, required = event !== "pull_request") => {
+      const skipped = event === "pull_request" && !required ? ["backend", "backend-evidence", "backend-retry"] : retry ? [] : ["backend-retry"];
       const results = Object.fromEntries(ci.jobs.build.needs.map((job: string) => [job, { result: failures[job] ?? (skipped.includes(job) ? "skipped" : "success") }]));
       return spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", summary], {
-        encoding: "utf8", env: { ...process.env, RESULTS: JSON.stringify(results), EVENT: event, RETRY: retry, REF: "refs/heads/main", GITHUB_SHA: "a".repeat(40) },
+        encoding: "utf8", env: { ...process.env, BACKEND_REQUIRED: String(required), RESULTS: JSON.stringify(results), EVENT: event, RETRY: retry, REF: "refs/heads/main", GITHUB_SHA: "a".repeat(40) },
       });
     };
     for (const [event, retry] of [["pull_request", ""], ["push", ""], ["workflow_dispatch", ""], ["workflow_dispatch", "123"]]) {
       expect(run(event!, retry!).status).toBe(0);
+    }
+    expect(run("pull_request", "", {}, true).status).toBe(0);
+    for (const job of ["backend-plan", "backend", "backend-evidence", "platform-updater", "runtime-platform"]) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        expect(run("pull_request", "", { [job]: result }, true).status).not.toBe(0);
+      }
     }
     for (const job of ["backend", "backend-evidence", "im-platform-smoke", "execution-configuration", "platform-updater"]) {
       for (const result of ["failure", "cancelled", "skipped"]) expect(run("workflow_dispatch", "123", { [job]: result }).status).not.toBe(0);
@@ -228,9 +236,9 @@ describe("release workflows", () => {
     expect(step.if).toBeUndefined();
     expect(step.env).toEqual({ CI: "true", GITHUB_ACTIONS: "true" });
     expect(step.run.trim().split(/\s+/)).toEqual(["bun", "run", "test", ...[
-      "ci-backend", "run-tests", "run-tests-signals", "retry-failed-backend-tests", "release-candidate",
+      "ci-backend", "ci-backend-required", "run-tests", "run-tests-signals", "retry-failed-backend-tests", "release-candidate",
     ].map(name => `tests/unit/scripts/${name}.test.ts`)]);
-    expect(ci.jobs["backend-plan"].if).toContain("github.event_name != 'pull_request'");
+    expect(ci.jobs["backend-plan"].steps.find((step: any) => step.id === "scope").run).toContain("scripts/ci-backend-required.ts");
   });
 
   test("publishes the platform automatically after the tag release", () => {

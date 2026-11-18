@@ -44,6 +44,18 @@ it("rejects version inference including review counterexamples and future files"
 });
 
 it.each([
+  ["computed string declaration", 'const {["cli_version"]: v} = runtime.metadata; if (v >= "0.2.95") feature();'],
+  ["computed string assignment", 'let v; ({["build"]: v} = runtime.metadata); if (v >= 12345) feature();'],
+  ["local comparison alias", 'const cmp = compareDaemonCliVersion; if (cmp(a, b) >= 0) feature();'],
+  ["computed template declaration", 'const {[`cli_version`]: v} = runtime.metadata; if (v >= "0.2.95") feature();'],
+  ["computed template assignment", 'let v; ({[`build`]: v} = runtime.metadata); if (v >= 12345) feature();'],
+  ["chained imported comparison alias", 'import { compareDaemonCliVersion as original } from "@multiremi/contracts/daemon-protocol.js"; const first = original; const cmp = first; if (cmp(a, b) >= 0) feature();'],
+  ["namespace comparison alias", 'import * as protocol from "@multiremi/contracts/daemon-protocol.js"; const cmp = protocol.compareDaemonCliVersion; if (cmp(a, b) >= 0) feature();'],
+])("rejects static computed keys and local comparison aliases: %s", (_name, source) => {
+  expect(findVersionDecisions("packages/server/src/worker/future.ts", source).length).toBeGreaterThan(0);
+});
+
+it.each([
   ["destructuring rename", 'const {cli_version: v} = runtime.metadata; if (v >= "0.2.95") feature();'],
   ["local initializer", 'const v = runtime.metadata.build; if (v >= 12345) feature();'],
   ["renamed comparison import", 'import { compareDaemonCliVersion as cmp } from "@multiremi/contracts/daemon-protocol.js"; if (cmp(current, "0.2.95") >= 0) feature();'],
@@ -73,6 +85,11 @@ it("keeps lexical scopes separate and permits type inspection", () => {
     function unrelated(v: number) { return v >= 12345; }
     function sibling() { const v = 1; return v >= 2; }
     if (typeof v === "number") display(v);
+  `)).toEqual([]);
+  expect(findVersionDecisions(file, `
+    const cmp = compareDaemonCliVersion;
+    function unrelated(cmp: Function) { return cmp(1, 2) >= 0; }
+    function sibling() { const cmp = ordinary; return cmp(1, 2) >= 0; }
   `)).toEqual([]);
   expect(findVersionDecisions(file, `
     import { compareDaemonCliVersion as cmp } from "@multiremi/contracts/daemon-protocol.js";

@@ -7,7 +7,7 @@ import type { CommitEventQueue, StoreContext } from '../context.js';
 import { createCommitEventQueue } from '../context.js';
 import { afterCommit } from '../db/postgres.js';
 import { nowIso } from '@multiremi/ids.js';
-import { getMessage, sendMessageWithinTransaction } from './send-message.js';
+import { getMessage, messageFromRow, sendMessageWithinTransaction } from './send-message.js';
 import { normalizeHumanResponse } from './human-response.js';
 import { assertQuestionCardToken, type QuestionCardCredential } from '../question-card-token.js';
 import { deriveIssueStatusWithinTransaction } from './issue-status.js';
@@ -38,6 +38,14 @@ interface QuestionRecord {
   history: QuestionHistoryEvent[];
   wait: { status: QuestionWaitStatus; reason: string | null; wait_id?: string; runtime_id?: string; reply_message_id?: string; consumer_turn_id?: string; consumer_attempt_id?: string; continuation_message_id?: string; consumed_at?: string };
 }
+type IntegrityFacts = {
+  source: Record<string, any> | null;
+  session: {
+    session: { workspaceId: string }; scoped: { ownerWorkspaceId: string | null; session: { workspaceId: string } } | null;
+  } | undefined;
+  chat: { workspaceId: string } | null;
+  head: { workspace_id: string; source_workspace: string | null } | null;
+};
 export class QuestionError extends Error {
   constructor(readonly status: 400 | 403 | 404 | 409, readonly code: string, message = code) { super(message); }
 }
@@ -62,7 +70,7 @@ export class Questions {
     afterCommit(this.ctx.db, () => this.ctx.emitCommitEvents(events));
     return result;
   }
-  private route(issueId: string | null, sourceAgent: string | null, sessionId?: string, workspaceId?: string): { steps: RouteStep[]; revision: string | null; reason: string | null } {
+  private route(issueId: string | null, sourceAgent: string | null, sessionId?: string, workspaceId?: string, issueResponsibility?: ReturnType<StoreContext['resolveIssueResponsibility']>): { steps: RouteStep[]; revision: string | null; reason: string | null } {
     if (!issueId) {
       const scoped = sessionId ? this.ctx.issueSessions().getIssueSessionWithOwnerScope(sessionId) : null;
       const validOwner = !scoped || scoped.ownerWorkspaceId === workspaceId && scoped.session.workspaceId === workspaceId && !!scoped.session.chatId;
@@ -80,7 +88,7 @@ export class Questions {
       return member && !member.archivedAt && member.workspaceId === workspaceId ? { steps: [{ handler: { type: 'member', id: member.id }, issue_id: null, stage: 'human' }], revision, reason: null }
         : { steps: [], revision, reason: 'workspace_operator_unavailable' };
     }
-    const responsibility = this.ctx.resolveIssueResponsibility(issueId);
+    const responsibility = issueResponsibility ?? this.ctx.resolveIssueResponsibility(issueId);
     // A source moved to another workspace stays frozen: nobody may handle it.
     if (workspaceId && responsibility.workspaceId && responsibility.workspaceId !== workspaceId) return { steps: [], revision: responsibility.revision, reason: 'source_workspace_changed' };
     // Climb the execution owners in order, skipping the asker and repeats. A level
@@ -177,12 +185,12 @@ export class Questions {
     if (!this.integrity(result.message, result.record)) throw new QuestionError(403, 'question_source_workspace_changed');
     return result;
   }
-  private integrity(message: UnifiedMessage, record: QuestionRecord): boolean {
+  private integrity(message: UnifiedMessage, record: QuestionRecord, batch?: IntegrityFacts): boolean {
     // Historical business Qs can live on a parent lane or a different scope.
     // Their exact source relation is checked by historicalSource/canAccessFromTurn.
     const historical = message.metadata.decision_record && !message.metadata.human_request && !record.wait.wait_id;
     if (!historical && record.source_attempt_id) {
-      const source = this.ctx.db.query(`SELECT t.id, t.session_id, t.workspace_id, t.agent_id, t.execution_scope
+      const source = batch ? batch.source : this.ctx.db.query(`SELECT t.id, t.session_id, t.workspace_id, t.agent_id, t.execution_scope
         FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id WHERE a.id=?`)
         .get(record.source_attempt_id);
       if (!source || source.id !== message.task_id
@@ -190,15 +198,15 @@ export class Questions {
         || message.sender_type !== 'agent' || source.agent_id !== message.sender_id
         || String(source.execution_scope ?? '') !== String(message.metadata.execution_scope ?? '')) return false;
     }
-    const scoped = this.ctx.issueSessions().getIssueSessionWithOwnerScope(message.session_id);
+    const scoped = batch ? batch.session?.scoped : this.ctx.issueSessions().getIssueSessionWithOwnerScope(message.session_id);
     if (scoped) {
       if (scoped.ownerWorkspaceId !== record.workspace_id || scoped.session.workspaceId !== record.workspace_id) return false;
     } else {
-      if (this.ctx.issueSessions().getIssueSession(message.session_id)) return false;
-      const chat = this.ctx.chat().getChatSession(message.session_id);
+      if (batch ? batch.session : this.ctx.issueSessions().getIssueSession(message.session_id)) return false;
+      const chat = batch ? batch.chat : this.ctx.chat().getChatSession(message.session_id);
       if (chat ? chat.workspaceId !== record.workspace_id : !this.nativeAutomationSource(message, record)) return false;
     }
-    const facts = this.ctx.db.query('SELECT h.workspace_id,i.workspace_id AS source_workspace FROM multiremi_conversation_heads h LEFT JOIN multiremi_issues i ON i.id=? WHERE h.session_id=?').get(record.source_issue_id, message.session_id);
+    const facts = batch ? batch.head : this.ctx.db.query('SELECT h.workspace_id,i.workspace_id AS source_workspace FROM multiremi_conversation_heads h LEFT JOIN multiremi_issues i ON i.id=? WHERE h.session_id=?').get(record.source_issue_id, message.session_id);
     return facts?.workspace_id === record.workspace_id && (!record.source_issue_id || facts?.source_workspace === record.workspace_id);
   }
   private nativeAutomationSource(message: UnifiedMessage, record: QuestionRecord): boolean {
@@ -544,6 +552,91 @@ export class Questions {
     events.workspace.push({ type: 'decision:created', workspaceId: record.workspace_id, actorType: 'agent', actorId: turn.agent_id,
       payload: { issue_id: record.source_issue_id, root_question_id: result.message.id } });
     return { ...result, message: getMessage(this.ctx, result.message.id)! };
+  }
+  /** Count only this Issue's human-stage Qs, without materializing views/wait state. */
+  countPendingForIssue(issueId: string): number {
+    const rows = this.ctx.db.query(`WITH candidates AS (
+      SELECT m.id FROM multiremi_turns t JOIN multiremi_conversation_log m ON m.task_id=t.id
+      WHERE t.issue_id=? AND m.kind='message' AND m.message_kind='decision'
+        AND m.deleted_at IS NULL AND m.resolved_at IS NULL
+      UNION
+      SELECT m.id FROM multiremi_issue_sessions s JOIN multiremi_conversation_log m ON m.session_id=s.id
+      WHERE s.issue_id=? AND m.kind='message' AND m.message_kind='decision'
+        AND m.deleted_at IS NULL AND m.resolved_at IS NULL)
+      SELECT m.*, t.issue_id AS count_turn_issue_id, t.current_attempt_id AS count_attempt_id,
+        chat.workspace_id AS count_chat_workspace,
+        legacy.id AS count_legacy_attempt, legacy_turn.agent_id AS count_legacy_agent,
+        legacy_turn.workspace_id AS count_legacy_workspace, legacy_turn.issue_id AS count_legacy_issue
+      FROM candidates c JOIN multiremi_conversation_log m ON m.id=c.id
+      LEFT JOIN multiremi_turns t ON t.id=m.task_id
+      LEFT JOIN multiremi_chat_sessions chat ON chat.id=m.session_id
+      LEFT JOIN multiremi_turn_attempts legacy ON legacy.id=${questionMetadataText(this.ctx.db, 'm.metadata', 'decision_record.source_task_id')}
+      LEFT JOIN multiremi_turns legacy_turn ON legacy_turn.id=legacy.turn_id`).all(issueId, issueId);
+    if (!rows.length) return 0;
+    const sessions = this.ctx.issueSessions().getIssueSessionOwnerFacts(rows.map(row => String(row.session_id)));
+    // Historical routes all have the requested source Issue. Resolve its chain
+    // once, even when each decision came from a different asker/session.
+    let responsibility: ReturnType<StoreContext['resolveIssueResponsibility']> | undefined;
+    const candidates: { message: UnifiedMessage; record: QuestionRecord; chat: IntegrityFacts['chat'] }[] = [];
+    for (const row of rows) {
+      const message = messageFromRow(row);
+      let record = message.metadata.question as QuestionRecord | undefined;
+      if (record?.version === 1) record = this.upgraded(record);
+      else {
+        const old = isHistoricalIssueQuestionRecord(message.metadata.decision_record) ? message.metadata.decision_record : undefined;
+        const human = message.metadata.human_request as Record<string, any> | undefined;
+        if (!old && !human) continue;
+        const session = sessions.get(message.session_id)?.session;
+        const workspace = session?.workspaceId ?? row.count_chat_workspace;
+        if (!workspace) continue;
+        const sourceId = old ? typeof old.source_issue_id === 'string' ? old.source_issue_id : session?.issueId ?? null
+          : row.count_turn_issue_id ?? session?.issueId ?? null;
+        if (sourceId !== issueId) continue;
+        const pending = old ? !['answered', 'withdrawn'].includes(String(old.status))
+          : !(human!.response && typeof human!.response === 'object') && !['responded', 'cancelled'].includes(String(human!.status));
+        if (!pending) continue;
+        let humanStage = !old || old.status === 'escalated' || ['permission', 'merge', 'production_change'].includes(String(old.kind));
+        if (!humanStage) {
+          responsibility ??= this.ctx.resolveIssueResponsibility(issueId);
+          humanStage = this.route(issueId, message.sender_id, message.session_id, workspace, responsibility).steps[0]?.stage === 'human';
+        }
+        if (!humanStage) continue;
+        // Only the fields consumed by integrity() and the count predicate are
+        // needed for historical records; answer/history/summary stay unread.
+        record = { workspace_id: workspace, source_issue_id: sourceId,
+          source_attempt_id: old ? typeof old.source_task_id === 'string' && row.count_legacy_agent === message.sender_id
+            && row.count_legacy_workspace === workspace && row.count_legacy_issue === sourceId ? row.count_legacy_attempt ?? null : null
+            : row.count_attempt_id ?? null,
+          status: 'pending', route: [{ stage: 'human', handler: null, issue_id: sourceId }], route_index: 0,
+          route_reason: null, wait: {} } as QuestionRecord;
+      }
+      if (record.status !== 'pending' || record.source_issue_id !== issueId
+        || record.route[record.route_index]?.stage !== 'human' || record.route_reason === 'source_workspace_changed') continue;
+      candidates.push({ message, record, chat: row.count_chat_workspace ? { workspaceId: row.count_chat_workspace } : null });
+    }
+    // A JSON rowset keeps bind count and statement count constant above SQLite's
+    // parameter limit. Historical normalization stays in JavaScript.
+    const payload = JSON.stringify(candidates.map(({ message, record }) => ({
+      id: message.id, session: message.session_id, attempt: record.source_attempt_id,
+    })));
+    const postgres = this.ctx.db.dialect === 'postgres';
+    const field = (name: string) => postgres ? `batch.value->>'${name}'` : `json_extract(batch.value,'$.${name}')`;
+    const facts = this.ctx.db.query(`SELECT ${field('id')} AS message_id,
+      t.id,t.session_id,t.workspace_id,t.agent_id,t.execution_scope,
+      h.workspace_id AS head_workspace, i.workspace_id AS source_workspace
+      FROM ${postgres ? 'json_array_elements(CAST(? AS JSON)) AS batch(value)' : 'json_each(?) AS batch'}
+      LEFT JOIN multiremi_turn_attempts a ON a.id=${field('attempt')}
+      LEFT JOIN multiremi_turns t ON t.id=a.turn_id
+      LEFT JOIN multiremi_conversation_heads h ON h.session_id=${field('session')}
+      LEFT JOIN multiremi_issues i ON i.id=?`).all(payload, issueId);
+    const byId = new Map(facts.map(row => [String(row.message_id), row]));
+    return candidates.filter(({ message, record, chat }) => {
+      const row = byId.get(message.id)!;
+      return this.integrity(message, record, {
+        source: row.id ? row : null, session: sessions.get(message.session_id), chat,
+        head: row.head_workspace == null ? null : { workspace_id: row.head_workspace, source_workspace: row.source_workspace },
+      });
+    }).length;
   }
   get(id: string, actor?: QuestionActor): QuestionView | null {
     const loaded = this.read(id); if (!loaded) return null;

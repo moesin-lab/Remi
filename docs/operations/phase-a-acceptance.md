@@ -45,7 +45,14 @@ summary: 准备隔离 PG/internal-updates/fake-acp 候选，执行并发轮次�
 
 ## Operator 可执行入口
 
-以下命令由有 Docker 权限的 Operator 执行；Agent 不申请 Docker/docker group 权限。
+整个流程（init、build/up、驱动、collect）必须由同一个宿主 UID 执行，且等于候选 API 容器运行 UID。
+默认 UID 1000，可用 `A5_RUNTIME_UID` 覆盖，后续必须保持相同值。
+init 将该 UID 写入候选 API overlay；覆盖默认值时，Web/updater/rehearsal 也以该 UID 运行，
+专用一次性 candidate-init 容器仅初始化候选命名卷的根目录归属，不挂载宿主 control，不放宽权限。
+宿主用户不是 1000 时，用 `sudo -u '#1000' -H` 运行全部命令（可先用
+`sudo -u '#1000' -H bash` 进入该身份的 shell，再执行下面的完整流程）。
+该身份需要可用的私有 HOME、源码/脚本访问权、Chromium 和 Docker 访问权，由 Operator 自行授予；
+Agent 不申请 Docker/docker group 权限。覆盖 UID 时相应替换 sudo 身份。
 先合入准备 PR #131，待 A4 #123 合入后，另建干净源码 checkout，固定其最终合入 SHA；
 该 checkout 必须包含 A4 和 MUL-178，不用未合入分支 head 代替最终 SHA。
 操作脚本来自已合入的准备 PR checkout，候选构建源码由 `A5_SOURCE_DIR` 单独指定。
@@ -54,13 +61,12 @@ summary: 准备隔离 PG/internal-updates/fake-acp 候选，执行并发轮次�
 # 在包含本操作脚本的仓库执行；仅替换以下两项实际值。
 export A5_SOURCE_DIR=/absolute/clean-candidate-checkout
 export A5_MERGED_SHA=<A4最终合入的40位SHA>
+export A5_RUNTIME_UID=1000
 export A5_PROJECT=remi-a5
 export A5_API_PORT=26120
 export A5_WEB_PORT=23000
 export A5_DATA_DIR="$HOME/.local/share/$A5_PROJECT"
 node scripts/phase-a/operator.mjs init
-# 仅候选控制目录需要容器 UID 1000；由 Operator 设置，不更改 Docker socket。
-sudo chown 1000:1000 "$A5_DATA_DIR/control"
 node scripts/phase-a/operator.mjs build
 node scripts/phase-a/operator.mjs up
 node scripts/phase-a/operator.mjs collect
@@ -71,8 +77,8 @@ node scripts/phase-a/operator.mjs collect
 Postgres、program、HOME、seed、state 使用 `${A5_PROJECT}_*` 命名卷；只有 control 绑定到该数据目录。
 API/Web 仅绑定 loopback。`build` 再检查源码 SHA 与干净状态。`up` 使用基础 Compose 与 internal-updates
 及专用 A4 overlay。使用同一组参数执行后续命令，避免误操作别的项目。
-若宿主执行器不是 UID 1000，应由 Operator 以 UID 1000 运行驱动并提供私有 HOME、Chromium 和凭据，
-不要放宽 edge.sock 的 0600 权限。
+init/collect 和驱动在执行 UID 不匹配时立即拒绝；驱动同时检查 control/evidence 目录归属。
+data/evidence/control 保持 0700，凭据与 edge.sock 保持 0600，不做跨 UID 权限交接。
 
 这组命令完成候选基础设施准备，仍需按上方第 5–6 项配置独立 daemon、九个 Session/八个 Agent、
 安装五个真实 retained release 并通过 updater 选到 v1；没有自动创建这些对象。
@@ -188,6 +194,7 @@ node scripts/phase-a/operator.mjs collect
 
 ```bash
 node --test scripts/phase-a/support.test.mjs
+node --test scripts/phase-a/operator.test.mjs
 bun run test tests/unit/scripts/ppe-fake-acp.test.ts tests/unit/scripts/phase-a-faults.test.ts
 bunx tsc --noEmit
 npm run docs:test

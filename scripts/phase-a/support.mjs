@@ -1,7 +1,36 @@
 import { connect } from 'node:net';
-import { readFile, rename, writeFile, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, rename, writeFile, realpath, stat, mkdir } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+
+// All host-side operations share the API runtime identity; no permission handoff.
+export function requireRuntimeUid(value = process.env.A5_RUNTIME_UID ?? '1000', uid = process.getuid?.()) {
+  const runtimeUid = Number(value);
+  if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(runtimeUid) || runtimeUid < 0 || runtimeUid > 4294967294) {
+    throw new Error('A5_RUNTIME_UID must be a non-negative POSIX UID');
+  }
+  if (uid !== runtimeUid) throw new Error(`Execution UID ${uid} must equal A5_RUNTIME_UID=${runtimeUid}; run the entire init/driver/collect workflow as that UID (e.g. sudo -u '#${runtimeUid}' -H). Operator must provide Docker access.`);
+  return runtimeUid;
+}
+export async function requireDirectoryUid(path, uid) {
+  const info = await stat(path);
+  if (!info.isDirectory() || info.uid !== uid) throw new Error(`Candidate directory ${path} must belong to runtime UID ${uid}; initialize and run the entire workflow as that UID`);
+}
+export async function prepareEvidence(path, uid) {
+  // Check existing ancestors before creating anything in another identity's tree.
+  let ancestor = path;
+  for (;;) {
+    try { await requireDirectoryUid(ancestor, uid); break; }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      const parent = resolve(ancestor, '..');
+      if (parent === ancestor) throw error;
+      ancestor = parent;
+    }
+  }
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  await requireDirectoryUid(path, uid);
+}
 
 export const scenarioPlan = r => [
   ['v1-v2', r.v2, false],

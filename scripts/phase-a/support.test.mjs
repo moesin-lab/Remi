@@ -4,7 +4,7 @@ import { mkdtemp, rm, readFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
-import { scenarioPlan, validateConfig, validateControlDirectory, edgeStatus, edgeDelta, writeDesired, scenarioPass, ProbeSchedule } from './support.mjs';
+import { requireRuntimeUid, requireDirectoryUid, prepareEvidence, scenarioPlan, validateConfig, validateControlDirectory, edgeStatus, edgeDelta, writeDesired, scenarioPass, ProbeSchedule } from './support.mjs';
 
 const config = () => ({ baseUrl: 'http://127.0.0.1:26120', profile: 'remi-a5-test',
   sessions: Array.from({ length: 8 }, (_, i) => ({ id: `session${i}`, agentId: `agent${i}` })),
@@ -114,4 +114,20 @@ test('absolute probe deadlines accept small jitter and reject cumulative drift o
   assert.ok(result.expectedTicks >= 190);
   assert.ok(result.missedTicks >= 90);
   assert.ok(result.lateTicks > 0);
+});
+
+test('runtime identity rejects mismatches and private evidence/control require matching ownership', async () => {
+  assert.equal(requireRuntimeUid('1000', 1000), 1000);
+  assert.equal(requireRuntimeUid('2000', 2000), 2000);
+  assert.throws(() => requireRuntimeUid('1000', 2000), /entire init\/driver\/collect workflow/);
+  for (const value of ['NaN', '-1', '1.5', '', '4294967295']) assert.throws(() => requireRuntimeUid(value, 1000), /POSIX UID/);
+  const dir = await mkdtemp(join(tmpdir(), 'mul172-uid-'));
+  try {
+    const uid = process.getuid();
+    await requireDirectoryUid(dir, uid);
+    await assert.rejects(requireDirectoryUid(dir, uid + 1), /must belong to runtime UID/);
+    await assert.rejects(prepareEvidence(join(dir, 'rejected'), uid + 1), /must belong to runtime UID/);
+    await prepareEvidence(join(dir, 'evidence'), uid);
+    await requireDirectoryUid(join(dir, 'evidence'), uid);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });

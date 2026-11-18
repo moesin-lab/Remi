@@ -1,3 +1,4 @@
+import { readTurnRow } from "@multiremi/store/execution-reads.js";
 import type { QuestionActor, QuestionAnswer, QuestionAnswerInput, QuestionHistoryEvent, QuestionMutationInput, QuestionStage, QuestionSubagent, QuestionView, QuestionWaitStatus } from '@multiremi/contracts';
 import { isHistoricalIssueQuestionRecord } from '@multiremi/contracts';
 import type { MultiremiWorkspaceMember } from '@multiremi/contracts/types.js';
@@ -116,7 +117,7 @@ export class Questions {
     if (!session && !chat) return null;
     const workspaceId = session?.workspaceId ?? chat!.workspaceId;
     if (human && !old) {
-      const source = message.task_id ? this.ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(message.task_id) : null;
+      const source = message.task_id ? readTurnRow(this.ctx.db, message.task_id) : null;
       const route = this.route(source?.issue_id ?? session?.issueId ?? null, message.sender_id, message.session_id, workspaceId);
       const response = human.response && typeof human.response === 'object' ? human.response : null;
       const ref = human.responded_by ? String(human.responded_by) : null;
@@ -227,14 +228,14 @@ export class Questions {
   }
   private waiting(message: UnifiedMessage, record: QuestionRecord): QuestionRecord['wait'] {
     if (record.wait.status !== 'waiting') return record.wait;
-    const turn = message.task_id ? this.ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(message.task_id) : null;
+    const turn = message.task_id ? readTurnRow(this.ctx.db, message.task_id) : null;
     if (!turn || turn.current_attempt_id !== record.source_attempt_id || !['running', 'awaiting_human'].includes(turn.status))
       return { ...record.wait, status: 'detached', reason: !turn ? 'source_turn_missing' : turn.current_attempt_id !== record.source_attempt_id ? 'provider_attempt_replaced' : `source_turn_${turn.status}` };
     return record.wait;
   }
   canAccessFromTurn(id: string, agentId: string, turnId?: string): boolean {
     const loaded = this.read(id);
-    const turn = turnId ? this.ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(turnId) : null;
+    const turn = turnId ? readTurnRow(this.ctx.db, turnId) : null;
     if (!loaded || !turn || turn.agent_id !== agentId || turn.workspace_id !== loaded.record.workspace_id
       || !['running', 'awaiting_human'].includes(turn.status) || !this.integrity(loaded.message, loaded.record)) return false;
     const { message, record } = loaded;
@@ -272,7 +273,7 @@ export class Questions {
     const actor = sender.type === 'agent' ? this.ctx.agents().getAgent(sender.id) : this.ctx.workspaces().getWorkspaceMember(sender.id);
     if (!actor || actor.workspaceId !== record.workspace_id || actor.archivedAt) throw new QuestionError(403, 'question_actor_workspace_mismatch');
     if (sender.type === 'agent') {
-      const turn = sourceTurnId ? this.ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(sourceTurnId) : null;
+      const turn = sourceTurnId ? readTurnRow(this.ctx.db, sourceTurnId) : null;
       if (!turn || turn.agent_id !== sender.id || turn.workspace_id !== record.workspace_id || !['running', 'awaiting_human'].includes(turn.status)) throw new QuestionError(403, 'question_agent_current_turn_required');
       if (Number.isSafeInteger(expectedRouteRevision) && expectedRouteRevision! > 0 && expectedRouteRevision !== record.route_revision) throw new QuestionError(409, 'question_route_changed');
       if (!messageId || !this.canAccessFromTurn(messageId, sender.id, sourceTurnId)) throw new QuestionError(403, 'question_agent_notification_lane_required');
@@ -509,7 +510,7 @@ export class Questions {
     this.ctx.feishuBot().enqueueQuestionPresentationWithinTransaction(message.id);
   }
   createWithinTransaction(input: SendMessageInput, sourceAttemptId: string, events: CommitEventQueue) {
-    const turn = input.source_turn_id ? this.ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(input.source_turn_id) : null;
+    const turn = input.source_turn_id ? readTurnRow(this.ctx.db, input.source_turn_id) : null;
     if (!turn || turn.current_attempt_id !== sourceAttemptId) throw new QuestionError(409, 'question_source_attempt_changed');
     if (turn.session_id !== input.session_id) throw new QuestionError(409, 'question_source_session_changed');
     const scoped = this.ctx.issueSessions().getIssueSessionWithOwnerScope(input.session_id);
@@ -935,7 +936,7 @@ export class Questions {
     if (record.wait.status !== 'continuation_pending' || record.wait.continuation_message_id !== messageId) return;
     if (record.wait.consumer_turn_id !== turnId) {
       const previous = this.ctx.db.query('SELECT status FROM multiremi_turns WHERE id=?').get(record.wait.consumer_turn_id ?? '');
-      const next = this.ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(turnId);
+      const next = readTurnRow(this.ctx.db, turnId);
       const source = this.ctx.db.query('SELECT execution_scope FROM multiremi_turns WHERE id=?').get(message.task_id ?? '');
       if (!previous || !['completed', 'failed', 'cancelled'].includes(previous.status)
         || !next || next.session_id !== message.session_id || next.agent_id !== message.sender_id

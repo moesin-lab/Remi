@@ -140,6 +140,8 @@ export function steerMessageText(content: string): string {
  */
 /** Keep a range record first so adding identity never bypasses body-read checks. */
 export function withSteerIdentity(content: string, id: string, notice = ""): string {
+  // Wrap-up controls recover through turn.wrap_up, not user-input receipts.
+  if (!/^msg_[A-Za-z0-9_-]+$/.test(id)) return content;
   const label = `${notice}[Remi steer id: ${id}]\n`;
   const projected = splitProjectedInput(content);
   const newline = content.indexOf("\n");

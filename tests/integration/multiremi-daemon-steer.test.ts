@@ -228,7 +228,7 @@ describe("Bun Multiremi daemon steering", () => {
 
       // ADR 0023: the injected prompt is the directive itself, labelled as the turn input labels it, on the same session.
       expect(prompts).toHaveLength(2);
-      expect(prompts[1]).toBe("[Remi] 改用中文输出");
+      expect(prompts[1]).toBe(`[Remi] [Remi steer id: ${steerId}]\n改用中文输出`);
       expect(sendOptions[1]?.sessionId).toBe("sess-steer");
 
       // Consumed server-side, and auditable in the run's message stream.
@@ -626,7 +626,7 @@ describe("Bun Multiremi daemon native steering (ADR 0020)", () => {
     expect(abortedFirst).toBe(false);
     expect(steers).toHaveLength(1);
     // The same text as the re-prompt: the directive itself.
-    expect(steers[0]).toBe("[Remi] 改用中文输出");
+    expect(steers[0]).toBe(`[Remi] [Remi steer id: ${steerId}]\n改用中文输出`);
     expect(consumedWhileRunning).toBeFalsy();
     expect(store.getTaskSteerMessage(steerId)?.consumedAt).toBeTruthy();
     expect(store.listPendingTaskSteerMessages(task.id)).toHaveLength(0);

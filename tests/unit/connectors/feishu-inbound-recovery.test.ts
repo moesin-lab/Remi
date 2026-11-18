@@ -1,10 +1,17 @@
-import { expect, it } from "bun:test";
+import { afterAll, beforeAll, expect, it } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FeishuInboundRecovery, feishuHistoryEvent, recoverFeishuHistory } from "@connectors/feishu/inbound-recovery.js";
-import { createFeishuInboundDelivery } from "@connectors/feishu/receive.js";
+import { createFeishuInboundDelivery, flushDedupCacheSync, setDedupCachePathForTesting } from "@connectors/feishu/receive.js";
 import { resolveFeishuCommand } from "@shared/feishu-commands.js";
+
+const dedupTestRoot = mkdtempSync(join(tmpdir(), "feishu-recovery-dedup-"));
+beforeAll(() => setDedupCachePathForTesting(join(dedupTestRoot, "dedup-cache.json")));
+afterAll(() => {
+  flushDedupCacheSync();
+  rmSync(dedupTestRoot, { recursive: true, force: true });
+});
 
 it("skips replayed commands, advances past an offline stop, and preserves ordinary slash requests", async () => {
   const root = mkdtempSync(join(tmpdir(), "feishu-commands-")), path = join(root, "journal.json"), now = Date.now();

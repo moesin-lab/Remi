@@ -156,7 +156,7 @@ export class SlotSupervisor {
       return;
     }
     if (slot) { this.healthySince ??= Date.now(); if (Date.now() - this.healthySince >= 60000) this.failures = 0; }
-    if (desired?.revision === this.revision && slot) return;
+    if ((desired?.revision ?? null) === this.revision && slot) return;
     const id = desired?.releaseId ?? null;
     if (slot && desired?.strategy !== 'switch') {
       this.edge.hold(); await this.terminate(this.live); this.live = null;

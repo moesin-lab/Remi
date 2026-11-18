@@ -1,3 +1,4 @@
+import { proxyFetch } from "@shared/proxy-fetch.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   lstat,
@@ -212,7 +213,7 @@ export class AgentPluginCache {
       let response: Response;
       try {
         response = await raceWithAbort(
-          (this.options.fetch ?? globalThis.fetch)(url, { headers, signal: scope.signal }),
+          (this.options.fetch ?? proxyFetch)(url, { headers, signal: scope.signal }),
           scope.signal,
         );
       } catch (error) {

@@ -8,6 +8,7 @@ import type { MultiremiDaemon } from "@multiremi/daemon.js";
 import { instantiateCoResidentWorkerDaemons } from "../../../apps/remi/cli/multiremi.js";
 import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.js";
 import type { DaemonProtocolConnect } from "@multiremi/worker/daemon-protocol-client.js";
+import candidate from "../../../package.json";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -69,7 +70,9 @@ for (const outcome of ["failed", "restarting"] as const) {
         pollIntervalMs: 5,
         gcEnabled: false,
         outboxPath: ":memory:",
-        protocolClientOptions: { clock, connect },
+        // This synthetic welcome admits the candidate release. Source execution
+        // otherwise uses the intentionally old, uninjected CLI version fallback.
+        protocolClientOptions: { clock, connect, cliVersion: candidate.version },
         updateRunner: async () => {
           updateStarted = true;
           await installing;

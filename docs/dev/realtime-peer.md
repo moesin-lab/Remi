@@ -23,7 +23,7 @@ does not produce or consume it.
 [The contract](../../packages/contracts/src/peer-events.ts) defines envelopes
 `{v:1, origin, kind, payload}` and batches
 `{topic, epoch, batch_seq, events}`. Each POST body, including JSON wrapping,
-fits the 1 MiB limit. The sender has one active or frozen batch and retries
+fits the 1 MiB limit. Realtime receivers accept positive future envelope versions, ignore unknown fields and deliver known kinds, counting them in `received`. Unknown kinds remain rejected. Hub frames now emit `v:1`; receivers also accept the N-1 format without `v` and future positive versions when their known fields parse. The sender has one active or frozen batch and retries
 identical bytes with the same sequence after 1-10 seconds. The receiver tracks
 the highest sequence handled per epoch and acknowledges duplicates without
 delivering again. A receiver restart clears that memory; reconnecting browser

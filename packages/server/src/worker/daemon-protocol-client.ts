@@ -1,3 +1,4 @@
+import { hasDaemonCapability, daemonCapabilityWireName } from "@multiremi/contracts/daemon-compatibility.js";
 import { proxyWebSocket, withNoProxyRoute } from "@shared/proxy-fetch.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
@@ -5,7 +6,6 @@ import { request as httpsRequest } from "node:https";
 import {
   DAEMON_ACK_TIMEOUT_MS,
   DAEMON_HEARTBEAT_INTERVAL_MS,
-  DAEMON_MIN_CLI_VERSION,
   DAEMON_PROTOCOL_CLOSE_CODES,
   DAEMON_PROTOCOL_MIN,
   DAEMON_PROTOCOL_VERSION,
@@ -180,11 +180,11 @@ export class DaemonProtocolClient {
    * disconnected; an old server answers `caps: []`.
    */
   sharesCap(cap: DaemonProtocolCap): boolean {
-    return this.state === "connected" && this.welcomeCaps.has(cap) && this.connectionCaps.has(cap);
+    return this.state === "connected" && hasDaemonCapability([...this.welcomeCaps], cap) && hasDaemonCapability([...this.connectionCaps], cap);
   }
 
   private helloCaps(): DaemonProtocolCap[] {
-    return [...new Set([...(this.options.caps ?? []), ...this.extraCaps])];
+    return [...new Set([...(this.options.caps ?? []), ...this.extraCaps].map(daemonCapabilityWireName))] as DaemonProtocolCap[];
   }
 
   addLane(lane: DaemonProtocolLane): void { this.lanes.add(lane); }
@@ -405,17 +405,14 @@ export class DaemonProtocolClient {
     }
     if (frame.type === "welcome" && this.state === "connecting") {
       if (frame.payload.protocol !== DAEMON_PROTOCOL_VERSION || !frame.payload.session_id) { this.disconnected(4002); return; }
-      // A v2 envelope alone does not prove the server understands turn payloads.
-      // Production welcomes always advertise the payload release gate.
+      // This is contract admission only. An older server's floor says nothing
+      // about its additive features; those are negotiated through named caps.
       if (typeof frame.payload.min_cli_version === "string") {
         this.serverMinCli = frame.payload.min_cli_version;
-        if (compareDaemonCliVersion(this.serverMinCli, DAEMON_MIN_CLI_VERSION) < 0) {
+        if (compareDaemonCliVersion(this.options.cliVersion, this.serverMinCli) < 0) {
           this.enterUpgradeWait();
           return;
         }
-      } else {
-        this.enterUpgradeWait();
-        return;
       }
       this.attempts = 0;
       if (this.handshakeTimer !== null) this.cancel(this.handshakeTimer);

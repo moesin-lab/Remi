@@ -24,7 +24,7 @@ afterEach(async () => { for (const client of clients.splice(0)) { client.close()
 
 function fixture() {
   const socket = new OfferSocket();
-  const client = new DaemonProtocolClient({ serverUrl: "http://fixture", daemonId: "dmn_unit", cliVersion: "0.2.83",
+  const client = new DaemonProtocolClient({ serverUrl: "http://fixture", daemonId: "dmn_unit", cliVersion: DAEMON_MIN_CLI_VERSION,
     clock: new ManualDaemonProtocolClock(), connect: () => socket });
   clients.push(client);
   const lane = { runtime: () => ({ runtime_id: "rt_unit", provider: "claude", max_concurrency: 1, active_task_ids: [] }),

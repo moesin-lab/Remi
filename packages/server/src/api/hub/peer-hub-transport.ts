@@ -17,11 +17,14 @@ type PeerHubPayload =
   | { kind: "head"; key: HubStreamKey; head: number; log_version: number | null; changed_seq?: number; changed_entry?: true }
   | { kind: "human_request"; event: HumanRequestEvent }
   | { kind: "hb" };
-type PeerHubFrame = PeerHubPayload & { sender_epoch: string; hub_seq: number };
+export const HUB_PEER_PROTOCOL_VERSION = 1;
+type PeerHubFrame = PeerHubPayload & { v?: number; sender_epoch: string; hub_seq: number };
 
 function isPeerHubFrame(payload: unknown): payload is PeerHubFrame {
   if (!payload || typeof payload !== "object") return false;
   const frame = payload as Record<string, unknown>;
+  // Missing v is the N-1 hub format. Future versions retain known payloads.
+  if (frame.v !== undefined && (!Number.isSafeInteger(frame.v) || (frame.v as number) < 1)) return false;
   if (typeof frame.sender_epoch !== "string" || !frame.sender_epoch) return false;
   if (!Number.isSafeInteger(frame.hub_seq) || (frame.hub_seq as number) < 1) return false;
   if (frame.kind === "hb") return true;
@@ -96,6 +99,7 @@ export class PeerHubTransport implements HubTransport {
     // Allocate before PeerChannel admission: an evicted event must leave a hole.
     this.peer.publish(HUB_PEER_TOPIC, {
       ...payload,
+      v: HUB_PEER_PROTOCOL_VERSION,
       sender_epoch: this.peer.origin,
       hub_seq: ++this.nextSeq,
     });

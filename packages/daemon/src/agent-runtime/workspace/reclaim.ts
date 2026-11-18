@@ -23,6 +23,7 @@ import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import type { DaemonGcSubjectReclaimedPayload } from "@multiremi/contracts/daemon-protocol.js";
 import type {
+  StorageDisk,
   StoragePlanItem,
   StorageReport,
   StorageRetainReason,
@@ -33,7 +34,7 @@ import type {
 } from "@multiremi/contracts/storage.js";
 import { createLogger } from "@shared/logger.js";
 import { sweepCodexPluginCaches } from "./codex-plugin-cache.js";
-import { DiskUsage, freeDiskBytes, freedBetween } from "./disk-usage.js";
+import { DiskUsage, diskSpace, freeDiskBytes, freedBetween } from "./disk-usage.js";
 import {
   cleanLaneGeneration,
   cleanSubjectEnvironment,
@@ -88,6 +89,8 @@ import {
 import { recoverOwnedDirectoryQuarantineSync, removeOwnedDirectory } from "./safe-remove.js";
 import { TOPIC_MIGRATION_INTENT, readTopicMigrationIntent, readTopicTaskDossier, topicLifecycleKey } from "./topic-lifecycle.js";
 import { collectWikiChanges, snapshotWiki } from "./wiki-snapshot.js";
+
+import { DISK_HYSTERESIS_BYTES, DISK_HYSTERESIS_PERCENT, diskThreshold, strictestDiskThresholds, type DiskThresholds } from "./disk-pressure.js";
 
 const log = createLogger("multiremi-reclaim");
 
@@ -144,6 +147,12 @@ export interface ReclaimTopics {
 
 export interface ReclaimEngineOptions {
   root: string;
+  /** Root-wide thresholds supplied by the daemon, including workspaces with no registry entry yet. */
+  diskThresholds?: () => DiskThresholds;
+  diskSpace?: typeof diskSpace;
+  /** Read the daemon monitor watermark; absent until its first successful measurement. */
+  storageDisk?: () => StorageDisk | undefined;
+  checkDisk?: () => Promise<void>;
   client: ReclaimClient;
   /** The Runtime reports are sent under; null before registration. */
   runtimeId: () => string | null;
@@ -181,7 +190,7 @@ export type SubjectProbe =
 
 export type SubjectOutcome =
   | { action: "keep"; reason: StorageRetainReason }
-  | { action: "reclaim"; reason: "ended_ttl" | "over_cap" }
+  | { action: "reclaim"; reason: "ended_ttl" | "over_cap" | "pressure" }
   | { action: "forget"; reason: "orphan" };
 
 export interface SubjectClassification {
@@ -365,25 +374,61 @@ export class ReclaimEngine {
       await this.recoverTopicMigrations(errors);
     }
 
-    const cacheFreeBefore = mutate ? await freeDiskBytes(this.root) : null;
-    const codexPluginCache = await sweepCodexPluginCaches({
-      root: this.root, mutate, tracker, locker: this.options.locker,
-      assertRootOwner: this.options.assertRootOwner, errors,
-    });
-    if (mutate) freedBytes += freedBetween(cacheFreeBefore, await freeDiskBytes(this.root));
-
     const records = listSubjectRecords(this.root, (path, error) => {
       errors.push({ subject_id: null, message: `unreadable registry record ${path}: ${errorMessage(error)}` });
     });
     this.consecutiveUnreachable = 0;
+    const pressure = requested === "pressure";
+    const thresholds = this.options.diskThresholds?.() ?? strictestDiskThresholds(records.map(record => this.options.policyFor(record.workspace_id)));
+    const readDisk = () => (this.options.diskSpace ?? diskSpace)(this.root);
+    const pressureNeeded = async () => {
+      const space = await readDisk();
+      // Unknown disk space never authorizes pressure eviction.
+      if (!space) return false;
+      const critical = diskThreshold(space, thresholds, "critical");
+      const margin = Math.max(DISK_HYSTERESIS_BYTES, space.total_bytes * DISK_HYSTERESIS_PERCENT / 100);
+      return space.free_bytes < diskThreshold(space, thresholds, "pressure")
+        || (critical > 0 && space.free_bytes <= critical + margin);
+    };
+    const cacheFreeBefore = mutate ? await freeDiskBytes(this.root) : null;
+    const codexPluginCache = await sweepCodexPluginCaches({
+      root: this.root, mutate, tracker, locker: this.options.locker,
+      pressureNeeded: pressure ? pressureNeeded : undefined,
+      assertRootOwner: this.options.assertRootOwner, errors,
+    });
+    if (mutate) freedBytes += freedBetween(cacheFreeBefore, await freeDiskBytes(this.root));
+
     const candidates = await this.classifyAll(records, requested !== "periodic");
-    this.applyRetainedCap(candidates);
+    let needsPressure = pressure && await pressureNeeded();
+    if (pressure) {
+      if (mutate && needsPressure) {
+        if (needsPressure) await this.sweepTaskTemp(candidates, tracker, errors, pressureNeeded);
+        needsPressure = await pressureNeeded();
+        if (needsPressure) await this.cleanSuperseded(candidates, tracker, errors, pressureNeeded);
+        needsPressure = await pressureNeeded();
+        if (needsPressure) await this.removeExpiredLegacy(errors, pressureNeeded);
+        needsPressure = await pressureNeeded();
+      }
+      candidates.sort((a, b) => parseTime(a.record.last_used_at) - parseTime(b.record.last_used_at));
+      for (const candidate of candidates) {
+        const { classification } = candidate;
+        if (classification.ended && (classification.outcome.action === "reclaim" ||
+          (classification.outcome.action === "keep" && classification.outcome.reason === "within_ttl"))) {
+          classification.outcome = needsPressure ? { action: "reclaim", reason: "pressure" } : { action: "keep", reason: "within_ttl" };
+        } else if (classification.outcome.action === "forget") {
+          classification.outcome = { action: "keep", reason: "within_ttl" };
+        }
+      }
+    } else this.applyRetainedCap(candidates);
 
     for (const candidate of candidates) {
       if (candidate.settled) continue;
       const { record } = candidate;
       const subject = record.subject;
-      const { outcome } = candidate.classification;
+      let { outcome } = candidate.classification;
+      if (pressure && outcome.action === "reclaim" && !(await pressureNeeded())) {
+        outcome = { action: "keep", reason: "within_ttl" };
+      }
       if (outcome.action === "keep") {
         retained[outcome.reason] = (retained[outcome.reason] ?? 0) + 1;
         plan.push(planItem(subject, outcome, false));
@@ -414,7 +459,7 @@ export class ReclaimEngine {
       freedBytes += effect.freedBytes;
     }
 
-    if (mutate) {
+    if (mutate && !pressure) {
       await this.cleanSuperseded(candidates, tracker, errors);
       await this.sweepTaskTemp(candidates, tracker, errors);
       await this.removeExpiredTopics(errors);
@@ -427,7 +472,10 @@ export class ReclaimEngine {
     const usage = this.diskUsage.latest();
 
     const live = candidates.filter((candidate) => candidate.finalState !== "forgotten");
+    await this.options.checkDisk?.();
+    const disk = this.options.storageDisk?.();
     const report: StorageReport = {
+      ...(disk ? { disk } : {}),
       version: 1,
       generated_at: new Date(startedAt).toISOString(),
       mode,
@@ -449,7 +497,7 @@ export class ReclaimEngine {
       errors,
     };
     this.fence();
-    this.diskUsage.refresh(requested !== "periodic");
+    this.diskUsage.refresh(requested === "run" || requested === "dry_run");
     return report;
   }
 
@@ -831,7 +879,7 @@ export class ReclaimEngine {
    * Lane generations older than the newest of their lane are cleaned once they have been idle for `ttl_ms`.
    * A generation whose work set holds unsaved work that cannot be saved (a standalone clone) is kept and reported.
    */
-  private async cleanSuperseded(candidates: Candidate[], tracker: ExecutionTracker, errors: StorageReport["errors"]): Promise<void> {
+  private async cleanSuperseded(candidates: Candidate[], tracker: ExecutionTracker, errors: StorageReport["errors"], pressureNeeded?: () => Promise<boolean>): Promise<void> {
     for (const candidate of candidates) {
       const { record } = candidate;
       if (candidate.settled || candidate.finalState === "forgotten") continue;
@@ -842,7 +890,8 @@ export class ReclaimEngine {
       try {
         const policy = this.options.policyFor(record.workspace_id);
         for (const generation of supersededGenerations(this.root, subject)) {
-          if (this.now() - generationModifiedAt(generation.path) <= policy.ttl_ms) continue;
+          if (pressureNeeded && !(await pressureNeeded())) return;
+          if (!pressureNeeded && this.now() - generationModifiedAt(generation.path) <= policy.ttl_ms) continue;
           try {
             await this.cleanGeneration(subject, generation, policy);
           } catch (error) {
@@ -894,7 +943,7 @@ export class ReclaimEngine {
    * Execution temp directories of executions that are not running are residue of a crash.
    * Every `env/<id>/tmp` is swept, also that of a subject whose registry record is missing or unreadable.
    */
-  private async sweepTaskTemp(candidates: Candidate[], tracker: ExecutionTracker, errors: StorageReport["errors"]): Promise<void> {
+  private async sweepTaskTemp(candidates: Candidate[], tracker: ExecutionTracker, errors: StorageReport["errors"], pressureNeeded?: () => Promise<boolean>): Promise<void> {
     const forgotten = new Set(candidates.filter((candidate) => candidate.finalState === "forgotten").map((candidate) => candidate.record.subject.id));
     const subjects = new Map(candidates.map((candidate) => [candidate.record.subject.id, candidate.record.subject]));
     for (const id of listDirectories(envRoot(this.root))) {
@@ -904,6 +953,7 @@ export class ReclaimEngine {
       try {
         if (!directoryExists(parent)) continue;
         for (const name of readdirSync(parent)) {
+          if (pressureNeeded && !(await pressureNeeded())) return;
           if (tracker.taskRunning(name.replace(TASK_TMP_SUFFIX, ""))) continue;
           this.fence();
           await removeOwnedDirectory(this.root, join(parent, name), { assertRootOwner: this.options.assertRootOwner });
@@ -1000,9 +1050,10 @@ export class ReclaimEngine {
    * What the sweep could not snapshot (`retained/` and its list) is the only copy
    * of unsaved work: everything beside it goes, and it stays for an operator.
    */
-  private async removeExpiredLegacy(errors: StorageReport["errors"]): Promise<void> {
+  private async removeExpiredLegacy(errors: StorageReport["errors"], pressureNeeded?: () => Promise<boolean>): Promise<void> {
     try {
       for (const name of readdirSync(this.root)) {
+        if (pressureNeeded && !(await pressureNeeded())) return;
         const match = LEGACY_DIRECTORY.exec(name);
         if (!match) continue;
         const movedOn = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
@@ -1018,6 +1069,7 @@ export class ReclaimEngine {
           continue;
         }
         for (const entry of readdirSync(directory)) {
+          if (pressureNeeded && !(await pressureNeeded())) return;
           if (kept.has(entry)) continue;
           this.fence();
           await removeOwnedPath(this.root, join(directory, entry), { assertRootOwner: this.options.assertRootOwner });

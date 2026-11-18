@@ -258,6 +258,7 @@ import { runLegacySweep } from "@daemon/agent-runtime/workspace/legacy-sweep.js"
 import { executionTrackerFor } from "@daemon/agent-runtime/workspace/execution-tracker.js";
 import { ReclaimEngine } from "@daemon/agent-runtime/workspace/reclaim.js";
 import { restoreReclaimedSubject } from "@daemon/agent-runtime/workspace/restore.js";
+import { DiskPressureMonitor, DISK_CHECK_MS, strictestDiskThresholds } from "@daemon/agent-runtime/workspace/disk-pressure.js";
 import { resolveStorageMachineOptions, resolveStoragePolicy } from "@daemon/agent-runtime/workspace/storage-policy.js";
 import { readSubjectRecord, upsertSubjectRecord } from "@daemon/agent-runtime/workspace/registry.js";
 import {
@@ -1295,6 +1296,8 @@ export class MultiremiDaemon {
   private readonly outboxBackoffMs: number[] | undefined;
   private readonly outboxMaxBytes: number | undefined;
   private restartRequestedFlag = false;
+  private readonly diskMonitor: DiskPressureMonitor;
+  private diskTimer: ReturnType<typeof setInterval> | null = null;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
   private gcInFlight: Promise<void> | null = null;
   private readonly reclaim: ReclaimEngine;
@@ -1526,7 +1529,23 @@ export class MultiremiDaemon {
       },
       ...repoCacheTimeoutOverrides(process.env),
     });
+    this.diskMonitor = new DiskPressureMonitor({
+      path: workspacesRoot,
+      thresholds: () => this.rootDiskThresholds(),
+      criticalChanged: (disk, wasCritical) => {
+        log.warn(`Disk critical ${wasCritical ? "recovered" : "entered"}`, disk);
+        this.protocolClient?.sendHeartbeatNow();
+        if (wasCritical) this.wakeClaim();
+      },
+      pressureError: error => log.warn(`Pressure reclaim failed: ${String(error)}`),
+      pressure: async () => {
+        if (this.options.gcEnabled && !this.options.once && !this.stopped) await this.runGcOnce("pressure");
+      },
+    });
     this.reclaim = new ReclaimEngine({
+      storageDisk: () => this.diskMonitor.latest,
+      checkDisk: () => this.diskMonitor.check(),
+      diskThresholds: () => this.rootDiskThresholds(),
       root: workspacesRoot,
       client: this.client,
       runtimeId: () => this.options.runtimeId,
@@ -1650,6 +1669,7 @@ export class MultiremiDaemon {
       } : null,
       heartbeat: () => ({
         active_task_count: this.activeTaskCount,
+        health: this.diskMonitor.health(),
         outbox: { pending: this.outboxStats()?.pending ?? 0, unacked: 0 },
         drain_ack_generation: this.appliedDrainGeneration,
         ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
@@ -1710,6 +1730,7 @@ export class MultiremiDaemon {
     registerDaemonOfferHandler(this.protocolClient, {
       runtimeId: () => this.options.runtimeId,
       rejection: (task) => {
+        if (this.diskMonitor.critical) return "disk_critical";
         if (this.options.once && this.onceTaskAccepted) return "draining";
         if (this.serverDrainActive) return "draining";
         if (this.stopped || !this.ready || !this.supervisorReady() || this.claimsPaused || this.runtimeGoneInflight.size) return "claims_paused";
@@ -1985,6 +2006,11 @@ export class MultiremiDaemon {
       outbox.pumpAll();
       await this.refreshWorkspaceRepos(this.options.workspaceId);
       this.assertWorkspaceRootOwner();
+      // Every daemon checks before it can accept its first offer, including non-GC leaders.
+      await this.diskMonitor.check();
+      this.diskTimer = setInterval(() => {
+        void this.diskMonitor.check().catch(error => log.warn(`Disk monitor failed: ${String(error)}`));
+      }, DISK_CHECK_MS);
       this.startGcLoop();
       // One-shot mode is primarily used for a single queued task (and tests), so
       // avoid paying for a second ACP process unless a model-list request exists.
@@ -3565,9 +3591,18 @@ export class MultiremiDaemon {
     });
   }
 
-  async runGcOnce(): Promise<void> {
-    if (this.gcInFlight) return await this.gcInFlight;
-    const run = this.executeGcOnce();
+  private rootDiskThresholds() {
+    const policies = [...this.workspaceSettings.values()].map(settings => resolveStoragePolicy(settings));
+    return strictestDiskThresholds(policies.length ? policies : [resolveStoragePolicy(undefined)]);
+  }
+
+  async runGcOnce(mode: "periodic" | "pressure" = "periodic"): Promise<void> {
+    if (this.gcInFlight) {
+      await this.gcInFlight;
+      if (mode === "pressure") return this.runGcOnce(mode);
+      return;
+    }
+    const run = this.executeGcOnce(mode);
     this.gcInFlight = run;
     try {
       return await run;
@@ -3576,18 +3611,22 @@ export class MultiremiDaemon {
     }
   }
 
-  private async executeGcOnce(): Promise<void> {
+  private async executeGcOnce(mode: "periodic" | "pressure" = "periodic"): Promise<void> {
     this.assertWorkspaceRootOwner();
     let reclaimFailure: unknown = null;
     // Without a registered Runtime there is no way to ask the server about a subject.
     if (this.options.runtimeId) {
       try {
-        await this.runReclaimRound("periodic");
+        await this.runReclaimRound(mode);
       } catch (error) {
         // Losing the root ends the sweep; anything else must not starve the code-view sweep below.
         this.assertWorkspaceRootOwner();
         reclaimFailure = error;
       }
+    }
+    if (mode === "pressure") {
+      if (reclaimFailure) throw reclaimFailure;
+      return;
     }
     this.traceTransport?.pruneMissing();
     try {
@@ -3612,7 +3651,7 @@ export class MultiremiDaemon {
   }
 
   /** One reclaim round; a real round also reports its findings to the server. */
-  private async runReclaimRound(mode: "periodic" | "dry_run" | "run"): Promise<StorageReport> {
+  private async runReclaimRound(mode: StorageReport["mode"]): Promise<StorageReport> {
     const report = await this.reclaim.run(mode);
     if (mode !== "dry_run") this.client.reportStorageReport(this.options.runtimeId!, report);
     log.info(`Reclaim ${report.mode} round finished`, {
@@ -3632,7 +3671,11 @@ export class MultiremiDaemon {
         this.assertWorkspaceRootOwner();
         // Only an explicit `run` may change anything; an unknown mode is refused, never applied.
         if (request.mode !== "dry_run" && request.mode !== "run") throw new Error(`unknown reclaim mode: ${String(request.mode)}`);
-        const report = await this.runReclaimRound(request.mode);
+        while (this.gcInFlight) await this.gcInFlight;
+        let report!: StorageReport;
+        const round = this.runReclaimRound(request.mode).then(value => { report = value; });
+        this.gcInFlight = round;
+        try { await round; } finally { if (this.gcInFlight === round) this.gcInFlight = null; }
         await this.client.reportGcRunResult(runtimeId, request.id, { status: "completed", report, error: null });
       } catch (error) {
         this.assertWorkspaceRootOwner();
@@ -6012,6 +6055,8 @@ export class MultiremiDaemon {
   }
 
   private stopGcLoop(): void {
+    if (this.diskTimer) clearInterval(this.diskTimer);
+    this.diskTimer = null;
     if (this.gcTimer) clearInterval(this.gcTimer);
     this.gcTimer = null;
   }

@@ -111,6 +111,10 @@ describe("deriveAgentAvailability", () => {
   // Reachability dimension only — runtime + clock decide it; tasks are
   // irrelevant to this axis.
 
+  it("shows degraded runtimes as unstable while they remain reachable", () => {
+    expect(deriveAgentAvailability([makeRuntime({ metadata: { health: { state: "degraded" } } })], NOW)).toBe("unstable");
+  });
+
   it("returns online when runtime is fresh-online", () => {
     expect(deriveAgentAvailability([makeRuntime()], NOW)).toBe("online");
   });

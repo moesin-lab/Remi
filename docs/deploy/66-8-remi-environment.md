@@ -22,6 +22,7 @@ summary: 说明 daemon 进程配置、工作区 bot 的控制面分配、凭据�
 | `MULTIREMI_GC_INTERVAL_MS` | 回收轮次间隔，默认 900000 ms（15 分钟）。 |
 | `MULTIREMI_GC_DRY_RUN` | 默认 false；为 true 时每轮只生成计划和报告，不删除任何内容。 |
 | `MULTIREMI_LEGACY_KEEP_DAYS` | 默认 7；升级清扫移入 `legacy-<日期>/` 的旧布局保留天数，到期由回收轮次删除；快照失败的旧 worktree 所在的 `retained/` 与 `retained.json` 不删，存储报告以 `legacy_retained` 计数，由运维核对后手工删除。 |
+| `MULTIREMI_GC_PRESSURE_FREE_PERCENT` / `MULTIREMI_GC_PRESSURE_FREE_BYTES` / `MULTIREMI_GC_CRITICAL_FREE_PERCENT` / `MULTIREMI_GC_CRITICAL_FREE_BYTES` | 单机磁盘水位覆盖，默认 15%、20 GiB、5%、5 GiB；0 关闭对应条件。每个 daemon 独立监测，critical 拒绝新领取，恢复自动解除磁盘暂停；不改变 online/offline。 |
 | `MULTIREMI_GC_TTL_MS` / `MULTIREMI_GC_AUTOMATION_TTL_MS` / `MULTIREMI_GC_MAX_RETAINED` / `MULTIREMI_GC_ORPHAN_TTL_MS` / `MULTIREMI_GC_SNAPSHOT_MAX_BYTES` | 单机覆盖。策略由工作区设置 `settings.storage` 统一管理并经 `workspace.settings` 下发，这些变量只在需要对某台机器单独覆盖时设置；默认值与范围见[存储与保留](../dev/storage-retention.md#策略)和[契约](../../packages/contracts/src/storage.ts)。 |
 | `MULTIREMI_HEARTBEAT_INTERVAL_MS` | v2 不再读取；进程级 `hb` 固定每 15000 ms，所有 provider 与 concierge 共用这条连接。 |
 | `MULTIREMI_CLAIM_IDLE_MAX_MS` | 空闲 claim 的退避上限，默认 30000 ms；退避从 3000 ms 起翻倍到该值。 |

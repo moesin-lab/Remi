@@ -38,6 +38,10 @@ export interface StorageSettings {
   snapshot_max_bytes: number;
   /** Days without activity before an active Chat is archived. 0 = never. */
   chat_idle_days: number;
+  pressure_free_percent: number;
+  pressure_free_bytes: number;
+  critical_free_percent: number;
+  critical_free_bytes: number;
 }
 
 export const STORAGE_SETTINGS_KEYS = [
@@ -47,15 +51,23 @@ export const STORAGE_SETTINGS_KEYS = [
   "orphan_ttl_ms",
   "snapshot_max_bytes",
   "chat_idle_days",
+  "pressure_free_percent",
+  "pressure_free_bytes",
+  "critical_free_percent",
+  "critical_free_bytes",
 ] as const satisfies readonly (keyof StorageSettings)[];
 
 export const STORAGE_SETTINGS_DEFAULTS: StorageSettings = {
-  ttl_ms: 72 * HOUR_MS,
+  ttl_ms: 24 * HOUR_MS,
   automation_ttl_ms: 24 * HOUR_MS,
-  max_retained: 50,
+  max_retained: 20,
   orphan_ttl_ms: 72 * HOUR_MS,
   snapshot_max_bytes: 256 * MIB,
   chat_idle_days: 14,
+  pressure_free_percent: 15,
+  pressure_free_bytes: 20 * GIB,
+  critical_free_percent: 5,
+  critical_free_bytes: 5 * GIB,
 };
 
 export const STORAGE_SETTINGS_BOUNDS: Record<keyof StorageSettings, { min: number; max: number }> = {
@@ -65,6 +77,10 @@ export const STORAGE_SETTINGS_BOUNDS: Record<keyof StorageSettings, { min: numbe
   orphan_ttl_ms: { min: HOUR_MS, max: 365 * DAY_MS },
   snapshot_max_bytes: { min: MIB, max: 10 * GIB },
   chat_idle_days: { min: 0, max: 3650 },
+  pressure_free_percent: { min: 0, max: 100 },
+  critical_free_percent: { min: 0, max: 100 },
+  pressure_free_bytes: { min: 0, max: Number.MAX_SAFE_INTEGER },
+  critical_free_bytes: { min: 0, max: Number.MAX_SAFE_INTEGER },
 };
 
 const INTEGER_KEYS: ReadonlySet<keyof StorageSettings> = new Set(["max_retained", "chat_idle_days"]);
@@ -87,6 +103,13 @@ export function resolveStorageSettings(raw: unknown): StorageSettings {
   for (const key of STORAGE_SETTINGS_KEYS) {
     const value = source[key];
     if (storageSettingValid(key, value)) resolved[key] = value;
+  }
+  for (const unit of ["percent", "bytes"] as const) {
+    const critical = `critical_free_${unit}` as const;
+    const pressure = `pressure_free_${unit}` as const;
+    if (resolved[critical] > 0 && resolved[pressure] > 0) {
+      resolved[critical] = Math.min(resolved[critical], resolved[pressure]);
+    }
   }
   return resolved;
 }
@@ -158,17 +181,34 @@ export type StorageRetainReason =
 export interface StoragePlanItem {
   subject: StorageSubjectRef;
   action: "reclaim" | "forget" | "keep";
-  /** A `StorageRetainReason` for keep; `ended_ttl`, `over_cap` or `orphan` for reclaim and forget. */
+  /** A `StorageRetainReason` for keep; `ended_ttl`, `over_cap`, `pressure` or `orphan` for reclaim and forget. */
   reason: string;
   /** Null from a daemon: a round measures no subject, the root's categories are in `StorageReport.bytes`. */
   bytes: number | null;
   unsaved_work: boolean;
 }
 
+export type DiskLevel = "ok" | "pressure" | "critical";
+export interface DiskSpace { free_bytes: number; total_bytes: number }
+export interface StorageDisk extends DiskSpace {
+  level: DiskLevel;
+  measured_at: string;
+  /** Effective root thresholds, including machine overrides. */
+  thresholds?: Pick<StorageSettings, "pressure_free_percent" | "pressure_free_bytes" | "critical_free_percent" | "critical_free_bytes">;
+}
+
+export function storageThresholdErrors(settings: StorageSettings): string[] {
+  return (["percent", "bytes"] as const).flatMap(unit =>
+    settings[`critical_free_${unit}`] > 0 && settings[`pressure_free_${unit}`] > 0
+      && settings[`critical_free_${unit}`] > settings[`pressure_free_${unit}`]
+      ? [`critical_free_${unit} must be <= pressure_free_${unit}`] : []);
+}
+
 export interface StorageReport {
+  disk?: StorageDisk;
   version: 1;
   generated_at: string;
-  mode: "periodic" | "dry_run" | "run";
+  mode: "periodic" | "dry_run" | "run" | "pressure";
   root: string;
   /**
    * The latest completed disk measurement, taken outside the round (hourly or on request) and

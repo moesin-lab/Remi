@@ -883,6 +883,7 @@ export interface RuntimesSurface {
   getRuntimeCommandRequest(runtimeId: string, requestId: string): MultiremiRuntimeCommandRequest | null;
   getRuntimeByDaemonAndProvider(daemonId: string, provider: string): MultiremiRuntime | null;
   heartbeatRuntime(runtimeId: string, options?: {
+    health?: import("@multiremi/contracts/daemon-protocol.js").DaemonHealth;
     claimPending?: boolean;
     supportsBatchImport?: boolean;
     supportsDirectoryScan?: boolean;

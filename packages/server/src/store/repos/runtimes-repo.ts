@@ -2495,6 +2495,7 @@ export class RuntimesRepo {
   }
 
   heartbeatRuntime(runtimeId: string, options: {
+    health?: import("@multiremi/contracts/daemon-protocol.js").DaemonHealth;
     claimPending?: boolean;
     supportsBatchImport?: boolean;
     supportsDirectoryScan?: boolean;
@@ -2517,6 +2518,7 @@ export class RuntimesRepo {
     // Capability flags a daemon re-advertises on every heartbeat. Collected once
     // so the three metadata-writing branches below stay in step.
     const metadataPatch: Record<string, unknown> = {};
+    if (options.health !== undefined && JSON.stringify(runtime.metadata.health) !== JSON.stringify(options.health)) metadataPatch.health = options.health;
     if (options.supportsBatchImport !== undefined) metadataPatch.supports_batch_import = options.supportsBatchImport;
     if (options.supportsDirectoryScan !== undefined) metadataPatch.supports_directory_scan = options.supportsDirectoryScan;
     if (options.supportsSkillDirectory !== undefined) metadataPatch.supports_skill_directory = options.supportsSkillDirectory;

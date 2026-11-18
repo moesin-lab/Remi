@@ -1,5 +1,5 @@
 import { unsupportedRegisteredSql } from '../../fixtures/schema-sql-allowlist.js';
-import { unsupportedStringContinuations, destructiveDollarQuotes, unsupportedDollarQuotes, unsupportedSingleLiterals, allowedDollarIdentifiers } from '../../fixtures/schema-string-continuations.js';
+import { unsupportedStringContinuations, destructiveDollarQuotes, unsupportedDollarQuotes, unsupportedSingleLiterals } from '../../fixtures/schema-string-continuations.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { runMigrations } from '@multiremi/store/migrations.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
@@ -154,15 +154,6 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
       console.info(`Dollar boundary rejected (${method}); row=42; steps=[]; levels=${JSON.stringify(levels)}: ${sql}`);
     } finally { db.exec('DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
   });
-  for (const sql of allowedDollarIdentifiers) it(`executes opaque dollar content: ${sql}`, () => {
-    fixture();
-    try {
-      runSchemaExpands(db, [step(`dollar-allowed-${serial}`, sql)], '9.0.0', { minLevel: 0, maxLevel: 100 });
-      expect(readSchemaLevels(db).expandLevel).toBe(1);
-      expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([{ id: `dollar-allowed-${serial}` }]);
-      console.info(`Dollar literal executed and expand committed: ${sql}`);
-    } finally { db.exec('DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
-  });
   // These SELECT statements deliberately pass text lint. Only before/after
   // catalog comparison can detect the function's transactional side effects.
   const hidden = [
@@ -273,6 +264,36 @@ INSERT INTO ${schema}.pieces VALUES('c'';d')`;
       console.info('PostgreSQL exec: batch bypasses bridge exec, quoted/comment semicolons retained, three statements executed and committed');
     } finally { db.exec('DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
   });
+  // A statement can outlive the lexical premise under which it was created.
+  // All four PG execution methods must recheck it, regardless of how it changed.
+  for (const factory of ['query', 'prepare'] as const) {
+    for (const change of ['SET standard_conforming_strings=off', 'SET LOCAL standard_conforming_strings=off',
+      "SELECT set_config('standard_conforming_strings','off',true)"]) {
+      for (const method of ['run', 'get', 'all', 'values'] as const) it(`rechecks deferred ${factory}.${method} after ${change}`, () => {
+        const schema = fixture();
+        db.exec(`CREATE TABLE ${schema}.retained(id integer); INSERT INTO ${schema}.retained VALUES(42)`);
+        const sql = String.raw`SELECT '\''; TRUNCATE ${schema}.retained; -- '`;
+        const levels = readSchemaLevels(db);
+        const migration = step(`deferred-${serial}`, sql);
+        migration.run = guarded => {
+          const statement = guarded[factory](sql);
+          guarded.query(change).run();
+          statement[method]();
+        };
+        try {
+          let failure: unknown;
+          try { runSchemaExpands(db, [migration], '9.0.0', {minLevel:0,maxLevel:100}); } catch (error) { failure = error; }
+          const rows = db.query(`SELECT id FROM ${schema}.retained`).all();
+          const steps = db.query('SELECT id FROM multiremi_schema_steps').all();
+          console.info(`DEFERRED ${factory}.${method} after ${change}: error=${String(failure)}; rows=${JSON.stringify(rows)}; steps=${JSON.stringify(steps)}; levels=${JSON.stringify(readSchemaLevels(db))}`);
+          expect(String(failure)).toContain('standard_conforming_strings=on');
+          expect(rows).toEqual([{id:42}]);
+          expect(steps).toEqual([]);
+          expect(readSchemaLevels(db)).toEqual(levels);
+        } finally { db.exec('SET standard_conforming_strings=on; DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
+      });
+    }
+  }
   it('refuses standard_conforming_strings=off before any expand work', () => {
     const schema = fixture();
     db.exec(`CREATE TABLE ${schema}.retained(id integer); INSERT INTO ${schema}.retained VALUES(42)`);

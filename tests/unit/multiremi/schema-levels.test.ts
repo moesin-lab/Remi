@@ -71,6 +71,23 @@ describe('schema compatibility protocol', () => {
     database.exec('DELETE FROM multiremi_schema_meta');
     expect(() => assertSchemaBeforeExpand(database)).toThrow('exactly one');
   });
+  it('preserves native SQLite statement receivers and iterate through the expand wrapper', () => {
+    const database = db();
+    runSchemaExpands(database, [expand(1, guarded => {
+      guarded.exec('CREATE TABLE retained(id integer)');
+      guarded.run('INSERT INTO retained VALUES(?)', 42);
+      for (const factory of ['query', 'prepare'] as const) {
+        const statement = guarded[factory]('SELECT id FROM retained');
+        expect(statement.get()).toEqual({id:42});
+        expect(statement.all()).toEqual([{id:42}]);
+        expect(statement.values()).toEqual([[42]]);
+        statement.run();
+        const iterable = statement as typeof statement & { iterate(): IterableIterator<{id:number}> };
+        expect([...iterable.iterate()]).toEqual([{id:42}]);
+      }
+    })], '1.0.0', code);
+    expect(readSchemaLevels(database).expandLevel).toBe(1);
+  });
   it('commits each expand with its marker and resumes after failure', () => {
     const database = db(); let fails = true;
     const steps = [expand(1, db => db.exec('CREATE TABLE added_one (id INTEGER)')), expand(2, db => {

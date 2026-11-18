@@ -37,7 +37,7 @@ function registeredSqlTokens(sql: string, templates = false): SqlToken[] {
       tokens.push({ text: '<identifier-or-value>', end: offset });
       continue;
     }
-    const word = /^(?:[A-Za-z_\x80-\uFFFF](?:[A-Za-z_0-9\x80-\uFFFF]|\$(?!\{))*|\$[0-9]+|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)/.exec(rest);
+    const word = /^(?:[A-Za-z_\x80-\uFFFF][A-Za-z_0-9\x80-\uFFFF]*|\$[0-9]+|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)/.exec(rest);
     const symbol = /^[+\-*\/%<>=~!@#^&|?:.,();]/.exec(rest);
     const match = word || symbol;
     if (!match) return unsupported(`unrecognized SQL character ${JSON.stringify(rest[0])}`);

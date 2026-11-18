@@ -161,16 +161,11 @@ for (const sql of supportedSingleLiterals) it(`allows single literals: ${sql}`, 
   expect(hasDestructiveSchemaStatement(sql)).toBe(false);
 });
 
-import { destructiveDollarQuotes, unsupportedDollarQuotes, unsupportedSingleLiterals, allowedDollarIdentifiers } from '../../fixtures/schema-string-continuations.js';
+import { destructiveDollarQuotes, unsupportedDollarQuotes, unsupportedSingleLiterals } from '../../fixtures/schema-string-continuations.js';
 for (const sql of destructiveDollarQuotes) it(`rejects case-sensitive dollar boundary: ${sql}`, () => {
   expect(hasDestructiveSchemaSql(sql)).toBe(true);
   expect(hasDestructiveSchemaStatement(sql)).toBe(true);
 });
-for (const sql of allowedDollarIdentifiers) it(`allows dollar in identifiers: ${sql}`, () => {
-  expect(hasDestructiveSchemaSql(sql)).toBe(false);
-  expect(hasDestructiveSchemaStatement(sql)).toBe(false);
-});
-
 import { unsupportedRegisteredSql } from '../../fixtures/schema-sql-allowlist.js';
 for (const sql of unsupportedRegisteredSql) it(`registered lexical allowlist rejects ${JSON.stringify(sql)}`, () => {
   expect(hasDestructiveSchemaSql(sql)).toBe(true);

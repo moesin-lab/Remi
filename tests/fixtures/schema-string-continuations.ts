@@ -33,5 +33,4 @@ export const supportedDollarQuotes = [
 // The registered SQL allowlist supersedes the earlier lexer compatibility.
 export const supportedSingleLiterals = formerlySupportedSingleLiterals.filter(sql => !/E'|e'|B'|X'|N'|\$\$/.test(sql));
 export const unsupportedSingleLiterals = formerlySupportedSingleLiterals.filter(sql => !supportedSingleLiterals.includes(sql));
-export const unsupportedDollarQuotes = supportedDollarQuotes.filter(sql => !sql.includes('1 AS'));
-export const allowedDollarIdentifiers = supportedDollarQuotes.filter(sql => sql.includes('1 AS'));
+export const unsupportedDollarQuotes = supportedDollarQuotes;

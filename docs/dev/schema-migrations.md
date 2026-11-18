@@ -142,7 +142,7 @@ IMPORT FOREIGN SCHEMA。CREATE OR REPLACE 的既有定义保护由运行时 cata
 [schema-ddl.ts](../../packages/server/src/store/schema-ddl.ts)。B1 登记迁移使用词法**允许清单**，
 运行时与 arch 共用 tokenizer；这里只维护我们自己编写的迁移 SQL，不实现完整 PG lexer。
 仅允许空格、Tab、LF；`--` 到 LF 的注释；不嵌套的 `/* */`；无前缀单引号串（内部以 `''` 转义）；
-普通双引号标识符（内部以 `""` 转义）；无引号标识符、数字、位置参数 `$<数字>`、运算符和标点。
+普通双引号标识符（内部以 `""` 转义）；无引号标识符（不含 `$`）、数字、位置参数 `$<数字>`、运算符和标点。
 arch 将源码模板插值作为不透明占位符，不能据此保证插值生成的 SQL；运行时检查实际 SQL。
 
 以下形式在任何已知迁移 SQL 中拒绝：`U&"…"` / `U&'…'`（包括所有 UESCAPE 变体）；
@@ -153,8 +153,10 @@ E/B/X/N 前缀字符串；dollar quote；字符串换行续接（包括夹行/�
 保持既有权限原子及排序，避免 ARRAY 方括号；catalog 查询仍在扫描集合内。
 冻结 legacy 列表中的历史模块保留原 lint 行为，不扩大历史 allowlist。
 
-PostgreSQL 在执行 expand 前读取 `SHOW standard_conforming_strings`，必须为 `on`（PG 默认），
-否则拒绝，不能依赖关闭该设置后的反斜杠语义。所有 unsupported 形式共用一个拒绝路径，
+PostgreSQL 在执行 expand 前以及每次执行 SQL 前同步读取 `SHOW standard_conforming_strings`，必须为 `on`（PG 默认）。
+`exec` 每段、`run` 和 `query`/`prepare` 返回 statement 的 run/get/all/values/iterate（接口存在时）均复查，
+不能只在创建 statement 时检查；statement 创建后通过 SET、SET LOCAL 或 set_config 修改设置也会被拒绝。
+不能依赖关闭该设置后的反斜杠语义。所有 unsupported 形式共用一个拒绝路径，
 错误说明具体形式；执行前整体拒绝，不记账、不推进 level。`exec` 由同一 tokenizer 按顶层分号切分，
 整批检查后逐段通过 `query(...).run()` 执行，不经过 bridge 的 `splitStatements`。
 这不是数据库协议层的多命令保证；worker 协议和通用 SQL adapter 不变，

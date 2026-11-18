@@ -1,5 +1,6 @@
 /** Shared counterexamples exercised by detector, source scanner and real PG. */
 export const unsupportedRegisteredSql = [
+  'SELECT 1 AS a$b$',
   // Reviewer's CR comment changes the statement boundary in PostgreSQL.
   "SELECT 1 -- comment\r; TRUNCATE S.retained; -- comment",
   "SELECT 1 -- comment\r\n; TRUNCATE S.retained",

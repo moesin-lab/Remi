@@ -67,7 +67,8 @@ SQLite 同样执行 expand：index/view/trigger 的 SQL 精确比较；table 比
 ## 后台回填
 
 Usage scalar 回填由 [startUsageAccountingBackfill](../../packages/server/src/store/usage-migration.ts)
-在 active slot 的后台工作启动，监听/standby 准备不等待历史扫描。
+仅在启用 backgroundJobs 且持有有效 A3 live term 的 active slot 启动，所有 SQL 经 liveTermDatabase 的事务 fence。
+backgroundJobs:false 候选、standby 及没有 singleton term 的拆分角色均不启动回填；监听/standby 准备不等待历史扫描。
 每批提交任务级证据与持久化 keyset cursor，批次间让出事件循环。
 release / shutdown 取消并等待当前批提交，重启/重新 activate 从检查点续跑。
 异常保留检查点并记录错误；解决源数据证据问题后重启可续跑。
@@ -128,7 +129,8 @@ active 后台任务入口）的传递运行时依赖图断言这两个模块不�
 SET DEFAULT/DROP DEFAULT/DROP NOT NULL 的 ALTER TABLE、ALTER TYPE ADD VALUE、COMMENT ON、GRANT、
 IMPORT FOREIGN SCHEMA。CREATE OR REPLACE 的既有定义保护由运行时 catalog 承担。
 候选对象类封闭常量及 PostgreSQL 16 SQL Commands / SQLite VIRTUAL TABLE 来源见
-[schema-ddl.ts](../../packages/server/src/store/schema-ddl.ts)；支持嵌套注释、Unicode、模板标识符与位置参数。
+[schema-ddl.ts](../../packages/server/src/store/schema-ddl.ts)；支持嵌套注释、Unicode、模板标识符与位置参数，以及双引号、反引号和 SQLite 方括号引用标识符；
+arch 与 expand guard 使用相同的 token 归一化。
 DO 执行体、DROP（含 ON table）、其它 ALTER、TRUNCATE、REVOKE 等候选一律拒绝。
 散文、事件名、shell 字符串不构成 DDL 候选；VACUUM/ANALYZE/REINDEX/CLUSTER/REFRESH/DISCARD 不由 lint 检查。
 历史 bootstrap 的 [冻结 allowlist](../../tests/arch/startup-schema-ddl-allowlist.json)

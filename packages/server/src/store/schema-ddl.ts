@@ -2,7 +2,7 @@
  * Template placeholders are opaque identifiers for the architecture scanner. */
 function sqlTokens(sql: string): string[] {
   const tokens: string[] = [];
-  const pattern = /\s+|--[^\n]*|'(?:''|[^'])*'|"(?:""|[^"])*"|\$([a-z_][a-z_0-9]*)?\$[\s\S]*?\$\1\$|(?:\$\{[^}]*\}|[\p{L}_](?:[\p{L}\p{N}_]|\$(?!\{))*|\$[0-9]+|\?)+|[^\s]/giu;
+  const pattern = /\s+|--[^\n]*|'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|\$([a-z_][a-z_0-9]*)?\$[\s\S]*?\$\1\$|(?:\$\{[^}]*\}|[\p{L}_](?:[\p{L}\p{N}_]|\$(?!\{))*|\$[0-9]+|\?)+|[^\s]/giu;
   let offset = 0;
   while (offset < sql.length) {
     if (sql.startsWith('/*', offset)) {
@@ -20,7 +20,7 @@ function sqlTokens(sql: string): string[] {
     const token = match[0];
     offset = pattern.lastIndex;
     if (/^(?:\s|--)/.test(token)) continue;
-    tokens.push(/^["'$]/.test(token) ? '<identifier-or-value>' : token.toUpperCase());
+    tokens.push(/^["'$`\[]/.test(token) ? '<identifier-or-value>' : token.toUpperCase());
   }
   return tokens;
 }

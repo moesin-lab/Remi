@@ -1,13 +1,16 @@
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startMultiremiServer } from "@multiremi/api/server.js";
-import { legacyUsageSnapshot, migrateLegacyUsage, USAGE_CUTOVER_MARKER, writeUsageSnapshot } from "@multiremi/store/usage-accounting.js";
-import { ensureUsageAccountingStartup, prepareUsageAccountingStartup, USAGE_STARTUP_CUTOVER_MARKER } from "@multiremi/store/usage-migration.js";
+import { ensureLegacyUsageMigrationSchema, legacyUsageSnapshot, migrateLegacyUsage, USAGE_CUTOVER_MARKER, writeUsageSnapshot } from "@multiremi/store/usage-accounting.js";
+import { startUsageAccountingBackfill, ensureUsageAccountingStartup, prepareUsageAccountingStartup, USAGE_STARTUP_CUTOVER_MARKER } from "@multiremi/store/usage-migration.js";
 import type { TaskUsageSnapshot } from "@multiremi/contracts/usage-accounting.js";
 import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
+
+import { liveTermDatabase } from "@multiremi/store/live-term-fence.js";
+import { currentBackgroundTerm } from "@shared/db/live-term.js";
 
 afterEach(resetMultiremiTestEnv);
 const firstUsage = JSON.stringify([{ provider: "claude", model: "configured", totalTokens: 999, inputTokens: 100, outputTokens: 2 }]);
@@ -27,6 +30,61 @@ const live = (runId: string): TaskUsageSnapshot => ({ version: 2, runId, revisio
 }] });
 
 describe("automatic scalar usage cutover", () => {
+  for (const start of [null, 'standby', 'active'] as const) {
+    it(`candidate ${start ?? 'legacy'} with backgroundJobs:false performs zero usage writes`, async () => {
+      const { store } = fixture(3);
+      ensureLegacyUsageMigrationSchema(db!);
+      const before = db!.query('SELECT total_changes() AS n').get();
+      const server = startMultiremiServer({ store, port: 0, hostname: '127.0.0.1', backgroundJobs: false,
+        slotConfiguration: start ? { id: 'candidate', start, controlToken: 'test', lockTimeoutMs: 5000, drainTimeoutMs: 5000 } : null });
+      try {
+        await server.slotStartup;
+        await Bun.sleep(30);
+        expect(marker()).toBeNull();
+        expect(db!.query('SELECT count(*) AS n FROM multiremi_usage_legacy_sources').get()).toEqual({ n: 0 });
+        expect(db!.query('SELECT total_changes() AS n').get()).toEqual(before);
+      } finally { await server.shutdown(); }
+    });
+  }
+
+  it("live usage backfill is SQL-fenced, stops at release and resumes its durable cursor", async () => {
+    const { store } = fixture(3);
+    let released: Promise<void> | undefined;
+    let worker: ReturnType<typeof startUsageAccountingBackfill>;
+    let guardCalls = 0;
+    const start = spyOn(store, 'startUsageAccountingBackfill').mockImplementation(() => {
+      const term = currentBackgroundTerm()!;
+      expect(term).toBeDefined();
+      const original = term.guard.bind(term);
+      term.guard = action => { guardCalls++; return original(action); };
+      worker = startUsageAccountingBackfill(liveTermDatabase(db!), { batchSize: 1, onBatch: () => {
+        released ??= server.slot!.release();
+      } });
+      return worker;
+    });
+    const server = startMultiremiServer({ store, port: 0, hostname: '127.0.0.1', backgroundJobs: true,
+      scheduler: null, scmPolling: null, messaging: null, issueTitleScheduler: null,
+      bodyHtmlBackfill: null, controlPlaneSshMesh: null,
+      slotConfiguration: { id: 'live', start: 'active', controlToken: 'test', lockTimeoutMs: 5000, drainTimeoutMs: 5000 } });
+    try {
+      await server.slotStartup;
+      await worker!.done;
+      await released;
+      expect(guardCalls).toBeGreaterThan(0);
+      expect(marker()).toBeNull();
+      expect(db!.query('SELECT count(*) AS n FROM multiremi_usage_legacy_sources').get()).toEqual({ n: 1 });
+      const progress = db!.query('SELECT * FROM multiremi_usage_startup_progress').all();
+      const changes = db!.query('SELECT total_changes() AS n').get();
+      await Bun.sleep(20);
+      expect(db!.query('SELECT total_changes() AS n').get()).toEqual(changes);
+      expect(db!.query('SELECT * FROM multiremi_usage_startup_progress').all()).toEqual(progress);
+      await server.slot!.activate();
+      await worker!.done;
+      expect(marker()).not.toBeNull();
+      expect(db!.query('SELECT count(*) AS n FROM multiremi_usage_legacy_sources').get()).toEqual({ n: 3 });
+    } finally { await server.shutdown(); start.mockRestore(); }
+  });
+
   it("starts a fresh database and serves canonical empty reports", async () => {
     const store = createLocalStore();
     await prepareUsageAccountingStartup(db!);

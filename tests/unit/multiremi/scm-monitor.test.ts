@@ -203,6 +203,19 @@ describe("SCM monitor outbox (real SQLite/Inbox, mock GitHub)", () => {
     expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type = 'monitor_extension'").get()).toEqual({ status: "applied" });
   });
 
+  it("supports explicit targets for rules on events without a PR", async () => {
+    const f = setup();
+    f.store.registerScmMonitorRule({ effectType: "monitor_branch_extension", matches: event => event.type === "default_branch.updated",
+      targets: event => [{ issueId: f.issue.id, payload: { headSha: event.payload.head_sha } }],
+      prepare: async () => () => { db!.run("UPDATE multiremi_issues SET title = ? WHERE id = ?", ["Branch extension committed", f.issue.id]); } });
+    f.store.recordScmCanonicalEvent({ workspaceId: "local", connectionId: f.connection.id, repositoryId: "repo_test",
+      type: "default_branch.updated", subjectType: "branch", subjectId: "main", logicalKey: "branch-extension", fidelity: "exact",
+      payload: { head_sha: head }, evidence: { source: "webhook", dedupeKey: "branch-extension" } });
+    await f.dispatch();
+    expect(f.store.getIssue(f.issue.id)?.title).toBe("Branch extension committed");
+    expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type = 'monitor_branch_extension'").get()).toEqual({ status: "applied" });
+  });
+
   it("uses the project timeout for the first pending effect", async () => {
     const f = setup(); const project = f.store.createProject({ title: "Monitor config" });
     f.store.updateIssue(f.issue.id, { projectId: project.id });

@@ -6,13 +6,13 @@ import { runSchemaExpands } from '@multiremi/store/schema-migration-runner.js';
 
 describe('SQLite expand catalog authority', () => {
   for (const sql of [
-    'ALTER TABLE retained DROP COLUMN d', 'ALTER TABLE retained RENAME COLUMN c TO gone',
+    'ALTER TABLE retained DROP COLUMN d', 'ALTER TABLE retained DROP COLUMN generated', 'ALTER TABLE retained RENAME COLUMN c TO gone',
     'ALTER TABLE retained RENAME TO gone', 'DROP INDEX retained_unique', 'DROP VIEW retained_view',
   ]) it(`rolls back indirect ${sql}`, () => {
     const db = new Database(':memory:');
     try {
       ensureSchemaMeta(db);
-      db.exec('CREATE TABLE retained (id integer PRIMARY KEY, c text, d text); CREATE UNIQUE INDEX retained_unique ON retained(c); CREATE VIEW retained_view AS SELECT id FROM retained');
+      db.exec('CREATE TABLE retained (id integer PRIMARY KEY, c text, d text, generated text GENERATED ALWAYS AS (c) VIRTUAL); CREATE UNIQUE INDEX retained_unique ON retained(c); CREATE VIEW retained_view AS SELECT id FROM retained');
       const before = snapshotSchemaCatalog(db);
       expect(() => runSchemaExpands(db, [{ id: 'hidden', phase: 'expand', level: 1,
         release: '1.0.0', expandRelease: '1.0.0', run: () => { db.exec(sql); },

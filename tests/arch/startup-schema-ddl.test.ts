@@ -61,7 +61,9 @@ describe('startup migration expand discipline', () => {
       writeFileSync(resolve(store, 'new-background-job.ts'), 'export const run = db => db.exec("ALTER TABLE t RENAME c TO d");');
       expect(startupSchemaDdl(fixture).map(entry => entry.file)).toEqual(['packages/server/src/store/new-background-job.ts']);
       for (const sql of ['dRoP tAbLe [retained]', 'aLtEr TaBlE [retained] ReNaMe To [replacement]',
-        'DROP TABLE `retained`', 'ALTER TABLE "retained" RENAME TO "replacement"']) {
+        'TRUNCATE TABLE U&"retained"',
+        `DROP TABLE U&"ret!0061ined" UESCAPE '!'`,
+        String.raw`ALTER TABLE U&"ret\0061ined" ALTER U&"c" TYPE bigint`, 'DROP TABLE `retained`', 'ALTER TABLE "retained" RENAME TO "replacement"']) {
         writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
         expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql]);
       }

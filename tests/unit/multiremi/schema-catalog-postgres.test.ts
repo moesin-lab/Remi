@@ -80,6 +80,24 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
     const schema = fixture();
     rejected(`direct-${index}`, template.replaceAll('S.', `${schema}.`).replace('SCHEMA S ', `SCHEMA ${schema} `), 'Destructive DDL is forbidden');
   });
+  for (const name of ['U&"retained"', String.raw`u&"ret\0061ined"`,
+    `U&"ret!0061ined" UESCAPE '!'`]) it(`rejects Unicode TRUNCATE without losing rows: ${name}`, () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.retained (id integer); INSERT INTO ${schema}.retained VALUES (42)`);
+    const sql = `TRUNCATE TABLE ${schema}.${name}`;
+    rejected(`unicode-truncate-${serial}`, sql, 'Destructive DDL is forbidden');
+    expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
+    console.info(`Original row retained after ${sql}`);
+  });
+  it('allows Unicode quoted additive ALTER with custom escape', () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.retained (id integer)`);
+    const sql = `ALTER TABLE ${schema}.U&"ret!0061ined" UESCAPE '!' ADD COLUMN U&"c!006fl" UESCAPE '!' text`;
+    expect(hasDestructiveSchemaSql(sql)).toBe(false);
+    runSchemaExpands(db, [step('unicode-additive', sql)], '9.0.0', { minLevel: 0, maxLevel: 100 });
+    expect(db.query(`SELECT col FROM ${schema}.retained`).all()).toEqual([]);
+    expect(readSchemaLevels(db).expandLevel).toBe(1);
+  });
   // These SELECT statements deliberately pass text lint. Only before/after
   // catalog comparison can detect the function's transactional side effects.
   const hidden = [

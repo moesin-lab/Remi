@@ -20,9 +20,23 @@ function sqlTokens(sql: string): string[] {
     const token = match[0];
     offset = pattern.lastIndex;
     if (/^(?:\s|--)/.test(token)) continue;
-    tokens.push(/^["'$`\[]/.test(token) ? '<identifier-or-value>' : token.toUpperCase());
+    tokens.push(token);
   }
-  return tokens;
+  const normalized: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    // PG Unicode quoted names are a single identifier, including UESCAPE.
+    // Keep the payload opaque: decoded keywords/punctuation are still part of
+    // the name, never action tokens. Comments/whitespace were removed above.
+    if (/^u$/i.test(token) && tokens[i + 1] === '&' && tokens[i + 2]?.startsWith('"')) {
+      i += 2;
+      if (tokens[i + 1]?.toUpperCase() === 'UESCAPE' && tokens[i + 2]?.startsWith("'")) i += 2;
+      normalized.push('<identifier-or-value>');
+    } else {
+      normalized.push(/^["'$`\[]/.test(token) ? '<identifier-or-value>' : token.toUpperCase());
+    }
+  }
+  return normalized;
 }
 
 function splitTopLevel(tokens: string[], separator: string): string[][] {

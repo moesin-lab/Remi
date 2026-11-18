@@ -538,7 +538,9 @@ export function parseTraceTranslatorCheckpoint(value: unknown): TraceTranslatorC
   const ids = (v: unknown) => Array.isArray(v) && v.every(id) && new Set(v).size === v.length;
   const pairs = (v: unknown) => Array.isArray(v) && v.every(pair => Array.isArray(pair) && pair.length === 2 && pair.every(id))
     && new Set(v.map(pair => pair[0])).size === v.length;
-  if (!row || row.version !== 1 || !id(row.agent_type) || !counters
+  // This is the local checkpoint schema discriminator, not a daemon feature gate.
+  switch (row?.version) { case 1: break; default: return null; }
+  if (!row || !id(row.agent_type) || !counters
       || ![counters.syn, counters.text, counters.notice, counters.spawn].every(count)
       || !ids(row.used_ids) || !ids(row.consumed_steers)
       || !pairs(row.sessions) || !pairs(row.aliases) || !pairs(row.failure_ids)

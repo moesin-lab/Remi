@@ -4,15 +4,15 @@ import { mkdtemp, rm, readFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
-import { scenarioPlan, validateConfig, validateControlDirectory, edgeStatus, edgeDelta, writeDesired, scenarioPass } from './support.mjs';
+import { scenarioPlan, validateConfig, validateControlDirectory, edgeStatus, edgeDelta, writeDesired, scenarioPass, ProbeSchedule } from './support.mjs';
 
-const config = () => ({ baseUrl: 'http://127.0.0.1:16120', profile: 'mul172-candidate-test',
+const config = () => ({ baseUrl: 'http://127.0.0.1:26120', profile: 'remi-a5-test',
   sessions: Array.from({ length: 8 }, (_, i) => ({ id: `session${i}`, agentId: `agent${i}` })),
   probeSessionId: 'probe', releases: { v1: 'v1', v2: 'v2', neverReady: 'bad-ready', activateCrash: 'bad-activate', crash30: 'bad30' },
   controlDir: '/tmp/candidate', chromeExecutable: '/usr/bin/chromium', candidateSha: 'a'.repeat(40), supervisorSha: 'b'.repeat(40) });
 test('requires loopback edge, isolated profile, eight distinct lanes and separate write probe', () => {
   validateConfig(config());
-  for (const patch of [{ baseUrl: 'https://production.example' }, { profile: 'stable' }, { seconds: 59 }, { seconds: 121 },
+  for (const patch of [{ baseUrl: 'https://production.example' }, { baseUrl: 'http://127.0.0.1:16120' }, { profile: 'stable' }, { seconds: 59 }, { seconds: 121 },
     { candidateSha: 'main' }, { releases: { ...config().releases, v2: 'v1' } }, { probeSessionId: 'session0' },
     { sessions: config().sessions.slice(1) }, { sessions: [...config().sessions.slice(1), config().sessions[1]] }]) {
     assert.throws(() => validateConfig({ ...config(), ...patch }));
@@ -54,7 +54,7 @@ test('edge deltas retain errors and reject counter reset or missing evidence', (
   assert.throws(() => edgeDelta(counters(0), { metrics: { ...counters(1).metrics, holdMs: undefined } }), /missing/);
 });
 const passing = () => ({ name: 'v1-v2', rollback: false, previous: 'v1', target: 'v2', switchAt: 2000, switchRequestedAt: 1500,
-  edge: edgeDelta(counters(0), counters(30)), sampling: { capacityExceeded: false, missedTicks: 0 },
+  edge: edgeDelta(counters(0), counters(30)), sampling: { capacityExceeded: false, missedTicks: 0, lateTicks: 0, tickCount: 100, expectedTicks: 100 },
   client: Array.from({ length: 3 }, () => ({ total: 10, failures: 0 })),
   rounds: Array.from({ length: 8 }, () => ({ turn: { status: 'completed', started_at: new Date(1000).toISOString(), ended_at: new Date(90000).toISOString(), ended_reason: null }, attempts: [{ status: 'completed' }] })),
   browser: { acks: 1, wsFrames: 10, complete: true, errors: [] },
@@ -76,12 +76,42 @@ test('acceptance rejects HTTP errors, retries, lost/recovery, missing browser da
 });
 test('bad release needs rollback AND actual fault evidence, including a full 30 seconds live', () => {
   const s = passing(); s.name = 'crash-after-30s'; s.rollback = true;
-  s.observed = { releaseId: 'v1', transition: { phase: 'failed', phases: [{ phase: 'rolling_back' }] } };
+  s.observed = { releaseId: 'v1', transition: { phase: 'failed', updatedAt: 34000, phases: [{ phase: 'rolling_back' }] } };
   assert.equal(scenarioPass(s), false);
   s.fault = { releaseId: 'v2', event: 'public_live_exit', armedAt: 3000, at: 32999 };
   assert.equal(scenarioPass(s), false);
   s.fault.at++;
   assert.equal(scenarioPass(s), true);
+  s.observed.transition.updatedAt = 91000;
+  assert.equal(scenarioPass(s), false);
+  s.observed.transition.updatedAt = 34000;
   s.observed.transition.phases = [];
   assert.equal(scenarioPass(s), false);
+});
+
+test('30s fault and rollback must both overlap all eight running rounds', () => {
+  const s = passing(); s.name = 'crash-after-30s'; s.rollback = true; s.switchAt = 50000;
+  s.rounds.forEach(r => { r.turn.ended_at = new Date(62000).toISOString(); });
+  s.observed = { releaseId: 'v1', transition: { phase: 'failed', updatedAt: 81000, phases: [{ phase: 'rolling_back' }] } };
+  s.fault = { releaseId: 'v2', event: 'public_live_exit', armedAt: 50010, at: 80010 };
+  assert.equal(scenarioPass(s), false);
+});
+test('sustained 190ms sampling cannot pass as a complete 100ms schedule', () => {
+  const s = passing();
+  s.sampling = { capacityExceeded: false, tickCount: 100, expectedTicks: 190, missedTicks: 0 };
+  assert.equal(scenarioPass(s), false);
+});
+
+test('absolute probe deadlines accept small jitter and reject cumulative drift or missing tail', () => {
+  const normal = new ProbeSchedule(0);
+  for (let i = 0; i < 100; i++) normal.record(i * 100 + 10);
+  assert.equal(normal.snapshot(9999).missedTicks, 0);
+  assert.equal(normal.snapshot(9999).lateTicks, 0);
+  assert.equal(normal.snapshot(10200).missedTicks, 2);
+  const slow = new ProbeSchedule(0);
+  for (let i = 0; i < 100; i++) slow.record(i * 190);
+  const result = slow.snapshot(19000);
+  assert.ok(result.expectedTicks >= 190);
+  assert.ok(result.missedTicks >= 90);
+  assert.ok(result.lateTicks > 0);
 });

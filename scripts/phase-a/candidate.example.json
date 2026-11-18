@@ -1,11 +1,11 @@
 {
-  "profile": "mul172-candidate-example",
-  "baseUrl": "http://127.0.0.1:16120",
+  "profile": "remi-a5",
+  "baseUrl": "http://127.0.0.1:26120",
   "controlDir": "/replace-with-isolated-control-mount/api",
   "chromeExecutable": "/usr/bin/chromium",
   "candidateSha": "0000000000000000000000000000000000000000",
   "supervisorSha": "0000000000000000000000000000000000000000",
-  "seconds": 90,
+  "seconds": 120,
   "probeSessionId": "replace-probe-session",
   "sessions": [
     { "id": "replace-session-1", "agentId": "replace-agent-1" },

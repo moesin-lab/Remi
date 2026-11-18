@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { scenarioPlan, validateConfig, validateControlDirectory, readJson, writeDesired, edgeStatus, edgeDelta, scenarioPass } from './phase-a/support.mjs';
+import { scenarioPlan, validateConfig, validateControlDirectory, readJson, writeDesired, edgeStatus, edgeDelta, scenarioPass, ProbeSchedule } from './phase-a/support.mjs';
 import { openTraceBrowser } from './phase-a/browser.mjs';
 
 export async function run(config, output) {
@@ -54,9 +54,11 @@ export async function run(config, output) {
       scenario.initialReady = await request('/readyz');
       const before = await edgeStatus(control);
       const pending = new Set();
-      let tickCount = 0, missedTicks = 0, maxTickGapMs = 0, lastTick = performance.now(), tickError = false;
+      const schedule = new ProbeSchedule(performance.now());
+      let timer, stopped = false, tickError = false;
       const tick = () => {
-        const now = performance.now(); missedTicks += Math.max(0, Math.floor((now - lastTick) / 100) - 1); maxTickGapMs = Math.max(maxTickGapMs, now - lastTick); lastTick = now; tickCount++;
+        if (stopped) return;
+        schedule.record(performance.now());
         const paths = ['/readyz', `/api/sessions/${encodeURIComponent(config.probeSessionId)}/messages?limit=1`,
           `/api/sessions/${encodeURIComponent(config.probeSessionId)}/messages`];
         for (let i = 0; i < 3; i++) {
@@ -68,8 +70,9 @@ export async function run(config, output) {
             .catch(() => { counter.failures++; }).finally(() => { counter.maxLatencyMs = Math.max(counter.maxLatencyMs, performance.now() - started); pending.delete(work); });
           pending.add(work);
         }
+        timer = setTimeout(tick, Math.max(0, schedule.deadline() - performance.now()));
       };
-      const timer = setInterval(tick, 100); tick();
+      tick();
       let browser;
       try {
         const turns = await Promise.all(config.sessions.map(async s => {
@@ -91,7 +94,12 @@ export async function run(config, output) {
         const running = await poll(getRounds, rows => rows.every(r => r.turn.status === 'running' && r.attempts.length === 1 && r.attempts[0].status === 'running'), 60000);
         browser = await openTraceBrowser(config, token, running[0].attempts[0].id, turns[0]);
         // Recheck immediately before issuing the switch, after browser startup.
-        if (!(await getRounds()).every(r => r.turn.status === 'running')) throw new Error('Workload ended before switch');
+        const preSwitch = await getRounds();
+        const remainingMs = name === 'crash-after-30s' ? 45000 : 15000;
+        if (!preSwitch.every(r => r.turn.status === 'running'
+          && Date.now() - Date.parse(r.turn.started_at) < (config.seconds ?? 90) * 1000 - remainingMs)) {
+          throw new Error('Insufficient remaining streaming time before switch');
+        }
         const desiredRevision = `mul172-${randomUUID()}`;
         scenario.revision = desiredRevision; scenario.switchRequestedAt = Date.now();
         await writeDesired(control, target, desiredRevision);
@@ -114,11 +122,11 @@ export async function run(config, output) {
         if (!scenario.observed.childPid || ready.version !== scenario.observed.version) throw new Error('Candidate final readiness mismatch');
         scenario.ready = { slot: ready.slot, state: ready.state, version: ready.version, term: ready.term };
       } finally {
-        clearInterval(timer);
+        stopped = true; clearTimeout(timer);
+        scenario.sampling = { ...schedule.snapshot(performance.now()), capacityExceeded: tickError };
         await Promise.allSettled([...pending]);
         await browser?.close();
         scenario.edge = edgeDelta(before, await edgeStatus(control));
-        scenario.sampling = { intervalMs: 100, tickCount, missedTicks, maxTickGapMs, capacityExceeded: tickError };
         // Hold observations are sampled to ~100 ms; A1 holdMs is request wait sum.
         scenario.holdMeasurement = 'sampled wall time; edge.holdMs is cumulative per-request waiting time';
         await save();

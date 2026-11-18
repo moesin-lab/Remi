@@ -10,8 +10,8 @@ export const scenarioPlan = r => [
 ];
 export function validateConfig(c) {
   const url = new URL(c.baseUrl);
-  if (url.origin !== 'http://127.0.0.1:16120' || url.pathname !== '/' || url.search || url.hash || url.username || url.password) throw new Error('Use isolated loopback edge http://127.0.0.1:16120');
-  if (!/^mul172-candidate-[a-z0-9-]+$/.test(c.profile)) throw new Error('An explicit mul172-candidate-* profile is required');
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || Number(url.port) < 1024 || Number(url.port) === 16120 || url.pathname !== '/' || url.search || url.hash || url.username || url.password) throw new Error('Use an isolated loopback port (default 26120); 16120 is prohibited');
+  if (!/^remi-a5(?:-[a-z0-9-]+)?$/.test(c.profile)) throw new Error('An explicit remi-a5 project is required');
   if (!Array.isArray(c.sessions) || c.sessions.length < 8 || c.sessions.some(s => !s.id || !s.agentId)
     || new Set(c.sessions.map(s => s.id)).size !== c.sessions.length
     || new Set(c.sessions.map(s => s.agentId)).size !== c.sessions.length) throw new Error('At least eight separate Sessions and Agents required');
@@ -26,7 +26,7 @@ export function validateConfig(c) {
 }
 export async function validateControlDirectory(path) {
   const canonical = await realpath(path);
-  if (/(^|[\/\\])stable([\/\\]|$)/i.test(canonical)) throw new Error('Stable control directory is prohibited');
+  if (/(^|[\/\\])(?:stable|remi-stable)([\/\\]|$)/i.test(canonical)) throw new Error('Stable control directory is prohibited');
   return canonical;
 }
 export const readJson = async path => JSON.parse(await readFile(path, 'utf8'));
@@ -74,9 +74,36 @@ export function faultPass(s) {
     : s.name === 'activate-crash' ? f.event === 'activate_exit'
     : f.event === 'public_live_exit' && Number.isSafeInteger(f.armedAt) && f.armedAt >= s.switchRequestedAt && f.at - f.armedAt >= 30000;
 }
+// Absolute deadlines prevent repeated sub-interval delays from hiding lost coverage.
+export class ProbeSchedule {
+  constructor(epoch, intervalMs = 100, toleranceMs = 50) {
+    Object.assign(this, { epoch, intervalMs, toleranceMs, next: 0, tickCount: 0, missedTicks: 0, lateTicks: 0, maxLatenessMs: 0 });
+  }
+  deadline() { return this.epoch + this.next * this.intervalMs; }
+  record(now) {
+    const lateness = Math.max(0, now - this.deadline());
+    this.maxLatenessMs = Math.max(this.maxLatenessMs, lateness);
+    if (lateness > this.toleranceMs) this.lateTicks++;
+    const skipped = Math.floor(lateness / this.intervalMs);
+    this.missedTicks += skipped;
+    this.next += skipped + 1;
+    this.tickCount++;
+  }
+  snapshot(now) {
+    // A final slot gets the same jitter allowance as every other slot.
+    const expectedTicks = Math.max(0, Math.floor((now - this.epoch - this.toleranceMs) / this.intervalMs) + 1);
+    return { intervalMs: this.intervalMs, toleranceMs: this.toleranceMs, tickCount: this.tickCount,
+      expectedTicks, missedTicks: Math.max(this.missedTicks, expectedTicks - this.tickCount),
+      lateTicks: this.lateTicks, maxLatenessMs: this.maxLatenessMs };
+  }
+}
 export function scenarioPass(s) {
   return faultPass(s) && s.edge.requests > 0 && s.edge.upstreamErrors === 0 && Object.values(s.edge.errors).every(n => n === 0)
-    && !s.sampling.capacityExceeded && s.sampling.missedTicks === 0 && s.client.length === 3 && s.client.every(p => p.total > 0 && p.failures === 0) && s.rounds.length >= 8 && s.rounds.every(r => roundPass(r, s.switchAt))
+    && !s.sampling.capacityExceeded && s.sampling.missedTicks === 0 && s.sampling.lateTicks === 0
+    && Number.isSafeInteger(s.sampling.expectedTicks) && s.sampling.expectedTicks > 0 && s.sampling.tickCount >= s.sampling.expectedTicks && s.client.length === 3 && s.client.every(p => p.total > 0 && p.failures === 0) && s.rounds.length >= 8 && s.rounds.every(r => roundPass(r, s.switchAt)
+      && (!s.rollback || (Number.isSafeInteger(s.observed.transition.updatedAt)
+        && s.observed.transition.updatedAt >= s.fault.at
+        && roundPass(r, s.fault.at) && roundPass(r, s.observed.transition.updatedAt))))
     && s.browser.acks > 0 && s.browser.wsFrames > 0 && s.browser.complete && s.browser.errors.length === 0
     && s.ready?.state === 'active' && /^[1-9]\d*$/.test(String(s.ready.term))
     && /^[1-9]\d*$/.test(String(s.initialReady?.term)) && BigInt(s.ready.term) >= BigInt(s.initialReady.term)

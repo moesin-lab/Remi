@@ -4,13 +4,18 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
 import { useMigratedIntegrationDatabases } from "../../helpers/integration-database.js";
+import type { TraceEvent } from "@multiremi/contracts/trace.js";
+import { createHash } from "node:crypto";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
+import { daemonTraceService } from "@multiremi/api/daemon-protocol/trace-handlers.js";
+import { EMPTY_TURN_TRACE, applyTurnTraceEvents } from "@shared/turn-trace.js";
 import { PlannedRestartJournal } from "@multiremi/worker/planned-restart-journal.js";
 
 useMigratedIntegrationDatabases();
 
 // Real daemon/provider lifetime, disk outbox/journal and authenticated v2 RPCs.
 // Candidate update acceptance is exercised separately with the MUL-27 harness.
-test("daemon joins provider shutdown before preparing and acknowledging the same-attempt checkpoint", async () => {
+for (const kind of ["task", "autopilot"] as const) test(`${kind} joins provider shutdown before preparing and acknowledging the same-attempt checkpoint`, async () => {
   let entered = false;
   let resumed = false;
   let providerClosed = false;
@@ -39,7 +44,10 @@ test("daemon joins provider shutdown before preparing and acknowledging the same
     const runtimeId = h.store.listRuntimes()[0]!.id;
     const daemonId = h.store.getRuntimeLite(runtimeId)!.daemonId!;
     const agent = h.store.createAgent({ name: "Planned stop", provider: "claude", runtimeId });
-    const task = h.store.createTask({ agentId: agent.id, runtimeId, prompt: "Long synthetic round", maxAttempts: 1 });
+    const autopilot = kind === "autopilot" ? h.store.createAutopilot({ title: "Planned automation", assigneeId: agent.id, executionMode: "run_only" }) : null;
+    const run = autopilot ? h.store.runAutopilot(autopilot.id, { prompt: "Long synthetic round" }) : null;
+    const task = run ? h.store.getTask(run.taskId!)! : h.store.createTask({ agentId: agent.id, runtimeId, prompt: "Long synthetic round", maxAttempts: 1 });
+    const maxAttempts = task.maxAttempts;
     await waitFor(() => entered, "provider entered", 5_000);
     h.store.beginDaemonDrain("local", daemonId, "manual", 60_000);
     const handoff = h.store.plannedRestarts().request(task.id, { workspaceId: "local", runtimeId, daemonId });
@@ -52,7 +60,7 @@ test("daemon joins provider shutdown before preparing and acknowledging the same
     await waitFor(() => h.store.plannedRestarts().get(task.id)?.state === "suspended", "checkpoint RPC committed", 10_000);
     await waitFor(() => (h.daemon as any).activeTaskCount === 0, "checkpoint locally acknowledged");
     expect(providerClosed).toBe(true);
-    expect(h.store.getTask(task.id)).toMatchObject({ status: "running", attempt: 1, maxAttempts: 1, sessionId: "planned-session" });
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "running", attempt: 1, maxAttempts, sessionId: "planned-session" });
     const journalPath = readdirSync(h.root).find(name => name.startsWith("restart-") && name.endsWith(".db"))!;
     const journal = new PlannedRestartJournal(join(h.root, journalPath));
     try { expect(journal.get(handoff.handoff_id)).toMatchObject({ state: "acknowledged", execution: { attempt_id: task.id, generation: 0 } }); }
@@ -65,7 +73,8 @@ test("daemon joins provider shutdown before preparing and acknowledging the same
     await h.recreateDaemon();
     await waitFor(() => h.store.getTask(task.id)?.status === "completed", "same attempt finished after replacement", 10_000);
     expect(resumed).toBe(true);
-    expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1, maxAttempts: 1, result: "complete resumed answer" });
+    if (run) expect(h.store.getAutopilotRun(run.id)?.status).toBe("completed");
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1, maxAttempts, result: "complete resumed answer" });
     expect(h.ledger.some(e => e.type === "turn.restart.resume")).toBe(true);
     expect(h.ledger.some(e => e.type === "task.fail")).toBe(false);
     expect(h.ledger.filter(e => e.type === "turn.complete").at(-1)?.frame.p.generation).toBe(1);
@@ -156,6 +165,7 @@ for (const unresponsive of ["cancel", "close"] as const) test(`planned restart b
     const started = performance.now();
     await waitFor(() => expired, "bounded crash fallback", 2_000);
     expect(performance.now() - started).toBeLessThan(2_000);
+    expect(h.daemon.traceStore().read(task.id).events.some(event => (event.item as any)?.title === "Remi 已更新")).toBe(false);
     expect(h.daemon.restartRequested()).toBe(true);
     expect(h.store.plannedRestarts().get(task.id)?.state).toBe("requested");
     expect(h.store.plannedRestarts().protectsFromOrphanRecovery(task.id)).toBe(false);
@@ -382,6 +392,91 @@ for (const echoed of [false, true]) test(`steer injected before cancellation is 
     const events = h.daemon.traceStore().read(task.id, 0, 500, 1024 * 1024).events;
     expect(events.filter(event => event.type === "item.completed" && (event.item as any)?.steer?.steer_id === message.id)).toHaveLength(1);
     expect(h.store.getTask(task.id)).toMatchObject({ attempt: 1, result: "Applied USE_BLUE_RECEIPT" });
+    expect(h.db.query("SELECT id FROM multiremi_turn_attempts WHERE turn_id=?").all(handoff.turn_id)).toHaveLength(1);
+    expect(h.ledger.some(event => event.type === "task.fail")).toBe(false);
+  } finally { await h.dispose(); }
+}, 25_000);
+
+// Read the authoritative trace through the server's reverse daemon reader and
+// fold it with the same reducer used by Turn views, across a fresh daemon.
+for (const snapshot of ["valid", "missing", "digest", "binding"] as const) test(`planned restart preserves native routes and continuous Turn history with ${snapshot} identity journal`, async () => {
+  const child = "a0000000000000001";
+  let entered = false, replacement = false, background = true;
+  const h = await DaemonProtocolHarness.create({ providerFactory: () => ({
+    async *sendStream(_message, options) {
+      if (replacement) {
+        yield { sessionUpdate: "tool_call", toolCallId: "send_after", name: "SendMessage", kind: "other", status: "completed",
+          rawInput: { to: child, message: "Continue after update" }, _meta: { claudeCode: { toolName: "SendMessage" } } } as any;
+        yield { sessionUpdate: "subagent_spawned", subagentSessionId: `${child}:generation:1`, name: "Child", prompt: "Continue after update" } as any;
+        yield { sessionUpdate: "tool_call", toolCallId: "child_after", name: "Bash", kind: "execute", status: "completed",
+          rawInput: { command: "echo continued" }, _meta: snapshot === "valid"
+            ? { claudeCode: { toolName: "Bash", parentToolUseId: "original_alias" } }
+            : { remiSessionId: child, claudeCode: { toolName: "Bash" } } } as any;
+        yield { sessionUpdate: "subagent_state_update", subagentSessionId: `${child}:generation:1`, state: "completed" } as any;
+        yield { sessionUpdate: "tool_call", toolCallId: "send_after", name: "SendMessage", status: "completed", rawOutput: "Message delivered", _meta: { claudeCode: { toolName: "SendMessage" } } } as any;
+        yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "continuous complete reply" }] } as any;
+        return;
+      }
+      yield { sessionUpdate: "subagent_spawned", subagentSessionId: child, name: "Child", _meta: { remi: { backgrounded: true } } } as any;
+      yield { sessionUpdate: "tool_call", toolCallId: "child_before", name: "Bash", kind: "execute", status: "in_progress",
+        rawInput: { command: "sleep 999" }, _meta: { remiSessionId: child, claudeCode: { toolName: "Bash", parentToolUseId: "original_alias" } } } as any;
+      yield { sessionUpdate: "async_task_spawned", asyncTaskId: "old_background", name: "Long background", taskType: "shell", canStop: true } as any;
+      entered = true;
+      await new Promise<never>((_resolve, reject) => {
+        const stop = () => reject(new Error("Cancelled"));
+        if (options?.signal?.aborted) stop(); else options?.signal?.addEventListener("abort", stop, { once: true });
+      });
+    },
+    listAsyncTasks: () => background ? [{ id: "old_background", state: "running", type: "shell" } as any] : [],
+    async *settleAsyncTasks() { background = false; },
+    getLastResponse: () => ({ text: replacement ? "continuous complete reply" : "", sessionId: "trace-session", usage: [], toolCalls: [] } as any),
+    close: async () => { replacement = true; background = false; },
+  }) });
+  try {
+    await h.startDaemon(); await h.settleHeartbeat();
+    const runtimeId = h.store.listRuntimes()[0]!.id, daemonId = h.store.getRuntimeLite(runtimeId)!.daemonId!;
+    const agent = h.store.createAgent({ name: "Trace identity restart", provider: "claude", runtimeId });
+    const task = h.store.createTask({ agentId: agent.id, runtimeId, prompt: "Long native and background work", maxAttempts: 1 });
+    await waitFor(() => entered, "native work entered");
+    h.store.beginDaemonDrain("local", daemonId, "manual", 60_000);
+    const handoff = h.store.plannedRestarts().request(task.id, { workspaceId: "local", runtimeId, daemonId });
+    await waitFor(() => h.store.plannedRestarts().get(task.id)?.state === "suspended", "identity checkpoint", 10_000);
+    await waitFor(() => (h.daemon as any).activeTaskCount === 0, "old provider released");
+    const before = applyTurnTraceEvents(EMPTY_TURN_TRACE, h.daemon.traceStore().read(task.id).events as TraceEvent[]);
+    expect(before.items.find(item => item.id === `sa:${child}`)).toMatchObject({ status: "stopped" });
+    expect(before.items.find(item => item.type === "background_task")).toMatchObject({ status: "stopped", stop_reason: "cancelled" });
+    expect(before.items.find(item => item.id === "child_before")).toMatchObject({ status: "stopped" });
+    await h.stopDaemon();
+    const path = join(h.root, readdirSync(h.root).find(name => name.startsWith("restart-") && name.endsWith(".db"))!);
+    const db = openSqliteDatabase(path);
+    try {
+      const row = db.query("SELECT payload FROM planned_restart_trace_identities WHERE handoff_id=?").get(handoff.handoff_id) as { payload: string };
+      expect(row).toBeTruthy();
+      if (snapshot === "missing") db.run("DELETE FROM planned_restart_trace_identities");
+      if (snapshot === "digest") db.run("UPDATE planned_restart_trace_identities SET sha256='bad'");
+      if (snapshot === "binding") {
+        const value = JSON.parse(row.payload); value.execution.generation++;
+        const payload = JSON.stringify(value);
+        db.run("UPDATE planned_restart_trace_identities SET payload=?,sha256=?", [payload, createHash("sha256").update(payload).digest("hex")]);
+      }
+    } finally { db.close(); }
+    h.store.undrainDaemon("local", daemonId); await h.recreateDaemon();
+    await waitFor(() => h.store.getTask(task.id)?.status === "completed", "identity resume completed without autonomous debt", 10_000);
+    const result = await daemonTraceService(h.layer).reader.read({ runtimeId, taskId: task.id, view: "events" });
+    expect(result.ok).toBe(true);
+    if (!result.ok || !("events" in result)) throw new Error("server trace events unavailable");
+    const events = result.events as TraceEvent[];
+    const state = applyTurnTraceEvents(EMPTY_TURN_TRACE, events);
+    expect(events.filter(event => event.type === "turn.started")).toHaveLength(1);
+    expect(events.filter(event => event.type === "item.started").map(event => event.type === "item.started" ? event.item.id : "").length)
+      .toBe(new Set(events.filter(event => event.type === "item.started").map(event => event.type === "item.started" ? event.item.id : "")).size);
+    expect(state.items.filter(item => item.type === "subagent")).toHaveLength(1);
+    expect(state.items.find(item => item.id === "child_after")?.parent_id).toBe(`sa:${child}`);
+    expect(state.items.find(item => item.type === "user_message" && item.parent_id === `sa:${child}` && item.text === "Continue after update")).toBeTruthy();
+    expect(state.items.find(item => item.type === "background_task")).toMatchObject({ status: "stopped", stop_reason: "cancelled" });
+    expect(state.items.filter(item => item.type === "notice" && item.title === "Remi 已更新")).toHaveLength(1);
+    expect(state.turn).toMatchObject({ status: "completed", turn_id: handoff.turn_id });
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1, failureReason: null, result: "continuous complete reply" });
     expect(h.db.query("SELECT id FROM multiremi_turn_attempts WHERE turn_id=?").all(handoff.turn_id)).toHaveLength(1);
     expect(h.ledger.some(event => event.type === "task.fail")).toBe(false);
   } finally { await h.dispose(); }

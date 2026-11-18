@@ -126,3 +126,29 @@ it("rejects conflicting checkpoints, unknown fields and corrupt disk evidence", 
   expect(() => local.get(execution.handoff_id)).toThrow("Corrupt");
   expect(() => local.entries()).toThrow("Corrupt");
 });
+
+it("treats trace identities as optional and discards bad digest, head or generation bindings", async () => {
+  const identities = { version: 1 as const, agent_type: "claude", used_ids: ["old_tool"],
+    counters: { syn: 1, text: 2, notice: 3, spawn: 0 }, natives: [], sessions: [], aliases: [], failure_ids: [], consumed_steers: [] };
+  for (const problem of ["none", "missing", "digest", "head", "generation"] as const) {
+    const path = join(root(), "identity.db"), local = journal(path);
+    const entry = local.prepare(execution, checkpoint); local.acknowledge(execution.handoff_id);
+    if (problem !== "missing") local.saveTraceIdentities(
+      { ...execution, generation: problem === "generation" ? 1 : 0 }, problem === "head" ? 43 : 42, identities);
+    if (problem === "digest") {
+      const writer = openSqliteDatabase(path);
+      try { writer.run("UPDATE planned_restart_trace_identities SET sha256='invalid'"); } finally { writer.close(); }
+    }
+    const warnings: string[] = [];
+    expect(local.traceIdentities(entry, reason => warnings.push(reason))).toEqual(problem === "none" ? identities : null);
+    expect(warnings.length).toBe(problem === "none" ? 0 : 1);
+    const resumed = await new PlannedRestartTransfer(local, {
+      ...remote(), resume: async value => {
+        // This is how the daemon consumes optional state before its authoritative CAS.
+        local.traceIdentities(value, () => {});
+        return { generation: value.execution.generation + 1 };
+      },
+    }).resume(execution.handoff_id);
+    expect(resumed.resumed_generation).toBe(1);
+  }
+});

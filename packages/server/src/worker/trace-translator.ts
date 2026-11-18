@@ -111,7 +111,8 @@ export const TRACE_DELTA_BUFFER_BYTES = 16 * 1024;
 export const TRACE_DELTA_MAX_BYTES = 64 * 1024;
 
 export interface TraceTranslatorOptions {
-  resume?: { turn: TraceTurn; items: readonly TraceItem[] };
+  resume?: { turn: TraceTurn; items: readonly TraceItem[]; runtime?: TraceTranslatorCheckpoint };
+  onResumeWarning?: (message: string) => void;
   /** ISO clock for item and turn timestamps. */
   now?: () => string;
   /** Millisecond clock for `duration_ms`. */
@@ -218,6 +219,12 @@ export interface TraceSettlement {
 }
 
 export interface TraceTranslator {
+  /** Private local state; persisted only after provider output has stopped. */
+  checkpoint(): TraceTranslatorCheckpoint;
+  /** Close work owned by the old bridge without ending the turn or its questions. */
+  plannedRestart(): void;
+  /** One idempotent system notice per planned generation. */
+  restarted(generation: number): void;
   start(input: TraceTranslatorStart): void;
   /** One `session/update`. */
   acp(update: ProviderEvent): void;
@@ -423,6 +430,7 @@ class OutputBuffer {
   private bytes = 0;
   overflowed = false;
 
+
   /** Append a chunk; returns the part that may still stream as a delta. */
   append(chunk: string): string {
     const size = utf8ByteLength(chunk);
@@ -507,6 +515,47 @@ interface ToolState {
   status: TraceItemStatus;
   /** Set at the first completion; later re-emits (late hooks, a decline) keep it. */
   durationMs: number | null;
+}
+
+/** Only identities survive a bridge restart; no provider input/output or running state. */
+export interface TraceTranslatorCheckpoint {
+  version: 1;
+  agent_type: string;
+  used_ids: string[];
+  counters: { syn: number; text: number; notice: number; spawn: number };
+  natives: Array<{ base_id: string; item_id: string; linked: boolean; authoritative: boolean; spawn_order: number }>;
+  sessions: Array<[string, string]>;
+  aliases: Array<[string, string]>;
+  failure_ids: Array<[string, string]>;
+  consumed_steers: string[];
+}
+export const TRACE_TRANSLATOR_CHECKPOINT_MAX_BYTES = 512 * 1024;
+
+export function parseTraceTranslatorCheckpoint(value: unknown): TraceTranslatorCheckpoint | null {
+  const row = record(value), counters = record(row?.counters);
+  const id = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 8192;
+  const count = (v: unknown) => Number.isSafeInteger(v) && Number(v) >= 0;
+  const ids = (v: unknown) => Array.isArray(v) && v.every(id) && new Set(v).size === v.length;
+  const pairs = (v: unknown) => Array.isArray(v) && v.every(pair => Array.isArray(pair) && pair.length === 2 && pair.every(id))
+    && new Set(v.map(pair => pair[0])).size === v.length;
+  if (!row || row.version !== 1 || !id(row.agent_type) || !counters
+      || ![counters.syn, counters.text, counters.notice, counters.spawn].every(count)
+      || !ids(row.used_ids) || !ids(row.consumed_steers)
+      || !pairs(row.sessions) || !pairs(row.aliases) || !pairs(row.failure_ids)
+      || !Array.isArray(row.natives) || !row.natives.every(entry => {
+        const native = record(entry);
+        return native && id(native.base_id) && id(native.item_id) && typeof native.linked === "boolean"
+          && typeof native.authoritative === "boolean" && count(native.spawn_order);
+      })) return null;
+  const expected = ["version", "agent_type", "used_ids", "counters", "natives", "sessions", "aliases", "failure_ids", "consumed_steers"];
+  if (Object.keys(row).length !== expected.length || Object.keys(row).some(key => !expected.includes(key))
+      || Object.keys(counters).sort().join() !== "notice,spawn,syn,text"
+      || row.natives.some(entry => Object.keys(entry).sort().join() !== "authoritative,base_id,item_id,linked,spawn_order")
+      || new Set(row.natives.map(entry => entry.base_id)).size !== row.natives.length
+      || new Set(row.natives.map(entry => entry.item_id)).size !== row.natives.length) return null;
+  try { if (utf8ByteLength(JSON.stringify(value)) > TRACE_TRANSLATOR_CHECKPOINT_MAX_BYTES) return null; }
+  catch { return null; }
+  return value as TraceTranslatorCheckpoint;
 }
 
 const NO_STATS = { item_count: 0, tool_call_count: 0, process_item_count: 0, type_histogram: [] };
@@ -1506,7 +1555,93 @@ export function createTraceTranslator(
     patchTurn({ model: next });
   };
 
+  const sealForRestart = (): void => emitter.run(() => {
+    endAllText();
+    const at = now();
+    for (const item of [...items.values()]) {
+      if (item.status !== "in_progress" && !(item.type === "background_task" && item.handed_off)) continue;
+      // Human waits belong to the server and survive on the same Q.
+      if (item.type === "permission" || item.type === "question") continue;
+      const next = { ...item, status: "stopped" as const, completed_at: at,
+        ...("duration_ms" in item ? { duration_ms: Math.max(0, nowMs() - Date.parse(item.started_at)) } : {}),
+        ...(item.type === "background_task" ? { stop_reason: "cancelled" as const } : {}) } as TraceItem;
+      if (next.type === "background_task") delete next.handed_off;
+      const native = nativeById.get(item.id);
+      if (native && next.type === "subagent") { native.item = next; native.endedOrder = null; native.endedRound = -1; }
+      write("item.completed", next);
+    }
+    tools.clear(); bgTasks.clear(); runningTasks.clear(); runningSubagents.clear();
+    subagentCounts = { top: 0, nested: 0 };
+    pendingStopNotices.length = 0; pendingHooks.clear(); pendingModels.clear();
+    backgroundLaunches.clear(); backgroundedCalls.clear(); roundTools.clear();
+    frameOrder = 0; lastMarkerOrder = 0; lastToolResultOrder = 0; markersSinceLaunch = 0;
+    roundIndex = 0; lastResultRound = -1; rootWorkSinceMarker = false;
+    cycleStartOrder = 0; lastCoveredCycleStart = 0; roundOpen = false; aborting = false;
+    reportActivity();
+  });
+
+  if (opts.resume) {
+    // Fold-only fallback can recover native identities from their canonical IDs.
+    // The fresh bridge owns no old execution, regardless of snapshot availability.
+    for (const item of items.values()) {
+      if (item.type === "subagent" && item.thread_id && item.id === nativeAgentItemId(item.thread_id)) {
+        const native: NativeAgent = { id: item.id, parentId: item.parent_id, item,
+          startedMs: Date.parse(item.started_at), linked: false, authoritative: item.background === true,
+          spawnOrder: ++spawnCounter, endedOrder: null, endedRound: -1 };
+        natives.set(item.thread_id, native); nativeById.set(item.id, native);
+      }
+      const synthetic = /^syn_(\d+)$/.exec(item.id);
+      if (synthetic) synCounter = Math.max(synCounter, Number(synthetic[1]) + 1);
+      if (item.type === "user_message" && item.steer?.consumed) consumedSteers.add(item.steer.steer_id);
+    }
+    const saved = opts.resume.runtime ? parseTraceTranslatorCheckpoint(opts.resume.runtime) : null;
+    const valid = saved && saved.agent_type === agentType
+      && saved.natives.every(native => natives.get(native.base_id)?.id === native.item_id)
+      && [...saved.sessions, ...saved.aliases].every(([, id]) => nativeById.has(id))
+      && saved.failure_ids.every(([, id]) => items.has(id));
+    if (valid && saved) {
+      for (const id of saved.used_ids) usedIds.add(id);
+      synCounter = Math.max(synCounter, saved.counters.syn); textCounter = saved.counters.text;
+      noticeCounter = saved.counters.notice; spawnCounter = Math.max(spawnCounter, saved.counters.spawn);
+      for (const native of saved.natives) {
+        const restored = nativeById.get(native.item_id)!;
+        restored.linked = native.linked; restored.authoritative = native.authoritative; restored.spawnOrder = native.spawn_order;
+      }
+      for (const [session, id] of saved.sessions) sessionAgent.set(session, nativeById.get(id)!);
+      for (const [call, id] of saved.aliases) alias.set(call, nativeById.get(id)!);
+      for (const [key, id] of saved.failure_ids) failureIds.set(key, id);
+      for (const id of saved.consumed_steers) consumedSteers.add(id);
+    } else if (opts.resume.runtime) {
+      try { opts.onResumeWarning?.("Invalid trace identity snapshot; using trace fold only"); } catch { /* Optional diagnostics. */ }
+    }
+    sealForRestart();
+  }
+
   return {
+    checkpoint() {
+      emitter.flush();
+      const snapshot: TraceTranslatorCheckpoint = { version: 1, agent_type: agentType, used_ids: [...usedIds],
+        counters: { syn: synCounter, text: textCounter, notice: noticeCounter, spawn: spawnCounter },
+        natives: [...natives].map(([base_id, native]) => ({ base_id, item_id: native.id, linked: native.linked,
+          authoritative: native.authoritative, spawn_order: native.spawnOrder })),
+        sessions: [...sessionAgent].map(([session, native]) => [session, native.id]),
+        aliases: [...alias].map(([call, native]) => [call, native.id]), failure_ids: [...failureIds],
+        consumed_steers: [...consumedSteers] };
+      if (!parseTraceTranslatorCheckpoint(snapshot)) throw new Error("Trace identity snapshot exceeds local limit");
+      return snapshot;
+    },
+    plannedRestart: sealForRestart,
+    restarted(generation) {
+      if (!Number.isSafeInteger(generation) || generation < 1 || !opts.resume) return;
+      const id = `ntc:restart:${generation}`;
+      if (items.has(id)) return;
+      usedIds.add(id);
+      emitter.run(() => {
+        const at = now();
+        write("item.completed", { id, parent_id: null, status: "completed", started_at: at, completed_at: at,
+          type: "notice", title: "Remi 已更新", description: "继续当前轮次", severity: "info", category: null, error_kind: null });
+      });
+    },
     start(input) {
       if (opts.resume) return;
       emitter.run(() => {

@@ -62,7 +62,7 @@ import {
   type UploadFeishuBotAttachmentInput,
 } from "./client.js";
 import { responseToUsageUnits } from "./usage-units.js";
-import { createTraceTranslator, type TraceSubagentRef, type TraceTranslator } from "./trace-translator.js";
+import { createTraceTranslator, type TraceSubagentRef, type TraceTranslator, type TraceTranslatorCheckpoint } from "./trace-translator.js";
 import { nativeAgentItemId } from "@acp/adapters/trace-vendor.js";
 import { TaskActivityReporter } from "./task-activity.js";
 import { LaneTaskContextFile, type LaneTaskContext } from "./lane-task-context.js";
@@ -1285,6 +1285,7 @@ export class MultiremiDaemon {
   private activeTaskAborts = new Set<AbortController>();
   private readonly taskAbortsById = new Map<string, AbortController>();
   private readonly restartExecutions = new Map<string, RestartExecution>();
+  private readonly restartTraceIdentities = new Map<string, { state: TraceTranslatorCheckpoint; trace_head: number }>();
   private readonly executionGenerations = new Map<string, number>();
   private readonly resumedUsageRuns = new Map<string, string>();
   private restartRecoveryCandidates = new Set<string>();
@@ -4437,7 +4438,15 @@ export class MultiremiDaemon {
             const checkpoint = result.checkpoint as PlannedRestartCheckpoint;
             const consumed = foldStoredTrace(this.ensureTrace().store, task.id).fold.state().items.flatMap(item =>
               item.type === "user_message" && item.steer?.consumed ? [item.steer.steer_id] : []);
-            return { ...checkpoint, delivered_message_ids: [...new Set(consumed)], trace_head: this.ensureTrace().store.head(task.id)?.head ?? 0 };
+            const head = this.ensureTrace().store.head(task.id)?.head ?? 0;
+            const identities = this.restartTraceIdentities.get(task.id);
+            try {
+              if (!identities || identities.trace_head !== head) throw new Error("Trace identity snapshot not available at checkpoint head");
+              this.restartJournal!.saveTraceIdentities(checkpointRestart!, head, identities.state);
+            } catch (error) {
+              log.warn(`Task ${task.id}: optional trace identity snapshot omitted: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            return { ...checkpoint, delivered_message_ids: [...new Set(consumed)], trace_head: head };
           });
           const deadline = this.restartDeadlines.get(task.id);
           if (deadline) clearTimeout(deadline);
@@ -4464,6 +4473,7 @@ export class MultiremiDaemon {
       stopWatching();
       this.taskDownlinks.release(task.id);
       this.restartQuestions.delete(task.id);
+      this.restartTraceIdentities.delete(task.id);
       if (timeout) clearTimeout(timeout);
     }
   }
@@ -4499,11 +4509,13 @@ export class MultiremiDaemon {
         await this.taskDownlinks.rpc("turn.restart.suspend", { ...entry.execution, checkpoint: entry.checkpoint }, this.options.requestTimeoutMs);
       },
       resume: async entry => {
+        const identities = this.restartJournal!.traceIdentities(entry, reason => log.warn(`Task ${entry.execution.attempt_id}: ${reason}; using trace fold only`));
         const result = await this.taskDownlinks.rpc("turn.restart.resume", { ...entry.execution, consumer_id: entry.consumer_id }, this.options.requestTimeoutMs);
         const task = normalizeDaemonTurnOffer(result.task as Record<string, unknown>);
         const generation = Number(result.generation);
         if (generation !== entry.execution.generation + 1) throw new Error("Invalid restart generation");
         this.executionGenerations.set(task.id, generation);
+        if (identities) this.restartTraceIdentities.set(task.id, { state: identities, trace_head: entry.checkpoint.trace_head });
         this.resumedUsageRuns.set(task.id, entry.consumer_id);
         this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
         this.taskDownlinks.bindTurn({ ...task, generation });
@@ -5595,7 +5607,9 @@ export class MultiremiDaemon {
         log.warn(`Failed to append trace events for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }, {
-      ...(previousTrace?.turn ? { resume: { turn: previousTrace.turn, items: previousTrace.items } } : {}),
+      ...(previousTrace?.turn ? { resume: { turn: previousTrace.turn, items: previousTrace.items,
+        runtime: this.restartTraceIdentities.get(task.id)?.state } } : {}),
+      onResumeWarning: message => log.warn(`Task ${task.id}: ${message}`),
       // Legacy (untyped) provider failures arrive as message text: keep secrets
       // out of the trace, and keep the failure its own message for the legacy
       // failure check below (it reads the round's last item).
@@ -5690,7 +5704,7 @@ export class MultiremiDaemon {
         // ADR 0023: Remi's part of the AGENTS.md in effect, for the transcript's session notes. Never the local context.
         instructions: promptArtifact.instructions,
       });
-      if (previousTrace?.turn) trace.acp({ sessionUpdate: "notice", title: "Remi 已更新", message: "继续当前轮次" } as any);
+      if (previousTrace?.turn && this.resumedUsageRuns.has(task.id)) trace.restarted(this.executionGenerations.get(task.id)!);
       signal.throwIfAborted();
       steerFeed.start();
       let prompt = promptArtifact.prompt;
@@ -6200,6 +6214,18 @@ export class MultiremiDaemon {
         } else await this.parkedLanes.endAttempt(laneRecord, outcome && !outcome.parked ? outcome.reason : null);
       } else {
         await provider.close?.();
+      }
+      if (this.restartExecutions.has(task.id)) {
+        // The bridge and all output sources have stopped. Close its work, keep
+        // server-owned waits, and save identities only: no activity survives.
+        this.recordTrace(task.id, () => trace.plannedRestart());
+        this.recordTrace(task.id, () => trace.flush());
+        try {
+          this.restartTraceIdentities.set(task.id, { state: trace.checkpoint(),
+            trace_head: this.ensureTrace().store.head(task.id)?.head ?? 0 });
+        } catch (error) {
+          log.warn(`Task ${task.id}: optional trace identity snapshot unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
       this.restartProviderClosed.add(task.id);
       this.liveUpdateProviders.delete(provider);

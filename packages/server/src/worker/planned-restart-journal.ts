@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { openSqliteDatabase } from "../store/db/sqlite.js";
 import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
+import { parseTraceTranslatorCheckpoint, TRACE_TRANSLATOR_CHECKPOINT_MAX_BYTES, type TraceTranslatorCheckpoint } from "./trace-translator.js";
 
 export interface RestartExecution {
   workspace_id: string;
@@ -67,7 +68,43 @@ export class PlannedRestartJournal {
         handoff_id TEXT PRIMARY KEY, payload TEXT NOT NULL, sha256 TEXT NOT NULL,
         consumer_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('prepared','acknowledged','resumed')),
         resumed_generation INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS planned_restart_trace_identities (
+        handoff_id TEXT PRIMARY KEY, payload TEXT NOT NULL, sha256 TEXT NOT NULL
       );`);
+  }
+
+  /** Optional local optimization, never part of server continuation authority. */
+  saveTraceIdentities(execution: RestartExecution, traceHead: number, state: TraceTranslatorCheckpoint): void {
+    if (!parseTraceTranslatorCheckpoint(state)) throw new Error("Invalid trace identity snapshot");
+    const binding = JSON.parse(encode(execution, { version: 1, session_id: null, work_dir: null,
+      trace_head: traceHead, input_ack_seq: 0, delivered_message_ids: [] })).execution;
+    const payload = JSON.stringify({ execution: binding, trace_head: traceHead, state });
+    if (Buffer.byteLength(payload) > TRACE_TRANSLATOR_CHECKPOINT_MAX_BYTES + 8192) throw new Error("Trace identity snapshot exceeds local limit");
+    this.db.run(`INSERT INTO planned_restart_trace_identities(handoff_id,payload,sha256) VALUES(?,?,?)
+      ON CONFLICT(handoff_id) DO UPDATE SET payload=excluded.payload,sha256=excluded.sha256`,
+    [execution.handoff_id, payload, digest(payload)]);
+  }
+
+  /** Missing or invalid snapshots must never stop an authorized resume. */
+  traceIdentities(entry: RestartJournalEntry, warn: (reason: string) => void): TraceTranslatorCheckpoint | null {
+    try {
+      const row = this.db.query("SELECT payload,sha256 FROM planned_restart_trace_identities WHERE handoff_id=?")
+        .get(entry.execution.handoff_id) as { payload: string; sha256: string } | null;
+      if (!row) throw new Error("trace identity snapshot missing");
+      if (Buffer.byteLength(row.payload) > TRACE_TRANSLATOR_CHECKPOINT_MAX_BYTES + 8192 || digest(row.payload) !== row.sha256)
+        throw new Error("trace identity snapshot digest mismatch");
+      const value = JSON.parse(row.payload);
+      if (value.trace_head !== entry.checkpoint.trace_head
+          || encode(value.execution, entry.checkpoint) !== encode(entry.execution, entry.checkpoint))
+        throw new Error("trace identity snapshot binding mismatch");
+      const state = parseTraceTranslatorCheckpoint(value.state);
+      if (!state) throw new Error("trace identity snapshot invalid");
+      return state;
+    } catch (error) {
+      try { warn(error instanceof Error ? error.message : "trace identity snapshot unavailable"); } catch { /* Diagnostics cannot prevent continuation. */ }
+      return null;
+    }
   }
 
   prepare(execution: RestartExecution, checkpoint: PlannedRestartCheckpoint): RestartJournalEntry {

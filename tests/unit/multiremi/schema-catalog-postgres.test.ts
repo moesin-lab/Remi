@@ -82,23 +82,25 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
   });
   for (const name of ['U&"retained"', String.raw`u&"ret\0061ined"`,
     `U&"ret!0061ined" UESCAPE '!'`,
-    ...["E'!'", '$$!$$', "'!'\n''"].map(escape => `U&"ret!0061ined" UESCAPE ${escape}`)]) it(`rejects Unicode TRUNCATE without losing rows: ${name}`, () => {
+    ...["E'!'", '$$!$$', "'!'\n''", "'!'\n-- continuation\n''", "E'!'\n-- continuation\n''"].map(escape => `U&"ret!0061ined" UESCAPE ${escape}`)]) it(`rejects Unicode TRUNCATE without losing rows: ${name}`, () => {
     const schema = fixture();
     db.exec(`CREATE TABLE ${schema}.retained (id integer); INSERT INTO ${schema}.retained VALUES (42)`);
-    const sql = `TRUNCATE TABLE ${schema}.${name}`;
-    rejected(`unicode-truncate-${serial}`, sql, 'Destructive DDL is forbidden');
+    const sql = `TRUNCATE ${schema}.${name}`;
+    rejected(`unicode-truncate-${serial}`, sql, 'Unicode escape identifiers/strings are unsupported');
     expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
-    console.info(`Original row retained after ${sql}`);
+    expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
+    expect(readSchemaLevels(db).expandLevel).toBe(0);
+    console.info(`Original row retained after ${sql}; steps=[]; expandLevel=0`);
   });
-  for (const escape of ["'!'", "E'!'", '$$!$$', "'!'\n''"]) it(`allows Unicode additive ALTER with ${escape}`, () => {
+  for (const escape of ["'!'", "E'!'", '$$!$$', "'!'\n''", "'!'\n-- continuation\n''", "E'!'\n-- continuation\n''"]) it(`rejects unsupported Unicode additive ALTER with ${escape}`, () => {
     const schema = fixture();
     db.exec(`CREATE TABLE ${schema}.retained (id integer)`);
     const sql = `ALTER TABLE ${schema}.U&"ret!0061ined" UESCAPE ${escape} ADD COLUMN U&"c!006fl" UESCAPE ${escape} text`;
-    expect(hasDestructiveSchemaSql(sql)).toBe(false);
-    runSchemaExpands(db, [step(`unicode-additive-${serial}`, sql)], '9.0.0', { minLevel: 0, maxLevel: 100 });
-    expect(db.query(`SELECT col FROM ${schema}.retained`).all()).toEqual([]);
-    expect(db.query('SELECT id FROM multiremi_schema_steps WHERE id=?').get(`unicode-additive-${serial}`)).not.toBeNull();
-    expect(readSchemaLevels(db).expandLevel).toBe(1);
+    db.exec(`INSERT INTO ${schema}.retained VALUES (42)`);
+    expect(hasDestructiveSchemaSql(sql)).toBe(true);
+    rejected(`unicode-additive-${serial}`, sql, 'Unicode escape identifiers/strings are unsupported');
+    expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
+    expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
   });
   it('rejects TRUNCATE with an unrecognized tail before the SQL backend', () => {
     const schema = fixture();
@@ -110,8 +112,15 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
     const schema = fixture();
     db.exec(`CREATE TABLE ${schema}.retained (id integer); INSERT INTO ${schema}.retained VALUES (42)`);
     rejected(`unknown-uescape-${serial}`,
-      `ALTER TABLE ${schema}.U&"retained" UESCAPE ${escape} ADD COLUMN c text`, 'Destructive DDL is forbidden');
+      `ALTER TABLE ${schema}.U&"retained" UESCAPE ${escape} ADD COLUMN c text`, 'Unicode escape identifiers/strings are unsupported');
     expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
+  });
+  it('rejects Unicode escaped strings before execution', () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.retained (id integer); INSERT INTO ${schema}.retained VALUES (42)`);
+    rejected(`unicode-string-${serial}`, `SELECT u&'hello'`, 'Unicode escape identifiers/strings are unsupported');
+    expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
+    expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
   });
   // These SELECT statements deliberately pass text lint. Only before/after
   // catalog comparison can detect the function's transactional side effects.

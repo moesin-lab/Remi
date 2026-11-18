@@ -72,10 +72,14 @@ describe('startup migration expand discipline', () => {
         writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
         expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql]);
       }
-      for (const escape of ["E'!'", '$$!$$', "'!'\n''"]) {
+      for (const escape of ["E'!'", '$$!$$', "'!'\n''", "'!'\n-- continuation\n''", "E'!'\n-- continuation\n''"]) {
         const sql = `ALTER TABLE U&"ret!0061ined" UESCAPE ${escape} ADD COLUMN U&"c!006fl" UESCAPE ${escape} text`;
         writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
-        expect(startupSchemaDdl(fixture)).toEqual([]);
+        expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql]);
+        for (const unicodeSql of [`TRUNCATE public.U&"ret!0061ined" UESCAPE ${escape}`, `SELECT u&'hello'`]) {
+          writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(unicodeSql)};`);
+          expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([unicodeSql]);
+        }
       }
       writeFileSync(resolve(store, 'new-background-job.ts'), 'export const sql = "DROP TABLE t";');
       const shared = resolve(fixture, 'packages/shared/src');

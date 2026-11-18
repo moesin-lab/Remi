@@ -38,12 +38,30 @@ MUL-170/A4 消费该接口；本单不改变 supervisor 切换条件、编排或
 每个新步骤声明 `id`、`phase`、`level`、`expandRelease`、`release`。
 expand 的 SQL、完成标记和 level 更新位于同一事务；失败可重试。
 重复 ID、倒序 level、改写已应用元数据都会失败。**运行时以 catalog diff 为准，文本检测仅为 lint**：
-每个 expand 在同一事务内、回调前后读取实际目录，拒绝删除或改名既有对象、列类型变化和 nullable→NOT NULL，
-抛错后步骤标记与 level 均不推进。PostgreSQL 覆盖非系统 schema（排除 `pg_catalog`、`information_schema`、
-`pg_toast*`）、表/分区表/外部表、视图/物化视图、序列、类型（含 enum 标签）、列、索引和命名约束。
-SQLite 同样执行 expand，使用 `sqlite_schema`、`pragma_table_xinfo`（含 generated 列）、`pragma_index_list` 和 CREATE SQL 中的命名约束。
-新增对象、默认值设置/修改/删除、DROP NOT NULL 允许；默认值变更仍须评估依赖默认值的旧 writer。
-受保护句柄共用文本检测器提供 fail-fast，但函数调用等间接 DDL 由事务内目录对比拦截。
+每个待执行 expand 在同一事务内读取前后快照，采用默认拒绝模型：已有对象的 identity → definition
+必须保留；删除、改名、定义变化均回滚，步骤和 level 不推进。已经应用的步骤在快照前返回，稳态启动不查 catalog。
+PostgreSQL 每次快照固定 11 条集合查询，不按 namespace 循环；范围排除 `pg_catalog`、`information_schema`、
+`pg_toast*`、临时系统 namespace。建模覆盖 schema；全部 pg_class relkind（含复合类型、分区表、外部表、
+视图/物化视图、索引和序列）的持久性、RLS、分区边界/键、继承顺序、视图/索引定义、序列参数；
+全部列（含复合类型属性）的顺序、类型、identity/generated 与生成表达式；type/domain/enum；
+表/domain 约束定义（忽略 convalidated）；非 internal trigger 定义和启用状态；policy；rule 定义和启用状态；
+function/procedure 定义；extension 版本。schema、relation、type、routine 的 ACL 按单项权限比较，允许增授。
+另以一条 `pg_depend` + `pg_identify_object` 查询登记依赖用户 namespace/relation 的对象身份；
+未建模类型的对象消失也会被拒绝。默认值的 pg_attrdef 身份除外，generated 表达式由列定义比较。
+
+放宽白名单仅有：新增对象；列默认值的设置、修改、删除；DROP NOT NULL；enum ADD VALUE
+（既有标签和相对顺序保留）；ACL 新增项（包括 grant option）；COMMENT。
+但在步骤执行前已存在的表上新增 CHECK/UNIQUE/PRIMARY KEY/FK/EXCLUDE 约束、UNIQUE 索引或 policy，
+以及开启/强制 RLS 都属于收紧，会拒绝旧 writer，故禁止。步骤中新建的表不受新增限制。
+新增 trigger 允许，以支持 expand 双写，但其行为必须人工审查。
+SQLite 同样执行 expand：index/view/trigger 的 SQL 精确比较；table 比较列的 type/notnull/pk/hidden/顺序、
+命名约束定义，以及索引结构；已有表上新增 UNIQUE 索引同样禁止。
+
+已知边界：未建模 catalog 类的同名定义变化不保证被发现；不验证数据内容变化；
+新 trigger 的数据副作用需人工审查。SQLite CHECK 表达式不做语义分析，命名 CHECK 的 token 变化会拒绝，
+未命名 CHECK 不保证覆盖。默认值变更按决定允许，仍须评估依赖默认值的旧 writer。
+受保护句柄与 arch 共用文本 lint 提供 fail-fast；函数调用等间接 DDL 由 catalog 权威守卫判断。
+
 不得捕获原始句柄绕过 guard；新 schema 变化必须提升 level，不能塞入已冻结的历史链。
 
 ## 后台回填
@@ -105,7 +123,14 @@ owner 在本 PR 合入后另开 PR 应用补丁，经 CI 通过再合入；因�
 [arch test](../../tests/arch/startup-schema-ddl.test.ts) 扫描所有非测试 `packages/server/src/**`（含自动后台回填和新文件），
 按 tsconfig 解析并递归扫描运行时 import、export-from、动态 import 的仓库依赖（跳过 type-only）；
 解析失败报错。仅按固定路径排除显式 contract 模块；从 `packages/server/src/api/server.ts`（standby 初始化、
-active 后台任务入口）的传递运行时依赖图断言这两个模块不可达。禁止新 DROP、RENAME、
-改类型、SET NOT NULL 和 TRUNCATE。历史 bootstrap 的 [冻结 allowlist](../../tests/arch/startup-schema-ddl-allowlist.json)
+active 后台任务入口）的传递运行时依赖图断言这两个模块不可达。
+文本 lint 先识别 SQL 语法候选，再默认拒绝，仅放行 CREATE（包括 OR REPLACE）、仅含 ADD/
+SET DEFAULT/DROP DEFAULT/DROP NOT NULL 的 ALTER TABLE、ALTER TYPE ADD VALUE、COMMENT ON、GRANT、
+IMPORT FOREIGN SCHEMA。CREATE OR REPLACE 的既有定义保护由运行时 catalog 承担。
+候选对象类封闭常量及 PostgreSQL 16 SQL Commands / SQLite VIRTUAL TABLE 来源见
+[schema-ddl.ts](../../packages/server/src/store/schema-ddl.ts)；支持嵌套注释、Unicode、模板标识符与位置参数。
+DO 执行体、DROP（含 ON table）、其它 ALTER、TRUNCATE、REVOKE 等候选一律拒绝。
+散文、事件名、shell 字符串不构成 DDL 候选；VACUUM/ANALYZE/REINDEX/CLUSTER/REFRESH/DISCARD 不由 lint 检查。
+历史 bootstrap 的 [冻结 allowlist](../../tests/arch/startup-schema-ddl-allowlist.json)
 精确绑定表达式及次数，只减不增；CI 设置 `SCHEMA_DDL_BASE_REF` 校验基线。历史一次性 DDL 仍是显式例外。
 A4 切换接入和 A5 live 验收不由本单实现；本地 PG 混跑不等于已验证 slot 零失败或生产部署。

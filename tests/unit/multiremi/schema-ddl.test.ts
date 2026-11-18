@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { hasDestructiveSchemaSql } from '@multiremi/store/schema-ddl.js';
+import { hasDestructiveSchemaSql, SCHEMA_DDL_OBJECT_CLASSES } from '@multiremi/store/schema-ddl.js';
 
 // Cross product: table modifiers, qualification, quoted names (spaces/commas),
 // optional COLUMN and IF EXISTS; every action is also checked after ADD.
@@ -46,6 +46,34 @@ negative.push(
   '/* outer /* DROP TABLE t */ outer */ SELECT 1',
   'ALTER TABLE té ALTER café DROP NOT NULL', 'ALTER TABLE té ALTER café DROP DEFAULT',
   "ALTER TABLE té ALTER café SET DEFAULT 'RENAME'", 'SELECT $$DO $$',
+);
+
+for (const kind of SCHEMA_DDL_OBJECT_CLASSES) {
+  for (const prefix of [`DROP ${kind} café CASCADE`, `ALTER ${kind} café RENAME TO té`,
+    `dRoP /* outer /* nested */ comment */ ${kind.toLowerCase()} "té"`]) positive.push(prefix);
+}
+positive.push(
+  'DROP TRIGGER IF EXISTS x ON t', 'DROP POLICY p ON t',
+  'ALTER TYPE p DROP ATTRIBUTE b', 'ALTER TYPE p ALTER ATTRIBUTE b TYPE bigint',
+  'ALTER TABLE p DETACH PARTITION c', 'ALTER TABLE t NO INHERIT p',
+  'ALTER TABLE t DISABLE TRIGGER x', 'ALTER TABLE t DISABLE RULE x',
+  'ALTER TABLE t ENABLE ROW LEVEL SECURITY', 'ALTER TABLE t FORCE ROW LEVEL SECURITY',
+  'ALTER TABLE t SET SCHEMA other', 'REVOKE SELECT ON t FROM PUBLIC',
+  'SECURITY LABEL ON TABLE t IS NULL', 'REASSIGN OWNED BY x TO y',
+  'TRUNCATE ONLY s.t*, other RESTART IDENTITY CASCADE',
+);
+negative.push(
+  'comment', 'comment.created', 'Comment not found: x', 'Do not do this',
+  'for x in y; do echo x; done', 'Drop this dependency first',
+  'import bundle exceeds limit', 'refresh token', 'analyze', 'VACUUM INTO ?',
+  'ALTER', 'DROP', 'COMMENT', 'TRUNCATE this log message',
+  'ALTER TABLE $1 ADD COLUMN IF NOT EXISTS ',
+  "ALTER TABLE t_${x} ADD COLUMN c TEXT NOT NULL DEFAULT 'd'",
+  'CREATE OR REPLACE VIEW v AS SELECT 1',
+  "CREATE OR REPLACE FUNCTION f() RETURNS void AS $$ BEGIN NULL; END $$ LANGUAGE plpgsql",
+  "ALTER TYPE mood ADD VALUE 'ok' BEFORE 'sad'", "COMMENT ON TABLE t IS 'ok'",
+  'GRANT SELECT ON t TO PUBLIC', 'IMPORT FOREIGN SCHEMA s FROM SERVER s INTO t',
+  'REINDEX INDEX i', 'CLUSTER t', 'REFRESH MATERIALIZED VIEW v', 'DISCARD ALL',
 );
 
 describe('shared schema DDL action detector', () => {

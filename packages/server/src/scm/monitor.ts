@@ -283,7 +283,8 @@ export class ScmMonitor {
           if (previous?.alert_key === key) return;
           for (const member of this.ctx.workspaces().listWorkspaceMembers(connection.workspaceId).filter(m => !m.archivedAt)) {
             this.ctx.createInboxItem({ workspaceId: connection.workspaceId, memberId: member.id, type: "scm_collection_alert",
-              title: "SCM collection is delayed", body: JSON.stringify({ schema: "scm_monitor.health.v1", ...stream }), details: stream, actorType: "system" });
+              title: "SCM collection is delayed", body: JSON.stringify({ schema: "scm_monitor.health.v1", ...stream }), details: stream, actorType: "system",
+            });
           }
           this.ctx.db.run(`INSERT INTO multiremi_scm_monitor_health(connection_id, repository_id, stream, alert_key) VALUES (?, ?, ?, ?)
             ON CONFLICT(connection_id, repository_id, stream) DO UPDATE SET alert_key = excluded.alert_key`, [connection.id, stream.repositoryId, stream.stream, key]);

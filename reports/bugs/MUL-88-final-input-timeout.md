@@ -127,3 +127,22 @@ CI 进行中、缺失、跳过不计为 PG 分片通过。未合并、未部署�
 修正测试恢复时点（deadline 后立即解除拦截，不放宽 timeout 或业务断言）后，
 只重跑改变的 `final-input-timeout.test.ts`：**11 pass、0 fail、113 assertions**。
 其余九文件未作后续修改；原有 steer/force-answer/unread/幂等回归全部通过。
+
+### 首轮完整 CI 暴露的测试适配
+
+`workflow_dispatch` run `44267708487`（head `4c39f194d`）实际执行 PG 后端：
+分片 0 / 6 失败，原始日志按该 run 的 backend (0) / backend (6) job 下载核对；不以其它分片成功掩盖失败。
+
+- `shutdown-recovery` 旧断言期望 final 后重试两次；改为检查同一 attempt 完成、
+  回复保留、provider 一次，符合本单“完成后仅重放送达”的行为。
+- decision callback range fixture 直接分发 `turn.complete`，跳过本地 receipt prerequisite，
+  且没有协商 `input_unread`。改用真实 `acquireDaemonOutbox` / `daemonReportTransport`
+  与同一 WS client，初始化 trace transport 并协商 unread；保留“未读必须再提示一次”
+  的原有三轮断言和真实 HTTP range read。后续 closed-database 连带错误随之消失。
+- poll cadence 的 `Object.create` 夹具缺少 main 新增的 `runtimeBindingProbeTasks`
+  与 `diskMonitor.check`；仅补齐这些非本测试关注模块的初始状态/替身，保留时间和 claim 断言。
+
+实际运行 `bun run test tests/unit/daemon/decision-callback-integration.test.ts
+ tests/integration/daemon-protocol-v2/shutdown-recovery.test.ts`：42 pass、32 skip（本地无 PG）、
+0 fail、314 assertions。`bun run test tests/unit/daemon/poll-cadence.test.ts`：14 pass、
+0 fail、49 assertions。最终 PG 实跑以新 head 完整工作流证据为准。

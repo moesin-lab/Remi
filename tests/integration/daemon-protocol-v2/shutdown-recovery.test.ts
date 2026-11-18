@@ -120,9 +120,11 @@ for (const outcome of ["completed", "cancelled"] as const) {
     let finish!: () => void;
     const finishing = new Promise<void>(resolve => { finish = resolve; });
     let running = false;
+    let providerRuns = 0;
     const h = await DaemonProtocolHarness.create({ database: "sqlite", providerFactory: () => ({
       async *sendStream() {
         running = true;
+        providerRuns++;
         await finishing;
         yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "drained answer" }] } as any;
       },
@@ -151,10 +153,12 @@ for (const outcome of ["completed", "cancelled"] as const) {
         expect(h.store.listTasksForIssue(issue.id)).toHaveLength(1);
         expect(h.store.getTask(task.id)?.failureReason).not.toBe("runtime_recovery");
       } else {
-        // The socket closes before the provider finishes: finalization RPCs
-        // lose authority, so this is also a resumable runtime interruption.
-        expect(h.store.listTasksForIssue(issue.id)).toHaveLength(2);
-        expect(h.store.getTask(task.id)?.failureReason).toBe("runtime_recovery");
+        // The provider drained a final answer after stop. Its durable completion
+        // replays on restart without turning delivery loss into another execution.
+        expect(h.store.listTasksForIssue(issue.id)).toHaveLength(1);
+        expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", result: "drained answer", error: null });
+        expect(h.store.getTask(task.id)?.failureReason).not.toBe("runtime_recovery");
+        expect(providerRuns).toBe(1);
       }
     } finally { finish(); await h.dispose(); }
   }, 20_000);

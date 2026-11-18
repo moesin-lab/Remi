@@ -15,6 +15,11 @@ import { READY_GATE } from './helpers.js';
 
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
+function simulateHostPlatform(platform: NodeJS.Platform) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...descriptor, value: platform });
+  cleanup.push(async () => { Object.defineProperty(process, 'platform', descriptor); });
+}
 async function fixture() {
   const previousSwitch = process.env.REMI_SLOT_SWITCH;
   process.env.REMI_SLOT_SWITCH = '1';
@@ -181,6 +186,9 @@ describe('socket-free internal application updates', () => {
     }
   });
   it('refines published preflight for the resolved target without requiring offline-only services for a switch', async () => {
+    // Internal updates run in Linux containers even when this suite's host is
+    // Windows/macOS. Exercise the real preflight without bypassing its guard.
+    simulateHostPlatform('linux');
     const f = await fixture(); f.statuses.api.slotSwitch = true;
     await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
     await rm(join(f.config.control, 'rehearsal/status.json'));
@@ -192,6 +200,19 @@ describe('socket-free internal application updates', () => {
     const incompatible = await f.driver.preflightForRelease({ ...f.manifest, dataSchema: 'e'.repeat(64) });
     expect(incompatible.ready).toBe(false);
     expect(incompatible.checks.find(check => check.code === 'isolated_rehearsal')?.ok).toBe(false);
+  });
+  it.each(['darwin', 'win32'] as const)('rejects compatible switch preflight on a %s host', async platform => {
+    simulateHostPlatform(platform);
+    const f = await fixture(); f.statuses.api.slotSwitch = true;
+    await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
+    await rm(join(f.config.control, 'rehearsal/status.json'));
+    const compatible = await f.driver.preflightForRelease(f.manifest);
+    expect(compatible.ready).toBe(false);
+    expect(compatible.checks.filter(check => !check.ok)).toEqual([
+      { code: 'container_supervisors', ok: false, message: 'Internal updater must run in a Linux container' },
+    ]);
+    expect(compatible.checks.map(check => check.code)).not.toContain('isolated_rehearsal');
+    expect(compatible.checks.map(check => check.code)).not.toContain('backup');
   });
   it('preserves structured rehearsal refusal in the internal recovery journal', async () => {
     const f = await fixture(); f.preflight(); f.state.rehearsalFails = true;

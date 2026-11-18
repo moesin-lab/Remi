@@ -534,6 +534,7 @@ async function reconcileIssueSessionProviderConfig(
     options.relayFragment ?? "",
     options.codexRelayUsesEnvApiKey === true,
     catalogState.status === "loaded" ? catalogPath : undefined,
+    options.codexPluginInstalled === true,
   );
   const personalSkills = resolvedHome.runtimeWorkspaceId ? [] : personalCodexSkillFiles(options.personalSkillsHome ?? homedir());
   if (options.sideConversation || personalSkills.length) {

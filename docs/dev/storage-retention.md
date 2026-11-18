@@ -37,7 +37,7 @@ daemon 上的东西分四类：工作区（代码目录）、运行环境（prov
 | 回收 | 结束后超过 `ttl_ms`（自动化 Chat 用 `automation_ttl_ms`）；或已结束且仍占用工作区的主体超过 `max_retained` 时淘汰最久未用的 |
 | 不回收 | 有正在跑的执行；Chat 被置顶；Issue 未结束；外部目录（只清运行环境） |
 | 旧一代运行环境 | 同一会话线下低于最高代的目录，修改时间超过 `ttl_ms` 后清理，不等主体结束；这一代里（私有 `work/`、provider home、插件运行目录）有无法保存的未保存工作时保留这一代 |
-| 私有临时目录 | 执行结束即删；每轮删除 `env/*/tmp` 下不在运行的执行留下的残留（不要求主体有登记） |
+| 私有临时目录 | 执行结束即删；每轮删除 `env/*/tmp` 下不在运行的执行留下的残留（不要求主体有登记）；Codex curated 插件缓存另按下述规则清理 |
 | 硬删除 | 服务端 404 且最后使用超过 `orphan_ttl_ms`：linked worktree 有未保存工作先打快照 ref，再删工作区、运行环境、trace 和登记；独立克隆里有未保存工作则保留（`snapshot_failed`） |
 | 已迁走的 Issue | `gc.check_issue` 应答 `moved` 只给执行过该 Issue 的 daemon（其他 daemon 仍得 404，避免被枚举）。daemon 视其为已结束：超过 `ttl_ms`（从最后使用算起，应答不带时间戳）后先快照再回收 `work/<iss>` 与运行环境，与已结束的 Issue 完全一致；但**永不遗忘**，trace、原生会话历史和登记都保留。之后若服务端对它应答 404（真被删除），才走硬删除 |
 | 失败 | 任一步失败则保留并上报原因，下一轮重试；根目录所有权丢失中止整轮 |
@@ -74,6 +74,27 @@ daemon 上的东西分四类：工作区（代码目录）、运行环境（prov
 - 还没有 worktree 站在其 `dir` 上的条目、以及站着的 worktree 不在记录的分支上的条目留在登记里等待，日志里报告 `snapshot_restore_pending`；登记保持 `reclaimed`，直到没有条目在等 worktree，之后的检出仍能恢复。
 - `dir` 在 `env/` 下的条目（会话线某一代的私有 `work/`、provider home 里的 worktree 的快照）只是参考：新的一代里没有地方可以恢复它们，ref 留在仓库里待人工处理。它们随回收一起上报一次（`unsaved_work`），不使登记保持 `reclaimed`，也不在每次启动时告警；重开后的第一次恢复把它们从登记里摘掉，已经 `reclaimed` 的登记在下一次回收时也不再带着它们，所以不会重复上报。
 - 快照只在本机；重开落到另一台 daemon 时只从分支恢复。
+
+### Codex curated 插件缓存
+
+Codex 默认启用 `features.plugins`，启动时自行把 OpenAI curated marketplace 同步到
+`$CODEX_HOME/.tmp/plugins`，会让每个执行 home 各存一份。Remi 不使用这份 marketplace：
+没有安装 Remi Agent Plugin 的 Codex session config 默认写 `features.plugins = false`；
+安装了 Agent Plugin 的 home 不写这个默认值。已有 features 条目、用户或 Relay 显式指定的
+`plugins` 值优先，非表的 `features` 原样保留。skills 与 MCP 不依赖这个插件开关。
+
+每个周期轮次和手动 `run` 都独立扫描 `env/` 下的 lane 一代 `home/` 及
+`executions/<fingerprint>/home/`，删除 `.tmp/plugins`、`plugins.sha`、`plugins.sync.lock`，
+以及 Codex 同步产生的 `plugins-clone-<随机字母数字>`、`plugins-backup-<随机字母数字>` staging 条目
+（命名见 [Codex 0.163.0 同步实现](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/core-plugins/src/startup_sync.rs)，本机实测观察到 `plugins-clone-wmUzz4`）。
+不要求主体登记或结束、不等保留期；其他 `.tmp` 内容、`projects/`、`sessions/`、`work/` 不受影响。
+同一主体有正在运行的执行或生命周期锁被占用时，全部缓存留到下轮。扫描不跟随符号链接，
+删除使用现有安全删除；单个失败写入 `errors` 后继续，根目录所有权丢失仍中止整轮。
+
+`dry_run`（包括环境变量强制的预演）只计算计划，不删除。报告可选字段
+`codex_plugin_cache.planned_homes` 表示本轮可清理的 home 数，`cleaned_homes` 表示本轮完整清理的
+home 数（预演为 0）；这次清理释放的空间并入 `freed_bytes`，沿用文件系统空闲空间差的近似口径。
+只上报计数，不添加每个缓存的路径清单，沿用原有报告大小限制。
 
 ## 策略
 

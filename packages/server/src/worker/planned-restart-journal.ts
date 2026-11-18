@@ -25,13 +25,18 @@ export interface RestartJournalEntry {
 }
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+// Local storage format, independent of peer capability negotiation.
+function identityCheckpoint(traceHead: number): PlannedRestartCheckpoint {
+  return { version: 1, session_id: null, work_dir: null, trace_head: traceHead, input_ack_seq: 0, delivered_message_ids: [] };
+}
 function encode(execution: RestartExecution, checkpoint: PlannedRestartCheckpoint): string {
+  switch (checkpoint.version) { case 1: break; default: throw new Error("Invalid planned restart journal entry"); }
   const ids = [execution.workspace_id, execution.daemon_id, execution.runtime_id, execution.turn_id,
     execution.attempt_id, execution.handoff_id];
   const counter = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0;
   if (ids.some(id => typeof id !== "string" || !id || id.length > 256)
     || !counter(execution.generation) || execution.generation >= Number.MAX_SAFE_INTEGER
-    || checkpoint.version !== 1 || !counter(checkpoint.trace_head) || !counter(checkpoint.input_ack_seq)
+    || !counter(checkpoint.trace_head) || !counter(checkpoint.input_ack_seq)
     || [checkpoint.session_id, checkpoint.work_dir].some(value => value !== null && (typeof value !== "string" || value.length > 8192))
     || !Array.isArray(checkpoint.delivered_message_ids) || checkpoint.delivered_message_ids.length > 1024
     || checkpoint.delivered_message_ids.some(id => typeof id !== "string" || !id || id.length > 256)
@@ -77,8 +82,7 @@ export class PlannedRestartJournal {
   /** Optional local optimization, never part of server continuation authority. */
   saveTraceIdentities(execution: RestartExecution, traceHead: number, state: TraceTranslatorCheckpoint): void {
     if (!parseTraceTranslatorCheckpoint(state)) throw new Error("Invalid trace identity snapshot");
-    const binding = JSON.parse(encode(execution, { version: 1, session_id: null, work_dir: null,
-      trace_head: traceHead, input_ack_seq: 0, delivered_message_ids: [] })).execution;
+    const binding = JSON.parse(encode(execution, identityCheckpoint(traceHead))).execution;
     const payload = JSON.stringify({ execution: binding, trace_head: traceHead, state });
     if (Buffer.byteLength(payload) > TRACE_TRANSLATOR_CHECKPOINT_MAX_BYTES + 8192) throw new Error("Trace identity snapshot exceeds local limit");
     this.db.run(`INSERT INTO planned_restart_trace_identities(handoff_id,payload,sha256) VALUES(?,?,?)
@@ -174,8 +178,7 @@ export class PlannedRestartTransfer {
 
   suspend(execution: RestartExecution, stopAtSafePoint: () => Promise<PlannedRestartCheckpoint>): Promise<RestartJournalEntry> {
     execution = { ...execution };
-    const identity = JSON.stringify(JSON.parse(encode(execution, { version: 1, session_id: null, work_dir: null,
-      trace_head: 0, input_ack_seq: 0, delivered_message_ids: [] })).execution);
+    const identity = JSON.stringify(JSON.parse(encode(execution, identityCheckpoint(0))).execution);
     const inFlight = this.stopping.get(execution.handoff_id);
     if (inFlight) {
       if (inFlight.execution !== identity) return Promise.reject(new Error("Planned restart journal conflict"));

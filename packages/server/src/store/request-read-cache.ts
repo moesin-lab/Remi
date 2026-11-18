@@ -197,6 +197,12 @@ export function seedRequestRead<T>(db: object, tables: readonly string[], key: s
 // Only locks acquired through the wrapped transaction runner are reusable.
 // A savepoint rollback restores its entry set: PG releases locks acquired after it.
 const transactionLocks = new WeakMap<object, { held: Set<string> | null }>();
+/** Database decorators must retain the wrapped transaction's lock reuse state. */
+export function inheritDatabaseTransactionLocks(database: object, wrapper: object): void {
+  const state = transactionLocks.get(database);
+  if (state) transactionLocks.set(wrapper, state);
+}
+
 export function acquireTransactionLock(db: object, key: string, acquire: () => void): void {
   const state = transactionLocks.get(db);
   if (state?.held?.has(key)) return;

@@ -41,15 +41,17 @@ try {
   await admin.unsafe(`CREATE DATABASE ${name}`); created = true;
   url.pathname = '/' + name;
   await copyFile(join(import.meta.dir, 'schema-rollback-probe.ts'), probe);
-  const runOld = () => {
+  const runOld = (expectedTask?: string) => {
     const result = Bun.spawnSync([process.execPath, probe], { cwd: previousRoot,
-      env: { PATH: process.env.PATH, HOME: temporary, NODE_ENV: 'test', MULTIREMI_DATABASE_URL: url.toString(),
+      env: { MUL173_EXPECT_TASK: expectedTask, PATH: process.env.PATH, HOME: temporary, NODE_ENV: 'test', MULTIREMI_DATABASE_URL: url.toString(),
         MULTIREMI_MIGRATION_REPORT_DIR: join(temporary, 'reports') }, stdout: 'pipe', stderr: 'pipe' });
     console.log(result.stdout.toString());
     if (result.exitCode !== 0) throw new Error(`Previous release core tests failed (${result.exitCode}): ${result.stderr.toString()}`);
-    assert.equal(JSON.parse(result.stdout.toString().trim().split('\n').at(-1)!).pass, true);
+    const resultData = JSON.parse(result.stdout.toString().trim().split('\n').at(-1)!);
+    assert.equal(resultData.pass, true);
+    return resultData;
   };
-  runOld(); // Establish the previous schema and data using actual old writers.
+  const seeded = runOld(); // Establish the previous schema and data using actual old writers.
   const db = new PostgresSyncDatabase(url.toString());
   let schema;
   try {
@@ -58,7 +60,7 @@ try {
     schema = readSchemaLevels(db);
     assert.equal(schema.contractLevel, 0, 'Automatic rollback attestation cannot cross contract');
   } finally { db.close(); }
-  runOld(); // Actual old startup plus create/start/complete/cancel after expand.
+  runOld(seeded.task); // Actual old startup plus create/start/complete/cancel after expand.
   const verify = new PostgresSyncDatabase(url.toString());
   try { assert.deepEqual(readSchemaLevels(verify), schema, 'Old startup must retain schema levels'); }
   finally { verify.close(); }

@@ -1305,3 +1305,17 @@ hello / welcome 协商命名能力 `turn.restart`，且
 manual、deploy、CLI update 的 drain 到期时，只有支持的 runtime 请求安全点 checkpoint；
 旧 daemon 回退到 MUL-45 的中断与自动重试，消耗原有重试预算，不创建 requested checkpoint。
 更新仍等待旧进程的零活跃 ACK，再进入安装；不会因无法确认新帧而永久停留在 requested。
+
+### 计划内重启的原生等待
+
+checkpoint 的可选 `question_ids` 只引用该 attempt 的原生等待，正文与答案仍由服务端保存。
+挂起确认后，`reconcileRuntimeWaits` 不因新进程暂未登记回调而分离这些 Q。
+恢复 CAS 原子设置新 generation 的绑定标记；provider 重做相同请求时，`turn.decision`
+携带 `recover_question_id` 和新 nonce，核对 checkpoint、来源、generation 与请求内容后重绑原 Q。
+已保存答案通过 `turn.decision.get` 取回；未重绑标记或旧 nonce 都不能确认消费。
+请求内容变化时拒绝该回调并保留原 Q，不创建第二个 Q。显式关闭优先，
+没有确认 checkpoint 的中断继续走原崩溃恢复。恢复响应在 CAS 后重建输入，保留期间新增的消息。
+
+当前不把 native steering 的 `injected` 结果视为跨重启持久收据：该结果没有证明桥在取消前
+已把消息写入可恢复的会话。未投递输入仍保存在原日志；已注入但未确认持久化的消息
+仍可能重放，严格的不丢且不重放对账尚未实现。

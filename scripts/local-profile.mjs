@@ -514,6 +514,100 @@ function acquireHostLock(root) {
   throw new Error('Unable to acquire the local-profile host lock');
 }
 
+// Parse the user unit without invoking systemctl. Unsupported executable
+// expansions fail closed: pruning is optional, losing a daemon executable is not.
+function daemonReleaseRefs(releases, keep) {
+  const config = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+  const unit = join(config, 'systemd/user/multiremi-daemon.service');
+  const optional = (path, read) => {
+    try { lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    return read(path);
+  };
+  const base = optional(unit, path => readFileSync(path, 'utf8'));
+  const dropins = optional(`${unit}.d`, path => readdirSync(path)) ?? [];
+  const files = base === null ? [] : [[unit, base]];
+  for (const name of dropins.filter(name => name.endsWith('.conf')).sort()) {
+    // Unlike an absent unit/directory, a missing or unreadable listed drop-in
+    // is an incomplete configuration snapshot and must abort the plan.
+    files.push([join(`${unit}.d`, name), readFileSync(join(`${unit}.d`, name), 'utf8')]);
+  }
+  const words = (value) => {
+    const tokens = [];
+    let token = '', quote = null, started = false;
+    for (let i = 0; i < value.length; i++) {
+      let c = value[i];
+      if (c === '\\') {
+        c = value[++i];
+        const escapes = { a: '\x07', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', s: ' ', '\\': '\\', '"': '"', "'": "'" };
+        if (c in escapes) token += escapes[c];
+        else if (c === 'x' && /^[a-f0-9]{2}$/iu.test(value.slice(i + 1, i + 3))) {
+          token += String.fromCharCode(parseInt(value.slice(i + 1, i + 3), 16)); i += 2;
+        } else throw new Error('Unsupported daemon ExecStart escape');
+        started = true;
+      } else if (quote) {
+        if (c === quote) quote = null; else token += c;
+      } else if (c === '"' || c === "'") {
+        if (started) throw new Error('Invalid daemon ExecStart quoting');
+        quote = c; started = true;
+      } else if (/\s/u.test(c)) {
+        if (started) { tokens.push(token); token = ''; started = false; }
+      } else { token += c; started = true; }
+    }
+    if (quote) throw new Error('Unterminated daemon ExecStart quote');
+    if (started) tokens.push(token);
+    return tokens;
+  };
+  const refFor = (value) => {
+    const tokens = words(value);
+    if (!tokens.length) throw new Error('Empty daemon ExecStart command');
+    let executable = tokens[0].replace(/^[-@:+!|]+/u, '');
+    executable = executable.replace(/%./gu, specifier => {
+      if (specifier === '%%') return '%';
+      if (specifier === '%h') return homedir();
+      if (specifier === '%E') return config;
+      throw new Error('Unsupported daemon ExecStart specifier');
+    });
+    if (!executable || /[$%\x00-\x1f]/u.test(executable)) throw new Error('Unresolved daemon ExecStart executable');
+    if (!isAbsolute(executable)) {
+      if (executable.includes('/')) throw new Error('Invalid daemon ExecStart executable');
+      return null; // systemd search-path executable, outside profile releases
+    }
+    const path = relative(resolve(releases), resolve(executable));
+    const ref = path.split(/[\\/]/u)[0];
+    return /^[a-f0-9]{40}$/u.test(ref) ? ref : null;
+  };
+  let effective = [];
+  const history = [];
+  for (const [path, content] of files) {
+    let section = '', pending = '';
+    for (const raw of content.split(/\r?\n/u)) {
+      const line = raw.trim();
+      if (!line || /^[#;]/u.test(line)) continue;
+      const logical = pending + line;
+      if ((logical.match(/\\+$/u)?.[0].length ?? 0) % 2) {
+        pending = `${logical.slice(0, -1)} `; continue;
+      }
+      pending = '';
+      if (/^\[[^\]]+\]$/u.test(logical)) { section = logical.slice(1, -1); continue; }
+      const assignment = /^([^=\s]+)\s*=(.*)$/u.exec(logical);
+      if (!assignment || !section) throw new Error(`Invalid daemon unit syntax: ${path}`);
+      if (section !== 'Service' || assignment[1] !== 'ExecStart') continue;
+      const value = assignment[2].trim();
+      if (!value) effective = [];
+      else effective.push(refFor(value));
+    }
+    if (pending) throw new Error(`Unterminated daemon unit continuation: ${path}`);
+    history.push([...effective]);
+  }
+  const refs = new Set(effective.filter(Boolean));
+  const recent = new Set();
+  for (const snapshot of history.reverse()) for (const ref of snapshot.filter(Boolean).reverse()) {
+    if (recent.size < keep) recent.add(ref);
+  }
+  for (const ref of recent) refs.add(ref);
+  return refs;
+}
+
 // Caller holds host-update.lock, including during automatic post-activation cleanup.
 function pruneReleases(root, dryRun = false) {
   try {
@@ -551,6 +645,8 @@ function pruneReleases(root, dryRun = false) {
       protect(active.source);
       protectedRefs.add(active.ref);
     }
+    const daemonRefs = daemonReleaseRefs(releases, keep);
+    for (const ref of daemonRefs) protectedRefs.add(ref);
     // Validate the entire deletion plan before changing anything. Only real
     // source directories and regular tar files are eligible; never follow links.
     const candidates = readdirSync(releases).filter(name => /^[a-f0-9]{40}(\.tar)?$/u.test(name))
@@ -564,6 +660,9 @@ function pruneReleases(root, dryRun = false) {
         if (dirname(canonicalPath(path)) !== canonicalPath(releases)) throw new Error(`Release path escapes releases: ${name}`);
         return path;
       });
+    if (dryRun) for (const ref of daemonRefs) {
+      console.log(`Keeping release for daemon reference: ${join(releases, ref)}`);
+    }
     for (const path of candidates) {
       console.log(`${dryRun ? 'Would remove' : 'Removing'} release: ${path}`);
       if (!dryRun) rmSync(path, { recursive: true, force: true });

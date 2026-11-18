@@ -511,6 +511,67 @@ jobs:
           compression-level: 0
           retention-days: 30
 
+  daemon-n-minus-one:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        direction: [previous-daemon, previous-server]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Select latest stable CLI release
+        id: previous
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner, repo: context.repo.repo, per_page: 100
+            });
+            const stable = releases.filter(r => !r.draft && !r.prerelease && /^v\d+\.\d+\.\d+$/.test(r.tag_name))
+              .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at));
+            if (!stable.length) throw new Error('No stable CLI release available for N-1 smoke');
+            core.setOutput('tag', stable[0].tag_name);
+      - name: Prepare release checkout and dependencies
+        env:
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/previous" "$PREVIOUS_TAG"
+          bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+          (cd "$RUNNER_TEMP/previous" && bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts)
+      - name: Enforce contract-only minimum CLI changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            BASE_SHA="$PREVIOUS_TAG"
+          fi
+          bun run scripts/check-daemon-contract.ts "$BASE_SHA"
+      - name: Named capability and peer compatibility guards
+        run: bun run test tests/arch/daemon-n-minus-one.test.ts tests/unit/daemon/daemon-compatibility.test.ts tests/unit/daemon/daemon-protocol-client.test.ts tests/unit/multiremi/peer-channel.test.ts tests/unit/multiremi/hub-peer-transport.test.ts
+      - name: Real mixed release smoke
+        env:
+          DIRECTION: ${{ matrix.direction }}
+        run: |
+          set -o pipefail
+          if [ "$DIRECTION" = previous-daemon ]; then
+            bun run tests/integration/daemon-n-minus-one/run.ts "$PWD" "$RUNNER_TEMP/previous" 2>&1 | tee mixed-version.log
+          else
+            bun run tests/integration/daemon-n-minus-one/run.ts "$RUNNER_TEMP/previous" "$PWD" 2>&1 | tee mixed-version.log
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daemon-n-minus-one-${{ matrix.direction }}
+          path: mixed-version.log
+          if-no-files-found: warn
+
   backend-plan:
     runs-on: ubuntu-latest
     outputs:
@@ -681,7 +742,7 @@ jobs:
   # dependency can become a green full-run release gate.
   build:
     if: always()
-    needs: [im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, runtime-platform, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
+    needs: [daemon-n-minus-one, im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, runtime-platform, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
     runs-on: ubuntu-latest
     steps:
       - name: Require every applicable check

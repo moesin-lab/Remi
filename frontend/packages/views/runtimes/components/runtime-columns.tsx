@@ -296,7 +296,7 @@ function HealthCell({
       <HealthIcon health={health} />
       <span className="block min-w-0 truncate text-sm">
         {labelOf(health)} {runtimeHealthReasons(runtime)}
-        {health !== "online" && runtime.last_seen_at && (
+        {health !== "online" && health !== "degraded" && runtime.last_seen_at && (
           <span className="text-muted-foreground"> · {lastSeen}</span>
         )}
       </span>

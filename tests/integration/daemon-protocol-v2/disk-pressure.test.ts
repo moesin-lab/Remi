@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { diskSpace } from "@daemon/agent-runtime/workspace/disk-usage.js";
-import type { DiskPressureMonitor } from "@daemon/agent-runtime/workspace/disk-pressure.js";
 import { DAEMON_HEARTBEAT_INTERVAL_MS, DAEMON_OFFER_COOLDOWN_MS } from "@multiremi/contracts/daemon-protocol.js";
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
 
@@ -33,9 +32,8 @@ test("temporary daemon refuses disk-critical offers and automatically recovers a
       body: JSON.stringify({ pressure_free_percent: 0, critical_free_percent: 0, pressure_free_bytes: 0, critical_free_bytes: 0 }) });
     expect(restored.status).toBe(200);
     await waitFor(() => (h.daemon as any).workspaceSettings.get("local")?.storage?.critical_free_percent === 0, "policy downlink");
-    // Invoke the same check used by the 30 s timer, without waiting for wall-clock polling.
-    const monitor = (h.daemon as unknown as { diskMonitor: DiskPressureMonitor }).diskMonitor;
-    await monitor.check();
+    // Use the real 30 s monitor timer; no explicit check, resume or claim call.
+    await waitFor(() => !(h.daemon as any).diskMonitor.critical, "automatic disk monitor recovery", 35_000);
     await h.settleHeartbeat();
     h.clock.advance(DAEMON_OFFER_COOLDOWN_MS + DAEMON_HEARTBEAT_INTERVAL_MS);
     await waitFor(() => h.ledger.some(entry => entry.type === "task.start" && entry.partition === task.id)
@@ -46,4 +44,4 @@ test("temporary daemon refuses disk-critical offers and automatically recovers a
     expect(h.store.getRuntime(runtimeId)?.metadata.health).toEqual({ state: "ok", reasons: [] });
     console.log(`MUL-212 recovered: ${JSON.stringify({ task: h.store.getTask(task.id)?.status, health: h.store.getRuntime(runtimeId)?.metadata.health, offers: offers.length, provider_execution: "not validated" })}`);
   } finally { await h.dispose(); }
-}, 45_000);
+}, 75_000);

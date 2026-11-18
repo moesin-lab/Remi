@@ -54,7 +54,7 @@ export function deriveAgentAvailability(
   for (const runtime of runtimes) {
     const health = deriveRuntimeHealth(runtime, now);
     if (health === "online") return "online";
-    if (health === "recently_lost") best = "unstable";
+    if (health === "recently_lost" || health === "degraded") best = "unstable";
     // offline | about_to_gc collapse into the "offline" floor
   }
   return best;

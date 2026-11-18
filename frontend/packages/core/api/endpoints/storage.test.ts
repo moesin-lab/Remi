@@ -4,6 +4,8 @@ import { ApiContractError } from "../schema";
 import { StorageEndpoints } from "./storage";
 
 const settings = {
+  pressure_free_percent: 15, pressure_free_bytes: 20 * 1024 ** 3,
+  critical_free_percent: 5, critical_free_bytes: 5 * 1024 ** 3,
   ttl_ms: 259_200_000, automation_ttl_ms: 86_400_000, max_retained: 50,
   orphan_ttl_ms: 259_200_000, snapshot_max_bytes: 268_435_456, chat_idle_days: 14,
 };

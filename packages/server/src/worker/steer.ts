@@ -3,6 +3,7 @@
 // sends into the live provider session, and multi-turn usage accumulation.
 import type { MultiremiTaskSteerMessage, TaskUsageEntry } from "@multiremi/contracts/types.js";
 import { materializeChatAttachments } from "@daemon/agent-runtime/workspace/chat-attachments.js";
+import { splitProjectedInput } from "@multiremi/contracts/session-input.js";
 import { buildSteerInput, steerInputText } from "@daemon/agent-runtime/prompts/turn-input.js";
 
 export const DEFAULT_STEER_POLL_MS = 2500;
@@ -137,6 +138,14 @@ export function steerMessageText(content: string): string {
  * labels them, with the unread sentence when their range is not complete, or
  * the wrap-up notice for force-answer.
  */
+/** Keep a range record first so adding identity never bypasses body-read checks. */
+export function withSteerIdentity(content: string, id: string, notice = ""): string {
+  const label = `${notice}[Remi steer id: ${id}]\n`;
+  const projected = splitProjectedInput(content);
+  const newline = content.indexOf("\n");
+  return projected.range && newline >= 0 ? content.slice(0, newline + 1) + label + content.slice(newline + 1) : label + content;
+}
+
 export function buildSteerInjectionPrompt(messages: PreparedTaskSteerMessage[], options: { agentId?: string | null; alwaysLabel?: boolean; provider?: string | null } = {}): string {
   return buildSteerInput(messages, options);
 }

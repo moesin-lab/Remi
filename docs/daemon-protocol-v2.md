@@ -1316,6 +1316,13 @@ checkpoint 的可选 `question_ids` 只引用该 attempt 的原生等待，正�
 请求内容变化时拒绝该回调并保留原 Q，不创建第二个 Q。显式关闭优先，
 没有确认 checkpoint 的中断继续走原崩溃恢复。恢复响应在 CAS 后重建输入，保留期间新增的消息。
 
-当前不把 native steering 的 `injected` 结果视为跨重启持久收据：该结果没有证明桥在取消前
-已把消息写入可恢复的会话。未投递输入仍保存在原日志；已注入但未确认持久化的消息
-仍可能重放，严格的不丢且不重放对账尚未实现。
+计划内重启时 steer 按 at-least-once 恢复，优先保证不丢。`injected` 只表示桥接收了输入，
+模型随后输出也不能证明已消费。daemon 为每条注入内容携带 `[Remi steer id: <原消息id>]`；
+只有 provider 的 `user_message_chunk` 回显该原 ID，trace 才把对应 steer 标为 `consumed: true`。
+该确认进入已刷盘 trace 与 checkpoint 的 `delivered_message_ids` 后，恢复的 offer/resync/下行
+才排除它；正文的完整范围读取门槛保持不变。
+
+其余消息仍从原日志恢复，保持顺序并在首次 prompt 带原 steer ID，加上系统说明：
+“以下消息在 Remi 更新前发出，可能已经收到过，处理过的请忽略。”
+trace 按原 steer ID 更新同一个条目，服务端消息也不另建副本。没有带 ID 消费回显的 provider
+会保守重投；窗口内模型可能看到同一消息两次。桥进程跨重启存活与 exactly-once 不在本单范围。

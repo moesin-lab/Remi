@@ -1088,6 +1088,23 @@ describe("trace translator: steer results (ADR 0020)", () => {
     content: kind === "steer" ? `steer ${id}` : "", authorType: "user", authorId: "mem_1",
     createdAt: new Date(T0).toISOString(), consumedAt: null });
 
+  for (const echoFirst of [false, true]) it(`requires an exact user echo and keeps one item (echo first: ${echoFirst})`, () => {
+    const h = harness("codex").start();
+    const record = () => h.translator.steer([steerMessage("st_confirmed")], { via: "native", native_outcome: "injected", error: null });
+    if (!echoFirst) record();
+    h.feed([chunk("[Remi steer id: st_confirmed]")]);
+    if (!echoFirst) expect(h.item("steer:st_confirmed", "user_message").steer?.consumed).toBeUndefined();
+    h.feed([{ sessionUpdate: "user_message_chunk", content: [{ type: "text", text: "[Remi steer id: st_" }] },
+      { sessionUpdate: "user_message_chunk", content: [{ type: "text", text: "confirmed]" }] }]);
+    if (echoFirst) record();
+    record();
+    const item = h.item("steer:st_confirmed", "user_message");
+    expect(item.steer?.consumed).toBe(true);
+    expect(isTraceItem(JSON.parse(JSON.stringify(item)))).toBe(true);
+    expect(h.state.items.filter(item => item.type === "user_message" && item.steer?.steer_id === "st_confirmed")).toHaveLength(1);
+    expect(isTraceItem({ ...item, steer: { ...item.steer, consumed: false } })).toBe(false);
+  });
+
   it("records how each steer was delivered, and the record round-trips", () => {
     const h = harness("claude").start().feed([chunk("Working on it.", { messageId: "m1" })]);
     // Native: injected mid-stream, between the reply it cut short and the one answering it.

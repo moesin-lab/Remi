@@ -574,6 +574,8 @@ export function createTraceTranslator(
   /** Latest version of every item, in first-seen order (for settle / lastItem). */
   const items = new Map<string, TraceItem>((opts.resume?.items ?? []).map(item => [item.id, item]));
   const usedIds = new Set<string>(items.keys());
+  const consumedSteers = new Set<string>();
+  let steerEcho = "";
   const openText = new Map<string, TextState>(); // key: `${parent}\u0000${kind}`
   const tools = new Map<string, ToolState>();
   const suppressed = new Set<string>();
@@ -1551,6 +1553,19 @@ export function createTraceTranslator(
           case "agent_thought_chunk":
             onChunk(frame, "reasoning");
             break;
+          case "user_message_chunk": {
+            const content = (frame as { content?: Array<{ type: string; text?: string }> }).content;
+            const text = Array.isArray(content) ? content.filter(block => block.type === "text").map(block => block.text ?? "").join("") : "";
+            steerEcho = (steerEcho + text).slice(-65536);
+            for (const match of steerEcho.matchAll(/\[Remi steer id: ([A-Za-z0-9_-]{1,256})\]/g)) {
+              const id = match[1]!;
+              consumedSteers.add(id);
+              for (const item of items.values()) if (item.type === "user_message" && item.steer?.steer_id === id && !item.steer.consumed) {
+                write("item.updated", { ...item, steer: { ...item.steer, consumed: true } });
+              }
+            }
+            break;
+          }
           case "tool_call":
           case "tool_call_update":
             onTool(frame);
@@ -1696,6 +1711,8 @@ export function createTraceTranslator(
       emitter.run(() => {
         boundary(null);
         for (const message of messages) {
+          const old = [...items.values()].find(item => item.type === "user_message" && item.steer?.steer_id === message.id);
+          if (old) continue; // Same message id keeps one UI item across resume/replay.
           const id = uniqueId(`steer:${message.id}`);
           const at = now();
           const text = capItemText(message.content ?? "");
@@ -1705,7 +1722,7 @@ export function createTraceTranslator(
             text: text.value, ...(text.truncated ? { truncated: true as const } : {}),
             message_ids: [message.id], attachments: attachmentRefs(message.attachments),
             ...(doorbells.length ? { background_tasks: doorbells } : {}),
-            steer: { steer_id: message.id, kind: message.kind, injected: result.via !== "none",
+            steer: { steer_id: message.id, ...(consumedSteers.has(message.id) ? { consumed: true as const } : {}), kind: message.kind, injected: result.via !== "none",
               author_type: message.authorType ?? null, author_id: message.authorId ?? null,
               result: { via: result.via, native_outcome: result.native_outcome, error: steerError(result.error) } },
           });

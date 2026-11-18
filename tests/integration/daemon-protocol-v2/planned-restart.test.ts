@@ -320,3 +320,69 @@ for (const kind of ["permission", "question"] as const) for (const answerAt of [
     } finally { await h.dispose(); }
   }, 25_000);
 }
+
+for (const echoed of [false, true]) test(`steer injected before cancellation is ${echoed ? "confirmed by its provider echo" : "replayed when only queued"}`, async () => {
+  let replacement = false, entered = false, injection = "", consumed = false, used = false, modelOutput = false;
+  const prompts: string[] = [];
+  const h = await DaemonProtocolHarness.create({ providerFactory: () => ({
+    async *sendStream(message, options) {
+      options?.onPromptStarted?.();
+      if (replacement) {
+        prompts.push(String(message));
+        // The fake native session retains only explicitly consumed input.
+        // Queue-only injection was lost when the old bridge closed.
+        used = consumed || String(message).includes("USE_BLUE_RECEIPT");
+        if (!used) throw new Error("The queued instruction was lost during restart");
+        yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "Applied USE_BLUE_RECEIPT" }] } as any;
+        return;
+      }
+      entered = true;
+      while (!options?.signal?.aborted) {
+        if (!echoed && injection && !modelOutput) {
+          modelOutput = true;
+          yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: injection }] } as any;
+        }
+        if (echoed && injection && !consumed) {
+          consumed = true;
+          yield { sessionUpdate: "user_message_chunk", content: [{ type: "text", text: injection }] } as any;
+        }
+        await Bun.sleep(5);
+      }
+      throw new Error("Cancelled");
+    },
+    steer: async text => { injection = text; return { outcome: "injected" as const }; },
+    getLastResponse: () => ({ text: used ? "Applied USE_BLUE_RECEIPT" : "", sessionId: "steer-replay-session", usage: [], toolCalls: [] } as any),
+    close: async () => { replacement = true; if (!echoed) injection = ""; },
+  }) });
+  try {
+    await h.startDaemon(); await h.settleHeartbeat();
+    const runtimeId = h.store.listRuntimes()[0]!.id;
+    const daemonId = h.store.getRuntimeLite(runtimeId)!.daemonId!;
+    const agent = h.store.createAgent({ name: "Steer replay", provider: "claude", runtimeId });
+    const task = h.store.createTask({ agentId: agent.id, runtimeId, prompt: "Long synthetic prompt", maxAttempts: 1 });
+    await waitFor(() => entered, "original prompt started");
+    const message = h.store.createTaskSteerMessage({ taskId: task.id, kind: "steer", content: "USE_BLUE_RECEIPT" });
+    await waitFor(() => !!injection, "steer queued by the bridge");
+    if (echoed) await waitFor(() => consumed, "provider consumed with exact id echo");
+    else await waitFor(() => modelOutput, "model output does not prove steer consumption");
+    h.store.beginDaemonDrain("local", daemonId, "manual", 60_000);
+    const handoff = h.store.plannedRestarts().request(task.id, { workspaceId: "local", runtimeId, daemonId });
+    await waitFor(() => h.store.plannedRestarts().get(task.id)?.state === "suspended", "steer checkpoint");
+    await waitFor(() => (h.daemon as any).activeTaskCount === 0, "original execution released");
+    expect(h.store.plannedRestarts().get(task.id)?.checkpoint?.delivered_message_ids.includes(message.id)).toBe(echoed);
+    await h.stopDaemon(); h.store.undrainDaemon("local", daemonId); await h.recreateDaemon();
+    await waitFor(() => h.store.getTask(task.id)?.status === "completed", "steer applied after replacement", 10_000);
+    expect(used).toBe(true);
+    if (echoed) expect(prompts.join("\n")).not.toContain("USE_BLUE_RECEIPT");
+    else {
+      expect(prompts[0]).toContain("USE_BLUE_RECEIPT");
+      expect(prompts[0]).toContain(`[Remi steer id: ${message.id}]`);
+      expect(prompts[0]).toContain("可能已经收到过");
+    }
+    const events = h.daemon.traceStore().read(task.id, 0, 500, 1024 * 1024).events;
+    expect(events.filter(event => event.type === "item.completed" && (event.item as any)?.steer?.steer_id === message.id)).toHaveLength(1);
+    expect(h.store.getTask(task.id)).toMatchObject({ attempt: 1, result: "Applied USE_BLUE_RECEIPT" });
+    expect(h.db.query("SELECT id FROM multiremi_turn_attempts WHERE turn_id=?").all(handoff.turn_id)).toHaveLength(1);
+    expect(h.ledger.some(event => event.type === "task.fail")).toBe(false);
+  } finally { await h.dispose(); }
+}, 25_000);

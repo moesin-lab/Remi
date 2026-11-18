@@ -48,9 +48,10 @@ export async function receiveTaskOffer(store: MultiremiStore, runtimeId: string,
     } }));
     await layer.drain();
     const offer = frames.find(frame => frame.t === "task.offer");
-    // A unit observation consumes one offer, not the rest of this runtime's queue.
-    layer.stop();
     if (!offer) return null;
+    // Stop after the production reply hooks commit, before the next pump's
+    // microtask can claim more work. Stopping before the reply drops it.
+    layer.onReply(() => layer.stop());
     await session.handleMessage(JSON.stringify({ v: 2, t: "res", re: String(offer.seq), ack: offer.seq, p: options.reply ?? { ok: true } }));
     return offer.p;
   } finally { layer.closeAll(); layer.stop(); await layer.drain(); }
@@ -58,8 +59,7 @@ export async function receiveTaskOffer(store: MultiremiStore, runtimeId: string,
 
 export async function reconcileRuntimeReady(store: MultiremiStore, runtimeId: string, activeTaskIds: string[] = []): Promise<Record<string, any>[]> {
   const layer = new DaemonProtocolLayer({ store });
-  new DaemonTaskOffers({ store, layer, prepare: async () => null });
-  layer.stop();
+  const offers = new DaemonTaskOffers({ store, layer, prepare: async () => null, autostart: false });
   const runtime = store.getRuntime(runtimeId);
   const frames: Record<string, any>[] = [];
   const session = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return text.length; }, close() {} },
@@ -69,6 +69,7 @@ export async function reconcileRuntimeReady(store: MultiremiStore, runtimeId: st
       protocol: 2, daemon_id: runtime?.daemonId ?? "dmn_offer_unit", cli_version: DAEMON_MIN_CLI_VERSION, caps: [],
       runtimes: [{ runtime_id: runtimeId, provider: runtime?.provider ?? "claude", max_concurrency: 1, active_task_ids: activeTaskIds }],
     } }));
+    offers.start();
     await session.handleMessage(JSON.stringify({ v: 2, t: "runtime.ready", rt: runtimeId, p: { active_task_ids: activeTaskIds } }));
     return frames;
   } finally { layer.closeAll(); layer.stop(); await layer.drain(); }

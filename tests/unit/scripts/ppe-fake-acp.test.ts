@@ -13,8 +13,8 @@ const root = resolve(import.meta.dir, "../../..");
 // Activity/thought updates precede the read; only message chunks are replies.
 const messageFrames = (frames: any[]) => frames.filter(frame => frame.method === "session/update"
   && frame.params.update.sessionUpdate === "agent_message_chunk");
-async function until(check: () => boolean) {
-  const deadline = Date.now() + 10_000;
+async function until(check: () => boolean, timeout = 10_000) {
+  const deadline = Date.now() + timeout;
   while (!check()) { if (Date.now() > deadline) throw new Error("PPE fixture condition timed out"); await Bun.sleep(10); }
 }
 async function world(kind: "chat" | "issue", pause = "") {
@@ -53,12 +53,12 @@ async function world(kind: "chat" | "issue", pause = "") {
   let seq = 0;
   const notify = (method: string, params: unknown) => { child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n"); };
   const respond = (id: string, result: unknown) => { child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n"); };
-  const rpc = async (method: string, params: unknown = {}) => {
+  const rpc = async (method: string, params: unknown = {}, timeout = 10_000) => {
     const id = ++seq; child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
-    await until(() => frames.some(f => f.id === id)); return frames.find(f => f.id === id);
+    await until(() => frames.some(f => f.id === id), timeout); return frames.find(f => f.id === id);
   };
   await rpc("initialize"); const providerSession = (await rpc("session/new")).result.sessionId;
-  const prompt = (text = marker) => rpc("session/prompt", { sessionId: providerSession, prompt: [{ type: "text", text }] });
+  const prompt = (text = marker, timeout = 10_000) => rpc("session/prompt", { sessionId: providerSession, prompt: [{ type: "text", text }] }, timeout);
   const close = async () => { child.kill(); await child.exited; await Promise.all(pumping); server.stop(true);
     store.stopNotificationDeliverySweeper(); rmSync(dir, { recursive: true, force: true }); };
   return { store, session, sent, task, bridge, marker, send, rpc, notify, respond, prompt, providerSession, frames, diagnostics, dir, close };
@@ -268,4 +268,33 @@ for (const prompt of ["PR404/RESP/PRESENTER", "PR404/RESP/ASK PR404/RESP/PRESENT
     if (previousKey === undefined) delete process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY; else process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = previousKey;
     await f.close();
   }
+}, 20_000);
+
+
+test("Phase A streams actual ACP thought frames for sixty seconds after a confirmed range read", async () => {
+  const f = await world("chat");
+  try {
+    const started = performance.now();
+    const done = f.prompt(`${f.marker} MUL-172/STREAM/60`, 70_000);
+    await until(() => f.frames.some(frame => frame.params?.update?.content?.text?.startsWith("MUL-172 trace ")));
+    expect(f.diagnostics.some(e => e.event === "actual_read")).toBe(true);
+    expect(messageFrames(f.frames)).toHaveLength(0);
+    expect(await done).toMatchObject({ result: { stopReason: "end_turn" } });
+    expect(performance.now() - started).toBeGreaterThanOrEqual(60_000);
+    const chunks = f.frames.filter(frame => frame.params?.update?.content?.text?.startsWith("MUL-172 trace "));
+    expect(chunks.length).toBeGreaterThanOrEqual(50);
+    expect(messageFrames(f.frames).at(-1).params.update.content.text).toContain("MUL-172 stream completed");
+  } finally { await f.close(); }
+}, 80_000);
+
+test("Phase A rejects short streams and cancels a live stream without a successful completion", async () => {
+  const f = await world("chat");
+  try {
+    expect(await f.prompt(`${f.marker} MUL-172/STREAM/59`)).toMatchObject({ error: { message: "ppe_invalid_stream_duration" } });
+    const done = f.prompt(`${f.marker} MUL-172/STREAM/120`);
+    await until(() => f.frames.some(frame => frame.params?.update?.content?.text?.startsWith("MUL-172 trace ")));
+    f.notify("session/cancel", { sessionId: f.providerSession });
+    expect(await done).toMatchObject({ result: { stopReason: "cancelled" } });
+    expect(messageFrames(f.frames)).toHaveLength(0);
+  } finally { await f.close(); }
 }, 20_000);

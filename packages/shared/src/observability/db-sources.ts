@@ -1,3 +1,4 @@
+import { currentBackgroundTerm } from "../db/live-term.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export type DbSourceKind = "http" | "ws" | "job";
@@ -14,7 +15,8 @@ export interface DbSourceSummary {
   queries_per_invocation: number;
   db_ms: number;
 }
-interface Invocation { kind: DbSourceKind; name: string; epoch: number }
+export interface DbSourceMetrics { dbMs: number; dbQueries: number }
+interface Invocation { kind: DbSourceKind; name: string; epoch: number; metrics?: DbSourceMetrics }
 const context = new AsyncLocalStorage<Invocation>();
 let enabled = false;
 let epoch = 0;
@@ -40,22 +42,31 @@ function groupFor(source: Invocation) {
   return group;
 }
 
-/** Names must be constants or already sanitized route/frame patterns. Never IDs. */
-export function withDbSource<T>(kind: DbSourceKind, name: string, action: () => T): T {
-  if (!enabled) return action();
-  const source: Invocation = { kind, name, epoch: -1 };
-  groupFor(source);
+/**
+ * Names must be constants or sanitized route/frame patterns, never IDs.
+ * Optional invocation counters share the exclusive source context with the
+ * process summary. Nested sources own their SQL, even with summaries disabled.
+ */
+export function withDbSource<T>(kind: DbSourceKind, name: string, action: () => T, metrics?: DbSourceMetrics): T {
+  if (!enabled && !metrics && !context.getStore()) return action();
+  const source: Invocation = { kind, name, epoch: -1, metrics };
+  if (enabled) groupFor(source);
   return context.run(source, action);
 }
 export function withDbJob<T>(name: DbJobName, action: () => T): T {
+  currentBackgroundTerm()?.assertCurrent();
   return withDbSource("job", name, action);
 }
 
 /** Called once at SQL completion, so all categories share the process window. */
 export function recordDbSourceQuery(dbMs: number): DbSourceKind | undefined {
-  if (!enabled) return undefined;
   const source = context.getStore();
   if (!source) return undefined;
+  if (source.metrics) {
+    source.metrics.dbQueries++;
+    source.metrics.dbMs += dbMs;
+  }
+  if (!enabled) return source.kind;
   const group = groupFor(source);
   group.db_queries++;
   group.db_ms += dbMs;

@@ -86,6 +86,18 @@ for (const [open, close] of [['"', '"'], ['`', '`'], ['[', ']']]) {
     `ALTER TABLE ${t} ALTER ${c} DROP NOT NULL`, `ALTER TABLE ${t} ALTER ${c} SET DEFAULT 1`);
 }
 
+// PostgreSQL Unicode quotes, including custom escapes, are one opaque name.
+for (const table of ['U&"retained"', String.raw`u&"ret\0061ined"`,
+  `U&"ret!0061ined" UESCAPE '!'`, `u&"ret!0061ined" /* escape */ uescape '!'`,
+  `U&"a""b,;DROP TABLE x"`, String.raw`U&"face\+01F600"`]) {
+  positive.push(`TRUNCATE TABLE ${table}`, `DROP TABLE ${table}`,
+    `ALTER TABLE ${table} ALTER U&"c!006fl" UESCAPE '!' TYPE bigint`,
+    `ALTER TABLE ${table} RENAME TO replacement`);
+  negative.push(`ALTER TABLE ${table} ADD COLUMN fresh TEXT`,
+    `ALTER TABLE ${table} ALTER U&"c!006fl" UESCAPE '!' DROP NOT NULL`,
+    `ALTER TABLE ${table} ALTER U&"col" SET DEFAULT 1`);
+}
+
 describe('shared schema DDL action detector', () => {
   for (const sql of positive) it(`rejects ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(true));
   for (const sql of negative) it(`allows ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(false));

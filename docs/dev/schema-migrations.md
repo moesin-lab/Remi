@@ -131,7 +131,8 @@ SET DEFAULT/DROP DEFAULT/DROP NOT NULL 的 ALTER TABLE、ALTER TYPE ADD VALUE、
 IMPORT FOREIGN SCHEMA。CREATE OR REPLACE 的既有定义保护由运行时 catalog 承担。
 候选对象类封闭常量及 PostgreSQL 16 SQL Commands / SQLite VIRTUAL TABLE 来源见
 [schema-ddl.ts](../../packages/server/src/store/schema-ddl.ts)；支持嵌套注释、Unicode、模板标识符与位置参数，以及双引号、反引号和 SQLite 方括号引用标识符；
-arch 与 expand guard 使用相同的 token 归一化。
+arch 与 expand guard 使用相同的 token 归一化。PostgreSQL `U&"…"`（含可选 `UESCAPE`、注释和大小写变体）
+整体按不透明标识符处理，转义内容不会成为 SQL 关键字；同样支持这类名称上的加法 ALTER。
 DO 执行体、DROP（含 ON table）、其它 ALTER、TRUNCATE、REVOKE 等候选一律拒绝。
 散文、事件名、shell 字符串不构成 DDL 候选；VACUUM/ANALYZE/REINDEX/CLUSTER/REFRESH/DISCARD 不由 lint 检查。
 历史 bootstrap 的 [冻结 allowlist](../../tests/arch/startup-schema-ddl-allowlist.json)

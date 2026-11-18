@@ -1,20 +1,22 @@
 #!/usr/bin/env node
 // Operates a PREPARED isolated candidate; never creates or addresses stable.
-import { mkdir, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { scenarioPlan, validateConfig, validateControlDirectory, readJson, writeDesired, edgeStatus, edgeDelta, scenarioPass, ProbeSchedule } from './phase-a/support.mjs';
+import { requireRuntimeUid, requireDirectoryUid, prepareEvidence, scenarioPlan, validateConfig, validateControlDirectory, readJson, writeDesired, edgeStatus, edgeDelta, scenarioPass, ProbeSchedule } from './phase-a/support.mjs';
 import { openTraceBrowser } from './phase-a/browser.mjs';
 
 export async function run(config, output) {
+  const runtimeUid = requireRuntimeUid();
   validateConfig(config);
   const control = await validateControlDirectory(config.controlDir);
+  await requireDirectoryUid(control, runtimeUid);
+  await prepareEvidence(output, runtimeUid);
   const token = process.env.MUL172_TOKEN;
   if (!token) throw new Error('MUL172_TOKEN must be a candidate human credential');
-  await mkdir(output, { recursive: true, mode: 0o700 });
   const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8' }).trim();
   const report = { issue: 'MUL-172', scriptSha: revision, scope: 'supervisor-direct; excludes updater verification/backup/current.json/Web',
     phaseAAccepted: false, supervisorScenariosPassed: false, profile: config.profile,
@@ -153,6 +155,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const report = await run(await readJson(process.argv[2]), resolve(process.argv[3]));
       console.log(`Supervisor scenarios: ${report.supervisorScenariosPassed ? 'PASS' : 'NOT PASSED'}; Phase A full acceptance: NOT ESTABLISHED. Report saved.`);
       process.exitCode = report.supervisorScenariosPassed ? 0 : 1;
-    } catch { console.error('Candidate preflight failed; check configuration and local prerequisites.'); process.exitCode = 1; }
+    } catch (error) {
+      console.error(/^(Execution UID |Candidate directory |A5_RUNTIME_UID )/.test(error.message)
+        ? error.message : 'Candidate preflight failed; check configuration and local prerequisites.');
+      process.exitCode = 1;
+    }
   }
 }

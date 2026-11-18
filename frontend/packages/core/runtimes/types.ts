@@ -4,6 +4,7 @@
 // time-bucketed flavors so users can tell "just lost" from "long gone".
 
 export type RuntimeHealth =
+  | "degraded"
   | "online" // green — within heartbeat threshold
   | "recently_lost" // amber — offline < 5 minutes (likely transient)
   | "offline" // grey — offline 5 minutes ~ 7 days

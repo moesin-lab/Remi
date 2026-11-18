@@ -1,4 +1,5 @@
 "use client";
+import { runtimeHealthReasons } from "@multiremi/core/runtimes";
 
 import { workspaceOperatorUser } from "@multiremi/core/workspace/operator";
 
@@ -450,6 +451,7 @@ function HeroCard({
               </h2>
             )}
             <HealthBadge health={health} />
+            {runtimeHealthReasons(runtime) && <span className="text-xs text-warning">{runtimeHealthReasons(runtime)}</span>}
             <span className="text-xs text-muted-foreground">
               {t(($) => $.detail.last_seen, { when: lastSeen })}
             </span>

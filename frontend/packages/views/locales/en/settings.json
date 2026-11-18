@@ -769,13 +769,30 @@
       "chat_idle_days": {
         "label": "Chat auto-archive",
         "hint": "Days without activity before an active chat is archived. 0 means never."
+      },
+      "pressure_free_percent": {
+        "label": "Pressure free percent",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
+      },
+      "pressure_free_bytes": {
+        "label": "Pressure free bytes",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
+      },
+      "critical_free_percent": {
+        "label": "Critical free percent",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
+      },
+      "critical_free_bytes": {
+        "label": "Critical free bytes",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
       }
     },
     "units": {
       "hours": "hours",
       "mb": "MB",
       "days": "days",
-      "count": "items"
+      "count": "items",
+      "percent": "%"
     },
     "default_value": "Default: {{value}} {{unit}}",
     "validation": {

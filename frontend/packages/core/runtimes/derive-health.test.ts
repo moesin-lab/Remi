@@ -26,6 +26,11 @@ function makeRuntime(overrides: Partial<AgentRuntime> = {}): AgentRuntime {
 }
 
 describe("deriveRuntimeHealth", () => {
+  it("shows degraded for a fresh online runtime and preserves offline precedence", () => {
+    const runtime = makeRuntime({ metadata: { health: { state: "degraded", reasons: [{ code: "disk_critical" }] } } });
+    expect(deriveRuntimeHealth(runtime, FIXED_NOW)).toBe("degraded");
+    expect(deriveRuntimeHealth({ ...runtime, last_seen_at: null }, FIXED_NOW)).toBe("offline");
+  });
   it("returns online when status is online and the heartbeat is fresh", () => {
     expect(
       deriveRuntimeHealth(makeRuntime({ status: "online" }), FIXED_NOW),

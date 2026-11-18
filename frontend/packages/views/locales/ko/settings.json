@@ -767,13 +767,30 @@
       "chat_idle_days": {
         "label": "채팅 자동 보관",
         "hint": "활성 채팅이 활동 없이 자동으로 보관되기까지의 일수입니다. 0은 자동 보관하지 않습니다."
+      },
+      "pressure_free_percent": {
+        "label": "Pressure free percent",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
+      },
+      "pressure_free_bytes": {
+        "label": "Pressure free bytes",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
+      },
+      "critical_free_percent": {
+        "label": "Critical free percent",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
+      },
+      "critical_free_bytes": {
+        "label": "Critical free bytes",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
       }
     },
     "units": {
       "hours": "시간",
       "mb": "MB",
       "days": "일",
-      "count": "개"
+      "count": "개",
+      "percent": "%"
     },
     "default_value": "기본값: {{value}} {{unit}}",
     "validation": {

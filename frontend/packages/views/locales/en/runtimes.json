@@ -254,6 +254,10 @@
     "about_to_gc": {
       "label": "About to GC",
       "description": "Offline 6+ days. Auto-deleted at 7 days unless it reconnects."
+    },
+    "degraded": {
+      "label": "Degraded",
+      "description": "Disk space critical; new offers are refused."
     }
   },
   "detail": {
@@ -872,13 +876,15 @@
       "error": "Error",
       "ended_ttl": "Past retention",
       "over_cap": "Over the retained limit",
-      "orphan": "Deleted on the server"
+      "orphan": "Deleted on the server",
+      "pressure": "Disk pressure"
     },
     "last_round": "Last round",
     "modes": {
       "periodic": "Scheduled",
       "dry_run": "Dry run",
-      "run": "Reclaim"
+      "run": "Reclaim",
+      "pressure": "Pressure"
     },
     "last_round_summary": "Freed {{size}} · reclaimed {{reclaimed}} · forgotten {{forgotten}}",
     "errors_title_one": "{{count}} error",
@@ -895,7 +901,8 @@
     "plan_title": {
       "periodic": "Items from the last round",
       "dry_run": "Dry run: what a reclaim would do",
-      "run": "Reclaim result"
+      "run": "Reclaim result",
+      "pressure": "Pressure reclaim plan"
     },
     "plan": {
       "subject": "Item",
@@ -919,7 +926,11 @@
       "task": "Task"
     },
     "load_failed": "Couldn't load storage reports",
-    "retry": "Retry"
+    "retry": "Retry",
+    "disk_warning": "Disk {{level}}: {{free}} free / {{total}}",
+    "claims_paused": "Claims paused",
+    "claims_allowed": "Claims allowed",
+    "disk_thresholds": "Pressure: {{pressure}}% / {{pressureBytes}}; critical: {{critical}}% / {{criticalBytes}}"
   },
   "magpie": {
     "loading": "Loading…",

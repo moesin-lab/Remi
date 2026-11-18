@@ -254,6 +254,10 @@
     "about_to_gc": {
       "label": "곧 정리됨",
       "description": "6일 넘게 오프라인입니다. 다시 연결되지 않으면 7일째 자동 삭제됩니다."
+    },
+    "degraded": {
+      "label": "Degraded",
+      "description": "Disk space critical; new offers are refused."
     }
   },
   "detail": {
@@ -872,13 +876,15 @@
       "error": "오류",
       "ended_ttl": "보존 기간 초과",
       "over_cap": "보존 수 상한 초과",
-      "orphan": "서버에서 삭제됨"
+      "orphan": "서버에서 삭제됨",
+      "pressure": "Disk pressure"
     },
     "last_round": "최근 라운드",
     "modes": {
       "periodic": "정기",
       "dry_run": "드라이런",
-      "run": "회수"
+      "run": "회수",
+      "pressure": "Pressure"
     },
     "last_round_summary": "해제 {{size}} · 회수 {{reclaimed}}개 · 폐기 {{forgotten}}개",
     "errors_title_one": "오류 {{count}}개",
@@ -895,7 +901,8 @@
     "plan_title": {
       "periodic": "최근 라운드 항목",
       "dry_run": "드라이런: 회수 시 수행될 작업",
-      "run": "회수 결과"
+      "run": "회수 결과",
+      "pressure": "Pressure reclaim plan"
     },
     "plan": {
       "subject": "항목",
@@ -919,7 +926,11 @@
       "task": "작업"
     },
     "load_failed": "저장소 보고서를 불러오지 못했습니다",
-    "retry": "다시 시도"
+    "retry": "다시 시도",
+    "disk_warning": "Disk {{level}}: {{free}} free / {{total}}",
+    "claims_paused": "Claims paused",
+    "claims_allowed": "Claims allowed",
+    "disk_thresholds": "Pressure: {{pressure}}% / {{pressureBytes}}; critical: {{critical}}% / {{criticalBytes}}"
   },
   "magpie": {
     "loading": "불러오는 중…",

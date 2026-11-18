@@ -768,13 +768,30 @@
       "chat_idle_days": {
         "label": "对话自动归档",
         "hint": "活跃对话无活动多少天后自动归档。0 表示不自动归档。"
+      },
+      "pressure_free_percent": {
+        "label": "压力空闲百分比",
+        "hint": "0 关闭此条件。告急阈值不得高于压力阈值。"
+      },
+      "pressure_free_bytes": {
+        "label": "压力空闲字节数",
+        "hint": "0 关闭此条件。告急阈值不得高于压力阈值。"
+      },
+      "critical_free_percent": {
+        "label": "告急空闲百分比",
+        "hint": "0 关闭此条件。告急阈值不得高于压力阈值。"
+      },
+      "critical_free_bytes": {
+        "label": "告急空闲字节数",
+        "hint": "0 关闭此条件。告急阈值不得高于压力阈值。"
       }
     },
     "units": {
       "hours": "小时",
       "mb": "MB",
       "days": "天",
-      "count": "个"
+      "count": "个",
+      "percent": "%"
     },
     "default_value": "默认：{{value}} {{unit}}",
     "validation": {

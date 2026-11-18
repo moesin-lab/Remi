@@ -29,10 +29,15 @@ const HOUR_MS = 60 * 60 * 1000;
 const MIB = 1024 * 1024;
 
 type FieldKey = keyof StorageSettings;
-type FieldUnit = "hours" | "mb" | "days" | "count";
+type FieldUnit = "hours" | "mb" | "days" | "count" | "percent";
 
 // The wire keeps milliseconds and bytes; people edit hours and megabytes.
 const FIELDS: ReadonlyArray<{ key: FieldKey; unit: FieldUnit; factor: number; integer: boolean }> = [
+  { key: "pressure_free_percent", unit: "percent", factor: 1, integer: false },
+  { key: "pressure_free_bytes", unit: "mb", factor: MIB, integer: false },
+  { key: "critical_free_percent", unit: "percent", factor: 1, integer: false },
+  { key: "critical_free_bytes", unit: "mb", factor: MIB, integer: false },
+
   { key: "ttl_ms", unit: "hours", factor: HOUR_MS, integer: false },
   { key: "automation_ttl_ms", unit: "hours", factor: HOUR_MS, integer: false },
   { key: "max_retained", unit: "count", factor: 1, integer: true },

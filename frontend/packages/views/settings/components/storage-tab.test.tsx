@@ -47,12 +47,14 @@ vi.mock("../../runtimes/components/daemon-storage-card", () => ({
 import { StorageTab } from "./storage-tab";
 
 const settings: StorageSettings = {
-  ttl_ms: 72 * HOUR,
+  ttl_ms: 24 * HOUR,
   automation_ttl_ms: 24 * HOUR,
-  max_retained: 50,
+  max_retained: 20,
   orphan_ttl_ms: 72 * HOUR,
   snapshot_max_bytes: 256 * 1024 * 1024,
   chat_idle_days: 14,
+  pressure_free_percent: 15, pressure_free_bytes: 20 * 1024 ** 3,
+  critical_free_percent: 5, critical_free_bytes: 5 * 1024 ** 3,
 };
 
 function policy(overrides: Partial<WorkspaceStorageResponse> = {}): WorkspaceStorageResponse {
@@ -85,17 +87,26 @@ beforeEach(() => {
 });
 
 describe("StorageTab", () => {
+  it("edits the four disk thresholds with percentage and byte units", async () => {
+    renderTab();
+    expect((await field("Pressure free percent")).value).toBe("15");
+    expect((await field("Pressure free bytes")).value).toBe("20480");
+    expect((await field("Critical free bytes")).value).toBe("5120");
+    fireEvent.change(await field("Critical free percent"), { target: { value: "6" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(fixtures.update).toHaveBeenCalledWith({ critical_free_percent: 6 }, expect.any(Object));
+  });
   it("uses the shared operator to manage each machine and policy despite a different login identity", async () => {
     renderTab();
     expect(await screen.findAllByTestId("daemon-card")).toHaveLength(2);
     expect(screen.getByText("host-a:manage")).toBeInTheDocument();
-    expect((await field("Retention period")).value).toBe("72");
+    expect((await field("Retention period")).value).toBe("24");
     expect((await field("Automation chat retention")).value).toBe("24");
-    expect((await field("Retained workspace limit")).value).toBe("50");
+    expect((await field("Retained workspace limit")).value).toBe("20");
     expect((await field("Orphaned data retention")).value).toBe("72");
     expect((await field("Snapshot size limit")).value).toBe("256");
     expect((await field("Chat auto-archive")).value).toBe("14");
-    expect(screen.getAllByText(/Default: 72 hours/)).toHaveLength(2);
+    expect(screen.getAllByText(/Default: 24 hours/)).toHaveLength(2);
     expect(screen.getByText(/Default: 256 MB/)).toBeInTheDocument();
   });
 

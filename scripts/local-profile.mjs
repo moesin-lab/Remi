@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, fsyncSync, realpathSync, unlinkSync, renameSync, readdirSync, rmSync, statSync, statfsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, fsyncSync, realpathSync, unlinkSync, renameSync, readdirSync, rmSync, lstatSync, statSync, statfsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve, delimiter, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -551,10 +551,14 @@ function pruneReleases(root, dryRun = false) {
       protect(active.source);
       protectedRefs.add(active.ref);
     }
-    // Validate the entire deletion plan before changing anything. Never follow
-    // an escaping symlink (including a symlink used as the releases directory).
+    // Validate the entire deletion plan before changing anything. Only real
+    // source directories and regular tar files are eligible; never follow links.
     const candidates = readdirSync(releases).filter(name => /^[a-f0-9]{40}(\.tar)?$/u.test(name))
       .filter(name => !protectedRefs.has(name.replace(/\.tar$/u, '')))
+      .filter(name => {
+        const stat = lstatSync(join(releases, name));
+        return name.endsWith('.tar') ? stat.isFile() : stat.isDirectory();
+      })
       .map(name => {
         const path = join(releases, name);
         if (dirname(canonicalPath(path)) !== canonicalPath(releases)) throw new Error(`Release path escapes releases: ${name}`);

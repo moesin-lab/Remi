@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, utimesSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, utimesSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { SystemdReleaseDriver } from "@remi-platform/updater/systemd-release-driver.js";
@@ -80,6 +80,8 @@ for (const invalidRetention of [false, true]) {
     const outside = join(root, "outside"); mkdirSync(outside);
     writeFileSync(join(outside, ".platform-release.json"), JSON.stringify({ ...releases[0], version: "9.0.0", ref: "outside" }));
     symlinkSync(outside, join(root, "releases", "external"));
+    const internalLink = join(root, "releases", "internal");
+    symlinkSync(paths[2], internalLink);
     symlinkSync(paths[0], join(root, "current"));
     // An unfinished switch still needs an older release even after this one succeeds.
     writeFileSync(join(root, "operation-other.json"), JSON.stringify({ phase: "committed", previousPath: paths[1], previous: releases[1] }));
@@ -102,6 +104,8 @@ for (const invalidRetention of [false, true]) {
       for (let i = 0; i < paths.length; i++) expect(existsSync(paths[i])).toBe(invalidRetention || i <= 1 || i >= 4);
       expect(existsSync(join(root, "releases", "manual"))).toBe(true);
       expect(existsSync(join(outside, ".platform-release.json"))).toBe(true);
+      expect(lstatSync(join(root, "releases", "external")).isSymbolicLink()).toBe(true);
+      expect(lstatSync(internalLink).isSymbolicLink()).toBe(true);
       expect(warnings.length).toBe(invalidRetention ? 1 : 0);
     } finally { console.warn = originalWarn; server.stop(true); }
   });

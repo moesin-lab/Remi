@@ -577,6 +577,15 @@ The transitional `systemd_release` driver builds a verified release archive in
 a new directory, atomically switches the `current` symlink, restarts API/Web,
 and restores the old symlink if health checks fail.
 
+Systemd activation prunes marked release directories after verification and journal
+persistence. It keeps the newest 3 directories by modification time (override with
+non-negative integer `REMI_RELEASES_KEEP`), plus `current`, the activating release,
+and every unfinished operation journal's `previousPath`. Only real directories
+with a regular `.platform-release.json` are eligible; symlinks and unmarked manual
+directories are retained. Cleanup failures only warn. Docker images, backups and
+ACP bundles are outside this cleanup. Local profile source/tar retention and the
+explicit dry-run command are documented in [local profiles](../docs/deploy/local-profiles.md#发布源码保留).
+
 ### Windows stable local-profile host
 
 The `local_profile` application executor reads the existing stable profile and
@@ -1388,3 +1397,60 @@ Inspect it via the daemon's local `/health` endpoint (`outbox` block). Size
 cap: `MULTIREMI_OUTBOX_MAX_BYTES` (default 256 MB) — oldest non-terminal
 records are dropped over the cap; terminal complete/fail events are never
 dropped.
+
+### Deployment build convergence for daemon CLI (MUL-79)
+
+The platform reconciles its own `BUILD_COMMIT` with each online local daemon's
+`metadata.cli_commit`. It reads
+`${MULTIREMI_DAEMON_ARTIFACT_DIR:-/opt/remi/daemon-artifacts}/<BUILD_COMMIT>/daemon-artifacts.json`
+using the shared manifest validator, and rejects manifests for another commit.
+Missing/invalid identity or manifests produce a reason in the API log and skip
+deployment-build queuing. The legacy formal SemVer reconciliation path remains
+available for formal updater releases.
+
+The updater heartbeat reconciles after a switch when no platform operation is
+active. A background-enabled `all`/`runtime` API process also reconciles once
+immediately after `Bun.serve` starts listening; read-only candidates and `ui`
+processes do not perform this startup write. This covers local-profile deployments
+without an updater. A live platform operation defers reconciliation.
+
+A different commit queues one CLI request per physical daemon, including when
+an operator deploys an older commit. Requests persist nullable `target_commit`
+and send it in `runtime.update`. Any active sibling request prevents another
+queue entry, and desktop-managed or offline daemons are excluded. Automatic
+history is keyed by workspace, daemon and target commit, so failed, rolled-back
+or timed-out requests are not automatically retried for the same commit. The
+request uses the existing daemon drain and update admission path.
+
+For old daemons without `cli_commit`, only exact equality with the manifest's
+version counts as aligned. Requests still carry `target_commit`; an old daemon
+that ignores it will look up `target_version` on GitHub and may fail for a
+deployment-only version. Runtime compatibility API responses expose `cli_commit`
+and `cli_commit_matches_platform` (null when the platform has no build identity).
+These are available through `remi runtime list|get`; `remi runtime release start`
+already accepts `target_commit` in its JSON input for manual recovery.
+
+Failure routing is optional platform configuration. Set
+`MULTIREMI_DAEMON_UPDATE_FAILURE_TARGETS` to a JSON object keyed by workspace ID,
+for example `{"local":{"projectId":"prj_example"}}`. A target may additionally
+specify `assigneeType` (`agent` or `squad`) and `assigneeId`; otherwise the project's
+default assignee is used. The project and assignee must belong to the same
+workspace. No task changes this configuration automatically.
+
+Automatic requests that end `failed`, `rolled_back` or `timeout` create a backlog
+Issue through the existing Issue service. Reports trigger a check immediately;
+the existing 60-second task maintenance sweep also expires abandoned automatic
+requests and repairs notifications after process restarts. Each workspace/daemon/
+commit has a transactional failure ledger entry, committed with its Issue, so
+repeated reports and concurrent workers cannot create duplicates. Missing target
+configuration records one `runtime:update_failure` event with
+`failure_target_unconfigured` and no Issue. Invalid targets roll back the ledger
+entry and retry on a later sweep. Issues include runtime/daemon IDs, target
+version/commit, terminal status, and redacted, bounded error/output summaries;
+logs never include raw daemon output or target configuration.
+
+Validation: `bun run test tests/unit/multiremi/runtime-cli-build-reconciliation.test.ts`
+covers identity convergence, old-daemon fallback, terminal history, sibling
+coalescing, drain/downlink integration, failure Issue deduplication/redaction,
+missing manifests, and nullable historical request migration. These are isolated
+SQLite tests; they do not prove a real deployment or PostgreSQL concurrency.

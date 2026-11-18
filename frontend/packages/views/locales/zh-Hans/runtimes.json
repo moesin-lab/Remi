@@ -241,6 +241,10 @@
     "about_to_gc": {
       "label": "即将清理",
       "description": "离线 6 天以上。如不重连，将在 7 天时自动删除。"
+    },
+    "degraded": {
+      "label": "降级",
+      "description": "磁盘空间告急，暂停领取新任务。"
     }
   },
   "detail": {
@@ -847,13 +851,15 @@
       "error": "出错",
       "ended_ttl": "已过保留期",
       "over_cap": "超出保留数量",
-      "orphan": "服务端已删除"
+      "orphan": "服务端已删除",
+      "pressure": "磁盘压力"
     },
     "last_round": "最近一轮",
     "modes": {
       "periodic": "定期",
       "dry_run": "预演",
-      "run": "回收"
+      "run": "回收",
+      "pressure": "压力回收"
     },
     "last_round_summary": "释放 {{size}} · 回收 {{reclaimed}} 个 · 遗忘 {{forgotten}} 个",
     "errors_title_other": "{{count}} 个错误",
@@ -869,7 +875,8 @@
     "plan_title": {
       "periodic": "最近一轮的条目",
       "dry_run": "预演：回收会做什么",
-      "run": "回收结果"
+      "run": "回收结果",
+      "pressure": "压力回收计划"
     },
     "plan": {
       "subject": "条目",
@@ -893,7 +900,11 @@
       "task": "任务"
     },
     "load_failed": "无法加载存储报告",
-    "retry": "重试"
+    "retry": "重试",
+    "disk_warning": "磁盘 {{level}}：可用 {{free}} / {{total}}",
+    "claims_paused": "已暂停领取",
+    "claims_allowed": "允许领取",
+    "disk_thresholds": "压力：{{pressure}}% / {{pressureBytes}}；告急：{{critical}}% / {{criticalBytes}}"
   },
   "magpie": {
     "loading": "加载中…",

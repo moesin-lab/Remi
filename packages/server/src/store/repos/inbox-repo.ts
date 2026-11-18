@@ -1,3 +1,4 @@
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { InboxOperations } from "../inbox/operations.js";
 import { QueuedMessages } from "../inbox/queued-messages.js";
 import { getMessage, getMessages, sendMessageWithinTransaction } from "../inbox/send-message.js";
@@ -47,7 +48,7 @@ export class InboxRepo {
       const before=env.dedupeKey?this.ctx.db.query('SELECT id FROM multiremi_conversation_log WHERE session_id=? AND dedupe_key=?').get(sessionId,env.dedupeKey):null;
       const reply=env.replyTo?this.getMessage(env.replyTo):null;
       const activeBefore=this.ctx.db.query("SELECT id FROM multiremi_turns WHERE session_id=? AND agent_id=? AND execution_scope=? AND status IN ('pending','running','awaiting_human')").get(sessionId,recipient.agentId,recipient.executionScope);
-      const sourceTurn=source?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(source.id):null;
+      const sourceTurn=source?readAttemptTurn(this.ctx.db, source.id):null;
       const result=sendMessageWithinTransaction(this.ctx,{session_id:sessionId,sender:{type:'platform',id:null},source_turn_id:sourceTurn?.turn_id??null,
         to:{type:'agent',ref:recipient.agentId},message_kind:env.kind==='lifecycle'?'status':env.kind==='decision_needed'?'decision':env.kind,
         wake_requested:env.wake,body_md:env.body,dedupe_key:env.dedupeKey,

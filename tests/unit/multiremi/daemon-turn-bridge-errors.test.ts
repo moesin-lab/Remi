@@ -85,6 +85,9 @@ for (const backend of backends) {
           expect(bridge.complete({ payload: completion, completionFields: null }, { ...scope, ...override }))
             .toMatchObject({ ok: false, code: "stale_attempt", retryable: false });
         }
+        expect(await report("turn.complete", { ...completion, turn_id: "foreign-turn" }))
+          .toMatchObject({ ok: false, code: "stale_attempt", retryable: false });
+        expect(store.getTask(task.id)?.status).toBe("running");
         expect(await report("turn.complete", { ...completion, attempt_id: "missing" }))
           .toMatchObject({ ok: false, code: "stale_attempt", retryable: false });
         expect(await report("turn.input", { ...input, input_to_seq: input.input_to_seq + 1 }))

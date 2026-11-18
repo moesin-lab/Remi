@@ -25,7 +25,8 @@ export function deriveRuntimeHealth(runtime: AgentRuntime, now: number): Runtime
     runtime.status === "online" &&
     isRuntimeHeartbeatFresh(runtime.last_seen_at, now)
   ) {
-    return "online";
+    return runtime.metadata?.health && typeof runtime.metadata.health === "object" &&
+      (runtime.metadata.health as { state?: unknown }).state === "degraded" ? "degraded" : "online";
   }
 
   // A missing or malformed heartbeat cannot establish how long the runtime
@@ -39,4 +40,13 @@ export function deriveRuntimeHealth(runtime: AgentRuntime, now: number): Runtime
   if (offlineFor < RUNTIME_HEARTBEAT_STALE_MS) return "recently_lost";
   if (offlineFor > ABOUT_TO_GC_THRESHOLD_MS) return "about_to_gc";
   return "offline";
+}
+
+/** Safe text for metadata from older or newer daemons. */
+export function runtimeHealthReasons(runtime: AgentRuntime): string {
+  const health = runtime.metadata?.health;
+  if (!health || typeof health !== "object") return "";
+  const reasons = (health as { reasons?: unknown }).reasons;
+  if (!Array.isArray(reasons)) return "";
+  return reasons.filter(reason => reason && typeof reason.code === "string").map(reason => reason.code).join(", ");
 }

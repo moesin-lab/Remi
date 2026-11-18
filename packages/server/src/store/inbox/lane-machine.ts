@@ -1,5 +1,7 @@
+import { readAttemptTurn, readTurnRow } from "@multiremi/store/execution-reads.js";
+import { acquireTransactionLock } from "../request-read-cache.js";
 import type { TaskSessionContinuation } from "../repos/tasks-repo.js";
-import { attemptInputState } from './attempt-input.js';
+import { readAttemptInputRow, attemptInputState } from './attempt-input.js';
 import type { SendMessageInput, UnifiedMessage } from '@multiremi/contracts/unified-model.js';
 import type { CreateTaskInput } from '@multiremi/contracts/types.js';
 import { nowIso } from '@multiremi/ids.js';
@@ -13,11 +15,12 @@ import { RE_RING_SWEEP_PAGE_SQL, reRingSweepEnabled } from '../re-ring-sweep.js'
 import { settleQueueAfterTurnEndWithinTransaction } from './queued-messages.js';
 
 export function lockLane(ctx: StoreContext, sessionId: string, agentId: string, scope = ''): void {
-  const at = nowIso();
-  ctx.db.run(`INSERT INTO multiremi_session_lanes(session_id,reader_type,reader_id,execution_scope,created_at,updated_at)
-    VALUES(?,'agent',?,?,?,?) ON CONFLICT DO NOTHING`, [sessionId, agentId, scope, at, at]);
-  ctx.db.run(`UPDATE multiremi_session_lanes SET updated_at=updated_at
-    WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`, [sessionId, agentId, scope]);
+  acquireTransactionLock(ctx.db, JSON.stringify(['lane', sessionId, agentId, scope]), () => {
+    const at = nowIso();
+    ctx.db.run(`INSERT INTO multiremi_session_lanes(session_id,reader_type,reader_id,execution_scope,created_at,updated_at)
+      VALUES(?,'agent',?,?,?,?) ON CONFLICT(session_id,reader_type,reader_id,execution_scope)
+      DO UPDATE SET updated_at=multiremi_session_lanes.updated_at`, [sessionId, agentId, scope, at, at]);
+  });
 }
 
 export function deliverToRunningTurn(ctx: StoreContext, turn: any, message: UnifiedMessage): string {
@@ -65,7 +68,7 @@ export function ensurePendingTurn(ctx: StoreContext, message: UnifiedMessage, in
     assignmentAuthorType:continuation ? 'system' : message.sender_type==='member'?'member':message.sender_type==='agent'?'agent':'system',
     assignmentAuthorId:continuation ? null : message.sender_id,
   },[],events,undefined,scope,continuation);
-  const turn=ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(task.id)!;
+  const turn=readAttemptTurn(ctx.db, task.id)!;
   ctx.db.run('UPDATE multiremi_turns SET trigger_message_id=?,wake_seq=? WHERE id=?',[message.id,message.seq,turn.turn_id]);
   appendPendingTurnAuditWithinTransaction(ctx.db,{id:turn.turn_id,issueId:task.issueId,workspaceId:task.workspaceId},
     'turn_created',{message_id:message.id,seq:message.seq,reason:message.wake_reason});
@@ -74,7 +77,7 @@ export function ensurePendingTurn(ctx: StoreContext, message: UnifiedMessage, in
 }
 
 export function reRingAfterTurnEnd(ctx: StoreContext, turnId: string, events: CommitEventQueue, origin='turn_end'): string | undefined {
-  const turn=ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(turnId);
+  const turn=readTurnRow(ctx.db, turnId);
   if (!turn || !['completed','failed','cancelled'].includes(turn.status)) return;
   const agent=ctx.agents().getAgent(turn.agent_id);
   const session=ctx.issueSessions().getIssueSession(turn.session_id);
@@ -120,11 +123,13 @@ export class InputUnreadError extends Error {
 /** Folded/context bodies need a full CLI range read before a receipt may cross them. */
 export function assertOfferedInputRead(ctx:StoreContext,turn:any,toSeq:number):void {
   const state=attemptInputState(ctx,turn);
-  const attempt=ctx.db.query('SELECT session_id,attempt_no,input_trigger_ack FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);
+  const attempt=readAttemptInputRow(ctx, turn.current_attempt_id);
   const replay=Number(attempt.attempt_no)>1&&!attempt.session_id&&!attempt.input_trigger_ack;
   const from=replay?Math.min(state.read,Number(turn.input_from_seq??0)):Math.max(state.read,state.ack);
-  const entries=ctx.db.query("SELECT id FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND visibility='shown' AND deleted_at IS NULL").all(turn.session_id,from,replay?Math.max(Math.min(state.ack,Number(turn.input_to_seq??turn.wake_seq)),toSeq):toSeq);
-  for(const entry of entries){const m=ctx.inbox().getMessage(entry.id)!;
+  // Validate the offered interval from its canonical rows in one read. Fetching
+  // each id through getMessage made completion proportional to inline inputs.
+  const entries=ctx.db.query("SELECT seq,sender_type,sender_id,body_md,to_agent_id,wake_applied,metadata FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND visibility='shown' AND deleted_at IS NULL").all(turn.session_id,from,replay?Math.max(Math.min(state.ack,Number(turn.input_to_seq??turn.wake_seq)),toSeq):toSeq);
+  for(const entry of entries){const m={...entry,metadata:typeof entry.metadata==='string'?JSON.parse(entry.metadata):entry.metadata??{}};
     if(m.seq<=state.read)continue;
     if(m.sender_type==='agent'&&m.sender_id===turn.agent_id||!m.body_md)continue;
     if(m.body_md.length>TRIGGER_MESSAGE_INLINE_CHARS||m.to_agent_id!==turn.agent_id||m.wake_applied!=='now'||(m.metadata.execution_scope??'')!==turn.execution_scope)throw new Error('input_gap');
@@ -132,7 +137,7 @@ export function assertOfferedInputRead(ctx:StoreContext,turn:any,toSeq:number):v
 }
 
 export function acknowledgeInput(ctx: StoreContext, turnId:string, fromSeq:number, toSeq:number, advanceRead=true): void {
-  const turn=ctx.db.query('SELECT * FROM multiremi_turns WHERE id=?').get(turnId);
+  const turn=readTurnRow(ctx.db, turnId);
   if (!turn) throw new Error('Turn not found');
   lockLane(ctx,turn.session_id,turn.agent_id,turn.execution_scope);
   const lane=ctx.db.query(`SELECT cursor_seq,cursor_offset FROM multiremi_session_lanes

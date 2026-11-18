@@ -16,6 +16,7 @@ import { API_BASE_INPUTS, type ApplicationManifest } from '@remi-platform/update
 import type { MultiremiPlatformOperation, MultiremiPlatformStatus } from '@multiremi/contracts';
 import { UNIFIED_MODEL_MIGRATION } from '@multiremi/store/unified-model-schema.js';
 import { baseFingerprints } from '../../packages/platform-updater/src/supervisor.mjs';
+import { buildPostgresWorker } from '../helpers/build-postgres-worker.js';
 
 const internal = process.argv.includes('--internal');
 const repository = resolve(import.meta.dir, '../..');
@@ -70,7 +71,7 @@ try {
   const apiRoot = join(root, 'api');
   const fixtureBuild = await Bun.build({ entrypoints: [join(import.meta.dir, 'platform-application-api-fixture.ts')], target: 'bun', outdir: join(apiRoot, 'apps/server') });
   if (!fixtureBuild.success) throw new Error(fixtureBuild.logs.map(String).join('\n'));
-  await cp(resolve(import.meta.dir, '../../packages/server/src/store/db/pg-worker.ts'), join(apiRoot, 'apps/server/pg-worker.ts'));
+  await buildPostgresWorker(join(apiRoot, 'apps/server'));
   await save(join(apiRoot, 'deploy/docker/Dockerfile.api'), `FROM ${apiBaseImage}\nCOPY api /app\n`);
   await save(join(apiRoot, 'deploy/docker/api-entrypoint.sh'), '#!/bin/sh\nexec "$@"\n');
   for (const path of DATA_SCHEMA_INPUTS) await save(join(apiRoot, path), '// isolated fixture\n');
@@ -79,7 +80,7 @@ try {
   const migrationRoot = join(apiRoot, 'packages/server/src/store');
   const storeBuild = await Bun.build({ entrypoints: [join(import.meta.dir, 'platform-application-store-fixture.ts')], target: 'bun', outdir: migrationRoot, naming: 'real-migration.js' });
   if (!storeBuild.success) throw new Error(storeBuild.logs.map(String).join('\n'));
-  await cp(resolve(import.meta.dir, '../../packages/server/src/store/db/pg-worker.ts'), join(migrationRoot, 'pg-worker.ts'));
+  await buildPostgresWorker(migrationRoot);
   const oldMigration = 'export async function runMigrations(db){await db.unsafe("CREATE TABLE IF NOT EXISTS sentinel(id integer PRIMARY KEY, value text NOT NULL)")}';
   const newMigration = 'export async function runMigrations(db){await db.unsafe("CREATE TABLE IF NOT EXISTS sentinel(id integer PRIMARY KEY, value text NOT NULL)");await db.unsafe("ALTER TABLE sentinel ADD COLUMN IF NOT EXISTS note text NOT NULL DEFAULT \'\'")}';
   await save(join(apiRoot, 'packages/server/src/store/migrations.ts'), oldMigration);

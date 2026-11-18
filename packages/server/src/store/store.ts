@@ -1,3 +1,4 @@
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
 import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
@@ -5,7 +6,7 @@ import { ExecutionEndpointsRepo } from "@multiremi/store/repos/execution-endpoin
 import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
 import { isRelatedTurnController } from './turn-controls.js';
 import { DaemonTurnBridge } from './inbox/daemon-turn-bridge.js';
-import { questionNotificationIdentity, questionNotificationFactsSql, canReadQuestionNotificationFacts } from './inbox/question-notification-visibility.js';
+import { questionNotificationIdentity, questionNotificationFactsSql, canReadQuestionNotificationFacts, questionNotificationVisibilitySql } from './inbox/question-notification-visibility.js';
 import type { InboxAccess } from './inbox/inbox-visibility.js';
 import type { QuestionCardCredential } from "@multiremi/store/question-card-token.js";
 import type { RuntimeConnectionProfile } from "@multiremi/contracts/runtime-connection";
@@ -512,6 +513,15 @@ import type {
 export { daemonRuntimeId, isTerminalStatus };
 
 export class MultiremiStore {
+  isDatabaseUnavailable(): boolean { return this.db.connectionUnavailable === true; }
+  private databaseReadyUntil = 0;
+  checkDatabaseReady(force = false): void {
+    if (!force && !this.db.connectionUnavailable && Date.now() < this.databaseReadyUntil) return;
+    this.databaseReadyUntil = 0;
+    this.db.query("SELECT 1 AS ready").get();
+    this.databaseReadyUntil = Date.now() + 1_000;
+  }
+
   private db: SqlDatabase;
   private ctx: StoreContext;
   private feedback: FeedbackRepo;
@@ -652,6 +662,7 @@ export class MultiremiStore {
       now => this.tasks.sweepIdleIssueLanes(now),
       now => this.archiveIdleChats(now),
       now => this.backgroundTasks.sweep(now),
+      () => this.reconcileRuntimeUpdateFailures(),
     ]);
     this.migrate();
     for (const workspace of this.workspaces.listWorkspaces()) {
@@ -1507,6 +1518,21 @@ runMigrations(this.db);
     return canReadQuestionNotificationFacts(identity, entry, access, this.db.query(query.sql).get(...query.params));
   }
 
+  /** Batch the same notification grant used by Inbox before pagination. */
+  readableQuestionNotifications(entries: readonly Parameters<typeof questionNotificationIdentity>[0][], access: InboxAccess,
+    originals: ReadonlyMap<string, Parameters<typeof questionNotificationIdentity>[0] | null>): Set<string> {
+    // Keep strict metadata validation (including numeric route revisions) from
+    // the scalar reader before applying the shared SQL fact checks.
+    const ids = [...new Set(entries.filter(entry => questionNotificationIdentity(entry,
+      originals.get(String(entry.metadata.root_question_id)))).map(entry => entry.id!))];
+    if (!ids.length) return new Set();
+    const guard = questionNotificationVisibilitySql(this.db, access, 'm', 'h.workspace_id');
+    const rows = this.db.query(`SELECT m.id FROM multiremi_conversation_log m
+      JOIN multiremi_conversation_heads h ON h.session_id=m.session_id
+      WHERE m.id IN (${ids.map(() => '?').join(',')}) AND ${guard.where}`).all(...ids, ...guard.params) as Array<{ id: string }>;
+    return new Set(rows.map(row => row.id));
+  }
+
   listWorkspacesForUser(userId: string | null | undefined): MultiremiWorkspace[] {
     return this.workspaces.listWorkspacesForUser(userId);
   }
@@ -2041,9 +2067,8 @@ runMigrations(this.db);
     this.taskCapabilityMonitor.start();
   }
 
-  stopNotificationDeliverySweeper(): void {
-    this.notificationDispatcher.stop();
-    this.taskCapabilityMonitor.stop();
+  async stopNotificationDeliverySweeper(): Promise<void> {
+    await Promise.all([this.notificationDispatcher.stop(), this.taskCapabilityMonitor.stop()]);
   }
 
   createFeedback(input: CreateFeedbackInput): MultiremiFeedback {
@@ -3239,6 +3264,10 @@ runMigrations(this.db);
   }
 
   /** The Runtime row without the derived usage/model/group reads. */
+  daemonInputRuntimeIds(workspaceId: string) { return this.runtimes.daemonInputRuntimeIds(workspaceId); }
+
+  getRuntimesLite(ids: readonly string[]) { return this.runtimes.getRuntimesLite(ids); }
+
   getRuntimeLite(id: string): MultiremiRuntime | null {
     return this.runtimes.getRuntimeLite(id);
   }
@@ -3447,12 +3476,14 @@ runMigrations(this.db);
     return this.runtimes.createRuntimeUpdateRequest(runtimeId, input);
   }
 
-  reconcileRuntimeCliRelease(targetVersion: string): MultiremiRuntimeUpdateRequest[] {
-    return this.runtimes.reconcileRuntimeCliRelease(targetVersion);
+  reconcileRuntimeCliRelease(targetVersion: string, targetCommit?: string): MultiremiRuntimeUpdateRequest[] {
+    return this.runtimes.reconcileRuntimeCliRelease(targetVersion, targetCommit);
   }
 
-  runtimeCliReleaseReconciliationKey(targetVersion: string): string {
-    return this.runtimes.runtimeCliReleaseReconciliationKey(targetVersion);
+  reconcileRuntimeUpdateFailures(): void { this.runtimes.reconcileRuntimeUpdateFailures(); }
+
+  runtimeCliReleaseReconciliationKey(targetVersion: string, targetCommit?: string): string {
+    return this.runtimes.runtimeCliReleaseReconciliationKey(targetVersion, targetCommit);
   }
 
   getRuntimeUpdateRequest(runtimeId: string, requestId: string): MultiremiRuntimeUpdateRequest | null {
@@ -3469,11 +3500,12 @@ runMigrations(this.db);
       generation: maintenance.generation };
   }
   nextDaemonDrainWakeAt(runtimeId: string): number | null {
-    if (!this.hasCliUpdateDrainForRuntime(runtimeId)) return null;
-    const runtime = this.getRuntimeLite(runtimeId);
-    if (!runtime) return null;
-    const state = this.getDaemonDrainStatus(runtime.workspaceId ?? "local", runtime.daemonId ?? runtime.id);
-    const at = state.deadline ? Date.parse(state.deadline) : NaN;
+    // Scheduling only needs the deadline, not the status/task/ack aggregate.
+    const row = this.ctx.db.query(`SELECT drain.deadline FROM multiremi_runtimes runtime
+      JOIN multiremi_daemon_drains drain ON drain.workspace_id = COALESCE(runtime.workspace_id, 'local')
+        AND drain.daemon_id = COALESCE(runtime.daemon_id, runtime.id)
+      WHERE runtime.id = ?`).get(runtimeId) as { deadline: string } | null;
+    const at = row ? Date.parse(row.deadline) : NaN;
     return Number.isFinite(at) && at > Date.now() ? at : null;
   }
 
@@ -3487,6 +3519,7 @@ runMigrations(this.db);
 
   reportRuntimeUpdateResult(runtimeId: string, requestId: string, input: ReportRuntimeUpdateInput): MultiremiRuntimeUpdateRequest {
     const request = this.runtimes.reportRuntimeUpdateResult(runtimeId, requestId, input);
+    this.reconcileRuntimeUpdateFailures();
     this.publishDaemonDispatchConditionsChanged(this.getRuntimeLite(runtimeId)?.workspaceId ?? "local");
     return request;
   }
@@ -3700,6 +3733,7 @@ runMigrations(this.db);
     return this.usage.listAgentRuntime(input);
   }
   heartbeatRuntime(runtimeId: string, options: {
+    health?: import("@multiremi/contracts/daemon-protocol.js").DaemonHealth;
     claimPending?: boolean;
     supportsBatchImport?: boolean;
     supportsDirectoryScan?: boolean;
@@ -3807,7 +3841,13 @@ runMigrations(this.db);
 
   reportIssueWorkspace(input: ReportIssueWorkspaceInput): MultiremiIssueWorkspace {
     const workspace = this.issueWorkspaces.report(input);
-    this.publishDaemonDispatchConditionsChanged(workspace.workspaceId);
+    // A live Issue workspace is pinned to its daemon. Its readiness changes
+    // eligibility for sibling providers on that host, not unrelated machines.
+    const runtime = this.runtimes.getRuntimeLite(input.runtimeId)!;
+    for (const runtimeId of this.runtimes.runtimeIdsForDaemon(runtime)) {
+      this.ctx.emitWorkspaceEvent({ type: "daemon:dispatch_conditions_changed", workspaceId: workspace.workspaceId,
+        actorType: "system", actorId: null, payload: { dispatch_only: true, runtime_id: runtimeId } });
+    }
     return workspace;
   }
 
@@ -4497,6 +4537,10 @@ runMigrations(this.db);
     return this.sessions.getIssueSession(id);
   }
 
+  getIssueSessionOwnerFacts(ids: readonly string[]) {
+    return this.sessions.getIssueSessionOwnerFacts(ids);
+  }
+
   getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null; historicalWorkspaceId: string | null } | null {
     return this.sessions.getIssueSessionWithOwnerScope(id);
   }
@@ -4631,8 +4675,9 @@ runMigrations(this.db);
   recordAttemptOutcomeWithinTransaction(
     taskId: string,
     fields: Parameters<ConversationLogRepo["recordAttemptOutcomeWithinTransaction"]>[1],
+    materialize = true,
   ): ConversationLogEntry | null {
-    return this.conversationLog.recordAttemptOutcomeWithinTransaction(taskId, fields);
+    return this.conversationLog.recordAttemptOutcomeWithinTransaction(taskId, fields, materialize);
   }
 
   /**
@@ -4696,7 +4741,7 @@ runMigrations(this.db);
       workedMs,
       processItemCount,
       lateSubagents,
-    });
+    }, false);
     return true;
   }
 
@@ -4729,6 +4774,10 @@ runMigrations(this.db);
 
   getConversationLogEntry(sessionId: string, seq: number, query?: ConversationLogQuery | null): ConversationLogEntry | null {
     return this.conversationLog.getEntry(sessionId, seq, query);
+  }
+
+  getConversationLogEntriesByRefs(refs: readonly { sessionId: string; seq: number }[]) {
+    return this.conversationLog.getEntriesByRefs(refs);
   }
 
   getConversationLogEntryById(id: string): ConversationLogEntry | null {
@@ -5685,7 +5734,7 @@ runMigrations(this.db);
   readAgentMessageInbox(...args: Parameters<InboxRepo["operations"]["readAgentMessageInbox"]>) { return this.inbox.operations.readAgentMessageInbox(...args); }
   getTurn(...args: Parameters<InboxRepo["operations"]["getTurn"]>) { return this.inbox.operations.getTurn(...args); }
   getTurnForAttempt(attemptId: string) {
-    const row = this.db.query("SELECT turn_id FROM multiremi_turn_attempts WHERE id=?").get(attemptId);
+    const row = readAttemptTurn(this.db, attemptId);
     return row ? this.getTurn(String(row.turn_id)) : null;
   }
   listTurns(...args: Parameters<InboxRepo["operations"]["listTurns"]>) { return this.inbox.operations.listTurns(...args); }
@@ -5834,6 +5883,8 @@ runMigrations(this.db);
   }
 
   /** MUL-474: identity/status columns only, request-scoped. */
+  getTaskIdentities(ids: readonly string[]) { return this.tasks.getTaskIdentities(ids); }
+
   getTaskIdentity(id: string): MultiremiTaskIdentity | null;
   getTaskIdentity(id: string, projection: "fanout"): import("@multiremi/store/context.js").TaskMessageFanoutSubject | null;
   getTaskIdentity(id: string, projection?: "fanout") {
@@ -5846,6 +5897,8 @@ runMigrations(this.db);
   }
 
   taskOfferRetryDeadlines(runtimeId: string) { return this.tasks.taskOfferRetryDeadlines(runtimeId); }
+  pendingTaskOfferRuntimeIds(workspaceId: string) { return this.tasks.pendingTaskOfferRuntimeIds(workspaceId); }
+
   hasPendingTaskOffers(workspaceId: string) { return this.tasks.hasPendingTaskOffers(workspaceId); }
 
   private publishDaemonDispatchConditionsChanged(workspaceId: string, runtimeId?: string): void {

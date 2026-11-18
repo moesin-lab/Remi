@@ -38,7 +38,6 @@ export class PlatformMaintenanceRepo {
   }
 
   get(nowMs = Date.now()): MultiremiPlatformMaintenance {
-    this.ensureRow();
     const maintenance = this.read();
     if (maintenance.mode !== "draining") return maintenance;
     const expiresAt = maintenance.expiresAt ? Date.parse(maintenance.expiresAt) : Number.NaN;
@@ -188,9 +187,13 @@ export class PlatformMaintenanceRepo {
   }
 
   private read(): MultiremiPlatformMaintenance {
-    const row = this.db.query(
+    let row = this.db.query(
       "SELECT * FROM multiremi_platform_maintenance WHERE id = 'platform'",
-    ).get() as Row;
+    ).get() as Row | null;
+    if (!row) {
+      this.ensureRow();
+      row = this.db.query("SELECT * FROM multiremi_platform_maintenance WHERE id = 'platform'").get() as Row;
+    }
     return {
       mode: String(row.mode ?? "normal") === "draining" ? "draining" : "normal",
       generation: Number(row.generation ?? 0),

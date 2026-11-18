@@ -18,7 +18,7 @@ import {
   uniqueRefMatch,
 } from "@multiremi/store/helpers.js";
 import { type StoreContext } from "@multiremi/store/context.js";
-import { activeRequestReadCache, cacheKey } from "@multiremi/store/request-read-cache.js";
+import { memoizeRequestRead, activeRequestReadCache, cacheKey } from "@multiremi/store/request-read-cache.js";
 import type {
   BotMenuConfig,
   CreateWorkspaceInput,
@@ -186,7 +186,8 @@ export class WorkspacesRepo {
   }
 
   getWorkspaceMember(id: string): MultiremiWorkspaceMember | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_workspace_members WHERE id = ?").get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_workspace_members'], `member:${id}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_workspace_members WHERE id = ?").get(id) as Row | null);
     return row ? toWorkspaceMember(row) : null;
   }
 

@@ -1,3 +1,4 @@
+import { isDatabaseConnectionError, withDatabaseTimeout } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 import { DAEMON_OFFER_COOLDOWN_MS, DAEMON_OFFER_TIMEOUT_MS, type DaemonTurnInput } from "@multiremi/contracts/daemon-protocol.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
@@ -66,6 +67,8 @@ interface RuntimePump {
     session: DaemonProtocolSession; seq: number; timer: DaemonProtocolTimer } | null;
   accepted: Set<string>;
   sweep: boolean;
+  databaseFailures?: number;
+  databaseWarningAt?: number;
 }
 
 /** The database is the queue; memory holds only leases, deadlines and single-flight state. */
@@ -83,20 +86,13 @@ export class DaemonTaskOffers {
     prepare(task: MultiremiTaskWithAgent, supportsWikiFetch?: boolean): Promise<Record<string, unknown> | null>;
     clock?: DaemonProtocolClock;
     sweepMs?: number;
+    autostart?: boolean;
     onRuntimeReady?(runtimeId: string, activeTaskIds: string[]): void;
   }) {
     this.clock = options.clock ?? systemClock;
+    this.stopped = options.autostart === false;
     options.layer.registerSessionHooks({
-      stop: () => {
-        this.stopped = true;
-        if (this.sweepTimer !== null) this.clock.clearTimeout(this.sweepTimer);
-        for (const timer of this.retryTimers.values()) this.clock.clearTimeout(timer);
-        this.retryTimers.clear();
-        for (const pump of this.pumps.values()) {
-          if (pump.cooldownTimer !== null) this.clock.clearTimeout(pump.cooldownTimer);
-          if (pump.pending) this.clock.clearTimeout(pump.pending.timer);
-        }
-      },
+      stop: () => { void this.stop(); },
       hello: (session, hello) => {
         for (const rt of session.runtimeIds) {
           options.store.reconcileQuestionWaits(rt, hello.runtimes.find(r => r.runtimeId === rt)?.activeQuestionWaits ?? []);
@@ -127,10 +123,18 @@ export class DaemonTaskOffers {
       close: session => this.closed(session),
     });
     options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.ready(frame, session));
-    const sweepMs = options.sweepMs ?? (process.env.NODE_ENV === "test" ? 2_147_483_647 : DAEMON_OFFER_SWEEP_MS);
+    // Dispatch is driven by queue/capacity/configuration events and explicit deadlines.
+    // Keep a low-frequency safety net for missed events; recoveries expose missing wiring.
+    if (options.autostart !== false) this.start();
+  }
+
+  start(): void {
+    if (this.sweepTimer !== null) return;
+    this.stopped = false;
+    const sweepMs = this.options.sweepMs ?? (process.env.NODE_ENV === "test" ? 2_147_483_647 : DAEMON_OFFER_SWEEP_MS);
     const sweep = () => {
       if (this.stopped) return;
-      for (const session of options.layer.registry.listSessions()) {
+      for (const session of this.options.layer.registry.listSessions()) {
         for (const rt of session.runtimeIds) this.kick(rt, true);
       }
       this.sweepTimer = this.clock.setTimeout(sweep, sweepMs);
@@ -138,6 +142,22 @@ export class DaemonTaskOffers {
     };
     this.sweepTimer = this.clock.setTimeout(sweep, sweepMs);
     (this.sweepTimer as ReturnType<typeof setTimeout>).unref?.();
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    if (this.sweepTimer !== null) this.clock.clearTimeout(this.sweepTimer);
+    this.sweepTimer = null;
+    for (const timer of this.retryTimers.values()) this.clock.clearTimeout(timer);
+    this.retryTimers.clear();
+    const pumps = [...this.pumps.values()];
+    for (const pump of pumps) {
+      if (pump.cooldownTimer !== null) this.clock.clearTimeout(pump.cooldownTimer);
+      if (pump.pending) this.clock.clearTimeout(pump.pending.timer);
+    }
+    await Promise.all(pumps.map(pump => pump.running));
+    this.pumps.clear();
+    this.heartbeatCounts.clear();
   }
 
   kick(runtimeId?: string | null, sweep = false): void {
@@ -157,9 +177,29 @@ export class DaemonTaskOffers {
         pump.dirty = false;
         const fromSweep = pump.sweep;
         pump.sweep = false;
-        await withDbJob("daemon.offer", () => this.run(runtimeId, pump, fromSweep));
-      } while (pump.dirty && !pump.waiting && !pump.pending && this.clock.now() >= pump.cooldownUntil);
+        await withDatabaseTimeout(5_000, () => withDbJob("daemon.offer", () => this.run(runtimeId, pump, fromSweep)));
+        pump.databaseFailures = 0;
+        pump.databaseWarningAt = undefined;
+      } while (!this.stopped && pump.dirty && !pump.waiting && !pump.pending && this.clock.now() >= pump.cooldownUntil);
     }).catch(error => {
+      if (!isDatabaseConnectionError(error)) {
+        console.error("daemon offer failed", error);
+        throw error;
+      }
+      if (this.stopped) return;
+      const delay = Math.min(30_000, 1_000 * 2 ** Math.min(pump.databaseFailures ?? 0, 16));
+      pump.databaseFailures = (pump.databaseFailures ?? 0) + 1;
+      pump.cooldownUntil = this.clock.now() + delay;
+      pump.cooldownReason = "database_unavailable";
+      if (pump.cooldownTimer !== null) this.clock.clearTimeout(pump.cooldownTimer);
+      pump.cooldownTimer = this.clock.setTimeout(() => {
+        pump.cooldownTimer = null;
+        pump.cooldownReason = null;
+        this.kick(runtimeId);
+      }, delay);
+      (pump.cooldownTimer as ReturnType<typeof setTimeout>).unref?.();
+      if (pump.databaseWarningAt !== undefined && this.clock.now() - pump.databaseWarningAt < 30_000) return;
+      pump.databaseWarningAt = this.clock.now();
       console.warn(JSON.stringify({ event: "daemon_offer_failed", runtime_id: runtimeId,
         error_class: error instanceof Error ? error.name : typeof error }));
     }).finally(() => {
@@ -171,10 +211,14 @@ export class DaemonTaskOffers {
   }
 
   kickWorkspace(workspaceId: string): void {
-    for (const session of this.options.layer.registry.listSessions()) {
-      for (const rt of session.runtimeIds) {
-        if ((this.options.store.getRuntimeLite(rt)?.workspaceId ?? "local") === workspaceId) this.kick(rt);
-      }
+    // A released slot can unblock work on another host (global agent limits),
+    // but hosts with no queued/offered work cannot claim anything. Preserve
+    // workspace-wide admission for unassigned attempts and the periodic sweep.
+    const pending = new Set(this.options.store.pendingTaskOfferRuntimeIds(workspaceId));
+    const ids = this.options.layer.registry.listSessions().flatMap(session => session.runtimeIds)
+      .filter(id => pending.has(null) || pending.has(id));
+    for (const runtime of this.options.store.getRuntimesLite(ids)) {
+      if ((runtime.workspaceId ?? "local") === workspaceId) this.kick(runtime.id);
     }
   }
 
@@ -284,6 +328,7 @@ export class DaemonTaskOffers {
           .map(entry => Number(entry.seq)) } : null;
       pump.pending = { taskId: task.id, agentId: task.agentId, inlineRead, session, seq: sent.seq, timer };
     } catch (error) {
+      if (isDatabaseConnectionError(error)) throw error;
       const current = store.getTaskIdentity(task.id);
       if (current?.status === "dispatched" && current.runtimeId === runtimeId) this.rescind(runtimeId, pump, task.id);
       throw error;
@@ -335,7 +380,8 @@ export class DaemonTaskOffers {
   private resume(session: DaemonProtocolSession): void {
     for (const runtimeId of session.runtimeIds) {
       const pump = this.pumps.get(runtimeId);
-      if (pump) pump.waiting = false;
+      if (!pump?.waiting) continue;
+      pump.waiting = false;
       this.kick(runtimeId);
     }
   }

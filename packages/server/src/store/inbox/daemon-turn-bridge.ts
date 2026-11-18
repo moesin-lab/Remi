@@ -5,7 +5,7 @@ import { afterCommit } from '../db/postgres.js';
 import type { MultiremiTaskWithAgent } from '@multiremi/contracts/types.js';
 import type { DaemonTaskCompletionFields } from '@multiremi/contracts/daemon-protocol.js';
 import type { UnifiedMessage,DecisionOption } from '@multiremi/contracts/unified-model.js';
-import { sendMessageWithinTransaction,getMessage } from './send-message.js';
+import { sendMessageWithinTransaction,getMessage,messageFromRow } from './send-message.js';
 import { InputUnreadError, lockLane,acknowledgeInput,assertOfferedInputRead } from './lane-machine.js';
 import { deriveIssueStatusWithinTransaction } from './issue-status.js';
 import { patchDecisionRecord } from './decision-records.js';
@@ -32,6 +32,8 @@ const invalidTurnReports=new Set([
 ]);
 function turnRejectionCode(error:unknown,attemptId:string,runtimeId:string):'stale_attempt'|'input_gap'|'turn_input_pending'|'invalid_report'|null {
   if(!(error instanceof Error))return null;
+  if ('retryable' in error && error.retryable === false && 'code' in error
+    && ['authority_revoked','task_not_found'].includes(String(error.code))) return 'stale_attempt';
   if(error.message==='stale_attempt'||error.message==='input_gap'||error.message==='turn_input_pending')return error.message;
   if(invalidTurnReports.has(error.message)
     ||error.message===`Task not found or terminal: ${attemptId}`
@@ -52,7 +54,7 @@ export class DaemonTurnBridge {
         &&!(sentInput&&row.status==='pending'&&row.offered_at&&['offered','accepted'].includes(row.attempt_status)))throw new Error('stale_attempt');
     lockLane(this.ctx,row.session_id,row.agent_id,row.execution_scope);return row;
   }
-  private messages(sessionId:string,from:number,to:number):UnifiedMessage[]{return this.ctx.db.query("SELECT id FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND deleted_at IS NULL AND visibility='shown' ORDER BY seq").all(sessionId,from,to).map(row=>getMessage(this.ctx,row.id)!);}
+  private messages(sessionId:string,from:number,to:number):UnifiedMessage[]{return this.ctx.db.query("SELECT * FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND deleted_at IS NULL AND visibility='shown' ORDER BY seq").all(sessionId,from,to).map(messageFromRow);}
   private inputMessages(turn:any,from:number,to:number):UnifiedMessage[] {
     const messages=this.messages(turn.session_id,from,to);
     const attempt=this.ctx.db.query('SELECT session_id,attempt_no,input_trigger_ack FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);
@@ -72,14 +74,14 @@ export class DaemonTurnBridge {
    * The original bodies remain in the log and range reads own partial-body progress.
    * `window` holds every message in (from,to]. The range record is `complete` only when none of
    * them still needs a read under the acknowledgement rule, so the agent can skip the range read. */
-  private project(messages:UnifiedMessage[],turn:any,from:number,to:number,window:UnifiedMessage[]=messages):UnifiedMessage[] {
+  private project(messages:UnifiedMessage[],turn:any,from:number,to:number,window:UnifiedMessage[]=messages,readSeq?:number):UnifiedMessage[] {
     const isTrigger=(m:UnifiedMessage)=>m.to_agent_id===turn.agent_id&&m.wake_applied==='now'&&(m.metadata.execution_scope??'')===turn.execution_scope;
     const triggers=new Set(messages.filter(isTrigger).map(m=>m.seq));
     const asEntries=(list:UnifiedMessage[])=>list.map(m=>({...m,author_type:m.sender_type,author_id:m.sender_id,parent_id:m.reply_to_id}));
     const entries=asEntries(messages);
     // A cold replacement's replayed original input sits before the range and is read by its pointer.
     const complete=!messages.some(m=>m.seq<=from)&&unreadInputInline({agentId:turn.agent_id,fromSeq:from,toSeq:to,
-      readSeq:attemptInputState(this.ctx,turn).read,entries:asEntries(window),triggerSeqs:new Set(window.filter(isTrigger).map(m=>m.seq))});
+      readSeq:readSeq??attemptInputState(this.ctx,turn).read,entries:asEntries(window),triggerSeqs:new Set(window.filter(isTrigger).map(m=>m.seq))});
     const range=taskSessionInput({sessionId:turn.session_id,agentId:turn.agent_id,fromSeq:from,toSeq:to,entries,triggerSeqs:triggers,coldStart:from===0,complete}).split('\n')[0]!.replaceAll('remi session log get','remi message list');
     return messages.map((message,index)=>{
       let body=triggers.has(message.seq)?message.body_md:'';
@@ -106,17 +108,78 @@ export class DaemonTurnBridge {
   snapshot(scope:DaemonTurnScope,activeAttemptIds:ReadonlySet<string>) {
     return this.transaction(()=>{
       const messages:Array<{turn_id:string;attempt_id:string;message:UnifiedMessage}>=[],wrapUps:Array<{turn_id:string;attempt_id:string;requested_at:string}>=[];
-      for(const id of activeAttemptIds){const turn=this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(id);if(!turn)continue;
-        let row:any;try{row=this.authorized(turn.turn_id,id,scope);}catch{continue;}
-        const head=this.ctx.conversationLog().getConversationLogHead(row.session_id)?.headSeq??0;
-        const from=this.cursor(row);
-        const window=this.messages(row.session_id,from,head);
+      if (!activeAttemptIds.size) return {messages,wrapUps};
+      // The same workspace mutex used by authorized() orders every source
+      // mutation. Lock every selected lane in a deterministic order, then read
+      // current-attempt/host authority and receipts under those locks.
+      this.ctx.lockWorkspaceRuntimeLifecycle(scope.workspaceId);
+      const runtime=this.ctx.runtimes().getRuntimeLite(scope.runtimeId);
+      if(runtime?.daemonId!==scope.daemonId)return {messages,wrapUps};
+      const ids=[...activeAttemptIds];
+      const marks=this.ctx.db.dialect==='postgres'
+        ? 'SELECT value FROM jsonb_array_elements_text(CAST(CAST(? AS TEXT) AS JSONB)) AS batch(value)'
+        : 'SELECT value FROM json_each(?)';
+      const where=`a.id IN (${marks}) AND t.current_attempt_id=a.id AND t.workspace_id=?
+        AND a.runtime_id=? AND t.status IN ('running','awaiting_human')`;
+      const args=[JSON.stringify(ids),scope.workspaceId,scope.runtimeId];
+      const at=nowIso();
+      // Multiple live attempts can share a lane; PostgreSQL upserts require
+      // each conflict target to occur only once in the selected batch.
+      this.ctx.db.run(`INSERT INTO multiremi_session_lanes
+        (session_id,reader_type,reader_id,execution_scope,created_at,updated_at)
+        SELECT DISTINCT t.session_id,'agent',t.agent_id,t.execution_scope,?,?
+        FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id
+        WHERE ${where} ORDER BY t.session_id,t.agent_id,t.execution_scope
+        ON CONFLICT(session_id,reader_type,reader_id,execution_scope)
+        DO UPDATE SET updated_at=multiremi_session_lanes.updated_at`,[at,at,...args]);
+      const rows=this.ctx.db.query(`SELECT t.*,a.id AS snapshot_attempt_id,
+        a.input_ack_seq,a.input_read_seq,a.session_id AS provider_session_id,
+        l.cursor_seq AS lane_cursor,COALESCE(h.head_seq,0) AS snapshot_head
+        FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id
+        JOIN multiremi_session_lanes l ON l.session_id=t.session_id AND l.reader_type='agent'
+          AND l.reader_id=t.agent_id AND l.execution_scope=t.execution_scope
+        LEFT JOIN multiremi_conversation_heads h ON h.session_id=t.session_id
+        WHERE ${where}`).all(...args);
+      if(!rows.length)return {messages,wrapUps};
+      const selected=rows.map(row=>String(row.snapshot_attempt_id));
+      const selectedMarks=marks;
+      const selectedArgs=[JSON.stringify(selected)];
+      this.ctx.db.run(`UPDATE multiremi_turn_attempts SET
+        input_ack_seq=CASE WHEN COALESCE(session_id,'')='' THEN 0 ELSE COALESCE((SELECT l.cursor_seq
+          FROM multiremi_session_lanes l JOIN multiremi_turns t ON t.session_id=l.session_id
+            AND t.agent_id=l.reader_id AND t.execution_scope=l.execution_scope
+          WHERE t.id=multiremi_turn_attempts.turn_id AND l.reader_type='agent'),0) END,
+        input_read_seq=CASE WHEN COALESCE(session_id,'')='' THEN 0 ELSE COALESCE((SELECT l.cursor_seq
+          FROM multiremi_session_lanes l JOIN multiremi_turns t ON t.session_id=l.session_id
+            AND t.agent_id=l.reader_id AND t.execution_scope=l.execution_scope
+          WHERE t.id=multiremi_turn_attempts.turn_id AND l.reader_type='agent'),0) END,
+        input_read_offset=0 WHERE id IN (${selectedMarks}) AND input_ack_seq IS NULL`,selectedArgs);
+      const windows=new Map<string,UnifiedMessage[]>();
+      for(const entry of this.ctx.db.query(`SELECT e.*,a.id AS snapshot_attempt_id
+        FROM multiremi_turn_attempts a JOIN multiremi_turns t ON t.id=a.turn_id
+        JOIN multiremi_conversation_log e ON e.session_id=t.session_id
+        WHERE a.id IN (${selectedMarks}) AND e.seq>a.input_ack_seq
+          AND e.seq<=COALESCE((SELECT h.head_seq FROM multiremi_conversation_heads h WHERE h.session_id=t.session_id),0)
+          AND e.kind='message' AND e.deleted_at IS NULL AND e.visibility='shown'
+        ORDER BY a.id,e.seq`).all(...selectedArgs)) {
+        const id=String(entry.snapshot_attempt_id),window=windows.get(id)??[];
+        window.push(messageFromRow(entry));windows.set(id,window);
+      }
+      for(const row of rows){
+        const id=String(row.snapshot_attempt_id),head=Number(row.snapshot_head);
+        const from=Number(row.input_ack_seq??(row.provider_session_id?row.lane_cursor:0)??0);
+        const read=Number(row.input_read_seq??from),window=windows.get(id)??[];
         const interrupts=window.filter(m=>m.wake_applied==='now'&&m.to_agent_id===row.agent_id
           &&(m.metadata.execution_scope??'')===row.execution_scope&&m.seq>Number(row.wake_seq));
-        for(const message of this.project(interrupts,row,from,head,window))messages.push({turn_id:row.id,attempt_id:id,message});
-        this.ctx.db.run('UPDATE multiremi_turn_attempts SET projection_to_seq=CASE WHEN COALESCE(projection_to_seq,0)<? THEN ? ELSE projection_to_seq END WHERE id=?',[head,head,id]);
+        for(const message of this.project(interrupts,row,from,head,window,read))messages.push({turn_id:row.id,attempt_id:id,message});
         if(row.wrap_up_requested_at)wrapUps.push({turn_id:row.id,attempt_id:id,requested_at:row.wrap_up_requested_at});
       }
+      this.ctx.db.run(`UPDATE multiremi_turn_attempts SET projection_to_seq=CASE
+        WHEN COALESCE(projection_to_seq,0)<COALESCE((SELECT h.head_seq FROM multiremi_turns t
+          JOIN multiremi_conversation_heads h ON h.session_id=t.session_id WHERE t.id=multiremi_turn_attempts.turn_id),0)
+        THEN (SELECT h.head_seq FROM multiremi_turns t JOIN multiremi_conversation_heads h
+          ON h.session_id=t.session_id WHERE t.id=multiremi_turn_attempts.turn_id)
+        ELSE projection_to_seq END WHERE id IN (${selectedMarks})`,selectedArgs);
       return {messages,wrapUps};
     });
   }
@@ -131,16 +194,19 @@ export class DaemonTurnBridge {
         const replay=this.ctx.db.query('SELECT input_trigger_ack,attempt_no,session_id FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);
         if(to>from||Number(replay.attempt_no)>1&&!replay.session_id&&!replay.input_trigger_ack){
           // Range reads can deliver ordinary context that snapshots never push.
-          // Only this attempt's full-body receipt may replace an explicit ID;
-          // unread IDs, foreign IDs, duplicates and ordering still need validation.
+          // Own messages already reached this provider when it authored them,
+          // and snapshots do not push those replies back. Other omitted IDs
+          // still require this attempt's full-body receipt. Validate every
+          // supplied ID (including own messages), duplicates and ordering.
           const read=attemptInputState(this.ctx,turn).read;
           const messageIds=new Set(payload.message_ids);
           const expected=this.inputMessages(turn,from,to)
-            .filter(message=>message.seq>read||messageIds.has(message.id)).map(message=>message.id);
+            .filter(message=>messageIds.has(message.id)||message.seq>read
+              &&!(message.sender_type==='agent'&&message.sender_id===turn.agent_id)).map(message=>message.id);
           if(JSON.stringify(expected)!==JSON.stringify(payload.message_ids))throw new Error('input_gap');
           assertOfferedInputRead(this.ctx,turn,to);}
         acknowledgeInput(this.ctx,turn.id,Math.min(from,to),to);
-        acknowledgeAttemptInput(this.ctx,turn,to);
+        acknowledgeAttemptInput(this.ctx,turn,to,true);
         for (const message of this.messages(turn.session_id,from,to)) if (message.metadata.question_continuation === true && typeof message.metadata.root_question_id === 'string')
           new Questions(this.ctx).consumeContinuationInputWithinTransaction(message.metadata.root_question_id, turn.id, turn.current_attempt_id, message.id, events);
         return {ok:true,input_to_seq:Math.max(from,to)};
@@ -182,14 +248,8 @@ export class DaemonTurnBridge {
   complete(input:{payload:DaemonTurnCompletePayload;completionFields:DaemonTaskCompletionFields|null;traceEventCount?:number},scope:DaemonTurnScope):Record<string,unknown> {
     const p=input.payload;
     try{
-      const prior=this.transaction(()=>{const turn=this.authorized(p.turn_id,p.attempt_id,scope,true);
-        if(turn.status==='completed')return {ok:true,turn_id:turn.id,reply_message_id:turn.reply_message_id};
-        const attempt=this.ctx.tasks().getTask(p.attempt_id);
-        if(!['running','awaiting_human'].includes(turn.status)&&!(turn.status==='pending'&&attempt?.offeredAt))throw new Error('invalid_report');
-        if(!Number.isSafeInteger(p.input_to_seq)||p.input_to_seq>Number(turn.offered_to??0)||p.input_to_seq<Number(turn.input_to_seq??0))throw new Error('invalid_report');return null;});
-      if(prior)return prior;
       this.ctx.tasks().completeTask(p.attempt_id,{output:p.reply.body_md,sessionId:p.session_id,workDir:p.work_dir,completionFields:input.completionFields,traceEventCount:input.traceEventCount,
-        turnInputToSeq:p.input_to_seq,allowUnreadInput:!scope.inputUnread||p.input_unread_fallback===true,replyKind:p.reply.message_kind,expectedRuntimeId:scope.runtimeId,expectedDaemonId:scope.daemonId},scope);
+        expectedTurnId:p.turn_id,turnInputToSeq:p.input_to_seq,allowUnreadInput:!scope.inputUnread||p.input_unread_fallback===true,replyKind:p.reply.message_kind,expectedRuntimeId:scope.runtimeId,expectedDaemonId:scope.daemonId},scope);
       const turn=this.ctx.db.query('SELECT reply_message_id FROM multiremi_turns WHERE id=?').get(p.turn_id);
       return {ok:true,turn_id:p.turn_id,reply_message_id:turn?.reply_message_id??null};
     }catch(error){

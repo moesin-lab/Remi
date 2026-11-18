@@ -1,14 +1,28 @@
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
+import { AccessTokensRepo } from "@multiremi/store/repos/access-tokens-repo.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import type { MultiremiIssueDecision } from '@multiremi/contracts/types.js';
 import { createLocalStore as createStore, resetMultiremiTestEnv } from "./helpers.js";
 
-afterEach(resetMultiremiTestEnv);
-// The answered-window cases pin "now" so created_at / answered_at are ordered.
-afterEach(() => setSystemTime());
+// Bun's timeout rejects the test wait; it does not cancel the async exercise.
+// Observe rejection immediately and drain it before resetting/closing its DB.
+let activeExercise: Promise<void> | undefined;
+function runExercise(exercise: () => Promise<void>): Promise<void> {
+  activeExercise = exercise();
+  void activeExercise.catch(() => {});
+  return activeExercise;
+}
+afterEach(async () => {
+  try { await activeExercise; }
+  finally {
+    activeExercise = undefined;
+    resetMultiremiTestEnv();
+    setSystemTime();
+  }
+});
 
 // #1/#4: the decision itself addresses its first human recipient; additional
 // audiences receive canonical status messages rather than duplicate ledger rows.
@@ -163,22 +177,44 @@ interface DecisionApi {
 
 function historicalDecisionApi(store: MultiremiStore): DecisionApi {
   const app = createMultiremiApp({ store, authToken: "test-master" });
+  const db = (store as unknown as { db: import('@multiremi/store/db/postgres.js').SqlDatabase }).db;
+  let template: Record<string, unknown> | undefined;
+  let targetIssueId = "";
   return {
     async create(issueId, token, input) {
-      // This helper exclusively seeds pre-Q history for read-window probes;
-      // all new business AUQs use the native bridge in exerciseDecisions.
-      expect(await store.verifyAccessToken(token)).not.toBeNull();
-      const source = store.getIssue(issueId)!;
-      const target = source.parentIssueId ? store.getIssue(source.parentIssueId)! : source;
-      const session = store.getOrCreateDefaultIssueSession(target.id);
-      const result = store.sendMessage({ session_id: session.id, sender: { type: 'agent', id: source.assigneeId! },
-        to: { type: 'none' }, message_kind: 'decision', wake_requested: 'inbox_only', body_md: input.title,
-        metadata: { decision_record: { kind: input.kind, title: input.title, body: input.title,
-          source_issue_id: source.id, source_task_id: null, status: 'pending', owner_agent_id: target.assigneeId,
-          history: [] } } });
-      expect(store.getMessage(result.message.id)?.metadata.question).toBeUndefined();
-      expect(store.getQuestion(result.message.id)?.wait_status).toBe('none');
-      return store.getIssueDecision(target.id, result.message.id)!;
+      // One canonical send establishes the historical shape. Subsequent rows
+      // are read-window fixtures: sending each through Questions re-reads all
+      // preceding decisions and turns 52 seeds into quadratic SQL work.
+      if (!template) {
+        expect(await store.verifyAccessToken(token)).not.toBeNull();
+        const source = store.getIssue(issueId)!;
+        const target = source.parentIssueId ? store.getIssue(source.parentIssueId)! : source;
+        targetIssueId = target.id;
+        const session = store.getOrCreateDefaultIssueSession(target.id);
+        const result = store.sendMessage({ session_id: session.id, sender: { type: 'agent', id: source.assigneeId! },
+          to: { type: 'none' }, message_kind: 'decision', wake_requested: 'inbox_only', body_md: input.title,
+          metadata: { decision_record: { kind: input.kind, title: input.title, body: input.title,
+            source_issue_id: source.id, source_task_id: null, status: 'pending', owner_agent_id: target.assigneeId,
+            history: [] } } });
+        expect(store.getMessage(result.message.id)?.metadata.question).toBeUndefined();
+        expect(store.getQuestion(result.message.id)?.wait_status).toBe('none');
+        template = db.query('SELECT * FROM multiremi_conversation_log WHERE id=?').get(result.message.id);
+        return store.getIssueDecision(target.id, result.message.id)!;
+      }
+      const id = `cmt_window_${crypto.randomUUID()}`;
+      const at = new Date().toISOString();
+      const metadata = JSON.parse(String(template.metadata));
+      metadata.decision_record = { ...metadata.decision_record, kind: input.kind, title: input.title, body: input.title };
+      const nextSeq = Number(db.query("SELECT head_seq FROM multiremi_conversation_heads WHERE session_id=?").get(template.session_id).head_seq) + 1;
+      const row: Record<string, unknown> = { ...template, id, seq: nextSeq, body_md: input.title, metadata: JSON.stringify(metadata), created_at: at, updated_at: at };
+      const columns = Object.keys(row);
+      db.transaction(() => {
+        db.run(`INSERT INTO multiremi_conversation_log (${columns.join(',')}) VALUES (${columns.map(() => '?').join(',')})`,
+          columns.map(column => row[column]));
+        db.run('UPDATE multiremi_conversation_heads SET head_seq=?,log_version=log_version+1,updated_at=? WHERE session_id=?',
+          [nextSeq, at, template!.session_id]);
+      })();
+      return store.getIssueDecision(targetIssueId, id)!;
     },
     // `app.request` is overloaded and returns a bare Response when the init is
     // passed as the second argument, so normalize it to a Promise here.
@@ -424,35 +460,27 @@ async function exerciseHumanStageReminders(store: MultiremiStore): Promise<void>
 
 describe("MUL-400 S4 decisions on SQLite", () => {
   it("covers parent ownership, identity, escalation, revision, read model, and events", async () => {
-    await exerciseDecisions(createStore());
+    await runExercise(() => exerciseDecisions(createStore()));
   });
 
   it("windows recently answered decisions by answered_at and exposes history", async () => {
-    await exerciseAnsweredWindow(createStore());
+    await runExercise(() => exerciseAnsweredWindow(createStore()));
   });
 
   it("reminds the root creator and source subscribers at the human stage while any active member acts", async () => {
-    await exerciseHumanStageReminders(createStore());
+    await runExercise(() => exerciseHumanStageReminders(createStore()));
   });
 });
 
 const pgAdminUrl = process.env.MULTIREMI_TEST_POSTGRES_URL;
-let pgAvailable = false;
-if (pgAdminUrl) {
-  try {
-    const probe = new Bun.SQL(pgAdminUrl, { max: 1 });
-    await probe`SELECT 1`;
-    await probe.end();
-    pgAvailable = true;
-  } catch { /* The PG suite reports a skip when this machine has no instance. */ }
-}
-
-describe.skipIf(!pgAvailable)("MUL-400 S4 decisions on PostgreSQL", () => {
+// An explicitly configured PG must connect successfully, never silently skip.
+describe.skipIf(!pgAdminUrl)("MUL-400 S4 decisions on PostgreSQL", () => {
   const databaseName = `mul410_decisions_${process.pid}`;
   let admin: Bun.SQL;
   let database: PostgresSyncDatabase;
   let store: MultiremiStore;
   let maxDepth = 0;
+  let statementCount = 0;
   const controls: { sql: string; invocationDepth: number; callbackDepth: number; inTransaction: boolean }[] = [];
 
   beforeAll(async () => {
@@ -467,6 +495,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S4 decisions on PostgreSQL", () => {
     const target = database as unknown as { execute(sql: string, params: unknown[]): unknown };
     const execute = target.execute.bind(database);
     target.execute = (sql, params) => {
+      statementCount++;
       const command = sql.trim().toUpperCase();
       if (/^(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|START TRANSACTION|END|ABORT)\b/.test(command)) {
         controls.push({ sql: command, invocationDepth: depth, callbackDepth, inTransaction: database.inTransaction });
@@ -498,7 +527,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S4 decisions on PostgreSQL", () => {
 
   it("runs the acceptance flow without nested transactions", async () => {
     controls.length = 0;
-    await exerciseDecisions(store);
+    await runExercise(() => exerciseDecisions(store));
     expect(maxDepth).toBe(1);
     let outerOpen = false;
     const savepoints: string[] = [];
@@ -534,14 +563,35 @@ describe.skipIf(!pgAvailable)("MUL-400 S4 decisions on PostgreSQL", () => {
     }
     expect(outerOpen).toBe(false);
     expect(savepoints).toHaveLength(0);
-  });
+  }, 30_000);
 
-  // The 55-answer PG fixture also persists an inbox entry and wake for each reply.
+  // Keep the original bound; historical seeds avoid unrelated per-message wakeups.
   it("windows recently answered decisions by answered_at and exposes history", async () => {
-    await exerciseAnsweredWindow(store);
+    const before = statementCount;
+    await runExercise(() => exerciseAnsweredWindow(store));
+    // Includes setup, 56 historical decisions, real member revision and reads.
+    // The previous per-message business path required over 15,000 statements.
+    expect(statementCount - before).toBeLessThan(3_000);
+    console.info(`MUL204 answered-window SQL statements: ${statementCount - before}`);
   }, 15_000);
 
   it("reminds the root creator and source subscribers at the human stage while any active member acts", async () => {
-    await exerciseHumanStageReminders(store);
+    await runExercise(() => exerciseHumanStageReminders(store));
   });
+
+  it("returns a late token lookup failure to its caller after bridge close", async () => {
+    const url = new URL(pgAdminUrl!);
+    url.pathname = `/${databaseName}`;
+    const peer = new PostgresSyncDatabase(url.toString());
+    try {
+      const tokens = new AccessTokensRepo(peer);
+      // verifyAccessToken yields at SHA-256 before its first DB query. Closing
+      // here recreates the timeout/teardown race without waiting 60 seconds.
+      const pending = tokens.verifyAccessToken('late-token-lookup');
+      peer.close();
+      await expect(pending).rejects.toThrow('postgres bridge is closed');
+      expect(() => peer.query('SELECT 1').get()).toThrow('postgres bridge is closed');
+    } finally { peer.close(); }
+  });
+
 });

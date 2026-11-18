@@ -1,4 +1,5 @@
 "use client";
+import { runtimeHealthReasons } from "@multiremi/core/runtimes";
 
 import { useState } from "react";
 import {
@@ -294,8 +295,8 @@ function HealthCell({
     <div className="flex min-w-0 items-center gap-1.5">
       <HealthIcon health={health} />
       <span className="block min-w-0 truncate text-sm">
-        {labelOf(health)}
-        {health !== "online" && runtime.last_seen_at && (
+        {labelOf(health)} {runtimeHealthReasons(runtime)}
+        {health !== "online" && health !== "degraded" && runtime.last_seen_at && (
           <span className="text-muted-foreground"> · {lastSeen}</span>
         )}
       </span>

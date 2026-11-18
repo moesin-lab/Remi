@@ -1,6 +1,8 @@
 import type { Hono } from "hono";
 import {
   resolveStorageSettings,
+  STORAGE_SETTINGS_DEFAULTS,
+  storageThresholdErrors,
   validateStorageSettingsPatch,
   type CreateGcRunInput,
   type StorageSettings,
@@ -65,6 +67,8 @@ export function registerStorageRoutes(app: Hono, deps: RouterDeps): void {
       if (value === null) delete storage[key as keyof StorageSettings];
       else storage[key as keyof StorageSettings] = value;
     }
+    const thresholdErrors = storageThresholdErrors({ ...STORAGE_SETTINGS_DEFAULTS, ...storage });
+    if (thresholdErrors.length) return c.json({ error: "invalid storage settings", details: thresholdErrors }, 400);
     const { storage: _previous, ...settings } = workspace.settings;
     const updated = store.updateWorkspace(workspaceId, {
       settings: Object.keys(storage).length ? { ...settings, storage } : settings,

@@ -1,3 +1,5 @@
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
+import { memoizeRequestRead } from "../request-read-cache.js";
 import { InboxOperations } from '../inbox/operations.js';
 import { activeRequestReadCache, cacheKey } from '../request-read-cache.js';
 import { IssueResponsibilityError } from '../issue-responsibility.js';
@@ -563,26 +565,11 @@ export class IssuesRepo {
    * Qs still climbing the execution-owner chain, Qs of other Issues in the
    * family and frozen `source_workspace_changed` Qs do not count. Unresolved
    * decision rows raised by this Issue's Turns or stored in its sessions are the
-   * candidates, so the common nothing-pending case stays one statement; each
-   * candidate's routed stage is then read from its original Q.
+   * candidates. The common nothing-pending case stays one statement; Q source
+   * integrity facts are read in bulk, independently of the candidate count.
    */
   countPendingIssueDecisions(issueId: string): number {
-    const rows = this.ctx.db.query(
-      `SELECT m.id FROM multiremi_turns t JOIN multiremi_conversation_log m ON m.task_id = t.id
-       WHERE t.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision'
-         AND m.deleted_at IS NULL AND m.resolved_at IS NULL
-       UNION
-       SELECT m.id FROM multiremi_issue_sessions s JOIN multiremi_conversation_log m ON m.session_id = s.id
-       WHERE s.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision'
-         AND m.deleted_at IS NULL AND m.resolved_at IS NULL`,
-    ).all(issueId, issueId) as Row[];
-    if (!rows.length) return 0;
-    const questions = new Questions(this.ctx);
-    return rows.filter((row) => {
-      const question = questions.get(String(row.id));
-      return question?.status === "pending" && question.stage === "human" && question.source_issue_id === issueId
-        && question.route_reason !== "source_workspace_changed";
-    }).length;
+    return new Questions(this.ctx).countPendingForIssue(issueId);
   }
 
   listIssueDecisions(issueId: string): MultiremiIssueDecisionList {
@@ -845,10 +832,10 @@ export class IssuesRepo {
 
   getIssue(id: string): MultiremiIssue | null {
     const cache = activeRequestReadCache();
-    const row = this.ctx.db.query(cache
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_issues', 'multiremi_workspaces'], `issue:${id}`, () => this.ctx.db.query(cache
       ? `SELECT i.*, w.id AS existing_workspace_id FROM multiremi_issues i
          LEFT JOIN multiremi_workspaces w ON w.id = i.workspace_id WHERE i.id = ?`
-      : "SELECT * FROM multiremi_issues WHERE id = ?").get(id) as Row | null;
+      : "SELECT * FROM multiremi_issues WHERE id = ?").get(id) as Row | null);
     // The HTTP guard needs workspace existence, not its full settings. Keep the
     // fact in the table-scoped cache so writes and transaction locks invalidate it.
     if (cache && row) cache.set(cacheKey("multiremi_workspaces", "exists", String(row.workspace_id)), row.existing_workspace_id != null);
@@ -4425,7 +4412,7 @@ export class IssuesRepo {
     // Always the within-transaction flavour: the public entry point, or the
     // caller that runs this half directly, guarantees a frame is open around
     // every write below.
-    const sourceTurn=taskId?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(taskId):null;
+    const sourceTurn=taskId?readAttemptTurn(this.ctx.db, taskId):null;
     const member=authorType==='member'?this.ctx.workspaces().getWorkspaceMemberByRef(input.authorId??'local',workspaceId):null;
     const written=sendMessageWithinTransaction(this.ctx,{id,session_id:issueSessionId,
       sender:{type:authorType==='system'?'platform':authorType as 'agent'|'member',id:member?.id??input.authorId??null},
@@ -5394,13 +5381,13 @@ export class IssuesRepo {
 
   /** `listLabelsForIssue` for a caller that already proved the issue exists. */
   listLabelsForExistingIssue(issueId: string): MultiremiLabel[] {
-    const rows = this.ctx.db.query(
+    const rows = memoizeRequestRead(this.ctx.db, ['multiremi_issue_labels', 'multiremi_issue_to_labels'], `labels:${issueId}`, () => this.ctx.db.query(
       `SELECT l.*
        FROM multiremi_issue_labels l
        JOIN multiremi_issue_to_labels il ON il.label_id = l.id
        WHERE il.issue_id = ?
        ORDER BY lower(l.name) ASC`,
-    ).all(issueId) as Row[];
+    ).all(issueId) as Row[]);
     return rows.map(toLabel);
   }
 
@@ -6643,7 +6630,7 @@ function assigneeCommentPrompt(_comment: MultiremiIssueComment): string {
 /**
  * MUL-400 E2 system comment. The old body told the parent owner to read every
  * sibling description and promote backlog items by hand; dependency-declared
- * children start themselves (S2), so this notification only asks for a review.
+ * children start themselves (S2). Closure follows the session instructions.
  */
 function childStatusSystemCommentBody(input: {
   mentionPrefix: string;
@@ -6660,7 +6647,7 @@ function childStatusSystemCommentBody(input: {
   return [
     `${input.mentionPrefix}Sub-issue [${input.childKey}](mention://issue/${input.childId}) - "${title}" - ${verb}.`,
     `Its status is now ${input.childStatus}; a platform round was queued for the owner of this issue.`,
-    "Children whose dependencies are declared as `blocked_by` are promoted automatically, so this report only needs a review of the outcome.",
+    "Children whose dependencies are declared as `blocked_by` are promoted automatically. Review this report and follow the Issue Execution and Escalation rules in your session instructions before closing the child.",
     ...(input.readinessLines?.length
       ? [`Dependencies satisfied: ${input.readinessLines.join(" ")}`]
       : []),

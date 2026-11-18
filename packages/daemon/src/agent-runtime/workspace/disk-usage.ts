@@ -56,13 +56,17 @@ export async function measureBytes(paths: readonly string[], signal?: AbortSigna
  * A reclaim round compares it before and after to tell what it freed; unlike a
  * measurement it walks nothing, so it belongs inside the round.
  */
-export async function freeDiskBytes(path: string): Promise<number | null> {
+export async function diskSpace(path: string): Promise<import("@multiremi/contracts/storage.js").DiskSpace | null> {
   try {
     const info = await statfs(path);
-    return info.bavail * info.bsize;
+    return { free_bytes: info.bavail * info.bsize, total_bytes: info.blocks * info.bsize };
   } catch {
     return null;
   }
+}
+
+export async function freeDiskBytes(path: string): Promise<number | null> {
+  return (await diskSpace(path))?.free_bytes ?? null;
 }
 
 /** Space gained between two readings of `freeDiskBytes`; 0 when either is unknown or space shrank meanwhile. */

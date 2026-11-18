@@ -57,8 +57,14 @@ class MapReadCache implements RequestReadCache {
    */
   private readonly entries = new Map<string, { value: unknown; generation: number }>();
   private generation = 0;
+  closed = false;
+  close(): void {
+    this.closed = true;
+    this.entries.clear();
+  }
   private transactionDepth = 0;
   get<T>(key: string): T | undefined {
+    if (this.closed) return undefined;
     const entry = this.entries.get(key);
     if (!entry) return undefined;
     if (this.transactionDepth > 0 && entry.generation !== this.generation) return undefined;
@@ -76,7 +82,7 @@ class MapReadCache implements RequestReadCache {
     if (this.transactionDepth > 0) this.generation += 1;
   }
   set<T>(key: string, value: T): void {
-    this.entries.set(key, { value, generation: this.generation });
+    if (!this.closed) this.entries.set(key, { value, generation: this.generation });
   }
   clear(): void {
     this.entries.clear();
@@ -106,13 +112,28 @@ export function writeThroughRequestReadCache<T>(key: string, value: T): void {
 
 /** The cache bound to the current async scope, or null when no scope is active. */
 export function activeRequestReadCache(): RequestReadCache | null {
-  return storage.getStore() ?? null;
+  const cache = storage.getStore();
+  return cache && !cache.closed ? cache : null;
 }
 
 /** Run `fn` with a fresh per-request cache active. Nested calls reuse the outer scope's cache. */
 export function withRequestReadCache<T>(fn: () => T): T {
-  if (storage.getStore()) return fn();
+  if (activeRequestReadCache()) return fn();
   return storage.run(new MapReadCache(), fn);
+}
+
+/**
+ * Cache only the synchronous operation. Async descendants may inherit the ALS object, but it is
+ * closed before their callbacks run, so event-triggered pumps cannot retain heartbeat rows.
+ * Always owns a fresh scope, even inside an HTTP request's longer-lived cache.
+ */
+export function withSynchronousRequestReadCache<T>(fn: () => T): T {
+  const cache = new MapReadCache();
+  try {
+    return storage.run(cache, fn);
+  } finally {
+    cache.close();
+  }
 }
 
 /**
@@ -147,6 +168,42 @@ function writtenTable(sql: string): string | null {
   return match ? match[1]! : null;
 }
 
+/** Reuse an explicitly selected read until any of its source tables changes. */
+const readDatabaseIds = new WeakMap<object, number>();
+let nextReadDatabaseId = 0;
+export function memoizeRequestRead<T>(db: object, tables: readonly string[], key: string, read: () => T): T {
+  const cache = activeRequestReadCache();
+  if (!cache) return read();
+  let databaseId = readDatabaseIds.get(db);
+  if (databaseId === undefined) { databaseId = ++nextReadDatabaseId; readDatabaseIds.set(db, databaseId); }
+  const keys = tables.map(table => cacheKey(table, databaseId!, key));
+  const entry = cache.get<{ value: T }>(keys[0]!);
+  if (entry && keys.every(key => cache.get(key) === entry)) return entry.value;
+  const next = { value: read() };
+  for (const key of keys) cache.set(key, next);
+  return next.value;
+}
+
+/** Seed a narrower canonical projection from a row already read in this generation. */
+export function seedRequestRead<T>(db: object, tables: readonly string[], key: string, value: T): void {
+  const cache = activeRequestReadCache();
+  if (!cache) return;
+  let databaseId = readDatabaseIds.get(db);
+  if (databaseId === undefined) { databaseId = ++nextReadDatabaseId; readDatabaseIds.set(db, databaseId); }
+  const entry = { value };
+  for (const table of tables) cache.set(cacheKey(table, databaseId, key), entry);
+}
+
+// Only locks acquired through the wrapped transaction runner are reusable.
+// A savepoint rollback restores its entry set: PG releases locks acquired after it.
+const transactionLocks = new WeakMap<object, { held: Set<string> | null }>();
+export function acquireTransactionLock(db: object, key: string, acquire: () => void): void {
+  const state = transactionLocks.get(db);
+  if (state?.held?.has(key)) return;
+  acquire();
+  state?.held?.add(key);
+}
+
 /**
  * Wrap a `SqlDatabase` so writes invalidate exactly the cached rows they can change, and a
  * transaction never reads a row cached before it began.
@@ -171,6 +228,7 @@ export function invalidatingDatabase<T extends object>(database: T): T {
    * implementation on `PostgresSyncDatabase`.
    */
   const afterCommitFrames: Array<Array<() => void>> = [];
+  const locks: { held: Set<string> | null } = { held: null };
   /** Depth of `transaction()` calls here; only the outermost opens a sentinel frame. */
   let sentinelTransactionDepth = 0;
   let savepointSequence = 0;
@@ -192,7 +250,7 @@ export function invalidatingDatabase<T extends object>(database: T): T {
       },
     });
   };
-  return new Proxy(database, {
+  const proxy = new Proxy(database, {
     get(target, key) {
       const value = Reflect.get(target, key, target);
       if ((key === "query" || key === "prepare") && typeof value === "function") {
@@ -227,6 +285,8 @@ export function invalidatingDatabase<T extends object>(database: T): T {
                 const outermost = sentinelTransactionDepth === 0;
                 sentinelTransactionDepth += 1;
                 if (outermost) lockOrderSentinelTransactionBegin();
+                const previousLocks = locks.held;
+                locks.held = new Set(previousLocks ?? []);
                 afterCommitFrames.push([]);
                 let committed = false;
                 try {
@@ -236,6 +296,7 @@ export function invalidatingDatabase<T extends object>(database: T): T {
                   // and their callbacks cannot be reported as committed.
                   return result;
                 } finally {
+                  if (!committed || outermost) locks.held = previousLocks;
                   const frame = afterCommitFrames.pop()!;
                   sentinelTransactionDepth -= 1;
                   if (outermost) lockOrderSentinelTransactionEnd();
@@ -280,11 +341,18 @@ export function invalidatingDatabase<T extends object>(database: T): T {
         };
       }
       if (key === "savepoint" && typeof value === "function") {
-        return <R>(fn: () => R): R => withinTransaction(() => value.call(target, fn));
+        return <R>(fn: () => R): R => withinTransaction(() => {
+          const previous = locks.held;
+          locks.held = new Set(previous ?? []);
+          try { return value.call(target, fn); }
+          catch (error) { locks.held = previous; throw error; }
+        });
       }
       if (key === "savepoint" && value === undefined) {
         return <R>(fn: () => R): R => withinTransaction(() => {
           if (!Reflect.get(target, "inTransaction", target)) throw new Error("savepoint requires an open transaction");
+          const previousLocks = locks.held;
+          locks.held = new Set(previousLocks ?? []);
           const name = `multiremi_optional_${++savepointSequence}`;
           const exec = Reflect.get(target, "exec", target) as (sql: string) => void;
           exec.call(target, `SAVEPOINT ${name}`);
@@ -298,6 +366,7 @@ export function invalidatingDatabase<T extends object>(database: T): T {
           } catch (error) {
             exec.call(target, `ROLLBACK TO SAVEPOINT ${name}`);
             exec.call(target, `RELEASE SAVEPOINT ${name}`);
+            locks.held = previousLocks;
             invalidateTable(null);
             throw error;
           } finally {
@@ -313,6 +382,8 @@ export function invalidatingDatabase<T extends object>(database: T): T {
       return typeof value === "function" ? value.bind(target) : value;
     },
   }) as T;
+  transactionLocks.set(proxy, locks);
+  return proxy;
 }
 
 /** Run a whole transaction, BEGIN to COMMIT, as a new cache generation. */
@@ -338,6 +409,8 @@ function invalidateTable(table: string | null): void {
     return;
   }
   cache.clearTable(table);
+  // Runtime lite rows join the physical-daemon drain fence.
+  if (table === "multiremi_daemon_drains") cache.clearTable("multiremi_runtimes");
   if(table==='multiremi_turns'||table==='multiremi_turn_attempts')cache.clearTable('multiremi_turn_execution_records');
   if(table==='multiremi_session_lanes')cache.clearTable('multiremi_agent_lane_records');
   if(table==='multiremi_conversation_log'){cache.clearTable('multiremi_chat_message_records');cache.clearTable('multiremi_issue_message_records');}

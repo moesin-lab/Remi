@@ -1,3 +1,4 @@
+import { proxyFetch } from "@shared/proxy-fetch.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
 import { parseExecutionConnectionSnapshot } from "@multiremi/contracts/execution-endpoint.js";
 import type { RuntimeExecutionBinding, RuntimeExecutionBindingAck } from "@multiremi/contracts/runtime-connection";
@@ -684,7 +685,7 @@ export class MultiremiDaemonClient {
     const path = `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/outbound/${encodeURIComponent(deliveryId)}/attachments/${encodeURIComponent(attachmentId)}`;
     const headers = new Headers(this.headers());
     headers.set(FEISHU_CONCIERGE_OUTBOUND_CLAIM_HEADER, claimToken);
-    const response = await fetch(this.baseUrl + path, { headers });
+    const response = await proxyFetch(this.baseUrl + path, { headers });
     if (!response.ok) {
       const responseBody = (await response.text()).slice(0, 2_000);
       throw new MultiremiDaemonHttpError(response.status, "GET", path, responseBody, null);
@@ -765,7 +766,7 @@ export class MultiremiDaemonClient {
     const timeout = AbortSignal.timeout(this.requestTimeoutMs);
     const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
     // Never forward a task/daemon credential to an attachment's external URL.
-    const response = await fetch(this.baseUrl + path, { headers, redirect: "manual", signal: requestSignal });
+    const response = await proxyFetch(this.baseUrl + path, { headers, redirect: "manual", signal: requestSignal });
     if (!response.ok) {
       await response.body?.cancel();
       throw new MultiremiDaemonHttpError(response.status, "GET", path, "Attachment download failed", null);
@@ -934,12 +935,13 @@ export class MultiremiDaemonClient {
     return response.allowed === true;
   }
 
-  async reportRuntimeUpdateResult(runtimeId: string, requestId: string, result: { status: string; output?: string; error?: string; self_check?: boolean }): Promise<void> {
-    if (!this.reportTransport || this.reportTransport.upgradeWaiting()) {
-      await this.post(`/api/daemon/runtimes/${runtimeId}/update/${requestId}/result`, result);
+  async reportRuntimeUpdateResult(runtimeId: string, requestId: string, result: { status: string; output?: string; error?: string; self_check?: boolean }, signal?: AbortSignal): Promise<void> {
+    if (result.status === "running" || !this.reportTransport || this.reportTransport.upgradeWaiting()) {
+      await this.post(`/api/daemon/runtimes/${runtimeId}/update/${requestId}/result`, result, undefined, signal);
       return;
     }
     await this.report("runtime.update_result", `rt:${runtimeId}`, { ...result, request_id: requestId, runtime_id: runtimeId },
+      // Terminal self-check confirmation remains durable across reconnects.
       result.status === "completed" || result.status === "rolled_back");
   }
 
@@ -1307,7 +1309,7 @@ export class MultiremiDaemonClient {
     }, this.requestTimeoutMs);
     let responseStatus: number | undefined;
     try {
-      const resp = await fetch(this.baseUrl + path, { ...init, signal: abort.signal });
+      const resp = await proxyFetch(this.baseUrl + path, { ...init, signal: abort.signal });
       responseStatus = resp.status;
       // Keep the deadline until the body is consumed, even for error responses.
       // Returning this promise without awaiting it would clear the timer early.

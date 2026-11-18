@@ -174,6 +174,8 @@ node scripts/local-profile.mjs stable backup
 
 存在 `compose.application.json` 或 `compose.internal-updates.yml` 时，`stable deploy` 拒绝覆盖应用更新配置，请使用下文 Web/CLI 更新入口。内部模式还阻止直接 `restart`、`backup` 和宿主更新命令，避免与内部操作竞争。尚未接入时，`deploy` 先拉取并核验候选镜像，再停止该环境的 API/Web 写入，保存数据库逻辑备份、API home、旧配置与镜像记录，然后启动并等待健康检查；已经 stop 的环境也保留升级备份步骤。单独 `backup` 同样停止写入，成功后只恢复原本运行的 API/Web。新备份的 `complete.json` 包含每个恢复文件的大小和 SHA-256；旧版只有时间戳的 marker 不满足自动恢复校验。中途失败的目录不能当作可恢复备份。手动部署或备份前应等待正在执行的 Agent 任务结束；API 启动会自动迁移数据库，关闭后台任务也不会跳过迁移。
 
+所有 `docker compose up` 调用遇到明确的端口绑定冲突（例如 `bind: address already in use` 或 `port is already allocated`）时，按 1、2、4 秒短退避最多重试三次，等待旧容器释放端口；其他错误立即失败。冲突持续时报告端口占用，需检查占用进程后重试。只有启动成功才写入 `active.json`。启动失败保留数据卷并列出已有备份位置，不据此认定迁移已执行或要求恢复数据；回滚前应检查 API 迁移日志，确认实际迁移情况。
+
 手动备份保存在 profile 的 `backups/<时间>/`，应用更新备份在 `application-backups/`。停止、重建和升级命令保留命名卷；脚本不提供删除卷操作。默认应用回滚保留当前数据库和文件，必须先验证迁移兼容。恢复旧 PostgreSQL/API home 快照属于独立的手动灾难恢复，会覆盖备份后的写入，不能用作常规版本回滚。备份和旧代码应保留到升级后的实际使用验证完成。
 
 ## 容器内部自更新
@@ -350,3 +352,33 @@ API：`GET /api/daemons/:daemonId/drain` 查询，`POST` 同路径发起
 更新下发还可能等待下一次零在途探测。未安装本功能的旧 daemon 不会消费新增取消字段，
 平台无法仅靠数据库恢复终止其本地进程：这类实例需在维护窗口人工停止旧 daemon 后升级，
 不能把服务端任务归零当作已完成本地排空。
+
+## 发布源码保留
+
+stable 解压源码快照并写入 `.remi-profile-source` 后立即删除对应 SHA tar。
+成功 deploy、up 或宿主激活后，在主机锁内自动修剪 `releases/`。
+手动预览与执行（也可用于旧部署遗留的 tar）：
+
+```bash
+node scripts/local-profile.mjs stable prune-releases --dry-run
+node scripts/local-profile.mjs stable prune-releases
+```
+
+只删除完整小写 40 位 SHA 命名的真实目录或 `<sha>.tar` 普通文件，真实路径必须仍在
+`releases/` 内。符号链接（包括指向 releases 内部的链接）不进入 dry-run 或实际删除计划；
+手工命名目录始终保留。保留 active、deployment、compose.env
+引用的源码，以及 running / recovery_required 宿主操作 previous / candidate
+快照引用的源码。另按备份目录时间名倒序保留最新 3 个不同 ref 的源码；
+`REMI_RELEASES_KEEP` 可设为非负整数覆盖此数量（0 表示不额外保留备份或 daemon 历史 ref）。
+同时读取 `${XDG_CONFIG_HOME:-~/.config}/systemd/user/multiremi-daemon.service`
+及其 `.d/*.conf`（按文件名字典序，空 `ExecStart=` 清空先前命令），保护生效的
+ExecStart 在本 profile releases 下引用的 SHA，以及从新到旧最近 N 个不同 daemon SHA。
+N 同样使用 `REMI_RELEASES_KEEP`，默认 3；回滚到更早的 daemon 版本需重新部署。
+daemon 生效与历史引用同时保护路径中的 SHA 和符号链接解析后仍在 `releases/` 下的 SHA。
+引用的 SHA 目录不存在时忽略；若目录或链接存在但真实路径无法解析（如断链、循环或权限错误），
+则在任何删除之前警告并放弃整次修剪，dry-run 也遵循相同规则。解析到 releases 外的目标不加入保护。
+dry-run 输出会注明 daemon 引用的保留原因。unit 或 drop-in 目录不存在视为无引用；
+存在但无法读取、语法错误或 executable 使用无法解析的扩展时，警告并放弃整次修剪。
+受保护 ref 对应的 tar 也保留；新解压的 tar 始终立即删除。
+元数据读取或路径校验失败会停止本次修剪并警告，修剪失败不影响部署结果。
+不清理 Docker 镜像、backups 或 ACP bundles。首次真实环境清理需由运维授权。

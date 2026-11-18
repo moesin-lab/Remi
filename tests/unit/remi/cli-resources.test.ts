@@ -9,6 +9,7 @@ import { projectCommandSpecs } from "../../../apps/remi/cli/commands/project.js"
 import { repoCommandSpecs } from "../../../apps/remi/cli/commands/repo.js";
 import { tokenCommandSpecs } from "../../../apps/remi/cli/commands/token.js";
 import { workspaceCommandSpecs } from "../../../apps/remi/cli/commands/workspace.js";
+import { STORAGE_SETTINGS_DEFAULTS } from "@multiremi/contracts/storage.js";
 
 const realFetch = globalThis.fetch;
 const realLog = console.log;
@@ -364,20 +365,21 @@ describe("native CLI resource contracts", () => {
   it("reads the effective storage policy and marks which values the workspace overrides", async () => {
     useCliEnv();
     const spec = specById("workspace.storage.get");
-    const settings = { ttl_ms: 86_400_000, automation_ttl_ms: 86_400_000, max_retained: 50, orphan_ttl_ms: 259_200_000, snapshot_max_bytes: 268_435_456, chat_idle_days: 14 };
+    const settings = { ...STORAGE_SETTINGS_DEFAULTS, ttl_ms: 7_200_000 };
     globalThis.fetch = mockFetch(spec.id, [], (request) => {
       const path = new URL(request.url).pathname;
       if (path === "/api/workspaces/ws_1") return Response.json({ id: "ws_1", name: "Workspace" });
       expect(request.method).toBe("GET");
       expect(path).toBe("/api/workspaces/ws_1/storage");
-      return Response.json({ settings, overrides: { ttl_ms: 86_400_000 } });
+      return Response.json({ settings, overrides: { ttl_ms: 7_200_000 } });
     });
 
     const table = await execute(spec, ["ws_1"]);
-    expect(table).toMatch(/ttl_ms\s+86400000\s+workspace\s+259200000/);
-    expect(table).toMatch(/max_retained\s+50\s+default\s+50/);
-    expect(table.split("\n")).toHaveLength(7);
-    expect(JSON.parse(await execute(spec, ["ws_1", "--output", "json"]))).toEqual({ settings, overrides: { ttl_ms: 86_400_000 } });
+    expect(table).toMatch(/ttl_ms\s+7200000\s+workspace\s+86400000/);
+    expect(table).toMatch(/max_retained\s+20\s+default\s+20/);
+    expect(table).toMatch(/pressure_free_percent\s+15\s+default\s+15/);
+    expect(table.split("\n")).toHaveLength(11);
+    expect(JSON.parse(await execute(spec, ["ws_1", "--output", "json"]))).toEqual({ settings, overrides: { ttl_ms: 7_200_000 } });
   });
 
   it("sends only the storage options that were set, resets others with null, and rejects empty updates", async () => {

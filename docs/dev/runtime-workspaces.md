@@ -111,6 +111,20 @@ Project 设备绑定（含独享设备）是放置约束，任何亲和都不能
 各覆盖完整 304 个组合（合计 608）。PG 每格使用独立数据库，逐 Runtime 领取探测以
 SAVEPOINT 回滚。
 
+## 任务 Git 传输
+
+Agent 的 Git 环境通过 `remi git-credential` 按任务身份获取已关联仓库的 HTTPS 凭据。
+对于任务仓库列表中的标准 SSH URL，daemon 还通过进程级 `GIT_CONFIG_*` 注入
+`url.<https-url>.insteadOf=<ssh-url>`，使保留 SSH origin 的工作树也能 fetch/push；
+不修改 origin、共享 Git 配置、SSH 配置或私钥。未列出的仓库不添加映射，非标准
+SSH 端口保留原传输。Git 的 `insteadOf` 是 URL 前缀匹配，凭据 broker 仍独立
+核对实际请求的仓库与服务端返回的 clone URL，不因映射而扩大凭据范围。
+
+实现和验证入口：[credential-broker.ts](../../packages/daemon/src/agent-runtime/repo/credential-broker.ts)、
+[Git 传输回归测试](../../tests/unit/daemon/git-credential-broker.test.ts)。URL 解析回归
+不等于真实 SCM 已可访问；端到端验收仍需在已配置 SCM 连接的 Agent 中执行读取、
+推送测试分支并删除。
+
 ## 任务私有 /tmp
 
 每个任务执行前，daemon 在 `env/<主体>/tmp/` 下分配一个独占目录（`<task>-XXXXXX`，0700），执行结束后删除；每轮 GC 还会清掉不在运行的执行留下的残留。Linux 把它挂载为进程树的字面 `/tmp`（[实现](../../packages/acp/src/private-tmp.ts)），因此同一个任务里的 shell、子进程和 ACP 文件工具看到同一份 `/tmp`，不同任务互不可见。namespace 不可用时 fail-closed：任务以 `private_tmp_isolation_unavailable` 失败，不退回共享 `/tmp`。
@@ -130,6 +144,8 @@ Codex 的 Skill 发现与目录预算使用固定原生版本：用户 `~/.agent
 其他 provider 的本地 Skill 索引包含名称、触发描述和绝对 `SKILL.md` 路径，支持文件从原目录读取；Grok 同时读取注册根目录到 cwd 的 `.grok/skills`。数据库 Agent Skill 每轮同步到 provider 目录；Runtime 工作区与 Project 的 `local_directory` 使用 provider home（Claude `CLAUDE_CONFIG_DIR/skills`，Codex `CODEX_HOME/skills`，Antigravity `.agents/skills`，Grok 为 Remi 私有 provider home 的 `skills`），不覆盖本地同名 Skill。Claude、Codex、Antigravity 由原生发现；Grok adapter 把 Remi 私有 Home 的 `AGENTS.md` 和受管 Agent Skill 的名称、`SKILL.md` 路径索引合入 `initialize._meta.rules`，不内联 Skill 正文，也不替换原生 `GROK_HOME`。Remi 不往用户文件夹写 Skill，只删除自己创建并记入清单的 Skill 目录。单份上下文文件上限 256 KiB；本地指令和 Skill 索引合计上限 24 KiB，Codex 不把全量 Skill 索引计入其中，并继续使用原生指令链与 Skill 目录预算。Remi 的会话说明最多 32 KiB，整个 `AGENTS.md` 上限 48 KiB，超限明确失败。
 
 `env_file` 使用 dotenv 格式，不执行 shell。注入顺序：机器环境 → 团队环境 → Agent 环境 → 本地环境文件 → provider 路由/认证 → Task 坐标。本地文件不能覆盖 `MULTIREMI_*`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`OPENAI_*`、`ANTHROPIC_*`。Antigravity Agent 另外不能覆盖 `GEMINI_HOME`、`GEMINI_API_KEY`、`AGY_*`、`GOOGLE_*`、`ANTIGRAVITY_*`（home、网关路由与 Google 凭据由其环境构造器独占；其他 provider 仍可在本地文件中使用 Google 工具变量）。其他 provider 配置继续沿用现有筛选、插件和 relay 机制，不共享完整 native home。
+
+任务环境构造器将平台 URL 的主机及 daemon helper 的 `localhost`、`127.0.0.1`、`::1` 追加到 `NO_PROXY` 和 `no_proxy`，IPv6 同时注入带括号形式以兼容 Bun，保留已有列表与其他代理变量。CLI 的平台 API、附件上传和下载、本地 daemon helper、worker HTTP 客户端、Runtime 模型发现与 Codex 模型目录请求、Git credential broker、Agent Plugin artifact 缓存及 daemon WebSocket 共用 `packages/shared/src/proxy-fetch.ts` 的路由规则，支持 `NO_PROXY` / `no_proxy` 中的 IPv4/IPv6 CIDR、`*`、域名后缀和主机端口；小写变量存在时优先（含空值）。CIDR 只匹配 URL 中的 IP 字面量，不解析域名。命中时在同步调用 Bun `fetch` 期间将绕过列表替换为精确主机，并在返回 Promise 前恢复原值；请求参数（含 getter、Headers、method 和 body 转换）在改写环境前通过原生 Request 完成规范化；显式为 undefined 的覆盖项继承 Request 原属性，URL 输入先转为字符串，避免在临时环境窗口内再次调用 toString；已有 Request 的流式 body 保留在原对象上，不再次包装转移，避免 Bun 1.3.14 的流式 POST 停滞；嵌套调用按最外层保存的原始规则判定并逐层恢复环境。原生 fetch 的同步读取假设由独立子进程守护测试验证，升级 Bun 后仍须通过。HTTP 重定向使用 manual 模式逐跳重新判定，最多跟随 20 跳；跨 origin 删除 Authorization 和 Cookie，保留 manual/error 控制及 301/302/303 的方法转换。HTTP 未命中时继续使用 Bun 的环境代理行为；WebSocket 命中时直连，未命中时按 ws/wss 选择 `HTTP_PROXY`/`HTTPS_PROXY`（小写优先），显式传给 Bun。真实 HTTP 代理及 WebSocket CONNECT 回归见 `tests/unit/remi/proxy-routing.test.ts`；模型目录的直连与代理回归见 `tests/unit/daemon/runtime-model-proxy-routing.test.ts`。Skill 导入和 CLI 更新的外网请求保持原路径。
 
 这些文件无需纳入云端 Git。注册不上传文件内容，服务端 Task prompt 仅描述路径；执行 agent 及其模型服务仍可能读取文件，任务输出和会话历史仍按现有机制处理。跨 Chat 的原生历史不会自动合并；跨任务记忆可保存在工作区文件中。
 

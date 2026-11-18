@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, utimesSync, mkdtempSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { SystemdReleaseDriver } from "@remi-platform/updater/systemd-release-driver.js";
@@ -62,3 +62,51 @@ describe("systemd release recovery", () => {
     expect(DATA_SCHEMA_INPUTS).toContain("packages/shared/src/db/index.ts");
   });
 });
+
+for (const invalidRetention of [false, true]) {
+  it.skipIf(process.platform !== "linux")(`prunes only marked releases after activation; cleanup failure warns (${invalidRetention})`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "systemd-pruning-")); roots.push(root);
+    const paths: string[] = [];
+    const releases = [];
+    for (let i = 0; i < 7; i++) {
+      const path = join(root, "releases", `release-${i}`); paths.push(path);
+      for (const input of DATA_SCHEMA_INPUTS) { mkdirSync(dirname(join(path, input)), { recursive: true }); writeFileSync(join(path, input), `// ${input}\n`); }
+      const release = { version: `1.0.${i}`, ref: `ref${i}`, dataSchema: migrationFingerprint(await readMigrationSource(path)), publishedAt: null, releaseUrl: null, manifestUrl: null, apiImage: null, webImage: null };
+      releases.push(release);
+      writeFileSync(join(path, ".platform-release.json"), JSON.stringify(release));
+      utimesSync(path, new Date(1000 * i), new Date(1000 * i));
+    }
+    mkdirSync(join(root, "releases", "manual"));
+    const outside = join(root, "outside"); mkdirSync(outside);
+    writeFileSync(join(outside, ".platform-release.json"), JSON.stringify({ ...releases[0], version: "9.0.0", ref: "outside" }));
+    symlinkSync(outside, join(root, "releases", "external"));
+    const internalLink = join(root, "releases", "internal");
+    symlinkSync(paths[2], internalLink);
+    symlinkSync(paths[0], join(root, "current"));
+    // An unfinished switch still needs an older release even after this one succeeds.
+    writeFileSync(join(root, "operation-other.json"), JSON.stringify({ phase: "committed", previousPath: paths[1], previous: releases[1] }));
+    writeFileSync(join(root, "operation-terminal.json"), JSON.stringify({ phase: "rolled_back", previousPath: paths[2], previous: releases[2] }));
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("healthy") });
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message) => { warnings.push(String(message)); };
+    const driver = new SystemdReleaseDriver({ root, backup: testBackup(root), releasesKeep: invalidRetention ? -1 : 3, apiService: "qa-api", webService: "qa-web", apiHealthUrl: server.url.href, webHealthUrl: server.url.href, bunExecutable: "bun" }, {
+      async run(command, args, options) {
+        if (command === "bun") return { exitCode: 0, stdout: "1.3.14", stderr: "" };
+        return safetyCommand(command, args, options) ?? { exitCode: 0, stdout: "active", stderr: "" };
+      },
+    });
+    const operation = { id: "pop_prune", kind: "rollback", status: "preparing", driver: "systemd_release", targetVersion: "1.0.0", targetRef: "ref0", targetManifest: {}, progress: {}, cancelRequested: false, requestedBy: "local", output: null, error: null, previousRelease: null, resultRelease: null, createdAt: "", updatedAt: "", startedAt: null, finishedAt: null } satisfies MultiremiPlatformOperation;
+    try {
+      expect(await driver.execute(operation, async () => {}, READY_GATE)).toEqual(releases[0]);
+      expect(readlinkSync(join(root, "current"))).toBe(paths[0]);
+      expect(JSON.parse(readFileSync(join(root, "operation-pop_prune.json"), "utf8")).phase).toBe("verified");
+      for (let i = 0; i < paths.length; i++) expect(existsSync(paths[i])).toBe(invalidRetention || i <= 1 || i >= 4);
+      expect(existsSync(join(root, "releases", "manual"))).toBe(true);
+      expect(existsSync(join(outside, ".platform-release.json"))).toBe(true);
+      expect(lstatSync(join(root, "releases", "external")).isSymbolicLink()).toBe(true);
+      expect(lstatSync(internalLink).isSymbolicLink()).toBe(true);
+      expect(warnings.length).toBe(invalidRetention ? 1 : 0);
+    } finally { console.warn = originalWarn; server.stop(true); }
+  });
+}

@@ -13,12 +13,14 @@ const DAY_MS = 24 * HOUR_MS;
 describe("storage settings defaults", () => {
   it("pins the ADR 0018 defaults and bounds", () => {
     expect(STORAGE_SETTINGS_DEFAULTS).toEqual({
-      ttl_ms: 72 * HOUR_MS,
+      ttl_ms: 24 * HOUR_MS,
       automation_ttl_ms: 24 * HOUR_MS,
-      max_retained: 50,
+      max_retained: 20,
       orphan_ttl_ms: 72 * HOUR_MS,
       snapshot_max_bytes: 256 * 1024 * 1024,
       chat_idle_days: 14,
+      pressure_free_percent: 15, pressure_free_bytes: 20 * 1024 ** 3,
+      critical_free_percent: 5, critical_free_bytes: 5 * 1024 ** 3,
     });
     expect(STORAGE_SETTINGS_BOUNDS).toEqual({
       ttl_ms: { min: HOUR_MS, max: 365 * DAY_MS },
@@ -27,6 +29,8 @@ describe("storage settings defaults", () => {
       orphan_ttl_ms: { min: HOUR_MS, max: 365 * DAY_MS },
       snapshot_max_bytes: { min: 1024 * 1024, max: 10 * 1024 * 1024 * 1024 },
       chat_idle_days: { min: 0, max: 3650 },
+      pressure_free_percent: { min: 0, max: 100 }, critical_free_percent: { min: 0, max: 100 },
+      pressure_free_bytes: { min: 0, max: Number.MAX_SAFE_INTEGER }, critical_free_bytes: { min: 0, max: Number.MAX_SAFE_INTEGER },
     });
   });
 
@@ -50,7 +54,7 @@ describe("resolveStorageSettings", () => {
   it("returns a copy so callers cannot mutate the defaults", () => {
     const resolved = resolveStorageSettings({});
     resolved.ttl_ms = 1;
-    expect(STORAGE_SETTINGS_DEFAULTS.ttl_ms).toBe(72 * HOUR_MS);
+    expect(STORAGE_SETTINGS_DEFAULTS.ttl_ms).toBe(24 * HOUR_MS);
   });
 
   it("merges valid keys over the defaults and ignores unknown keys", () => {
@@ -66,7 +70,9 @@ describe("resolveStorageSettings", () => {
     for (const key of STORAGE_SETTINGS_KEYS) {
       const { min, max } = STORAGE_SETTINGS_BOUNDS[key];
       expect(resolveStorageSettings({ [key]: min })[key]).toBe(min);
-      expect(resolveStorageSettings({ [key]: max })[key]).toBe(max);
+      const paired = key === "critical_free_percent" ? { pressure_free_percent: max }
+        : key === "critical_free_bytes" ? { pressure_free_bytes: max } : {};
+      expect(resolveStorageSettings({ ...paired, [key]: max })[key]).toBe(max);
     }
   });
 
@@ -133,4 +139,11 @@ describe("validateStorageSettingsPatch", () => {
     expect(result.patch).toEqual({});
     expect(result.errors).toHaveLength(3);
   });
+});
+
+it("normalizes legacy inconsistent threshold pairs but treats zero as disabled", () => {
+  expect(resolveStorageSettings({ critical_free_percent: 99, critical_free_bytes: 99 * 1024 ** 3 }))
+    .toMatchObject({ critical_free_percent: 15, critical_free_bytes: 20 * 1024 ** 3 });
+  expect(resolveStorageSettings({ pressure_free_percent: 0, pressure_free_bytes: 0, critical_free_percent: 99 }))
+    .toMatchObject({ pressure_free_percent: 0, critical_free_percent: 99, critical_free_bytes: 5 * 1024 ** 3 });
 });

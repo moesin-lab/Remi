@@ -22,6 +22,7 @@ summary: 说明 daemon 进程配置、工作区 bot 的控制面分配、凭据�
 | `MULTIREMI_GC_INTERVAL_MS` | 回收轮次间隔，默认 900000 ms（15 分钟）。 |
 | `MULTIREMI_GC_DRY_RUN` | 默认 false；为 true 时每轮只生成计划和报告，不删除任何内容。 |
 | `MULTIREMI_LEGACY_KEEP_DAYS` | 默认 7；升级清扫移入 `legacy-<日期>/` 的旧布局保留天数，到期由回收轮次删除；快照失败的旧 worktree 所在的 `retained/` 与 `retained.json` 不删，存储报告以 `legacy_retained` 计数，由运维核对后手工删除。 |
+| `MULTIREMI_GC_PRESSURE_FREE_PERCENT` / `MULTIREMI_GC_PRESSURE_FREE_BYTES` / `MULTIREMI_GC_CRITICAL_FREE_PERCENT` / `MULTIREMI_GC_CRITICAL_FREE_BYTES` | 单机磁盘水位覆盖，默认 15%、20 GiB、5%、5 GiB；0 关闭对应条件。每个 daemon 独立监测，critical 拒绝新领取，恢复自动解除磁盘暂停；不改变 online/offline。 |
 | `MULTIREMI_GC_TTL_MS` / `MULTIREMI_GC_AUTOMATION_TTL_MS` / `MULTIREMI_GC_MAX_RETAINED` / `MULTIREMI_GC_ORPHAN_TTL_MS` / `MULTIREMI_GC_SNAPSHOT_MAX_BYTES` | 单机覆盖。策略由工作区设置 `settings.storage` 统一管理并经 `workspace.settings` 下发，这些变量只在需要对某台机器单独覆盖时设置；默认值与范围见[存储与保留](../dev/storage-retention.md#策略)和[契约](../../packages/contracts/src/storage.ts)。 |
 | `MULTIREMI_HEARTBEAT_INTERVAL_MS` | v2 不再读取；进程级 `hb` 固定每 15000 ms，所有 provider 与 concierge 共用这条连接。 |
 | `MULTIREMI_CLAIM_IDLE_MAX_MS` | 空闲 claim 的退避上限，默认 30000 ms；退避从 3000 ms 起翻倍到该值。 |
@@ -186,3 +187,28 @@ bun test tests/unit/multiremi/multiremi-feishu-bot-task-bridge.test.ts
 ```
 
 这些是当前验证入口；实际执行结果应记录在对应任务或 PR，并分别说明 Bun 测试、服务重启、凭据测试和真实飞书消息收发的验证范围。
+
+## CLI 更新来源与构建身份
+
+`remi update` 使用已配置的控制面地址（环境变量 `MULTIREMI_SERVER_URL` 或保存的
+`server_url`）及对应 token；daemon 使用自身连接地址与 daemon token。默认来源顺序
+是 `platform,github`，可用 `MULTIREMI_UPDATE_SOURCES=platform` 或 `github` 限定来源，
+也可改变顺序。平台未配置、返回 404 或网络不可达时才尝试下一个来源；401、400、5xx、
+清单错误、size/SHA-256 或二进制身份不一致均直接失败。下载阶段的 404/网络不可达也适用
+后备规则。日志及更新输出标明实际来源；GitHub 元数据请求可使用 daemon 自身环境中的
+`GITHUB_TOKEN`，不使用工作区 SCM 凭据。
+
+平台清单来自 `/api/remi/releases/daemon/current`，显式 `target_commit` 则使用
+`/api/remi/releases/daemon/<40位提交>`，且只允许 platform 来源。未指定提交时仍要求
+`target_version` 与清单版本完全相等，包含版本后缀。制品按 OS/arch 选择，下载、校验后
+继续使用原有快照与 launcher 原子替换、watchdog 回滚流程。此命令不重启正在运行的 daemon。
+
+`remi --build-info` 输出单行 `{version, commit}` JSON，`--version` 保持原有输出。
+`BUILD_COMMIT` 由编译期 `MULTIREMI_BUILD_COMMIT` 注入，未注入时读取同名进程环境变量；
+规范化后不是完整 40 位 hex 则为 null。平台制品必须通过暂存二进制 `--build-info` 的版本与
+提交校验；GitHub 旧制品仅要求 `--version`。daemon 在 runtime metadata 中报告 `cli_commit`，
+没有构建提交时省略。handoff journal 保存 `targetCommit`；存在时 PID 绑定与 completed 确认
+必须同时满足版本和提交一致，避免同版本不同提交误判。
+
+回归入口：`bun run test tests/unit/remi/cli-update-platform.test.ts tests/unit/daemon/cli-update-identity.test.ts`。清单类型与解析器见
+[daemon-artifact-manifest.ts](../../packages/shared/src/daemon-artifact-manifest.ts)。

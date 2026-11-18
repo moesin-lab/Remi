@@ -333,7 +333,15 @@
     "section_repositories": "リポジトリ",
     "repositories_shortcut_label": "リポジトリ URL はリポジトリタブにあります",
     "repositories_shortcut_link": "リポジトリを管理 →",
-    "toast_failed": "ソース管理設定を更新できませんでした"
+    "toast_failed": "ソース管理設定を更新できませんでした",
+    "co_author_description": "エージェントのコミットに共同作成者を自動追加します。",
+    "co_author_name": "名前",
+    "co_author_email": "メール",
+    "co_author_invalid_name": "制御文字や山括弧を含まない1〜100文字の名前を入力してください。",
+    "co_author_invalid_email": "ドット付きドメインの有効なメールを254文字以内で入力してください。",
+    "co_author_disabled": "トレーラーは無効です。",
+    "co_author_save": "保存",
+    "co_author_reset": "既定値に戻す"
   },
   "repositories": {
     "section_title": "リポジトリ",
@@ -759,16 +767,34 @@
       "chat_idle_days": {
         "label": "チャットの自動アーカイブ",
         "hint": "アクティブなチャットが操作されないまま自動アーカイブされるまでの日数。0 は自動アーカイブしません。"
+      },
+      "pressure_free_percent": {
+        "label": "Pressure free percent",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
+      },
+      "pressure_free_bytes": {
+        "label": "Pressure free bytes",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
+      },
+      "critical_free_percent": {
+        "label": "Critical free percent",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
+      },
+      "critical_free_bytes": {
+        "label": "Critical free bytes",
+        "hint": "0 disables this condition. Critical must not exceed pressure."
       }
     },
     "units": {
       "hours": "時間",
       "mb": "MB",
       "days": "日",
-      "count": "件"
+      "count": "件",
+      "percent": "%"
     },
     "default_value": "既定: {{value}} {{unit}}",
     "validation": {
+      "threshold_order": "両方が有効な場合、緊急しきい値は圧迫しきい値以下にしてください。",
       "required": "数値を入力してください。",
       "integer": "整数を入力してください。",
       "range": "{{min}} から {{max}} {{unit}}の範囲で入力してください。"

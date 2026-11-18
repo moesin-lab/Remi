@@ -40,7 +40,7 @@ export interface ControlPlaneSshMeshStore {
 
 export interface ControlPlaneSshMeshLifecycle {
   start(): boolean | void;
-  stop(): void;
+  stop(): void | Promise<void>;
 }
 
 export interface ControlPlaneSshMeshManagerContract {
@@ -140,7 +140,7 @@ export class ControlPlaneSshMeshReconciler implements ControlPlaneSshMeshLifecyc
     return true;
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.abortController?.abort();
     // The per-workspace reconciliation lease still fences an in-flight write.
     // Releasing this outer process lease synchronously lets a normal systemd
@@ -150,6 +150,7 @@ export class ControlPlaneSshMeshReconciler implements ControlPlaneSshMeshLifecyc
       ownerLease.release();
       if (this.ownerLease === ownerLease) this.ownerLease = null;
     }
+    await this.loop;
   }
 
   async whenStopped(): Promise<void> {

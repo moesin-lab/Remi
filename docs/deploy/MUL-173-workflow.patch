@@ -62,7 +62,7 @@
    im-platform-smoke:
      runs-on: ubuntu-latest
      timeout-minutes: 15
-@@ -667,7 +722,7 @@
+@@ -681,7 +736,7 @@
    # dependency can become a green full-run release gate.
    build:
      if: always()

@@ -1,3 +1,4 @@
+import { currentBackgroundTerm } from "@shared/db/live-term.js";
 import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 import { Cron } from "croner";
@@ -82,9 +83,9 @@ export class MultiremiScheduler {
         this.sync();
       } catch (error) {
         // A failed tick can leave its whole claimed batch at next_run_at=NULL.
-        // Use startup recovery on the next tick, scheduling from now rather
-        // than replaying work whose commit may already have succeeded.
-        if (isDatabaseConnectionError(error)) recovered = false;
+        // Legacy callers recover on retry. A fenced activation only recovers
+        // once: a replacement activation owns recovery of abandoned claims.
+        if (isDatabaseConnectionError(error) && !currentBackgroundTerm()) recovered = false;
         throw error;
       }
     }), this.pollIntervalMs);

@@ -48,9 +48,18 @@ WebSocket 关闭握手最多等待 1 秒，未确认的连接随后断开，避�
 
 Bun 1.3.14 在服务端关闭 WebSocket 后可能保留 `pendingWebSockets` 计数，使原生 `stop(false)` 的 Promise 不结束。监听已停止且所有跟踪的 WebSocket 已关闭时，最终停机改为等待实际 HTTP 响应与 `pendingRequests` 清零；总预算内仍等待 HTTP，超过预算由 CLI 终止整个进程。回归测试同时验证停机后原端口可重新绑定。
 
-`slotFence` 是 A3 注入 live term 的异步钩子；A2 默认 `term:null`，没有实现持久化 term 或后台写入 fencing。supervisor 的顺序、路由切换及回滚由 A4 负责：release A 后 activate B；若 B 失败，可重新 activate A。
+激活持有角色锁后，在 `multiremi_live_terms` 的 `background_jobs` 行递增 BIGINT term 并记录 slot。`slotFence` 可选钩子在递增前运行，用于附加激活检查；状态与 readyz 中的 `term` 是数据库返回的十进制字符串，避免 JavaScript 整数精度损失。不设 slot 时也激活同一张表，holder 为 `single:<pid>`。
+
+[LiveTermFence](../../packages/server/src/store/live-term-fence.ts) 为每次激活生成独立上下文，后台定时器及异步续体继承原 term。每次 retry loop/job tick 都查询当前 term；Store 的 SQL 边界还在事务中执行带 term 条件的行锁 UPDATE，并持锁到业务操作提交。新 activate 必须更新同一行，所以它与已经进入事务的后台写入互斥；接管后的旧续体即使越过 tick 检查，也不能写入。事务锁顺序为 fence → workspace → number → domain。该保护覆盖 claim、autopilot run 创建、trigger 推进，以及 capability sweep 和排队 schedule target 推进，手动 HTTP 操作不继承后台上下文。
+
+term 不匹配时将原上下文永久失效、记录错误并停止全部后台任务，slot 进入 failed；需先 release，再 activate 创建新 term。单进程失效后需重启。数据库不可达时当前 tick 不执行副作用，沿用数据库恢复退避，不把连接失败误报为 term 变更。title 模型等外部请求可能已在接管前发出，返回后的 SQL 仍受 fence；外部服务本身不支持数据库 fence，wiki/SSH 等只保证下一次操作入口重新检查，并沿用已有 lease/owner lock。
+
+`recoverLostScheduleTriggers` 在激活后的首次 scheduler tick 执行；带 fence 的重试不会重新武装在途 claim，遗留 claim 等待下一次激活恢复。未绑定 fence 的独立 scheduler 调用者保留原有断连恢复行为。后台数据库操作会额外执行 term 校验并短暂持有共享 fence 行的写锁，尚未做生产负载基准。supervisor 的顺序、路由切换及回滚由 A4 负责：release A 后 activate B；若 B 失败，可重新 activate A。
 
 ## 验证入口
+
+[live term 回归](../../tests/unit/multiremi/live-term-fence.test.ts)覆盖 A/B 接管、prepared SQL、暂停的异步续体、Cron/title/wiki 无写入、trigger 单次运行、后台停止及重新激活。
+[PG 双进程回归](../../tests/integration/live-term-fence.test.ts)在配置 `MULTIREMI_TEST_POSTGRES_URL` 后检查接管被旧事务的行锁阻塞、提交后新进程写入，以及旧进程续体被拒绝；没有测试 PG 时明确跳过。
 
 [PG deadline 事务清理回归](../../tests/integration/postgres-deadline-cleanup.test.ts)覆盖 worker 查询超时及语句之间预算过期，检查后续查询、事务状态、未提交写入、锁释放和独立进程接管，并覆盖嵌套事务与 savepoint 清理；测试专用 PG 协议代理把 ROLLBACK / ROLLBACK TO / RELEASE 替换为被观察连接 advisory lock 持续阻塞的真实 SQL，验证 cleanup 超时返回、旧 backend 消失、锁归零和独立进程取得角色锁并写入；需要隔离的 `MULTIREMI_TEST_POSTGRES_URL`。
 

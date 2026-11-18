@@ -2,7 +2,8 @@
 
 ## 来源与结论
 
-仓库基线 `8cc817d2ca31db59f2c6fb39f040b0edf99c1134`，任务 worktree
+初始调查基线 `8cc817d2ca31db59f2c6fb39f040b0edf99c1134`；按所有者补充要求，
+最终交付已合入 main `66ac17dc72bd347cd56d51f69b1a3d531b4e1268` 为审阅基线。任务 worktree
 `agent/MUL-209`。本次先修复已证实的指标缺陷，不据未归因汇总推断业务 SQL 的 N+1。
 没有合并、部署或改变 stable 配置。
 
@@ -95,14 +96,14 @@ query-budget 37 pass/0 fail（SQLite）。本地完整 Release build check 不�
 在 Linux 开发机、Bun 1.3.14 上新增两个真实 WebSocket 回归（来源汇总开启/关闭）。
 隔离服务使用 `startMultiremiServer`，8 个独立 daemon/runtime 经真实 upgrade/hello/message
 进入注册的 trace.head RPC；每帧先查询一次，全部到达屏障后，插入 HTTP/job/无来源查询，
-释放屏障，再各查询一次。测试同时断言回包、每帧计数 2、实际 flushMetrics 输出的
-ws_minute_summary 为 8 帧/16 次，以及 db_sources 的 trace.head 来源为 16 次（启用时）。
+释放屏障，再各查询一次。测试同时断言回包、每帧计数 2、每帧 db_ms 等于该帧两次同步 SQL 的独立耗时之和、实际 flushMetrics 输出的
+ws_minute_summary 为 8 帧/16 次及对应 db_ms 总和，以及 db_sources 的 trace.head 来源为 16 次（启用时）。
 监听 metrics ring 使用 call-through spy，不替换 Session、传输或汇总实现。
 配置真实 PG URL 时查询均经过 PG bridge；本地没有 PG URL，SQL 完成钩子替身仅验证
 真实 WS 的上下文/输出接线，不作为 PG 通过证据。
 
-去修复反证在 `/tmp/mul209-old-attribution` 的隔离 archive 执行：保留新测试，
-将 session.ts、daemon-protocol/index.ts、api/server.ts 恢复为基线 8cc817d2c 的全局差值接线。
+去修复反证在 `/tmp/mul209-old-main` 的隔离 archive 执行：从指定 main
+66ac17dc7 导出未修复代码，加入相同新测试，保留其全局差值接线。
 同一测试命令得到 0 pass / 2 fail，均在每帧计数断言失败：实际为
 19,18,17,16,15,14,13,12（合计 124），预期八个 2（合计 16）。
 未更改任务工作树中的运行实现。命令为

@@ -11,7 +11,7 @@ import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js"
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { drainDbSources, withDbJob, withDbSource } from "@shared/observability/db-sources.js";
-import { recordDbQuery, resetRequestMetricsForTest } from "@multiremi/observability/request-metrics.js";
+import { readProcessDbCounters, recordDbQuery, resetRequestMetricsForTest } from "@multiremi/observability/request-metrics.js";
 import { WsFrameMetricsRing, resetWsFrameMetricsForTest } from "../../../packages/server/src/api/daemon-protocol/metrics.js";
 import type { DaemonProtocolLayer } from "../../../packages/server/src/api/daemon-protocol/index.js";
 import { watchRuntimeFrames } from "../../fixtures/runtime-downlinks.js";
@@ -33,14 +33,17 @@ for (const summaryDbRoutes of [true, false]) {
     // PG CI exercises the actual SQL completion hook. Local SQLite has no such
     // hook, so its fallback verifies transport/context only, not PG behavior.
     const query = () => {
+      const before = readProcessDbCounters().dbMs;
       if (database) expect(database.query("SELECT 1 AS n").get()?.n).toBe(1);
       else recordDbQuery(2, 0);
+      return readProcessDbCounters().dbMs - before;
     };
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     let ready!: () => void;
     const allEntered = new Promise<void>(resolve => { ready = resolve; });
     let entered = 0;
+    const ownSqlMs: number[] = [];
     let layer!: DaemonProtocolLayer;
     resetWsFrameMetricsForTest();
     const samples = spyOn(WsFrameMetricsRing.prototype, "record"); // call through
@@ -54,10 +57,11 @@ for (const summaryDbRoutes of [true, false]) {
       onDaemonProtocol: protocol => {
         layer = protocol;
         protocol.registerRpcHandler("trace.head", async () => {
-          query();
+          let dbMs = query();
           if (++entered === 8) ready();
           await gate;
-          query(); // ALS must survive restoration after all peers interleave.
+          dbMs += query(); // ALS must survive restoration after all peers interleave.
+          ownSqlMs.push(dbMs);
           return { ok: true };
         });
       },
@@ -95,6 +99,12 @@ for (const summaryDbRoutes of [true, false]) {
       for (const reply of await Promise.all(replies)) expect(reply.p).toMatchObject({ ok: true });
       const frames = samples.mock.calls.map(([sample]) => sample).filter(sample => sample.type === "trace.head");
       expect(frames.map(frame => frame.dbQueries)).toEqual(Array(8).fill(2));
+      // SQL is synchronous: process deltas immediately around each statement
+      // independently measure its time without spanning the interleaving await.
+      const expectedMs = [...ownSqlMs].sort((a, b) => a - b);
+      frames.map(frame => frame.dbMs).sort((a, b) => a - b).forEach((ms, index) => {
+        expect(ms).toBeCloseTo(expectedMs[index]!, 6);
+      });
       layer.flushMetrics();
       const summaries = output.mock.calls.flatMap(([line]) => {
         try { const value = JSON.parse(String(line)); return value.event === "ws_minute_summary" ? [value] : []; }
@@ -102,7 +112,8 @@ for (const summaryDbRoutes of [true, false]) {
       });
       expect(summaries).toHaveLength(1);
       expect(summaries[0].types.find((type: { type: string }) => type.type === "trace.head"))
-        .toMatchObject({ count: 8, db_queries: 16 });
+        .toMatchObject({ count: 8, db_queries: 16,
+          db_ms: Math.round(ownSqlMs.reduce((sum, ms) => sum + ms, 0) * 10) / 10 });
       expect(drainDbSources(100).db_sources.find(source => source.kind === "ws" && source.name === "trace.head")?.db_queries)
         .toBe(summaryDbRoutes ? 16 : undefined);
     } finally {

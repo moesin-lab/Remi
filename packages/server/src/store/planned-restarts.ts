@@ -4,15 +4,9 @@ import { PlatformMaintenanceRepo } from "./repos/platform-maintenance-repo.js";
 import { lockLane } from "./inbox/lane-machine.js";
 import { nowIso } from "@multiremi/ids.js";
 
-/** A checkpoint contains references and receipts, never credentials or message bodies. */
-export interface PlannedRestartCheckpoint {
-  version: 1;
-  session_id: string | null;
-  work_dir: string | null;
-  trace_head: number;
-  input_ack_seq: number;
-  delivered_message_ids: string[];
-}
+import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
+export type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
+
 export interface PlannedRestartScope { workspaceId: string; runtimeId: string; daemonId: string }
 export interface PlannedRestartHandoff {
   attempt_id: string;

@@ -33,7 +33,8 @@
     "./queued-message": "./src/queued-message.ts",
     "./slash-commands": "./src/slash-commands.ts",
     "./trace-file": "./src/trace-file.ts",
-    "./external-chats": "./src/external-chats.ts"
+    "./external-chats": "./src/external-chats.ts",
+    "./planned-restart": "./src/planned-restart.ts"
   },
   "dependencies": {}
 }

@@ -1,0 +1,128 @@
+import { afterEach, expect, it } from "bun:test";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
+import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution,
+  type PlannedRestartRemote } from "@multiremi/worker/planned-restart-journal.js";
+import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
+
+const execution: RestartExecution = { workspace_id: "ws_test", daemon_id: "daemon_test", runtime_id: "rt_test",
+  turn_id: "turn_test", attempt_id: "attempt_test", handoff_id: "handoff_test", generation: 0 };
+const checkpoint: PlannedRestartCheckpoint = { version: 1, session_id: "provider_session", work_dir: "/work",
+  trace_head: 42, input_ack_seq: 12, delivered_message_ids: ["message_test"] };
+const roots: string[] = [];
+const journals: PlannedRestartJournal[] = [];
+afterEach(() => {
+  for (const journal of journals.splice(0)) journal.close();
+  for (const root of roots.splice(0)) rmSync(root, { force: true, recursive: true });
+});
+function root() { const path = mkdtempSync(join(tmpdir(), "planned-restart-journal-")); roots.push(path); return path; }
+function journal(path = ":memory:") { const value = new PlannedRestartJournal(path); journals.push(value); return value; }
+const remote = (): PlannedRestartRemote => ({ suspend: async () => {}, resume: async entry => ({ generation: entry.execution.generation + 1 }) });
+
+it("journals only after provider/report/trace quiescence, and only acknowledges a committed remote checkpoint", async () => {
+  const path = join(root(), "journal.db"), local = journal(path);
+  const order: string[] = [];
+  let finish!: () => void;
+  const safePoint = new Promise<void>(resolve => { finish = resolve; });
+  const transfer = new PlannedRestartTransfer(local, { ...remote(), suspend: async entry => {
+    order.push("remote");
+    expect(local.get(entry.execution.handoff_id)?.state).toBe("prepared");
+    expect(local.get(entry.execution.handoff_id)?.checkpoint).toEqual(checkpoint);
+  } });
+  const pending = transfer.suspend(execution, async () => { await safePoint; order.push("provider-stopped-and-flushed"); return checkpoint; });
+  expect(local.entries()).toEqual([]);
+  const duplicate = transfer.suspend(execution, async () => { throw new Error("must not stop twice"); });
+  await expect(transfer.suspend({ ...execution, attempt_id: "other_attempt" }, async () => checkpoint)).rejects.toThrow("conflict");
+  finish();
+  expect((await pending).state).toBe("acknowledged");
+  expect(await duplicate).toEqual(await pending);
+  expect(order).toEqual(["provider-stopped-and-flushed", "remote"]);
+  if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);
+});
+
+it("failed safe-point shutdown produces no suspension evidence", async () => {
+  const local = journal(); let calls = 0;
+  const transfer = new PlannedRestartTransfer(local, { ...remote(), suspend: async () => { calls++; } });
+  await expect(transfer.suspend(execution, async () => { throw new Error("provider still running"); })).rejects.toThrow("provider still running");
+  expect(local.entries()).toEqual([]); expect(calls).toBe(0);
+  expect((await transfer.suspend(execution, async () => checkpoint)).state).toBe("acknowledged");
+});
+
+it("a new process recovers a prepared journal after a lost suspend response", async () => {
+  const path = join(root(), "journal.db");
+  const local = new PlannedRestartJournal(path);
+  let consumer = "";
+  try {
+    const transfer = new PlannedRestartTransfer(local, { ...remote(), suspend: async entry => {
+      consumer = entry.consumer_id; throw new Error("response lost after commit");
+    } });
+    await expect(transfer.suspend(execution, async () => checkpoint)).rejects.toThrow("response lost");
+    expect(local.get(execution.handoff_id)?.state).toBe("prepared");
+  } finally { local.close(); }
+  const result = spawnSync(process.execPath, ["-e", `
+    import { PlannedRestartJournal, PlannedRestartTransfer } from "./packages/server/src/worker/planned-restart-journal.ts";
+    const journal = new PlannedRestartJournal(process.env.TEST_RESTART_JOURNAL);
+    const order = [];
+    const transfer = new PlannedRestartTransfer(journal, {
+      suspend: async () => { order.push("suspend-replay"); },
+      resume: async entry => { order.push("resume-cas"); return { generation: entry.execution.generation + 1 }; },
+    });
+    const entry = await transfer.resume("handoff_test");
+    console.log(JSON.stringify({ entry, order })); journal.close();
+  `], { cwd: new URL("../../../", import.meta.url), env: { ...process.env, TEST_RESTART_JOURNAL: path }, encoding: "utf8", timeout: 10_000 });
+  expect(result.error).toBeUndefined(); expect(result.status).toBe(0);
+  const resultBody = JSON.parse(result.stdout.trim());
+  expect(resultBody.order).toEqual(["suspend-replay", "resume-cas"]);
+  expect(resultBody.entry).toMatchObject({ execution, checkpoint, consumer_id: consumer, state: "resumed", resumed_generation: 1 });
+  expect(journal(path).get(execution.handoff_id)).toEqual(resultBody.entry);
+});
+
+it("persists the same consumer across an ambiguous resume and rechecks remote authority on every recovery", async () => {
+  const path = join(root(), "journal.db"); let local = new PlannedRestartJournal(path);
+  const entry = local.prepare(execution, checkpoint); local.acknowledge(execution.handoff_id);
+  const consumers: string[] = [];
+  try {
+    await expect(new PlannedRestartTransfer(local, { ...remote(), resume: async value => {
+      consumers.push(value.consumer_id); throw new Error("resume response lost");
+    } }).resume(execution.handoff_id)).rejects.toThrow("resume response lost");
+    expect(local.get(execution.handoff_id)?.state).toBe("acknowledged");
+  } finally { local.close(); }
+  local = journal(path);
+  const transferred = await new PlannedRestartTransfer(local, { ...remote(), resume: async value => {
+    consumers.push(value.consumer_id); return { generation: 1 };
+  } }).resume(execution.handoff_id);
+  expect(consumers).toEqual([entry.consumer_id, entry.consumer_id]);
+  expect(transferred.state).toBe("resumed");
+  await expect(new PlannedRestartTransfer(local, { ...remote(), resume: async () => {
+    throw new Error("stale_execution");
+  } }).resume(execution.handoff_id)).rejects.toThrow("stale_execution");
+});
+
+it("does not consume a checkpoint behind a fence or accept a mismatched generation receipt", async () => {
+  const local = journal(); local.prepare(execution, checkpoint);
+  await expect(new PlannedRestartTransfer(local, { ...remote(), resume: async () => {
+    throw new Error("resume_fenced");
+  } }).resume(execution.handoff_id)).rejects.toThrow("resume_fenced");
+  expect(local.get(execution.handoff_id)?.state).toBe("acknowledged");
+  await expect(new PlannedRestartTransfer(local, { ...remote(), resume: async () => ({ generation: 2 }) })
+    .resume(execution.handoff_id)).rejects.toThrow("Invalid planned restart resume receipt");
+  expect(local.get(execution.handoff_id)?.resumed_generation).toBeNull();
+});
+
+it("rejects conflicting checkpoints, unknown fields and corrupt disk evidence", () => {
+  const path = join(root(), "journal.db"), local = journal(path);
+  const first = local.prepare(execution, checkpoint);
+  expect(local.prepare(execution, checkpoint)).toEqual(first);
+  expect(() => local.prepare(execution, { ...checkpoint, trace_head: 43 })).toThrow("conflict");
+  expect(() => local.prepare({ ...execution, runtime_id: "another_runtime" }, checkpoint)).toThrow("conflict");
+  expect(() => local.prepare({ ...execution, handoff_id: "new" }, { ...checkpoint, token: "not-allowed" } as PlannedRestartCheckpoint)).toThrow("Invalid");
+  expect(() => local.prepare({ ...execution, handoff_id: "new" }, { ...checkpoint, trace_head: -1 })).toThrow("Invalid");
+  const db = openSqliteDatabase(path);
+  try { db.run("UPDATE planned_restart_journal SET payload='{}' WHERE handoff_id=?", [execution.handoff_id]); }
+  finally { db.close(); }
+  expect(() => local.get(execution.handoff_id)).toThrow("Corrupt");
+  expect(() => local.entries()).toThrow("Corrupt");
+});

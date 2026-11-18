@@ -3,7 +3,7 @@ import { quotePreview } from "../../issues/utils/quote-preview";
 
 export const INTERNAL_ID_PREFIXES = [
   "act", "ane", "apb", "apl", "aps", "apv", "agt", "att", "aut", "batch", "bgt", "bot", "chat", "clog", "cmt_env", "cmt", "crn", "cses",
-  "dcs", "dec", "dep", "dlg", "dws", "ebg", "eg", "ep", "evt", "fba", "fbo", "fbr", "fbs", "fcb", "fdb", "fhrp", "flease", "foc", "fop_claim", "fop", "fout", "frp", "fsrc",
+  "dcs", "dec", "dep", "dlg", "drain", "dws", "ebg", "eg", "ep", "evt", "fba", "fbo", "fbr", "fbs", "fcb", "fdb", "fhrp", "flease", "foc", "fop_claim", "fop", "fout", "frp", "fsrc",
   "hrq", "inb", "inv", "ises", "iss", "kout", "krun", "ksrc", "ksub", "lbl", "mconn", "mem", "mlease", "mout", "msg", "msrc",
   "nch", "ndl", "orga", "paud", "pdoc", "pdrev", "pin", "pop", "price", "prj", "prov", "qcl", "qmsg", "rck", "rct", "repo", "res", "rt", "run", "rwbatch", "rwdoc",
   "rwjob", "rwlease", "rwrev", "rws", "rxn", "sar", "sce", "scm", "scr", "scv", "sdl", "sev", "sevt", "sfx", "sil", "skf", "skl",

@@ -196,3 +196,24 @@ Q 重绑定、steer 对账与 translator 状态恢复；飞书补收另需真实
 存储验证入口：`bun run test tests/unit/multiremi/planned-restarts.test.ts`，覆盖双 dialect fixture
 （PG 需显式配置）、SQLite 真正 close/open 和双连接消费者、重放、陈旧 generation/fence、
 取消竞争、摘要损坏与事务回滚。它不替代假 provider 的真正进程替换验收。
+
+### daemon 本地交接 journal（运行适配器尚未接入）
+
+[planned-restart-journal.ts](../../packages/server/src/worker/planned-restart-journal.ts) 提供
+`PlannedRestartJournal` 与 `PlannedRestartTransfer`，checkpoint 类型共用于
+[contracts](../../packages/contracts/src/planned-restart.ts) 和服务端。journal 以 SQLite WAL /
+`synchronous=FULL` 写入，文件 owner-only。`suspend` 等待调用方安全点回调完成后才写
+`prepared`，服务端 checkpoint 提交确认后才写 `acknowledged`；回调必须停止 provider 输出并
+排空报告/trace，失败不生成挂起证据。同一 handoff 的并发停止合并；不同执行身份或 checkpoint
+重放冲突拒绝，摘要损坏、未知字段与非法水位拒绝。
+
+恢复时先重放未确认的 checkpoint，再用首次本地提交时生成的稳定 consumer 调用服务端
+resume CAS；丢失恢复响应后仍重用该 consumer，避免重复授权。同 attempt 的 journal 与
+服务端 DB 真正关库重开、恢复响应丢失后的单次授权由存储联测覆盖；新进程重读 journal
+由子进程测试覆盖。本地 `resumed` receipt 不能代替服务端权威，恢复仍调用服务端 CAS，
+不能据本地文件复活已取消的执行。
+
+该模块尚未被 `daemon.ts` 调用，remote 接口也尚未接入真实协议 RPC。它没有实现 provider
+安全点、恢复派发、报告/输入/trace generation 守卫，因此本节不改变前述排空/orphan 行为。
+验证入口另含 `bun run test tests/unit/daemon/planned-restart-journal.test.ts`；这些是交接组件
+测试，不能代替 MUL-27 隔离候选实例的假 provider 更新验收。

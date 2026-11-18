@@ -92,6 +92,36 @@ remi messaging source status <source>
 
 Connection 的 Provider 配置走结构化输入，具体字段以 API 和 CLI help 为准。现有 profile 与 managed profile 的清理行为不同：删除 managed Connection 会调用 lark-cli logout/remove profile；不直接编辑凭据文件。旧 `remi feishu` 命令仍有兼容路由，新接入使用上述 Messaging 入口。
 
+## 计划内重启后的补收
+
+daemon 以服务端既有 `multiremi_feishu_bot_chat_bindings.chat_id`（含话题）和
+`multiremi_feishu_bot_agent_routes.chat_id` 为已知会话种子，不另建会话目录。
+启用此配置的连接器将实时事件先原子写入本地 app/domain 隔离的 pending 日志，
+业务 callback 成功后确认；失败保留 pending，启动及每 30 秒重放并分页读取历史。
+历史 sender/mention 转为同一接收事件，沿用发送者授权、群准入及附件链路。
+Task 去重仍只由服务端 `multiremi_feishu_bot_deliveries.external_message_id` 负责；
+提交成功而本地未确认的事件可再次提交，解析到原 Task。
+
+每个 app/chat 游标采用已确认消息的 `create_time`，回看保留 60 秒重叠。
+未完成的历史扫描另留水位，防止较新的实时事件跨过重启缺口。
+单次最多回看 10 分钟、每会话 5 页（每页 50 条），先取最新消息，再按时间升序处理；
+超出的区间记录本地 `skipped` 并告警，不突发处理全部旧消息。
+读取历史需要飞书相应权限；权限或网络失败会告警并重试，不能视为补收成功。
+
+已知限制：停机期间首次出现、此前从未绑定或路由的会话不补收。
+历史中被实时 command router 在入站 Task 幂等口之前拦截的命令也不执行；
+双方复用 [共享命令识别](../packages/shared/src/feishu-commands.ts)。
+这些消息记为 `skipped`，游标继续前进，并记录 app、chat、message 和命令名的结构化告警，
+不给用户发提示。停机期间发出的 `/stop`、`/new` 需要用户重发；普通路径及带参数的未知斜杠请求仍正常提交。
+
+出站重领沿用 outbox 行 ID 对应的 stable UUID。对于认领后未确认的普通创建消息，
+仅在行创建后 55 分钟内重发（飞书 1 小时 UUID 去重窗口扣除 5 分钟余量）。
+过期 lease 且超过此期限时以 `dedupe_window_expired` 终止并告警，沿用原有批次级联失败规则；
+未发送或已明确拒收的 pending 行不受此期限影响，持久化发送收据不会重发。
+网络无响应保留 sending，不冒充明确拒收。native CoT 的 `creating/writePending`
+保持既有不重发策略；反应和原消息 patch 使用各自的幂等更新路径。
+一小时后才恢复的未知发送结果可能无法自动补发；此限制不能称为真实飞书恰好一次验证。
+
 ## 机器人发送者白名单
 
 机器人默认使用 `sender_access_policy=allowlist`：只有加入白名单的账号可以使用机器人。未授权账号发来的消息只记录发送者，不创建 Chat 或任务，守护进程回复「无权限，请联系空间管理员」。服务端以 409 `sender_not_allowed` 拒绝（不用 403，因为守护进程把 401/403/410 视为运行时凭证失效）。升级时已有机器人一次性切换为白名单，不预先授权任何账号，包括 owner；需由空间管理者在「IM 平台 → 飞书 → 访问控制」中逐个加入。

@@ -17,7 +17,7 @@ import { discoverRuntimeProfileModels } from "./runtime-profile-models.js";
 import { ensureAntigravityServer, installedAntigravity } from "@acp/antigravity-install.js";
 import { AntigravityGatewayShim, type GatewayShimRun } from "@daemon/agent-runtime/antigravity/gateway-shim.js";
 import { prepareRuntimeCodexModelCatalog } from "./runtime-codex-model-catalog.js";
-import { isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
+import { FeishuDeliveryError, isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
 import { existsSync, realpathSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { cpus, homedir, hostname } from "node:os";
 import { multiremiStateDir } from "@shared/home-paths.js";
@@ -2813,6 +2813,7 @@ export class MultiremiDaemon {
     signal: AbortSignal = this.pollAbort.signal,
   ): Promise<void> {
     const supervisor = this.feishuConcierge;
+    let sending = false;
     try {
       if (!supervisor) throw new Error("Feishu concierge is unavailable");
       const resolveImage = createFeishuImageResolver({
@@ -2839,10 +2840,26 @@ export class MultiremiDaemon {
       await deliverFeishuOutbound(delivery, {
         signal,
         prepareMention: openId => this.client.prepareFeishuBotOutboundMention(runtimeId, delivery.id, delivery.claimToken, openId),
-        send: options => supervisor.sendOutbound({ ...delivery, body }, options),
-        report: input => this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, input),
+        send: async options => {
+          sending = true;
+          try { return await supervisor.sendOutbound({ ...delivery, body }, options); }
+          catch (error) {
+            if (error instanceof FeishuDeliveryError) throw error;
+            throw new FeishuDeliveryError(redactFeishuBotError(error), true, true);
+          }
+        },
+        report: async input => {
+          try { await this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, input); }
+          catch (error) {
+            if (input.status === "sent") throw new FeishuDeliveryError(redactFeishuBotError(error), true, true);
+            throw error;
+          }
+        },
       });
     } catch (error) {
+      // A missing transport acknowledgement may hide a committed send. Keep
+      // the sending lease so recovery uses the bounded stable-UUID path.
+      if (sending && error instanceof FeishuDeliveryError && error.ambiguous) throw error;
       await this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, {
         claimToken: delivery.claimToken,
         status: "failed",

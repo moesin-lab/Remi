@@ -28,6 +28,7 @@ function withFeishuCredentials(config: RemiConfig, credentials: FeishuChannelCre
       appId: credentials.appId,
       appSecret: credentials.appSecret,
       domain: credentials.domain,
+      recoveryChats: credentials.recoveryChats,
     },
   };
 }
@@ -38,6 +39,7 @@ function withFeishuCredentials(config: RemiConfig, credentials: FeishuChannelCre
  * the channel runs.
  */
 export interface FeishuChannelCredentials {
+  recoveryChats?: Array<{ chat_id: string; chat_type: "p2p" | "group" }>;
   appId: string;
   appSecret: string;
   domain: RemiConfig["feishu"]["domain"];

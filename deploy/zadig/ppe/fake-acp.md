@@ -95,3 +95,13 @@ The PPE image runs the source CLI with Bun; the fixture detects
 `/app/apps/remi/main.ts` and uses that same entry. Other environments use `remi`
 on PATH. Local fixture tests may supply `PPE_ACP_REMI_BIN` and
 `PPE_ACP_REMI_ENTRY` to execute this checkout's CLI with Bun.
+
+## Phase A long streams
+
+A request containing `MUL-172/STREAM/60` through `MUL-172/STREAM/120`, plus a unique
+`MUL-493/PROBE/<id>`, first confirms the real CLI range read above, then emits one
+`agent_thought_chunk` about every second for the requested duration. It completes
+with one final message. Cancellation returns cancelled without a successful final
+reply. Out-of-range durations are rejected; unrelated smoke prompts are unchanged.
+Use the [Phase A runbook](../../../docs/operations/phase-a-acceptance.md) for the
+isolated candidate, concurrent lanes, switching and evidence requirements.

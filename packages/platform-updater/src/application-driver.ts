@@ -563,7 +563,10 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
     const result = await this.runner.run('docker', args, options);
     if (result.exitCode !== 0) {
       // Keep arbitrary candidate stderr private while surfacing the known
-      // backup-report failure as an actionable operation error.
+      // preparation/report failures as actionable operation errors.
+      if (args.includes('migrate') && result.stderr.includes('Migration rehearsal: historical schema preparation required')) {
+        throw new Error('Docker application migration rehearsal requires offline schema preparation (remi db prepare); follow the manual schema-boundary upgrade procedure');
+      }
       if (args.includes('migrate') && result.stderr.includes('Migration rehearsal:')) {
         throw new Error('Docker application migration rehearsal failed: current api-home backup is missing or has invalid persistent migration reports (reports/migrations)');
       }

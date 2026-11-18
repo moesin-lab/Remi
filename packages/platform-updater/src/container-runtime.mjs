@@ -210,16 +210,17 @@ export async function rehearseStoreMigration(apiRoot, archive, scratch, options 
   const child = spawn(options.executable || 'bun', ['--eval',
     "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}"],
   { cwd: apiRoot, stdio: ['ignore', 'ignore', 'pipe'], env: { ...(options.env || process.env), HOME: scratch, MULTIREMI_HOME: scratch + '/home', MULTIREMI_MIGRATION_REPORT_DIR: reportDirectory } });
-  let missingBeforeReport = false, stderrTail = '';
+  let missingBeforeReport = false, requiresPreparation = false, stderrTail = '';
   child.stderr.on('data', chunk => {
     stderrTail = (stderrTail + chunk.toString()).slice(-4096);
     if (stderrTail.includes('Unified migration before report missing')) missingBeforeReport = true;
+    if (stderrTail.includes('Historical schema preparation required:')) requiresPreparation = true;
   });
   // A hung candidate migration must not strand API/Web offline indefinitely.
   // Only this disposable rehearsal process is killed; no provider runs here.
   const timeout = setTimeout(() => child.kill('SIGKILL'), 5 * 60_000);
   try {
-    await new Promise((ok, fail) => { child.on('error', fail); child.on('exit', code => code === 0 ? ok() : fail(new Error(missingBeforeReport ? 'Migration rehearsal: Unified migration before report missing from current api-home backup; restore the persistent migration reports before retrying' : 'Migration rehearsal failed or timed out'))); });
+    await new Promise((ok, fail) => { child.on('error', fail); child.on('exit', code => code === 0 ? ok() : fail(new Error(requiresPreparation ? 'Migration rehearsal: historical schema preparation required; stop all writers and run remi db prepare before retrying' : missingBeforeReport ? 'Migration rehearsal: Unified migration before report missing from current api-home backup; restore the persistent migration reports before retrying' : 'Migration rehearsal failed or timed out'))); });
   } finally { clearTimeout(timeout); }
 }
 

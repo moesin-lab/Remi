@@ -7,13 +7,13 @@ import { pathToFileURL } from 'node:url';
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
 
-async function fixture(fails: boolean | 'missing-before' = false, internal = false) {
+async function fixture(fails: boolean | 'missing-before' | 'requires-prepare' = false, internal = false) {
   const root = await mkdtemp(join(tmpdir(), 'remi-store-rehearsal-')); roots.push(root);
   const source = join(root, 'releases', 'candidate', 'api', 'packages/server/src/store');
   await mkdir(join(source, 'db'), { recursive: true });
   await writeFile(join(source, 'db/postgres.ts'), 'export function openMultiremiDatabase(){return {close(){}}}');
   await writeFile(join(source, 'store.ts'), `import {writeFileSync} from 'node:fs';import {resolve} from 'node:path';
-export class MultiremiStore { constructor(){writeFileSync('startup-ran','operator and question migrations');if(resolve(process.env.MULTIREMI_MIGRATION_REPORT_DIR || '')!==${JSON.stringify(join(root, 'scratch/reports/migrations'))})throw new Error('Missing report override');${fails ? `throw new Error(${JSON.stringify(fails === 'missing-before' ? 'Unified migration before report missing' : 'invalid historical route')});` : ''}} }`);
+export class MultiremiStore { constructor(){writeFileSync('startup-ran','operator and question migrations');if(resolve(process.env.MULTIREMI_MIGRATION_REPORT_DIR || '')!==${JSON.stringify(join(root, 'scratch/reports/migrations'))})throw new Error('Missing report override');${fails ? `throw new Error(${JSON.stringify(fails === 'missing-before' ? 'Unified migration before report missing' : fails === 'requires-prepare' ? 'Historical schema preparation required: stop all API slots and workers, run remi db prepare, then restart' : 'invalid historical route')});` : ''}} }`);
   const reports = join(root, 'home/reports/migrations');
   await mkdir(reports, { recursive: true });
   await writeFile(join(reports, 'test-before.json'), '{"phase":"before"}');
@@ -96,3 +96,41 @@ for (const mode of ['present', 'missing', 'invalid', 'missing-before'] as const)
     }
   }, 15_000);
 }
+
+it('reports the pre-protocol offline preparation boundary without exposing candidate stderr', async () => {
+  const f = await fixture('requires-prepare', true);
+  const result = await f.run();
+  expect(result.code).not.toBe(0);
+  expect(result.error).toContain('Migration rehearsal: historical schema preparation required');
+  expect(result.error).toContain('remi db prepare');
+  expect(result.error).not.toContain('run remi db prepare, then restart');
+}, 15_000);
+
+it.skipIf(!process.env.MULTIREMI_TEST_POSTGRES_URL)('keeps a real pre-protocol PostgreSQL database unchanged when rehearsal refuses enrollment', async () => {
+  const adminUrl = process.env.MULTIREMI_TEST_POSTGRES_URL!;
+  if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(adminUrl).hostname)) throw new Error('Requires local PostgreSQL');
+  const name = `mul173_rehearsal_${process.pid}_${crypto.randomUUID().replaceAll('-', '')}`;
+  const admin = new Bun.SQL(adminUrl, { max: 1 });
+  let database: Bun.SQL | undefined, created = false;
+  try {
+    await admin.unsafe(`CREATE DATABASE ${name}`); created = true;
+    const url = new URL(adminUrl); url.pathname = `/${name}`;
+    database = new Bun.SQL(url.toString(), { max: 1 });
+    await database.unsafe('CREATE TABLE multiremi_legacy_witness (id integer); INSERT INTO multiremi_legacy_witness VALUES (42)');
+    const f = await fixture(false, true);
+    const root = await mkdtemp(join(tmpdir(), 'remi-real-rehearsal-')); roots.push(root);
+    const runtime = resolve('packages/platform-updater/src/container-runtime.mjs');
+    const script = `import {rehearseStoreMigration} from ${JSON.stringify(pathToFileURL(runtime).href)}; await rehearseStoreMigration(${JSON.stringify(process.cwd())}, ${JSON.stringify(f.archive)}, ${JSON.stringify(join(root, 'scratch'))}, { executable: process.execPath, env: { PATH: process.env.PATH, MULTIREMI_DATABASE_URL: ${JSON.stringify(url.toString())} } });`;
+    const child = Bun.spawn([process.execPath, '--eval', script], { stdout: 'pipe', stderr: 'pipe' });
+    const [code, error] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    expect(code).not.toBe(0);
+    expect(error).toContain('Migration rehearsal: historical schema preparation required');
+    expect(await database.unsafe<{ id: number }[]>('SELECT id FROM multiremi_legacy_witness')).toEqual([{ id: 42 }]);
+    expect((await database.unsafe("SELECT to_regclass('multiremi_schema_meta') IS NULL AS absent"))[0]?.absent).toBe(true);
+    console.info(`Real PG rehearsal refusal: row=42, no metadata enrollment; ${error.split('\n').find(line => line.startsWith('error:'))}`);
+  } finally {
+    await database?.close();
+    if (created) await admin.unsafe(`DROP DATABASE ${name}`);
+    await admin.close();
+  }
+}, 30_000);

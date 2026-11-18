@@ -322,3 +322,12 @@ it('bundles the updater with executable fingerprint exports and embedded bootstr
   expect(result.stderr.toString()).not.toContain('error:');
   expect(result.exitCode).toBe(0);
 });
+
+it('keeps the offline schema preparation refusal actionable and candidate diagnostics private', async () => {
+  const driver = new ContainerApplicationDriver({ kind: 'docker_compose', composeFile: '/unused/compose.yml', envFile: '/unused/env', stateDir: '/unused', apiHealthUrl: '', webHealthUrl: '' }, {
+    run: async () => ({ exitCode: 1, stdout: '', stderr: 'Migration rehearsal: historical schema preparation required; private candidate details' }),
+  });
+  const internal = driver as unknown as { mustDocker(args: string[]): Promise<string> };
+  await expect(internal.mustDocker(['run', 'migrate'])).rejects.toThrow('requires offline schema preparation (remi db prepare)');
+  await expect(internal.mustDocker(['run', 'migrate'])).rejects.not.toThrow('private candidate details');
+});

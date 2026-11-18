@@ -158,11 +158,9 @@ for (const blockedReport of ["turn.input", "task.usage", "turn.complete"] as con
         await waitFor(() => timedReportSent && h.daemon.traceStore().head(taskId)?.closed === true, "final durably queued");
         expect((h.daemon as any).ensureOutbox().taskIdsWithPendingTerminal(runtimeId)).toContain(taskId);
         h.clock.advance(30_000);
-        await Bun.sleep(20);
         expect(h.daemon.traceStore().snapshotPart(taskId, 0)?.turn?.error).toBeNull();
         expect(h.store.getTask(taskId)?.status).toBe("running");
         blocked = false;
-        h.clock.advance(5); // release the manual-clock outbox retry backoff
         if (restart) await h.recreateDaemon();
         await waitFor(() => h.store.getTask(taskId)?.status === "completed" && h.daemon.outboxStats()?.pending === 0,
           "steered completion replay", 5_000);

@@ -41,7 +41,7 @@ expand 的 SQL、完成标记和 level 更新位于同一事务；失败可重�
 每个 expand 在同一事务内、回调前后读取实际目录，拒绝删除或改名既有对象、列类型变化和 nullable→NOT NULL，
 抛错后步骤标记与 level 均不推进。PostgreSQL 覆盖非系统 schema（排除 `pg_catalog`、`information_schema`、
 `pg_toast*`）、表/分区表/外部表、视图/物化视图、序列、类型（含 enum 标签）、列、索引和命名约束。
-SQLite 同样执行 expand，使用 `sqlite_schema`、`pragma_table_info`、`pragma_index_list` 和 CREATE SQL 中的命名约束。
+SQLite 同样执行 expand，使用 `sqlite_schema`、`pragma_table_xinfo`（含 generated 列）、`pragma_index_list` 和 CREATE SQL 中的命名约束。
 新增对象、默认值设置/修改/删除、DROP NOT NULL 允许；默认值变更仍须评估依赖默认值的旧 writer。
 受保护句柄共用文本检测器提供 fail-fast，但函数调用等间接 DDL 由事务内目录对比拦截。
 不得捕获原始句柄绕过 guard；新 schema 变化必须提升 level，不能塞入已冻结的历史链。

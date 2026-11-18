@@ -1,0 +1,27 @@
+{
+  "profile": "mul172-candidate-example",
+  "baseUrl": "http://127.0.0.1:16120",
+  "controlDir": "/replace-with-isolated-control-mount/api",
+  "chromeExecutable": "/usr/bin/chromium",
+  "candidateSha": "0000000000000000000000000000000000000000",
+  "supervisorSha": "0000000000000000000000000000000000000000",
+  "seconds": 90,
+  "probeSessionId": "replace-probe-session",
+  "sessions": [
+    { "id": "replace-session-1", "agentId": "replace-agent-1" },
+    { "id": "replace-session-2", "agentId": "replace-agent-2" },
+    { "id": "replace-session-3", "agentId": "replace-agent-3" },
+    { "id": "replace-session-4", "agentId": "replace-agent-4" },
+    { "id": "replace-session-5", "agentId": "replace-agent-5" },
+    { "id": "replace-session-6", "agentId": "replace-agent-6" },
+    { "id": "replace-session-7", "agentId": "replace-agent-7" },
+    { "id": "replace-session-8", "agentId": "replace-agent-8" }
+  ],
+  "releases": {
+    "v1": "mul172-v1",
+    "v2": "mul172-v2",
+    "neverReady": "mul172-never-ready",
+    "activateCrash": "mul172-activate-crash",
+    "crash30": "mul172-crash30"
+  }
+}

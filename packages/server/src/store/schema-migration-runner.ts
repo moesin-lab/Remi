@@ -40,11 +40,16 @@ export function validateSchemaMigrations(steps: readonly SchemaMigration[]): voi
   }
 }
 
-/** Caller owns the migration lock; each step and its marker commit together. */
-export function runSchemaExpands(db: SqlDatabase, steps: readonly SchemaMigration[], release: string, code: SchemaCompatibility): void {
+/** Recheck at execution time: prepared statements can outlive this setting. */
+function assertExpandSqlPremise(db: SqlDatabase): void {
   if (db.dialect === 'postgres' && db.query('SHOW standard_conforming_strings').get()?.standard_conforming_strings !== 'on') {
     throw new Error('Registered schema expands require standard_conforming_strings=on; restore the PostgreSQL default before retrying');
   }
+}
+
+/** Caller owns the migration lock; each step and its marker commit together. */
+export function runSchemaExpands(db: SqlDatabase, steps: readonly SchemaMigration[], release: string, code: SchemaCompatibility): void {
+  assertExpandSqlPremise(db);
   validateSchemaMigrations(steps);
   validateSchemaCompatibility(code);
   releaseParts(release);
@@ -119,18 +124,27 @@ function expandOnlyDatabase(db: SqlDatabase): SqlDatabase {
             // the bridge splitter. Validate the full batch before executing.
             const statements = splitSchemaStatements(sql);
             for (const statement of statements) {
-              if (target.dialect === 'postgres' && target.query('SHOW standard_conforming_strings').get()?.standard_conforming_strings !== 'on') {
-                throw new Error('Registered schema expands require standard_conforming_strings=on');
-              }
+              assertExpandSqlPremise(target);
               target.query(statement).run();
             }
             return;
           }
-          // This premise also holds if a preceding expand statement changed it.
-          if (target.dialect === 'postgres' && target.query('SHOW standard_conforming_strings').get()?.standard_conforming_strings !== 'on') {
-            throw new Error('Registered schema expands require standard_conforming_strings=on');
-          }
-          return value.call(target, sql, ...args);
+          assertExpandSqlPremise(target);
+          const result = value.call(target, sql, ...args);
+          if (key !== 'query' && key !== 'prepare') return result;
+          return new Proxy(result, {
+            get(statement, method) {
+              const execute = Reflect.get(statement, method, statement);
+              if (typeof execute !== 'function') return execute;
+              if (['run', 'get', 'all', 'values', 'iterate'].includes(String(method))) {
+                return (...params: unknown[]) => {
+                  assertExpandSqlPremise(target);
+                  return execute.apply(statement, params);
+                };
+              }
+              return execute.bind(statement);
+            },
+          });
         };
       }
       // Preserve receiver-sensitive SQLite methods. Transaction callbacks must

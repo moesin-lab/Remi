@@ -132,6 +132,14 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
     });
     return preflightResult(checks);
   }
+  async preflightForRelease(value: unknown) {
+    const target = parseApplicationManifest(value);
+    const current = (await this.selected()) ?? await this.baseSelection();
+    const api = await this.status('api');
+    const switching = process.env.REMI_SLOT_SWITCH !== '0' && api?.slotSwitch
+      && current.release.dataSchema === target.dataSchema;
+    return this.preflight(!switching);
+  }
   async validateRelease(value: unknown) {
     const manifest = parseApplicationManifest(value);
     const app = manifest.application;

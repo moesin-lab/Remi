@@ -175,6 +175,19 @@ describe('socket-free internal application updates', () => {
       if (previousFlag === undefined) delete process.env.REMI_SLOT_SWITCH; else process.env.REMI_SLOT_SWITCH = previousFlag;
     }
   });
+  it('refines published preflight for the resolved target without requiring offline-only services for a switch', async () => {
+    const f = await fixture(); f.statuses.api.slotSwitch = true;
+    await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
+    await rm(join(f.config.control, 'rehearsal/status.json'));
+    expect((await f.driver.preflight()).ready).toBe(false);
+    const compatible = await f.driver.preflightForRelease(f.manifest);
+    expect(compatible.ready).toBe(true);
+    expect(compatible.checks.map(check => check.code)).not.toContain('isolated_rehearsal');
+    expect(compatible.checks.map(check => check.code)).not.toContain('backup');
+    const incompatible = await f.driver.preflightForRelease({ ...f.manifest, dataSchema: 'e'.repeat(64) });
+    expect(incompatible.ready).toBe(false);
+    expect(incompatible.checks.find(check => check.code === 'isolated_rehearsal')?.ok).toBe(false);
+  });
   it('preserves structured rehearsal refusal in the internal recovery journal', async () => {
     const f = await fixture(); f.preflight(); f.state.rehearsalFails = true;
     try { assertSchemaContract(['public.old.id:text:text:NO'], [], { stage: 'previous', currentVersion: '1.0.0', targetVersion: '1.0.0' }); }

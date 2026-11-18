@@ -24,6 +24,8 @@ export interface PlatformDeploymentDriver {
   recoverInterrupted?(): Promise<void>;
   inspect(): Promise<PlatformInspection>;
   preflight(): Promise<MultiremiPlatformPreflight>;
+  /** Refine preparation requirements after resolving the actual target manifest. */
+  preflightForRelease?(manifest: unknown): Promise<MultiremiPlatformPreflight>;
   /** Validate a target's artifacts and runtime/migration contract, if applicable. */
   validateRelease?(manifest: unknown): Promise<void>;
   /** Release a host-owned write fence only after reporting and drain release. */

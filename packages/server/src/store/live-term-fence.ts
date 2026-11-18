@@ -1,3 +1,4 @@
+import { inheritDatabaseTransactionLocks } from "./request-read-cache.js";
 import { currentBackgroundTerm, StaleLiveTermError, withBackgroundTerm, type BackgroundTerm } from "@shared/db/live-term.js";
 import type { SqlDatabase, SqlStatement } from "./db/postgres.js";
 
@@ -59,7 +60,7 @@ export function liveTermDatabase(db: SqlDatabase): SqlDatabase {
     const term = currentBackgroundTerm();
     return term ? term.guard(action) : action();
   };
-  return new Proxy(db, {
+  const proxy = new Proxy(db, {
     get(target, key) {
       const value = Reflect.get(target, key, target);
       if (key === "query" || key === "prepare") return (sql: string): SqlStatement => {
@@ -78,4 +79,6 @@ export function liveTermDatabase(db: SqlDatabase): SqlDatabase {
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+  inheritDatabaseTransactionLocks(db, proxy);
+  return proxy;
 }

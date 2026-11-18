@@ -13,7 +13,7 @@ describe("proactive delivery execution", () => {
     const input = { ...delivery, taskId: undefined, body: "reply" };
     Object.assign(daemon, { options: { serverUrl: "https://remi.example.test" },
       client: { reportFeishuBotOutboundResult: async (_runtime: string, _delivery: string, report: any) => { reports.push(report); } },
-      feishuConcierge: { sendOutbound: async () => { throw new Error("response lost after message creation"); } },
+      feishuConcierge: { sendOutbound: async () => { throw new FeishuDeliveryError("response lost after message creation", true, true); } },
     });
     await expect(daemon.handleFeishuBotOutbound("rt_1", input, new AbortController().signal)).rejects.toMatchObject({ ambiguous: true });
     expect(reports).toEqual([]);

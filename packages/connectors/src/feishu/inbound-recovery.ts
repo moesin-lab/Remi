@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { multiremiStateDir } from "@shared/home-paths.js";
 import type { FeishuMessageEvent } from "./types.js";
 
 type ChatType = "p2p" | "group";
@@ -16,7 +16,7 @@ interface InboundState {
 /** App and API domain are both part of the local identity. Never persist secrets. */
 export function feishuRecoveryPath(appId: string, domain = "feishu"): string {
   const identity = createHash("sha256").update(JSON.stringify([domain, appId])).digest("hex");
-  return join(process.env.MULTIREMI_STATE_DIR || join(homedir(), ".remi"), "feishu-inbound", `${identity}.json`);
+  return join(multiremiStateDir(), "feishu-inbound", `${identity}.json`);
 }
 
 /** Write ahead of the business callback; only a successful callback acknowledges it.

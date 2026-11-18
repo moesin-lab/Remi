@@ -102,6 +102,7 @@ daemon 以服务端既有 `multiremi_feishu_bot_chat_bindings.chat_id`（含话�
 Task 去重仍只由服务端 `multiremi_feishu_bot_deliveries.external_message_id` 负责；
 提交成功而本地未确认的事件可再次提交，解析到原 Task。
 
+journal 使用统一 `multiremiStateDir`（可通过 `MULTIREMI_STATE_DIR` 隔离）的 app/domain 哈希路径。
 每个 app/chat 游标采用已确认消息的 `create_time`，回看保留 60 秒重叠。
 未完成的历史扫描另留水位，防止较新的实时事件跨过重启缺口。
 单次最多回看 10 分钟、每会话 5 页（每页 50 条），先取最新消息，再按时间升序处理；
@@ -118,7 +119,10 @@ Task 去重仍只由服务端 `multiremi_feishu_bot_deliveries.external_message_
 仅在行创建后 55 分钟内重发（飞书 1 小时 UUID 去重窗口扣除 5 分钟余量）。
 过期 lease 且超过此期限时以 `dedupe_window_expired` 终止并告警，沿用原有批次级联失败规则；
 未发送或已明确拒收的 pending 行不受此期限影响，持久化发送收据不会重发。
-网络无响应保留 sending，不冒充明确拒收。native CoT 的 `creating/writePending`
+只在真正的 message.create/reply 请求边界把网络无响应标为发送不明，保留 sending；
+附件下载、上传或 mention 准备失败仍作为明确失败重试。socket offer 暂存为 pending 时，
+通过内部 `last_error=send_outcome_unknown` 保留原发送不明的来源，offer 与实际 ACK/claim
+均重新检查窗口；明确拒收的报告覆盖该标记，不能仅凭 attempt_count 拒绝 pending。native CoT 的 `creating/writePending`
 保持既有不重发策略；反应和原消息 patch 使用各自的幂等更新路径。
 一小时后才恢复的未知发送结果可能无法自动补发；此限制不能称为真实飞书恰好一次验证。
 

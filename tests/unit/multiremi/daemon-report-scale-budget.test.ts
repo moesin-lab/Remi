@@ -5,14 +5,17 @@ import { createReportScaleFixture, REPORT_SCALES } from "../../fixtures/multirem
 useReportFleetFixtures("file");
 // Executions include queued downlinks/offers, through layer.drain(). PG runs
 // the same comparisons; its fixed totals need a real-backend capture.
+// MUL-31 adds fixed generation/handoff authority reads. Checkpoint projections
+// join the existing batched snapshot; small/stable equality and the 9-query
+// snapshot ceiling below must not grow with active attempts.
 const SQLITE_BUDGETS = {
   hb: { total: 60, reads: 43, writes: 17 },
-  'task.start': { total: 80, reads: 63, writes: 17 },
-  'task.progress': { total: 38, reads: 30, writes: 8 },
-  'task.workspace': { total: 40, reads: 32, writes: 8 },
-  'turn.input': { total: 88, reads: 73, writes: 15 },
-  'turn.complete': { total: 227, reads: 175, writes: 52 },
-  'task.fail': { total: 141, reads: 116, writes: 25 },
+  'task.start': { total: 82, reads: 65, writes: 17 },
+  'task.progress': { total: 43, reads: 34, writes: 9 },
+  'task.workspace': { total: 41, reads: 33, writes: 8 },
+  'turn.input': { total: 90, reads: 75, writes: 15 },
+  'turn.complete': { total: 230, reads: 178, writes: 52 },
+  'task.fail': { total: 144, reads: 119, writes: 25 },
 };
 const fleets: Record<string, Awaited<ReturnType<typeof createReportScaleFixture>>> = {};
 const costs: Record<string, { total: number; reads: number; writes: number; statements: Record<string, number> }> = {};
@@ -82,6 +85,9 @@ for (const type of ['hb','task.start','task.progress','task.workspace','turn.inp
       const unsubscribe = f.store.onWorkspaceEvent(event => events.push(event));
       const trace = process.env.MULTIREMI_TEST_SQL_TRACE;
       if (trace) process.env.MULTIREMI_TEST_SQL_TRACE = `${trace}-${type}-${name}`;
+      // Keep the independently tested one-second readiness probe outside the
+      // business SQL profile, even when a PG round trip crosses its TTL.
+      f.store.checkDatabaseReady(true);
       const sql = await countSql(f.database, f.layer, () => type === 'hb' ? f.heartbeat(0, false, 1)
         : f.sessions[sessionIndex]!.handleMessage(JSON.stringify({ v: 2, t: type, rt: runtime, seq, id: String(seq), p })));
       if (trace) process.env.MULTIREMI_TEST_SQL_TRACE = trace;

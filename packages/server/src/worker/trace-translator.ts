@@ -111,6 +111,7 @@ export const TRACE_DELTA_BUFFER_BYTES = 16 * 1024;
 export const TRACE_DELTA_MAX_BYTES = 64 * 1024;
 
 export interface TraceTranslatorOptions {
+  resume?: { turn: TraceTurn; items: readonly TraceItem[] };
   /** ISO clock for item and turn timestamps. */
   now?: () => string;
   /** Millisecond clock for `duration_ms`. */
@@ -571,8 +572,8 @@ export function createTraceTranslator(
   const emitter = new TraceEmitter(emit, Math.max(1, opts.flushIntervalMs ?? TRACE_DELTA_FLUSH_INTERVAL_MS));
 
   /** Latest version of every item, in first-seen order (for settle / lastItem). */
-  const items = new Map<string, TraceItem>();
-  const usedIds = new Set<string>();
+  const items = new Map<string, TraceItem>((opts.resume?.items ?? []).map(item => [item.id, item]));
+  const usedIds = new Set<string>(items.keys());
   const openText = new Map<string, TextState>(); // key: `${parent}\u0000${kind}`
   const tools = new Map<string, ToolState>();
   const suppressed = new Set<string>();
@@ -584,7 +585,7 @@ export function createTraceTranslator(
   let synCounter = 0;
   let textCounter = 0;
   let noticeCounter = 0;
-  let turnStarted = false;
+  let turnStarted = !!opts.resume;
   let contextUsage: TraceContextUsage | null = null;
   let model: string | null = null;
   let previousInferred: string | null = null;
@@ -1505,6 +1506,7 @@ export function createTraceTranslator(
 
   return {
     start(input) {
+      if (opts.resume) return;
       emitter.run(() => {
         const at = now();
         const turn: TraceTurn = {

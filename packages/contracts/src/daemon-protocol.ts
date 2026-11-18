@@ -149,6 +149,7 @@ export const DAEMON_UPLINK_RPC_FRAMES = [
   "concierge.status_report",
   "turn.restart.checkpoint",
   "turn.restart.suspend",
+  "turn.restart.resume",
   "turn.input",
   "turn.decision",
   "turn.decision.get",

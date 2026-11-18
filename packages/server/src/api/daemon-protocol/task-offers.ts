@@ -32,7 +32,8 @@ export function daemonTurnOfferPayload(execution: Record<string, unknown>, input
 export async function prepareTaskOffer(store: MultiremiStore, task: MultiremiTaskWithAgent,
   project: ProjectKnowledgeServiceContract, repository: RepositoryWikiServiceContract,
   supportsWikiFetch = false,
-  input: DaemonTurnInput = store.getDaemonTurnBridge().offerInput(task)): Promise<Record<string, unknown> | null> {
+  input: DaemonTurnInput = store.getDaemonTurnBridge().offerInput(task),
+  expectedStatus: "dispatched" | "running" = "dispatched"): Promise<Record<string, unknown> | null> {
   // Validate canonical input before preparing the execution context and access token.
   daemonTurnOfferPayload({}, input);
   const remotes = new Set(task.repos.map(repo => canonicalRepositoryRemote(repo.url)));
@@ -46,7 +47,7 @@ export async function prepareTaskOffer(store: MultiremiStore, task: MultiremiTas
     undefined, supportsWikiFetch);
   invalidateRequestReadCache();
   const current = store.getTaskIdentity(task.id);
-  if (current?.status !== "dispatched" || current.runtimeId !== task.runtimeId) return null;
+  if (current?.status !== expectedStatus || current.runtimeId !== task.runtimeId) return null;
   const response = daemonTaskClaimResponse(store, hydrated, store.getTaskTriggerMetadata(task));
   useTaskSessionInput(store, task, response);
   const runtime = store.getRuntimeLite(task.runtimeId!);

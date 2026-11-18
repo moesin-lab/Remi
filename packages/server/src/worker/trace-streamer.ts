@@ -31,6 +31,13 @@ interface StreamCursor { runtimeId: string; afterSeq: number; closed: boolean; b
 /** One process-wide, lower-priority pump; trace cursors never occupy outbox rows. */
 export class TraceStreamer {
   private readonly tasks = new Map<string, StreamCursor>();
+  private readonly executionGenerations = new Map<string, number>();
+  setExecutionGeneration(taskId: string, generation: number): void {
+    this.executionGenerations.set(taskId, generation);
+    const cursor = this.tasks.get(taskId);
+    if (cursor) cursor.blocked = false;
+    this.wake();
+  }
   private heads: Record<string, number> = {};
   private generation = 0;
   private running: Promise<void> | null = null;
@@ -100,15 +107,18 @@ export class TraceStreamer {
         Math.max(1, DAEMON_TRACE_APPEND_MAX_BYTES - envelopeBytes - DAEMON_TRACE_APPEND_MAX_EVENTS));
       if (!page.events.length) continue;
       const closed = head.closed && page.events.at(-1)!.seq >= head.head;
+      const executionGeneration = this.executionGenerations.get(taskId);
       try {
-        const reply = await this.protocol.rpc("trace.append", { task_id: taskId, events: page.events, closed }, cursor.runtimeId);
+        const reply = await this.protocol.rpc("trace.append", { task_id: taskId, ...(executionGeneration !== undefined ? { generation: executionGeneration } : {}), events: page.events, closed }, cursor.runtimeId);
         if (generation !== this.generation) return;
+        if (executionGeneration !== this.executionGenerations.get(taskId)) continue;
         const hubHead = reply.hub_head;
         if (!Number.isSafeInteger(hubHead) || (hubHead as number) < page.events.at(-1)!.seq) throw new Error("trace.append did not acknowledge its head");
         cursor.afterSeq = hubHead as number;
         cursor.closed = closed;
       } catch (error) {
         if (generation !== this.generation || this.stopped) return;
+        if (executionGeneration !== this.executionGenerations.get(taskId)) continue;
         if ((error as { retryable?: boolean }).retryable === false) cursor.blocked = true;
         this.onError(taskId, error);
         return;

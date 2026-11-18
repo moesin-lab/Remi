@@ -32,6 +32,9 @@ describe("daemon GC and lifecycle orchestration", () => {
       finish = resolve;
     });
     Object.assign(daemon, {
+      plannedRestartTransfer: () => {},
+      restartJournal: { entries: () => [], close: () => {} },
+      resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
       gcInFlight: null,
@@ -55,6 +58,9 @@ describe("daemon GC and lifecycle orchestration", () => {
     const daemon = Object.create(MultiremiDaemon.prototype) as MultiremiDaemon & Record<string, unknown>;
     let calls = 0;
     Object.assign(daemon, {
+      plannedRestartTransfer: () => {},
+      restartJournal: { entries: () => [], close: () => {} },
+      resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
       diskMonitor: { check: async () => {}, health: () => ({ state: "ok", reasons: [] }) },
@@ -83,6 +89,9 @@ describe("daemon GC and lifecycle orchestration", () => {
       loopEntered = resolve;
     });
     Object.assign(daemon, {
+      plannedRestartTransfer: () => {},
+      restartJournal: { entries: () => [], close: () => {} },
+      resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
       stopped: false,
@@ -178,12 +187,22 @@ describe("daemon GC and lifecycle orchestration", () => {
     });
     const events: string[] = [];
     Object.assign(daemon, {
+      plannedRestartTransfer: () => {},
+      restartJournal: { entries: () => [], close: () => {} },
+      resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
       pollAbort: new AbortController(),
       activeTaskCount: 0,
       activeTaskIds: new Set<string>(),
       activeTaskAborts: new Set<AbortController>(),
+      taskAbortsById: new Map(),
+      resumedUsageRuns: new Map(),
+      executionGenerations: new Map(),
+      restartExecutions: new Map(),
+      restartDeadlines: new Map(),
+      restartProviderClosed: new Set(),
+      expiredRestartTasks: new Set(),
       issueWorkspaceLifecycleLocks: locker,
       taskDownlinks: { observeCancellation: () => () => {}, release: () => {} },
       ensureOutbox: reports(),
@@ -249,12 +268,22 @@ describe("daemon GC and lifecycle orchestration", () => {
     let finishProvider!: () => void;
     const providerFinished = new Promise<void>((resolve) => { finishProvider = resolve; });
     Object.assign(daemon, {
+      plannedRestartTransfer: () => {},
+      restartJournal: { entries: () => [], close: () => {} },
+      resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
       pollAbort: new AbortController(),
       activeTaskCount: 0,
       activeTaskIds: new Set<string>(),
       activeTaskAborts: new Set<AbortController>(),
+      taskAbortsById: new Map(),
+      resumedUsageRuns: new Map(),
+      executionGenerations: new Map(),
+      restartExecutions: new Map(),
+      restartDeadlines: new Map(),
+      restartProviderClosed: new Set(),
+      expiredRestartTasks: new Set(),
       issueWorkspaceLifecycleLocks: locker,
       taskDownlinks: { observeCancellation: () => () => {}, release: () => {} },
       ensureOutbox: reports(),
@@ -360,6 +389,9 @@ describe("daemon GC and lifecycle orchestration", () => {
     let providerReady!: () => void;
     const providerReachedBarrier = new Promise<void>((resolve) => { providerReady = resolve; });
     Object.assign(daemon, {
+      plannedRestartTransfer: () => {},
+      restartJournal: { entries: () => [], close: () => {} },
+      resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
       stopped: false,
@@ -435,6 +467,9 @@ describe("daemon GC and lifecycle orchestration", () => {
     const daemon = Object.create(MultiremiDaemon.prototype) as MultiremiDaemon & Record<string, unknown>;
     const calls: string[] = [];
     Object.assign(daemon, {
+      plannedRestartTransfer: () => {},
+      restartJournal: { entries: () => [], close: () => {} },
+      resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
       workspaceRootFence: null,
@@ -493,6 +528,13 @@ describe("daemon GC and lifecycle orchestration", () => {
       reclaim: { run: async () => { lost = true; throw new Error("round aborted"); } },
       workspaceOwnershipLost: false,
       activeTaskAborts: new Set<AbortController>(),
+      taskAbortsById: new Map(),
+      resumedUsageRuns: new Map(),
+      executionGenerations: new Map(),
+      restartExecutions: new Map(),
+      restartDeadlines: new Map(),
+      restartProviderClosed: new Set(),
+      expiredRestartTasks: new Set(),
       claimsPaused: false,
       ready: true,
       stopped: false,
@@ -521,6 +563,13 @@ describe("daemon GC and lifecycle orchestration", () => {
       },
       workspaceOwnershipLost: false,
       activeTaskAborts: new Set<AbortController>(),
+      taskAbortsById: new Map(),
+      resumedUsageRuns: new Map(),
+      executionGenerations: new Map(),
+      restartExecutions: new Map(),
+      restartDeadlines: new Map(),
+      restartProviderClosed: new Set(),
+      expiredRestartTasks: new Set(),
       claimsPaused: false,
       ready: true,
       stopped: false,
@@ -622,6 +671,9 @@ describe("daemon GC and lifecycle orchestration", () => {
     const pollAbort = new AbortController();
     const readyStates: boolean[] = [];
     Object.assign(daemon, {
+      plannedRestartTransfer: () => {},
+      restartJournal: { entries: () => [], close: () => {} },
+      resumePlannedRestarts: async () => {},
       runtimeBindingDiscoveries: new Map(),
       runtimeBindingProbeTasks: new Set(),
       workspaceRootFence: () => {

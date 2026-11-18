@@ -250,8 +250,8 @@ export class DaemonTurnBridge {
   complete(input:{payload:DaemonTurnCompletePayload;completionFields:DaemonTaskCompletionFields|null;traceEventCount?:number},scope:DaemonTurnScope):Record<string,unknown> {
     const p=input.payload;
     try{
-      new PlannedRestarts(this.ctx).withExecution(p.attempt_id,scope.generation,scope,()=>this.ctx.tasks().completeTask(p.attempt_id,{output:p.reply.body_md,sessionId:p.session_id,workDir:p.work_dir,completionFields:input.completionFields,traceEventCount:input.traceEventCount,
-        expectedTurnId:p.turn_id,turnInputToSeq:p.input_to_seq,allowUnreadInput:!scope.inputUnread||p.input_unread_fallback===true,replyKind:p.reply.message_kind,expectedRuntimeId:scope.runtimeId,expectedDaemonId:scope.daemonId},scope));
+      this.ctx.tasks().completeTask(p.attempt_id,{output:p.reply.body_md,sessionId:p.session_id,workDir:p.work_dir,completionFields:input.completionFields,traceEventCount:input.traceEventCount,
+        expectedTurnId:p.turn_id,turnInputToSeq:p.input_to_seq,allowUnreadInput:!scope.inputUnread||p.input_unread_fallback===true,replyKind:p.reply.message_kind,expectedRuntimeId:scope.runtimeId,expectedDaemonId:scope.daemonId},scope);
       const turn=this.ctx.db.query('SELECT reply_message_id FROM multiremi_turns WHERE id=?').get(p.turn_id);
       return {ok:true,turn_id:p.turn_id,reply_message_id:turn?.reply_message_id??null};
     }catch(error){

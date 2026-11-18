@@ -1,3 +1,4 @@
+import { foldStoredTrace } from "./trace-pages.js";
 import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution } from "./planned-restart-journal.js";
 import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
@@ -94,7 +95,7 @@ import {
   type DaemonProtocolClientOptions,
   type DaemonProtocolLane,
 } from "./daemon-protocol-client.js";
-import { registerDaemonOfferHandler } from "./daemon-offers.js";
+import { normalizeDaemonTurnOffer, registerDaemonOfferHandler } from "./daemon-offers.js";
 import { DaemonTaskDownlinks, type DaemonSteerMessage } from "./daemon-downlinks.js";
 import { registerDaemonRuntimeDownlinks } from "./daemon-runtime-downlinks.js";
 import {
@@ -1284,6 +1285,13 @@ export class MultiremiDaemon {
   private activeTaskAborts = new Set<AbortController>();
   private readonly taskAbortsById = new Map<string, AbortController>();
   private readonly restartExecutions = new Map<string, RestartExecution>();
+  private readonly executionGenerations = new Map<string, number>();
+  private readonly resumedUsageRuns = new Map<string, string>();
+  private restartRecoveryCandidates = new Set<string>();
+  private readonly restartProviderClosed = new Set<string>();
+  private readonly expiredRestartTasks = new Set<string>();
+  private readonly restartDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly resumedRestartIds = new Set<string>();
   private restartJournal: PlannedRestartJournal | null = null;
   private restartTransfer: PlannedRestartTransfer | null = null;
   private claimsPaused = false;
@@ -1747,6 +1755,19 @@ export class MultiremiDaemon {
       // runAgent's finally awaits provider.close(), flushes trace and ends reports
       // before handleTask can create the prepared journal record.
       abort.abort();
+      // Provider cancellation/close is cooperative. If it never settles there
+      // can be no checkpoint receipt: terminate the process as a crash, so the
+      // replacement takes MUL-45 recovery rather than reviving unsafe state.
+      const deadline = setTimeout(() => {
+        this.expiredRestartTasks.add(p.attempt_id as string);
+        this.restartDeadlines.delete(p.attempt_id as string);
+        this.restartExecutions.delete(p.attempt_id as string);
+        this.forceStopProcesses();
+        this.requestRestart();
+        this.onStopTimeout();
+      }, this.stopTimeoutMs);
+      deadline.unref?.();
+      this.restartDeadlines.set(p.attempt_id, deadline);
     });
     this.protocolClient.addLane(this.protocolLane);
     registerDaemonOfferHandler(this.protocolClient, {
@@ -1792,7 +1813,7 @@ export class MultiremiDaemon {
           this.attemptSlashCommands.delete(taskId);
           this.ensureTrace().close(taskId, status, error);
         },
-      }));
+      }, taskId => this.executionGenerations.get(taskId) ?? 0));
   }
 
   async checkExternalWorkspaceMembership(workspaceId: string, externalId: string): Promise<boolean> {
@@ -2015,6 +2036,8 @@ export class MultiremiDaemon {
     this.parkedLanes?.disable(null);
     this.parkedLanesClosing = null;
     const outbox = this.ensureOutbox();
+    this.plannedRestartTransfer();
+    this.restartRecoveryCandidates = new Set(this.restartJournal!.entries().map(entry => entry.execution.handoff_id));
     this.startRepoCheckoutServer();
     try {
       await this.registerCurrentRuntime();
@@ -2052,6 +2075,7 @@ export class MultiremiDaemon {
       }
 
       this.protocolClient?.startLane(this.protocolLane);
+      await this.resumePlannedRestarts();
       this.nextPluginDesiredAt = Date.now() + PLUGIN_DESIRED_FORCED_REFRESH_MS;
       this.onceTaskAccepted = false;
       while (!this.stopped) {
@@ -2065,6 +2089,7 @@ export class MultiremiDaemon {
             this.nextPluginDesiredAt = Date.now() + PLUGIN_DESIRED_FORCED_REFRESH_MS;
             await this.reconcileRuntimeAgentPlugins(this.options.runtimeId!, null, { force: true });
           }
+          await this.resumePlannedRestarts();
           await this.waitForNextTick();
         } catch (err) {
           // A transient server/network blip (e.g. the server restarting) must not
@@ -2502,8 +2527,11 @@ export class MultiremiDaemon {
     // Admission is deliberately non-durable: a timed-out running report must
     // never replay after this executor has given up and queued failed.
     const platformDeadline = drainDeadline === undefined ? Infinity : Date.parse(drainDeadline);
-    const admissionEnd = Math.min(Date.now() + 30_000,
-      Number.isNaN(platformDeadline) ? Date.now() : platformDeadline);
+    const admissionNow = Date.now();
+    // An expired drain that was safely checkpointed must still be able to
+    // confirm installation; future deadlines retain the existing smaller budget.
+    const admissionEnd = Number.isNaN(platformDeadline) ? admissionNow : Math.min(admissionNow + 30_000,
+      platformDeadline > admissionNow ? platformDeadline : admissionNow + 30_000);
     while (true) {
       try {
         await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "running" },
@@ -3767,7 +3795,7 @@ export class MultiremiDaemon {
     const status = kind === "complete" ? "completed" : "failed";
     if (terminal && this.options.runtimeId) this.ensureTrace().track(taskId, this.options.runtimeId);
     // The completion fields describe the close that follows the enqueue.
-    this.ensureOutbox().enqueue(taskId, kind, { ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
+    this.ensureOutbox().enqueue(taskId, kind, { ...(this.executionGenerations.has(taskId) ? { generation: this.executionGenerations.get(taskId) } : {}), ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
       ...(terminal ? this.withSlashCommands(taskId, this.ensureTrace().completion(taskId, status)) : {}) });
     if (terminal) {
       this.attemptSlashCommands.delete(taskId);
@@ -4017,7 +4045,7 @@ export class MultiremiDaemon {
       }, timeoutMs)
       : null;
     let summary: RunSummary | null = null;
-    const usageRunId = randomUUID();
+    const usageRunId = this.resumedUsageRuns.get(task.id) ?? randomUUID();
     let observedUsage: TaskUsageSnapshot | null = null;
     const observedUsageUnits = new Map<string, TaskUsageUnit>();
     let resolvedWorkDir: ResolvedTaskWorkDir | null = null;
@@ -4242,7 +4270,7 @@ export class MultiremiDaemon {
       const startSignal = AbortSignal.any([abort.signal, this.pollAbort.signal]);
       startSignal.throwIfAborted();
       const startReply = await this.ensureOutbox().enqueueAndWait(task.id, "start", {
-        usage_run_id: usageRunId, runtime_id: this.options.runtimeId,
+        usage_run_id: usageRunId, runtime_id: this.options.runtimeId, ...(this.executionGenerations.has(task.id) ? { generation: this.executionGenerations.get(task.id) } : {}),
       }, this.options.requestTimeoutMs, startSignal);
       if (startReply.execution_authorized !== true) throw new Error("Task execution start does not authorize this run to execute");
       startSignal.throwIfAborted();
@@ -4327,6 +4355,7 @@ export class MultiremiDaemon {
       }
       const restart = this.restartExecutions.get(task.id);
       if (restart && !timedOut) {
+        if (providerEntered && !this.restartProviderClosed.has(task.id)) return;
         checkpointRestart = restart;
         // runAgent has joined provider shutdown. Preserve the same visible
         // attempt; a checkpoint failure leaves ordinary crash recovery intact.
@@ -4342,8 +4371,8 @@ export class MultiremiDaemon {
       // terminate ACP children, so Cancelled/EOF here is runtime interruption,
       // not an Agent failure. Keep the report durable: replay must create the
       // retry even when startup orphan recovery skips pending terminal rows.
-      const runtimeInterrupted = !timedOut && (err instanceof RunAgentError
-        ? err.runtimeInterrupted : this.pollAbort.signal.aborted && isShutdownInterruption(err));
+      const runtimeInterrupted = !timedOut && (this.expiredRestartTasks.has(task.id) || (err instanceof RunAgentError
+        ? err.runtimeInterrupted : this.pollAbort.signal.aborted && isShutdownInterruption(err)));
       const cause = err instanceof RunAgentError ? err.cause : err;
       const failureReason = runtimeInterrupted ? "runtime_recovery" : cause instanceof LocalDirectoryError
         ? cause.failureReason
@@ -4390,11 +4419,21 @@ export class MultiremiDaemon {
             const checkpoint = result.checkpoint as PlannedRestartCheckpoint;
             return { ...checkpoint, trace_head: this.ensureTrace().store.head(task.id)?.head ?? 0 };
           });
+          const deadline = this.restartDeadlines.get(task.id);
+          if (deadline) clearTimeout(deadline);
+          this.restartDeadlines.delete(task.id);
           log.info(`Task ${task.id} planned restart checkpoint acknowledged`);
         } catch (error) {
           log.error(`Task ${task.id} planned restart checkpoint deferred: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
+      if (!checkpointRestart && (serverTerminalStatus || timedOut || !this.restartExecutions.has(task.id))) {
+        const deadline = this.restartDeadlines.get(task.id);
+        if (deadline) clearTimeout(deadline);
+        this.restartDeadlines.delete(task.id);
+      }
+      this.restartProviderClosed.delete(task.id);
+      this.expiredRestartTasks.delete(task.id);
       this.taskAbortsById.delete(task.id);
       this.restartExecutions.delete(task.id);
       this.activeTaskAborts.delete(abort);
@@ -4408,6 +4447,28 @@ export class MultiremiDaemon {
     }
   }
 
+  private readonly pendingResumedTasks = new Map<string, ReturnType<typeof normalizeDaemonTurnOffer>>();
+
+  private async resumePlannedRestarts(): Promise<void> {
+    this.plannedRestartTransfer();
+    for (const entry of this.restartJournal!.entries()) {
+      if (this.stopped || !this.restartRecoveryCandidates.has(entry.execution.handoff_id) || this.resumedRestartIds.has(entry.execution.handoff_id)
+        || entry.execution.runtime_id !== this.options.runtimeId) continue;
+      try {
+        await this.restartTransfer!.resume(entry.execution.handoff_id);
+        const task = this.pendingResumedTasks.get(entry.execution.handoff_id)!;
+        this.pendingResumedTasks.delete(entry.execution.handoff_id);
+        this.resumedRestartIds.add(entry.execution.handoff_id);
+        const run = this.handleTask(task).finally(() => this.inflight.delete(run));
+        this.inflight.add(run);
+        void run.catch(error => log.error(`Resumed task ${task.id} failed: ${String(error)}`));
+      } catch (error) {
+        if (error instanceof DaemonProtocolRpcError && error.code === "stale_execution") this.restartRecoveryCandidates.delete(entry.execution.handoff_id);
+        log.warn(`Planned restart ${entry.execution.handoff_id} waiting: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
   private plannedRestartTransfer(): PlannedRestartTransfer {
     if (this.restartTransfer) return this.restartTransfer;
     this.restartJournal ??= new PlannedRestartJournal(this.outboxPath === ":memory:" ? ":memory:"
@@ -4416,9 +4477,19 @@ export class MultiremiDaemon {
       suspend: async entry => {
         await this.taskDownlinks.rpc("turn.restart.suspend", { ...entry.execution, checkpoint: entry.checkpoint }, this.options.requestTimeoutMs);
       },
-      // Activation is deliberately fenced until fresh-run authorization and
-      // startup dispatch are wired; a local receipt cannot authorize execution.
-      resume: async () => { throw new Error("Planned restart activation is not enabled"); },
+      resume: async entry => {
+        const result = await this.taskDownlinks.rpc("turn.restart.resume", { ...entry.execution, consumer_id: entry.consumer_id }, this.options.requestTimeoutMs);
+        const task = normalizeDaemonTurnOffer(result.task as Record<string, unknown>);
+        const generation = Number(result.generation);
+        if (generation !== entry.execution.generation + 1) throw new Error("Invalid restart generation");
+        this.executionGenerations.set(task.id, generation);
+        this.resumedUsageRuns.set(task.id, entry.consumer_id);
+        this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
+        this.taskDownlinks.bindTurn({ ...task, generation });
+        // No model may run until transfer.resume has persisted the local receipt.
+        this.pendingResumedTasks.set(entry.execution.handoff_id, task);
+        return { generation };
+      },
     });
   }
 
@@ -5459,6 +5530,8 @@ export class MultiremiDaemon {
     // One writer per attempt: ACP updates, permissions, questions and steers all
     // go through the translator, which flushes pending deltas before any other
     // fact, so the trace keeps their order (PR 2 §2).
+    const previousTrace = this.executionGenerations.has(task.id)
+      ? foldStoredTrace(this.ensureTrace().store, task.id).fold.state() : null;
     const trace = createTraceTranslator(createAdapter(config.agentType), (events) => {
       try {
         const stored = this.ensureTrace().append(task.id, this.options.runtimeId!, events);
@@ -5467,6 +5540,7 @@ export class MultiremiDaemon {
         log.warn(`Failed to append trace events for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }, {
+      ...(previousTrace?.turn ? { resume: { turn: previousTrace.turn, items: previousTrace.items } } : {}),
       // Legacy (untyped) provider failures arrive as message text: keep secrets
       // out of the trace, and keep the failure its own message for the legacy
       // failure check below (it reads the round's last item).
@@ -5561,6 +5635,7 @@ export class MultiremiDaemon {
         // ADR 0023: Remi's part of the AGENTS.md in effect, for the transcript's session notes. Never the local context.
         instructions: promptArtifact.instructions,
       });
+      if (previousTrace?.turn) trace.acp({ sessionUpdate: "notice", title: "Remi 已更新", message: "继续当前轮次" } as any);
       signal.throwIfAborted();
       steerFeed.start();
       let prompt = promptArtifact.prompt;
@@ -6071,6 +6146,7 @@ export class MultiremiDaemon {
       } else {
         await provider.close?.();
       }
+      this.restartProviderClosed.add(task.id);
       this.liveUpdateProviders.delete(provider);
     }
   }

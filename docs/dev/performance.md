@@ -362,10 +362,13 @@ daemon 的流量从 HTTP 轮询搬到协议 v2 的 socket 之后，它的 DB 时
   环境变量。两者独立解析时，只要有一方被显式覆盖（`startMultiremiServer({ requestMetrics })`，
   测试与冒烟脚本都这么做）就会错位。两行并排读时窗口才能对齐。
 - **归因**：每条帧按**帧类型 + 方向**汇总 `count / db_ms / db_queries`，另带 `violations`
-  （超长帧、未知帧、无法解析的帧）。`db_ms` 是处理该帧前后进程级计数器的差，所以它回答的是
-  「这段时间的 DB 时间大致归哪个帧类型」。**它只是归因参考**：进程计数器是同步的，异步帧会在两个
-  采样点之间混入并发工作，因此不要把它当成进程总量的分解，也不要和 `api_minute_summary` 相加。
-  A-8 的 DB 阻塞报告用 `api_minute_summary` 的进程级 `db_busy_pct` 做前后对比，本行只做归因。
+  （超长帧、未知帧、无法解析的帧）。SQL 完成钩子通过 AsyncLocalStorage 将查询次数和耗时
+  同时记入当前帧与 `db_sources` 来源；不同连接、HTTP 和嵌套独立 job 不会重复归因。
+  帧样本在处理结束时入窗，`db_sources` 在 SQL 完成时入窗，因此跨分钟的帧与帧返回后继续的
+  异步工作可能分布在不同窗口，不能要求单分钟两者相等。帧返回后的来源 SQL 仍计入
+  `db_sources`，不回写已发出的帧样本。前 N 截断及 ring dropped 也需一并核对。
+  A-8 的 DB 阻塞报告用 `api_minute_summary` 的进程级 `db_busy_pct` 做前后对比；
+  WS 是其中一部分，不与进程总量相加。现场采样边界见 [MUL-209 报告](../../reports/performance/MUL-209-attribution.md)。
 - **不写内容**：与 `api_minute_summary` 一样只写 stdout 的一行 JSON，不含 query、header、payload、
   原始 path、user 或 token；帧类型是唯一的字符串来源。
 

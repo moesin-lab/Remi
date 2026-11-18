@@ -369,10 +369,8 @@ export function recordDbQuery(waitMs: number, bytes: number): void {
 /**
  * Snapshot the process-wide DB counters.
  *
- * Read by the WebSocket frame summary (`ws_minute_summary`) so both summaries
- * report the same process totals: a daemon that moved from HTTP to a socket must
- * not look like it stopped touching the database. A reader is exported rather
- * than the object itself so nothing outside can reset a counter.
+ * A reader is exported for process-level diagnostics; frame attribution uses
+ * the SQL execution's AsyncLocalStorage source instead of global deltas.
  */
 export function readProcessDbCounters(): { dbMs: number; dbQueries: number; dbBytes: number } {
   return { ...processDbCounters };

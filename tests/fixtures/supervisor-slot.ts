@@ -1,19 +1,23 @@
 // Real child process implementing only the slot protocol for supervisor tests.
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 const config = JSON.parse(readFileSync('behavior.json', 'utf8'));
+if (config.pidFile) writeFileSync(config.pidFile, String(process.pid));
 if (config.immediateExit) process.exit(1);
-let state = 'standby', healthy = true;
+let state = process.env.MULTIREMI_SLOT_START === 'standby' ? 'standby' : 'active', healthy = true;
 Bun.serve({ hostname: '127.0.0.1', port: Number(process.env.MULTIREMI_PORT), async fetch(request) {
   const path = new URL(request.url).pathname;
   if (path.startsWith('/internal/slot/')) {
     if (request.headers.get('authorization') !== 'Bearer ' + process.env.MULTIREMI_SLOT_CONTROL_TOKEN) return new Response('', { status: 401 });
     if (path.endsWith('/activate')) {
+      if (config.activateDelay) await Bun.sleep(config.activateDelay);
+      if (config.reactivateDelay && state !== 'standby') await Bun.sleep(config.reactivateDelay);
       if (config.activateFails) return new Response('', { status: 503 });
       state = 'active';
       if (config.unhealthyAfter) setTimeout(() => { healthy = false; }, config.unhealthyAfter);
       if (config.crashAfter) setTimeout(() => process.exit(1), config.crashAfter);
     }
     if (path.endsWith('/release')) {
+      if (config.releaseDelay) await Bun.sleep(config.releaseDelay);
       state = config.releaseFails ? 'draining' : 'released';
       if (config.releaseFails) return new Response('', { status: 503 });
     }

@@ -9,6 +9,7 @@ export class SlotSupervisor {
     this.edge = edge; this.launch = launch;
     this.waits = { standbyWait: 120000, releaseWait: 30000, activateWait: 60000, confirmWait: 180000, ...options };
     this.slots = [null, null]; this.live = null; this.revision = null; this.transition = null;
+    this.restartPending = null;
     this.supportsSwitch = false; this.failures = 0; this.healthySince = null; this.closing = false; this.abort = new AbortController();
     edge.hold();
   }
@@ -17,10 +18,11 @@ export class SlotSupervisor {
     return { childPid: slot?.dead ? null : slot?.child.pid ?? null, releaseId: slot?.id ?? null,
       version: slot?.version, revision: this.revision, stopped: !slot, slotSwitch: this.supportsSwitch, transition: this.transition };
   }
-  phase(phase, extra = {}) {
+  async phase(phase, extra = {}) {
     const updatedAt = Date.now();
     this.transition = { ...this.transition, phase, ...extra, updatedAt,
       phases: [...(this.transition?.phases || []), { phase, updatedAt }] };
+    await this.waits.persist?.({ revision: this.transition.revision, releaseId: this.slots[this.live]?.id ?? null, transition: this.transition });
   }
   async request(slot, action, timeout) {
     const response = await fetch(slot.url + '/internal/slot/' + action, {
@@ -32,7 +34,7 @@ export class SlotSupervisor {
   async wait(slot, active, timeout) {
     const deadline = Date.now() + timeout;
     while (!this.closing && Date.now() < deadline) {
-      if (slot.dead) throw new Error('Slot exited before readiness');
+      if (slot.dead) throw slot.error ?? new Error('Slot exited before readiness');
       try {
         if (active) {
           const response = await fetch(slot.url + '/readyz', { signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(Math.max(1, Math.min(1000, deadline - Date.now())))]) });
@@ -57,8 +59,8 @@ export class SlotSupervisor {
         MULTIREMI_TRUSTED_PROXY_IPS: [config.env.MULTIREMI_TRUSTED_PROXY_IPS, '127.0.0.1', '::1'].filter(Boolean).join(','),
       } });
     slot.exit = new Promise(resolve => {
-      const died = () => { slot.dead = true; if (this.slots[this.live] === slot) this.edge.hold(); resolve(); };
-      child.once('exit', died); child.once('error', died);
+      const died = error => { slot.error = error; slot.dead = true; if (this.slots[this.live] === slot) this.edge.hold(); resolve(); };
+      child.once('exit', () => died()); child.once('error', died);
     });
     this.slots[index] = slot;
     const backend = this.edge.status().backends?.find(b => b.id === `slot-${index}`);
@@ -94,24 +96,24 @@ export class SlotSupervisor {
   }
   async change(id, revision) {
     const oldIndex = this.live, old = this.slots[oldIndex], index = oldIndex === 0 ? 1 : 0;
-    this.transition = { revision, target: id, previous: old?.id ?? null };
+    this.transition = { revision, target: id, previous: old?.id ?? null, hasPrevious: Boolean(old), recovery: 'rollback-on-restart' };
     let held = false;
     if (old && !this.supportsSwitch) {
-      this.phase('failed', { error: 'Current release lacks live term fencing; use the offline update path' });
+      await this.phase('failed', { error: 'Current release lacks live term fencing; use the offline update path' });
       this.revision = revision; return;
     }
     try {
-      this.phase('standby'); const next = await this.start(index, id);
+      await this.phase('standby'); const next = await this.start(index, id);
       await this.wait(next, false, this.waits.standbyWait);
-      this.phase('releasing'); this.edge.hold(); held = true;
+      await this.phase('releasing'); this.edge.hold(); held = true;
       if (old) { this.edge.setState(`slot-${oldIndex}`, 'draining'); await this.request(old, 'release', this.waits.releaseWait); }
-      this.phase('activating'); await this.activate(index, Boolean(old));
+      await this.phase('activating'); await this.activate(index, Boolean(old));
       if (old) {
         await this.request(old, 'exit', 1000).catch(() => {});
         await Promise.race([old.exit, sleep(30000, undefined, { ref: false })]);
         await this.kill(oldIndex);
       }
-      this.phase('confirming');
+      await this.phase('confirming');
       const deadline = Date.now() + (old ? this.waits.confirmWait : 0);
       let unhealthySince = null;
       while (!this.closing && Date.now() < deadline) {
@@ -125,34 +127,62 @@ export class SlotSupervisor {
         await sleep(100);
       }
       if (this.closing) throw new Error('Supervisor stopping');
-      this.phase('succeeded'); this.failures = 0; this.healthySince = null;
+      await this.phase('succeeded'); this.failures = 0; this.healthySince = null;
     } catch (error) {
-      this.phase('rolling_back', { error: error.message });
-      if (held) this.edge.hold();
+      await this.phase('rolling_back', { error: error.message });
+      if (held || old?.dead) this.edge.hold();
       await this.kill(index);
       if (old && !this.closing) {
-        if (!this.slots[oldIndex] || old.dead) { await this.kill(oldIndex); await this.start(oldIndex, old.id); await this.wait(this.slots[oldIndex], false, this.waits.standbyWait); }
-        if (held) await this.activate(oldIndex);
+        this.restartPending = { id: old.id, index: oldIndex };
+        const restarted = !this.slots[oldIndex] || old.dead;
+        if (restarted) { await this.kill(oldIndex); await this.start(oldIndex, old.id); await this.wait(this.slots[oldIndex], false, this.waits.standbyWait); }
+        await this.activate(oldIndex);
+        this.restartPending = null;
       } else if (!old) throw error;
-      this.phase('failed');
+      if (this.closing) return;
+      await this.phase('failed');
     }
     this.revision = revision;
+  }
+  async restore(selection) {
+    const transition = selection?.transition;
+    if (!transition) return;
+    const terminal = ['succeeded', 'failed'].includes(transition.phase);
+    if (!terminal && !transition.hasPrevious) return;
+    // An interrupted switch (including confirmation) is conservatively rolled
+    // back. Never treat a container restart as completing the observation period.
+    this.transition = transition;
+    const id = terminal ? selection.releaseId : transition.previous;
+    if (!terminal) await this.phase('rolling_back', { error: 'Supervisor restarted during switch; restoring previous release' });
+    await this.start(0, id);
+    await this.wait(this.slots[0], false, this.waits.standbyWait);
+    await this.activate(0);
+    this.revision = selection.revision;
+    if (!terminal) await this.phase('failed');
   }
   async reconcile(desired) {
     if (this.closing) return;
     if (desired?.mode === 'stop') {
-      this.edge.hold(); await Promise.all([this.terminate(0), this.terminate(1)]); this.live = null; this.revision = desired.revision; return;
+      this.edge.hold(); await Promise.all([this.terminate(0), this.terminate(1)]); this.live = null; this.restartPending = null; this.revision = desired.revision; return;
     }
     const slot = this.slots[this.live];
-    if (slot?.dead) {
+    if (slot?.dead || this.restartPending) {
       this.edge.hold();
-      const id = slot.id, index = this.live;
+      const { id, index } = this.restartPending ?? { id: slot.id, index: this.live };
+      this.restartPending ??= { id, index };
       this.healthySince = null;
       await sleep(Math.min(30000, 1000 * 2 ** this.failures), undefined, { signal: this.abort.signal });
-      if (++this.failures >= 5) throw new Error('Live slot failed five consecutive restarts');
+      if (this.failures >= 5) throw new Error('Live slot failed five consecutive restarts: ' + (this.restartPending.error || 'child exited'));
+      this.failures++;
       await this.kill(index);
-      try { await this.start(index, id); await this.wait(this.slots[index], false, this.waits.standbyWait); await this.activate(index); }
-      catch { this.slots[index].dead = true; }
+      try {
+        await this.start(index, id); await this.wait(this.slots[index], false, this.waits.standbyWait); await this.activate(index);
+        this.restartPending = null;
+      } catch (error) {
+        this.restartPending.error = error.message;
+        await this.kill(index);
+        if (this.failures >= 5) throw new Error('Live slot failed five consecutive restarts: ' + error.message);
+      }
       return;
     }
     if (slot) { this.healthySince ??= Date.now(); if (Date.now() - this.healthySince >= 60000) this.failures = 0; }

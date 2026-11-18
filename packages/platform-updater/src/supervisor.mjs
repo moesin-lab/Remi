@@ -144,8 +144,7 @@ export async function supervise() {
   let restored = false;
   // Keep the terminal outcome separate from heartbeats written during bootstrap.
   const priorStatus = await readJson(join(directory, 'slot-selection.json')) ?? await readJson(join(directory, 'status.json'));
-  let savedOutcome = null;
-  const slotEnabled = role === 'api' && process.env.REMI_SLOT_SWITCH !== '0'
+  const slotEnabled = role === 'api' && process.env.REMI_SLOT_SWITCH === '1'
     && (process.env.MULTIREMI_API_ROLE || 'all') === 'all' && !process.env.MULTIREMI_PEER_URL?.trim();
   if (slotEnabled) {
     const { SlotSupervisor } = await import('./slot-supervisor.mjs');
@@ -168,7 +167,7 @@ export async function supervise() {
         args: ['run', '--preload', process.env.REMI_SUPERVISOR_FENCE || '/usr/local/lib/remi/host-write-fence.ts', 'apps/server/main.ts', 'serve'],
         env: { ...process.env, MULTIREMI_VERSION: selected.version, REMI_APPLICATION_VERSION: selected.version,
           MULTIREMI_HOST_WRITE_FENCE_FILE: join(control, 'write-fence.json') } };
-    }, { port, ...waits });
+    }, { port, ...waits, persist: outcome => writeJson(join(directory, 'slot-selection.json'), outcome) });
   }
   const shutdown = () => { closing = true; };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
@@ -182,13 +181,8 @@ export async function supervise() {
       if (slots) {
         if (!slotTask) {
           slotTask = (async () => {
-            // A terminal rollback must survive a container restart even though
-            // desired still names the rejected target. A new revision retries it.
-            if (!restored && priorStatus?.revision === desired?.revision
-              && ['succeeded', 'failed'].includes(priorStatus?.transition?.phase)) {
-              await slots.reconcile({ ...desired, releaseId: priorStatus.releaseId });
-              slots.transition = priorStatus.transition;
-            } else await slots.reconcile(desired);
+            if (!restored && desired?.mode !== 'stop') await slots.restore(priorStatus);
+            await slots.reconcile(desired);
             restored = true;
           })().catch(error => { slotError = error; }).finally(() => { slotTask = null; });
         }
@@ -213,15 +207,6 @@ export async function supervise() {
       }
       if (Date.now() - lastStatus >= 500) {
         const snapshot = slots?.snapshot();
-        if (restored && snapshot?.childPid && snapshot.revision === snapshot.transition?.revision
-          && ['succeeded', 'failed'].includes(snapshot.transition?.phase)) {
-          const outcome = { revision: snapshot.revision, releaseId: snapshot.releaseId, transition: snapshot.transition };
-          const serialized = JSON.stringify(outcome);
-          if (serialized !== savedOutcome) {
-            await writeJson(join(directory, 'slot-selection.json'), outcome);
-            savedOutcome = serialized;
-          }
-        }
         await writeJson(join(directory, 'status.json'), { ...base, version: runningVersion, supervisorPid: process.pid, childPid: child?.pid ?? null,
           releaseId: current, revision, stopped: !child, ...(snapshot ?? {}), seedReady, seedError, probe: lastProbe, heartbeatAt: Date.now() });
         lastStatus = Date.now();

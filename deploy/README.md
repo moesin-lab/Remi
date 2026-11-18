@@ -577,6 +577,15 @@ The transitional `systemd_release` driver builds a verified release archive in
 a new directory, atomically switches the `current` symlink, restarts API/Web,
 and restores the old symlink if health checks fail.
 
+Systemd activation prunes marked release directories after verification and journal
+persistence. It keeps the newest 3 directories by modification time (override with
+non-negative integer `REMI_RELEASES_KEEP`), plus `current`, the activating release,
+and every unfinished operation journal's `previousPath`. Only real directories
+with a regular `.platform-release.json` are eligible; symlinks and unmarked manual
+directories are retained. Cleanup failures only warn. Docker images, backups and
+ACP bundles are outside this cleanup. Local profile source/tar retention and the
+explicit dry-run command are documented in [local profiles](../docs/deploy/local-profiles.md#发布源码保留).
+
 ### Windows stable local-profile host
 
 The `local_profile` application executor reads the existing stable profile and

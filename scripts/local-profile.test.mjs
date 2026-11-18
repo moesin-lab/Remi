@@ -1308,3 +1308,89 @@ test('real runner streams before child exit and forwards termination', { skip: p
   const [code] = await closed;
   assert.notEqual(code, 0);
 });
+
+test('prepare deletes its extracted source archive', (t) => {
+  const f = fixture(t);
+  succeeds(f.run('stable', 'prepare'));
+  assert.ok(existsSync(join(f.profileRoot(), 'releases', OLD_REF, '.remi-profile-source')));
+  assert.ok(!existsSync(join(f.profileRoot(), 'releases', `${OLD_REF}.tar`)));
+});
+
+test('prune protects active, both candidates, in-flight snapshots and latest distinct backup refs', (t) => {
+  const f = fixture(t); f.activate();
+  const root = f.profileRoot();
+  const refs = Array.from({ length: 12 }, (_, i) => i.toString(16).padStart(2, '0').repeat(20));
+  const source = ref => join(root, 'releases', ref);
+  const json = (path, value) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, JSON.stringify(value)); };
+  for (const ref of refs) { mkdirSync(source(ref)); writeFileSync(`${source(ref)}.tar`, 'archive'); }
+  mkdirSync(source('manual-release'));
+  json(join(root, 'deployment.json'), { source: source(refs[0]) });
+  writeFileSync(join(root, 'compose.env'), `REMI_SOURCE_DIR='${source(refs[1])}'\n`);
+  for (const [name, status, previous, candidate] of [['one', 'running', 2, 3], ['two', 'recovery_required', 4, 5], ['done', 'succeeded', 6, 7]]) {
+    const op = join(root, 'host-operations', name);
+    json(join(op, 'operation.json'), { status });
+    json(join(op, 'previous', 'deployment.json'), { source: source(refs[previous]) });
+    json(join(op, 'candidate', 'deployment.json'), { source: source(refs[candidate]) });
+  }
+  for (const [name, index] of [['2026-01', 8], ['2026-02', 9], ['2026-03', 10], ['2026-04', 10]]) {
+    json(join(root, 'backups', name, 'active.json'), { ref: refs[index], source: source(refs[index]) });
+  }
+  const options = { environment: { REMI_RELEASES_KEEP: '2' } };
+  const dry = f.run('stable', 'prune-releases', { ...options, args: ['--dry-run'] }); succeeds(dry);
+  assert.match(dry.stdout, /Would remove/);
+  assert.ok(existsSync(source(refs[11])));
+  succeeds(f.run('stable', 'prune-releases', options));
+  for (let i = 0; i < refs.length; i++) {
+    const kept = i <= 5 || i === 9 || i === 10;
+    assert.equal(existsSync(source(refs[i])), kept, refs[i]);
+    assert.equal(existsSync(`${source(refs[i])}.tar`), kept);
+  }
+  assert.ok(existsSync(source(OLD_REF)));
+  assert.ok(existsSync(source('manual-release')));
+});
+
+test('prune refuses escaping release symlinks and preserves outside files', (t) => {
+  const f = fixture(t); f.activate();
+  const outside = join(f.root, 'outside'); mkdirSync(outside); writeFileSync(join(outside, 'sentinel'), 'keep');
+  symlinkSync(outside, join(f.profileRoot(), 'releases', NEW_REF), 'dir');
+  const result = f.run('stable', 'prune-releases'); succeeds(result);
+  assert.match(result.stderr, /Release pruning failed: Release path escapes/);
+  assert.equal(readFileSync(join(outside, 'sentinel'), 'utf8'), 'keep');
+});
+
+test('prune shares the host lock and never deletes while another operation owns it', (t) => {
+  const f = fixture(t); f.activate();
+  const path = join(f.profileRoot(), 'releases', NEW_REF); mkdirSync(path);
+  writeFileSync(join(f.profileRoot(), 'host-update.lock'), JSON.stringify({ pid: process.pid }));
+  const result = f.run('stable', 'prune-releases');
+  assert.equal(result.status, 1); assert.match(result.stderr, /holds the lock/);
+  assert.ok(existsSync(path));
+});
+
+test('automatic pruning failures only warn after successful deployment', (t) => {
+  const f = fixture(t); f.activate();
+  const result = f.run('stable', 'deploy', { commit: NEW_REF, environment: { REMI_RELEASES_KEEP: 'invalid' } });
+  succeeds(result); assert.match(result.stderr, /Release pruning failed/);
+  assert.equal(f.readProfile('active.json').ref, NEW_REF);
+});
+
+
+test('default retention keeps three distinct backup refs and rejects an escaping releases root', (t) => {
+  const f = fixture(t); f.activate();
+  const root = f.profileRoot();
+  const refs = ['1', '2', '3', '4'].map(c => c.repeat(40));
+  for (const [i, ref] of refs.entries()) {
+    const source = join(root, 'releases', ref); mkdirSync(source);
+    const backup = join(root, 'backups', `2026-0${i + 1}`); mkdirSync(backup);
+    writeFileSync(join(backup, 'active.json'), JSON.stringify({ ref, source }));
+  }
+  succeeds(f.run('stable', 'prune-releases'));
+  for (const [i, ref] of refs.entries()) assert.equal(existsSync(join(root, 'releases', ref)), i > 0);
+  const outside = join(f.root, 'other-releases'); mkdirSync(outside);
+  const sentinel = join(outside, NEW_REF); mkdirSync(sentinel);
+  rmSync(join(root, 'releases'), { recursive: true });
+  symlinkSync(outside, join(root, 'releases'), 'dir');
+  const result = f.run('stable', 'prune-releases'); succeeds(result);
+  assert.match(result.stderr, /Release path escapes profile root/);
+  assert.ok(existsSync(sentinel));
+});

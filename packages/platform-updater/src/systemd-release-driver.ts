@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readlink, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readlink, readdir, realpath, lstat, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type {
   MultiremiPlatformOperation,
@@ -22,6 +22,7 @@ interface SystemdReleaseConfig {
   webHealthUrl: string;
   bunExecutable: string;
   healthTimeoutMs?: number;
+  releasesKeep?: number;
 }
 
 interface SystemdManifest {
@@ -231,6 +232,7 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
       await this.switchCurrent(target);
       await this.restartAndVerify();
       await atomicJson(this.journalPath(operation.id), { ...journal, phase: "verified", result: release });
+      await this.pruneReleases(target);
       return release;
     } catch (error) {
       if (!committed) { await rm(this.journalPath(operation.id), { force: true }); throw error; }
@@ -241,6 +243,41 @@ export class SystemdReleaseDriver implements PlatformDeploymentDriver {
       } catch { throw new RecoveryRequiredError("Update and rollback verification failed; backup retained and scheduling remains paused"); }
       throw error;
     }
+  }
+
+  private async pruneReleases(target: string): Promise<void> {
+    try {
+      const keep = this.config.releasesKeep ?? Number(process.env.REMI_RELEASES_KEEP ?? 3);
+      if (!Number.isSafeInteger(keep) || keep < 0) throw new Error("REMI_RELEASES_KEEP must be a non-negative integer");
+      const root = join(this.config.root, "releases");
+      const canonicalRoot = await realpath(root);
+      if (canonicalRoot !== join(await realpath(this.config.root), "releases")) throw new Error("release path escapes platform root");
+      const protectedPaths = new Set([await realpath(target), await realpath(resolve(this.config.root, await readlink(join(this.config.root, "current"))))]);
+      for (const name of await readdir(this.config.root)) {
+        if (!/^operation-[A-Za-z0-9._-]+\.json$/.test(name)) continue;
+        const journal = await this.readJournal(join(this.config.root, name));
+        if (journal && !["verified", "rolled_back"].includes(journal.phase ?? "")) {
+          protectedPaths.add(await realpath(journal.previousPath));
+        }
+      }
+      const releases: Array<{ path: string; time: number }> = [];
+      for (const name of await readdir(root)) {
+        const path = ensureChild(root, join(root, name));
+        const stat = await lstat(path);
+        // Symlinks and unmarked manual directories are never deletion candidates.
+        if (!stat.isDirectory()) continue;
+        let marker;
+        try { marker = await lstat(join(path, ".platform-release.json")); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+        if (!marker.isFile()) continue;
+        const canonical = await realpath(path);
+        ensureChild(canonicalRoot, canonical);
+        releases.push({ path: canonical, time: stat.mtimeMs });
+      }
+      releases.sort((a, b) => b.time - a.time || b.path.localeCompare(a.path));
+      for (const release of releases.slice(0, keep)) protectedPaths.add(release.path);
+      for (const release of releases) if (!protectedPaths.has(release.path)) await rm(release.path, { recursive: true });
+    } catch (error) { console.warn(`Release pruning failed: ${errorMessage(error)}`); }
   }
 
   private async restartAndVerify(): Promise<void> {

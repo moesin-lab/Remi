@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -29,6 +30,7 @@ function upgradeLegacyCheckpoint(sessionId: string, agentId: string, seq: number
   db!.exec("ALTER TABLE multiremi_session_lanes DROP COLUMN provider_cursor_seq");
   db!.exec("ALTER TABLE multiremi_session_lanes DROP COLUMN cursor_offset");
   db!.exec("ALTER TABLE multiremi_turns DROP COLUMN trigger_message_id");
+  runMigrations(db!, { historicalMaintenance: true });
   new MultiremiStore(db!);
   new MultiremiStore(db!);
 }

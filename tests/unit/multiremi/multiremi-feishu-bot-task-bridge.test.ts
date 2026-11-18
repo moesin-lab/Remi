@@ -3,7 +3,7 @@ import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-record
 import { mutateExecutionFixture, sentTask } from "./unified-test-paths.js";
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { seedLegacyChatIssueClassificationFixture } from "./chat-issue-migration-fixture.js";
 import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
@@ -264,6 +264,7 @@ describe("Feishu bot standard Task bridge", () => {
       // No outstanding task is needed to trigger the provider reset.
       db!.run("UPDATE multiremi_tasks SET status = 'cancelled'");
       bootstrapPreUnifiedSchema(db!);
+      runMigrations(db!, { historicalMaintenance: true });
       const store = new MultiremiStore(db!);
       // Explicitly use the legacy native test Runtime; endpoint readiness has separate coverage.
       store.updateAgent("agt_chat_migration", { executionGroupId: null });

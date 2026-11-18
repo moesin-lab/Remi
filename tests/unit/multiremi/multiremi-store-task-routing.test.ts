@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { createRoutingMatrixDatabase } from "../../helpers/routing-matrix-database.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
@@ -2009,6 +2010,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
       const legacyAgent = h.createAgent({ name: "Historical", provider: "codex" });
       const legacyTask = h.createTask({ agentId: legacyAgent.id, prompt: "legacy result row" });
       legacy.run("UPDATE multiremi_tasks SET status = 'completed', result = ? WHERE id = ?", ["legacy done", legacyTask.id]);
+      runMigrations(legacy, { historicalMaintenance: true });
       expect(new MultiremiStore(legacy).getTask(legacyTask.id)?.result).toBe("legacy done");
     } finally { legacy.close(); }
   });

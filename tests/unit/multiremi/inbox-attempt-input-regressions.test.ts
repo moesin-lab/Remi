@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it } from 'bun:test';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
@@ -97,6 +98,7 @@ pendingTurnBackendTests('MUL-506 provider input boundaries', fixture => {
         f.db.run('DELETE FROM multiremi_schema_migrations WHERE id IN (?,?)', ['20261005_attempt_input_receipts', '20261005_attempt_counters_bigint']);
         if (f.db.dialect === 'postgres')
             f.db.exec('ALTER TABLE multiremi_turn_attempts ALTER COLUMN event_count TYPE INTEGER, ALTER COLUMN tool_call_count TYPE INTEGER');
+        runMigrations(f.db, { historicalMaintenance: true });
         new MultiremiStore(f.db);
         new MultiremiStore(f.db);
         expect(f.store.getMessage(decision.id)?.metadata.decision_record).toEqual({ status: 'pending' });

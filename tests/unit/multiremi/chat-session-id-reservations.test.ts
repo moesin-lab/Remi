@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { expect, it } from "bun:test";
 import { MultiremiStore } from "@multiremi/store.js";
 import { CHAT_SESSION_IDS_MIGRATION } from "@multiremi/store/migrations.js";
@@ -33,6 +34,7 @@ pendingTurnBackendTests("Chat id reservations", (fixture, backend) => {
 
     f.db.exec("DROP TABLE multiremi_chat_session_ids");
     f.db.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [CHAT_SESSION_IDS_MIGRATION]);
+    runMigrations(f.db, { historicalMaintenance: true });
     reopen();
     expect(f.store.deleteChatSession(live.id)).toBe(true);
     reopen();

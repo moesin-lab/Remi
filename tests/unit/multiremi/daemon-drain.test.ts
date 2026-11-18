@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { withRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -62,6 +63,7 @@ describe("daemon drain", () => {
       db!.run("UPDATE multiremi_runtime_update_requests SET status = ? WHERE id = ?", [status, update.id]);
       // Simulate upgrading an existing database before the persisted fence existed.
       db!.run("DELETE FROM multiremi_daemon_drains");
+      runMigrations(db!, { historicalMaintenance: true });
       const reopened = new MultiremiStore(db!);
       expect(reopened.getDaemonDrainStatus("local", "machine-a").reason).toBe("cli_update");
       reopened.reconcileDaemonDrain("rt_a");
@@ -471,6 +473,7 @@ describe("daemon drain", () => {
     const { store } = fixture();
     store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" });
     db!.run("DELETE FROM multiremi_daemon_drains");
+    runMigrations(db!, { historicalMaintenance: true });
     let reopened = new MultiremiStore(db!);
     const state = reopened.getDaemonDrainStatus("local", "machine-a");
     expect(state).toMatchObject({ reason: "cli_update", mode: "draining" });

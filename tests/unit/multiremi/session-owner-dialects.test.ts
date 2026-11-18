@@ -227,8 +227,8 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     expect(chatMain.id.startsWith("ises_")).toBe(true);
 
     db.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [migrationId]);
-    runMigrations(db);
-    runMigrations(db);
+    runMigrations(db, { historicalMaintenance: true });
+    runMigrations(db, { historicalMaintenance: true });
 
     expect(db.query("SELECT id, chat_id, issue_id, workspace_id FROM multiremi_issue_sessions ORDER BY id").all()).toEqual(owners);
     expect(store.getIssueSession(issueMain.id)).toMatchObject({ ownerType: "issue", ownerId: issue.id, chatId: null });
@@ -261,7 +261,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     // The old move contract changed the Issue row but left its Session workspace behind.
     db.run("UPDATE multiremi_issues SET workspace_id = ? WHERE id = ?", [target.id, issue.id]);
     db.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [migrationId]);
-    runMigrations(db);
+    runMigrations(db, { historicalMaintenance: true });
 
     expect(store.getIssueSession(main.id)).toMatchObject({ ownerType: "issue", ownerId: issue.id, workspaceId: target.id });
     expect(store.getIssueSession(projected.id)).toMatchObject({ ownerType: "chat", ownerId: chat.id, workspaceId: "local", issueId: null });
@@ -285,7 +285,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     db.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [migrationId]);
     const before = db.query("SELECT id, chat_id, issue_id, workspace_id FROM multiremi_issue_sessions ORDER BY id").all();
 
-    expect(() => runMigrations(db)).toThrow("parent has a different owner");
+    expect(() => runMigrations(db, { historicalMaintenance: true })).toThrow("parent has a different owner");
     expect(db.query("SELECT id, chat_id, issue_id, workspace_id FROM multiremi_issue_sessions ORDER BY id").all()).toEqual(before);
     expect(store.listSessionResults(projected.id)).toContainEqual(result);
     expect(db.query("SELECT id FROM multiremi_schema_migrations WHERE id = ?").get(migrationId)).toBeNull();
@@ -308,7 +308,7 @@ pendingTurnBackendTests("Session owner migration contract", (fixture, backend) =
     db.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [migrationId]);
     const before = db.query("SELECT id, chat_id, issue_id, workspace_id FROM multiremi_issue_sessions ORDER BY id").all();
 
-    expect(() => runMigrations(db)).toThrow("missing owner");
+    expect(() => runMigrations(db, { historicalMaintenance: true })).toThrow("missing owner");
     expect(db.query("SELECT id, chat_id, issue_id, workspace_id FROM multiremi_issue_sessions ORDER BY id").all()).toEqual(before);
     expect(store.getIssueSession(main.id)?.ownerId).toBe(issue.id);
     expect(db.query("SELECT id FROM multiremi_schema_migrations WHERE id = ?").get(migrationId)).toBeNull();

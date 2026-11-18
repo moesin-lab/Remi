@@ -62,11 +62,22 @@ describe('startup migration expand discipline', () => {
       expect(startupSchemaDdl(fixture).map(entry => entry.file)).toEqual(['packages/server/src/store/new-background-job.ts']);
       for (const sql of ['dRoP tAbLe [retained]', 'aLtEr TaBlE [retained] ReNaMe To [replacement]',
         'TRUNCATE TABLE U&"retained"',
+        ...["E'!'", '$$!$$', "'!'\n''"].flatMap(escape => [
+          `TRUNCATE TABLE U&"ret!0061ined" UESCAPE ${escape}`,
+          `DROP TABLE U&"ret!0061ined" UESCAPE ${escape}`,
+          `ALTER TABLE U&"ret!0061ined" UESCAPE ${escape} ALTER c TYPE bigint`,
+        ]),
         `DROP TABLE U&"ret!0061ined" UESCAPE '!'`,
         String.raw`ALTER TABLE U&"ret\0061ined" ALTER U&"c" TYPE bigint`, 'DROP TABLE `retained`', 'ALTER TABLE "retained" RENAME TO "replacement"']) {
         writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
         expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql]);
       }
+      for (const escape of ["E'!'", '$$!$$', "'!'\n''"]) {
+        const sql = `ALTER TABLE U&"ret!0061ined" UESCAPE ${escape} ADD COLUMN U&"c!006fl" UESCAPE ${escape} text`;
+        writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
+        expect(startupSchemaDdl(fixture)).toEqual([]);
+      }
+      writeFileSync(resolve(store, 'new-background-job.ts'), 'export const sql = "DROP TABLE t";');
       const shared = resolve(fixture, 'packages/shared/src');
       mkdirSync(shared, { recursive: true });
       writeFileSync(resolve(fixture, 'tsconfig.json'), JSON.stringify({ compilerOptions: {

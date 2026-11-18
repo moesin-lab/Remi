@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { reportFrame } from "../../fixtures/report-session.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -147,6 +148,7 @@ describe("Skill file encoding", () => {
     db!.run("INSERT INTO multiremi_skills(id,name,content,created_at,updated_at) VALUES(?,'legacy','# Legacy',?,?)", [skill.id, "2026-09-01", "2026-09-01"]);
     db!.run("INSERT INTO multiremi_skill_files(id,skill_id,path,content,created_at,updated_at) VALUES('file_legacy',?,?,?,?,?)", [skill.id, textFile.path, textFile.content, "2026-09-01", "2026-09-01"]);
     db!.run("ALTER TABLE multiremi_skill_files DROP COLUMN encoding");
+    runMigrations(db!, { historicalMaintenance: true });
     const upgraded = new MultiremiStore(db!);
     const file = upgraded.listSkillFiles(skill.id!)[0]!;
     expect(file).toMatchObject(textFile);

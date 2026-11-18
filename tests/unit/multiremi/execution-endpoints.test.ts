@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 import { afterEach, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
@@ -154,6 +155,7 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     f.db.run(`INSERT INTO multiremi_gateway_model_context(workspace_id,engine,model_id,context_window,updated_at)
       VALUES('local','claude','large-context','1m',?)`, [new Date().toISOString()]);
     f.db.run("DELETE FROM multiremi_schema_migrations WHERE id='execution_endpoints_v1'");
+    runMigrations(f.db, { historicalMaintenance: true });
     if (backend === "PostgreSQL") f.reopen(); else f.store = new MultiremiStore(f.db);
     const migrated = f.store.getExecutionEndpoint(legacy.id, "local")!;
     expect(migrated.revision).toBe(2);

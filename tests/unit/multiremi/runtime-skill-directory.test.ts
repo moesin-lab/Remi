@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
-import { bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
 import { historicalWriters } from "./unified-model-test-backends.js";
 import { createStore, db, resetMultiremiTestEnv } from "./helpers.js";
 import { receiveRuntimeInputs } from "../../fixtures/runtime-downlinks.js";
@@ -263,6 +263,7 @@ describe("Runtime skill directories", () => {
     legacy.run("ALTER TABLE multiremi_runtime_local_skill_import_requests DROP COLUMN root");
     legacy.run("INSERT INTO multiremi_runtime_local_skill_list_requests(id,runtime_id,created_at,updated_at) VALUES(?,?,?,?)", [scan.id,runtime.id,at,at]);
     legacy.run("INSERT INTO multiremi_runtime_local_skill_import_requests(id,runtime_id,skill_key,created_at,updated_at) VALUES(?,?,'legacy',?,?)", [imported.id,runtime.id,at,at]);
+    runMigrations(legacy, { historicalMaintenance: true });
     const upgraded = new MultiremiStore(legacy);
     expect(upgraded.getRuntimeLocalSkillListRequest(runtime.id, scan.id)?.status).toBe("pending");
     expect(upgraded.getRuntimeLocalSkillImportRequest(runtime.id, imported.id)?.status).toBe("pending");

@@ -13,6 +13,8 @@ PostgreSQL advisory lock / SQLite migration file lock 内，首先检查 contrac
 历史链保留在同文件的维护路径，既有步骤标记和事务支持失败重试；它不是新 expand 的扩展位置。
 已登记的库启动只执行 [版本化 expand 注册表](../../packages/server/src/store/schema-migrations.ts)，
 不会重跑历史重建、扫描、投影修复和 backfill。历史准备不是可与旧 writer 并行的后台任务。
+测试若合成历史 schema（删除列、表或历史步骤记录），也必须先显式执行离线 prepare，再断言启动幂等；不能以重新构造 Store 代替历史维护。
+
 SQLite 历史升级仍须由离线工具调用 `runMigrations(db, { historicalMaintenance: true })`，CLI 仅提供 PostgreSQL 维护。
 
 ## Level 与查询接口

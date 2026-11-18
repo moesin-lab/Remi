@@ -133,7 +133,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
     // This view is the only schema dependency on the old head workspace column.
     db.exec('DROP VIEW multiremi_member_inbox_records');
     db.exec('ALTER TABLE multiremi_conversation_heads DROP COLUMN workspace_id');
-    runMigrations(db);
+    runMigrations(db, { historicalMaintenance: true });
 
     expect(db.query('SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id=?').get(main.id))
       .toEqual({ workspace_id: 'local' });
@@ -150,7 +150,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
     const placeholder = store.createIssueSession(issue.id, { title: 'New unbound side after upgrade' });
     const head = db.query('SELECT * FROM multiremi_conversation_heads WHERE session_id=?').get(placeholder.id);
     expect(head).toMatchObject({ workspace_id: null });
-    runMigrations(db);
+    runMigrations(db, { historicalMaintenance: true });
     expect(db.query('SELECT * FROM multiremi_conversation_heads WHERE session_id=?').get(placeholder.id)).toEqual(head);
     expect(log()).toEqual(before);
   });
@@ -177,7 +177,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
     expect(store.getIssueSessionWithOwnerScope(main.id)).toMatchObject({ ownerWorkspaceId: null, historicalWorkspaceId: null });
     const oldLog = db.query('SELECT * FROM multiremi_conversation_log WHERE session_id=? ORDER BY seq').all(main.id);
     db.run("DELETE FROM multiremi_schema_migrations WHERE id='20261008_dual_owned_sessions'");
-    runMigrations(db);
+    runMigrations(db, { historicalMaintenance: true });
     expect(store.getIssueSession(main.id)?.workspaceId).toBe('local');
     expect(db.query('SELECT * FROM multiremi_conversation_log WHERE session_id=? ORDER BY seq').all(main.id)).toEqual(oldLog);
     expect(db.query('SELECT workspace_id FROM multiremi_conversation_heads WHERE session_id=?').get(main.id))
@@ -237,7 +237,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
     expect(store.getOrCreateDefaultChatSession(chat.id).id).toBe(chatMain.id);
     const reopen = () => {
       db.run("DELETE FROM multiremi_schema_migrations WHERE id='20261008_dual_owned_sessions'");
-      runMigrations(db);
+      runMigrations(db, { historicalMaintenance: true });
       store = new MultiremiStore(db);
     };
     const assertSourceHistory = async (workspaceId: string) => {
@@ -384,7 +384,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
     });
     const beforeUpgrade = snapshot();
     db.run("DELETE FROM multiremi_schema_migrations WHERE id='20261008_dual_owned_sessions'");
-    runMigrations(db);
+    runMigrations(db, { historicalMaintenance: true });
     const reopened = new MultiremiStore(db);
     expect(snapshot()).toEqual(beforeUpgrade);
     expect(reopened.getMessage(question.id)?.session_id).toBe(main.id);
@@ -498,6 +498,7 @@ pendingTurnBackendTests('explicit Issue workspace Main rotation', (fixture, back
     // Reproduce the actual previous unified shape: this additive column did
     // not exist. Two complete bootstraps must preserve its original evidence.
     f.db.exec('ALTER TABLE multiremi_issue_activity DROP COLUMN workspace_id');
+    runMigrations(f.db, { historicalMaintenance: true });
     const first = new MultiremiStore(f.db);
     const store = new MultiremiStore((first as unknown as { db: typeof f.db }).db);
     expect(f.db.query('SELECT id,body,data FROM multiremi_issue_activity WHERE issue_id=?').all(issue.id)).toEqual(originalData);

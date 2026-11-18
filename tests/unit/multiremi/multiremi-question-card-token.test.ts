@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { seedHistoricalDecision, seedQuestionHumanMapping } from './fixtures/historical-decision.js';
 import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
@@ -506,6 +507,7 @@ unifiedModelBackendTests("MUL-506 historical question credentials", fixture => {
       for(const column of ["token_hash","token_recipient","token_consumed_at"])db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
     }
     db.run("DELETE FROM multiremi_schema_migrations WHERE id=?",["20260929_human_request_tokens"]);
+    runMigrations(db, { historicalMaintenance: true });
     new MultiremiStore(db);new MultiremiStore(db);
     for(const [id,status] of [["hrq_historical","pending"],["dcs_historical","escalated"]]){
       const current=db.query("SELECT card_token_hash AS token_hash,card_token_recipient AS token_recipient,card_token_consumed_at AS token_consumed_at FROM multiremi_conversation_log WHERE id=?").get(id)!;

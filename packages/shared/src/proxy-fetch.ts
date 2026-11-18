@@ -38,7 +38,10 @@ export async function proxyFetch(input: string | URL | Request, init?: RequestIn
     const replay = target instanceof Request && target.body && mode === "follow" ? target.clone() : target;
     // Normalize caller-controlled values before the env override. Do not wrap
     // an existing Request body: Bun 1.3.14 can stall after that stream transfer.
-    const normalized = { ...options };
+    // Undefined dictionary members inherit from Request, just like native fetch.
+    const normalized: RequestInit = Object.fromEntries(
+      Object.entries(options ?? {}).filter(([, value]) => value !== undefined),
+    );
     const inherited: RequestInit = target instanceof Request ? {
       method: target.method, headers: target.headers, signal: target.signal,
       cache: target.cache, credentials: target.credentials, integrity: target.integrity,
@@ -53,7 +56,8 @@ export async function proxyFetch(input: string | URL | Request, init?: RequestIn
       referrerPolicy: prepared.referrerPolicy, redirect: "manual",
       ...(normalized.body !== undefined ? { body: prepared.body } : {}),
     };
-    const response = await withNoProxyRoute(url, () => fetch(target, transport));
+    const transportTarget = target instanceof Request ? target : url;
+    const response = await withNoProxyRoute(url, () => fetch(transportTarget, transport));
     if (![301, 302, 303, 307, 308].includes(response.status) || mode === "manual") {
       if (hops > 0) Object.defineProperty(response, "redirected", { value: true });
       return response;

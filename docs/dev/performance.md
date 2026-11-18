@@ -21,6 +21,23 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 - **风险推断：** 并行 HTTP 请求无法自动消除主线程同步数据库等待；额外 SQL 往返和较大的响应序列化可能放大排队，影响同进程其他请求。吞吐拐点与 PostgreSQL 网络延迟的影响尚未测量。
 - **采集重点：** 冷/热页面请求数量、单请求 SQL 数与响应 bytes、列表可操作时间，以及 API 并发升高时的 p50/p95、错误率和事件循环延迟。
 
+### Issue 待人工 decision 计数
+
+`countPendingIssueDecisions` 不再为每条候选调用 `Questions.get()`。空候选为一次读；
+非空原生 Question 使用四次读（候选、会话归属、迁移审计、来源 attempt/head/issue），
+不写库；候选只投影 metadata 和来源身份，不读取正文或卡片字段。
+历史 decision 额外用一次递归查询读取责任链与负责人事实，复用同一个 resolver；
+总共五次读，不随 decision 数量、asker、会话数或祖先层数增长。批量参数使用 JSON rowset，
+不按 ID 数量拆 SQL，也不依赖 SQLite bind 上限。
+
+计数复用原生记录的 read-time upgrade、来源 integrity 与会话迁移审计，保留无效来源、
+跨工作区、退休会话、非 human stage、普通 choice 和已结束记录的排除规则；只省去
+计数不需要的 wait/answer/action 视图展开。
+[查询预算与等价测试](../../tests/unit/multiremi/pending-issue-decisions-budget.test.ts)
+覆盖 2/1202 条原生 Question（四读、零写）、2/102 条混合历史记录（五读、零写），
+并以原逐条 `Questions.get()` 谓词核对结果。测试在 SQLite 和配置了真实服务的 PostgreSQL
+两种后端运行；缺少 PG 时的 skip 不构成 PG 验证。
+
 ### 2. 搜索：候选 issue → 逐 issue 搜评论 → 过滤与分页
 
 - **实现事实：** [IssuesRepo.searchIssues / searchIssueCommentSnippet](../../packages/server/src/store/repos/issues-repo.ts) 先调用 `listIssues({ includeArchived: true })`；启用评论正文搜索时逐 issue 查询评论，再在 JavaScript 中筛 workspace、匹配字段、排序和截取页面。`includeCommentBodies` 默认启用，传 `false` 才跳过评论查询。

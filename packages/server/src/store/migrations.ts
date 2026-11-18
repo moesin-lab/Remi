@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ensurePlannedRestarts } from "./planned-restart-schema.js";
+import { LIVE_TERM_SCHEMA } from "./live-term-fence.js";
 import { migrateExecutionEndpoints } from "./execution-endpoint-migration.js";
 import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
 import { ensureTurnListIndexes } from './turn-list-indexes.js';
@@ -84,6 +85,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
   const migrate = () => withModernSqliteAlterTable(db, resolveSqlDialect(db, options.dialect), () => advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () => {
     // The directory may have become unwritable while waiting for the lock.
     prepareMigrationReportDirectory(reportDir);
+    db.exec(LIVE_TERM_SCHEMA);
     const tables=existingTableNames(db);
     if (tables.has("multiremi_turn_attempts")) addColumnIfMissing(db, "multiremi_turn_attempts", "execution_connection TEXT");
     if(tables.has("multiremi_users"))backfillOwnerExternalId(db);
@@ -103,7 +105,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
       addColumnIfMissing(db, "multiremi_execution_groups", "connection_mode TEXT NOT NULL DEFAULT 'legacy'");
       addColumnIfMissing(db, "multiremi_execution_groups", "model_policy TEXT NOT NULL DEFAULT '{}'");
     }
-    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensurePlannedRestarts(db);ensureRuntimeUpdateBuildIdentity(db);return;}
+    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);ensurePlannedRestarts(db);return;}
     // Inspect the existing snapshot before bootstrap migrations can touch it.
     const checks=unifiedModelPreflight(db);
     if(checks.some(c=>!c.ok)){
@@ -112,7 +114,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     }
     runMigrationsForDialect(db,resolveSqlDialect(db,options.dialect));
     runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});
-    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensurePlannedRestarts(db);ensureRuntimeUpdateBuildIdentity(db);
+    separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);ensurePlannedRestarts(db);
   }));
   // SQLite schema rebuilds toggle foreign_keys outside their transactions.
   // Hold a separate SQLite writer lock across that entire sequence so another

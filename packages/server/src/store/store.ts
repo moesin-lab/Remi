@@ -1,4 +1,5 @@
 import { PlannedRestarts } from "./planned-restarts.js";
+import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
@@ -514,6 +515,10 @@ import type {
 export { daemonRuntimeId, isTerminalStatus };
 
 export class MultiremiStore {
+  activateBackgroundTerm(holder: string, onLost: () => void): LiveTermFence {
+    return LiveTermFence.activate(this.fenceDatabase, holder, onLost);
+  }
+
   isDatabaseUnavailable(): boolean { return this.db.connectionUnavailable === true; }
   private databaseReadyUntil = 0;
   checkDatabaseReady(force = false): void {
@@ -524,6 +529,7 @@ export class MultiremiStore {
   }
 
   private db: SqlDatabase;
+  private fenceDatabase: SqlDatabase;
   private ctx: StoreContext;
   private feedback: FeedbackRepo;
   private accessTokens: AccessTokensRepo;
@@ -599,7 +605,8 @@ export class MultiremiStore {
   } = {}) {
     // The wrapper clears the per-request read cache on every write, so a cached row can never
     // outlive a write that changed it. See request-read-cache.ts for the contract.
-    this.db = invalidatingDatabase(db ?? openMultiremiDatabase());
+    this.fenceDatabase = invalidatingDatabase(db ?? openMultiremiDatabase());
+    this.db = liveTermDatabase(this.fenceDatabase);
     this.ctx = new StoreContext(this.db, () => this);
     this.feedback = new FeedbackRepo(this.db);
     this.accessTokens = new AccessTokensRepo(this.db);

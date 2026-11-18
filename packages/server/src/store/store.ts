@@ -3673,7 +3673,7 @@ runMigrations(this.db);
   isTaskUsageExecutionAuthorized(taskId: string, runId: string, runtimeId: string): boolean {
     return !!this.ctx.db.query(`SELECT t.id FROM multiremi_turn_execution_records t JOIN multiremi_usage_task_scopes s ON s.task_id=t.id
       JOIN multiremi_usage_runs r ON r.task_id=t.id AND r.run_id=s.active_run_id
-      WHERE t.id=? AND t.runtime_id=? AND t.status='running' AND s.active_run_id=? AND r.complete=0`).get(taskId, runtimeId, runId);
+      WHERE t.id=? AND t.runtime_id=? AND t.status IN ('running','awaiting_human') AND s.active_run_id=? AND r.complete=0`).get(taskId, runtimeId, runId);
   }
 
   /** Deprecated transport replay check; never a reporting/statistics source. */

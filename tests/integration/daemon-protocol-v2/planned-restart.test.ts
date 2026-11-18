@@ -245,3 +245,67 @@ test("per-runtime restart version cannot grant support without the negotiated he
     expect(h.client.sharesCap("turn.restart")).toBe(false);
   } finally { await h.dispose(); }
 }, 10_000);
+
+for (const kind of ["permission", "question"] as const) for (const answerAt of ["suspended", "resumed"] as const) {
+  test(`daemon resumes the original ${kind} callback and consumes an answer saved while ${answerAt}`, async () => {
+    let replacement = false, replyUsed = false, rebound = false;
+    const h = await DaemonProtocolHarness.create({ daemonOptions: { approvalMode: "ask" }, providerFactory: () => {
+      let permission: ((params: any) => Promise<any>) | undefined;
+      let elicitation: ((params: any) => Promise<any>) | undefined;
+      return {
+        setPermissionHandler: handler => { permission = handler; },
+        setElicitationHandler: handler => { elicitation = handler; },
+        async *sendStream(_message, options) {
+          if (replacement) rebound = true;
+          const outcome = kind === "permission" ? await permission!({ sessionId: "permission-session",
+            toolCall: { toolCallId: replacement ? "reissued-tool" : "old-tool", title: "Write receipt", rawInput: { path: "receipt.txt", content: "approved" } },
+            options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }] })
+            : await elicitation!({ mode: "form", sessionId: "question-session", message: "Where?",
+                requestedSchema: { type: "object", properties: { city: { type: "string", title: "City" } }, required: ["city"] } });
+          if (options?.signal?.aborted) throw new Error("Cancelled");
+          replyUsed = replacement && (kind === "permission" ? outcome.optionId === "allow" : outcome.action === "accept" && outcome.content.city === "Paris");
+          if (!replyUsed) throw new Error(`original answer was not delivered: ${JSON.stringify(outcome)}`);
+          yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "Original answer applied; full final response" }] } as any;
+        },
+        getLastResponse: () => ({ text: replyUsed ? "Original answer applied; full final response" : "", sessionId: "wait-provider-session", usage: [], toolCalls: [] } as any),
+        close: async () => { replacement = true; },
+      };
+    } });
+    try {
+      await h.startDaemon(); await h.settleHeartbeat();
+      const runtimeId = h.store.listRuntimes()[0]!.id;
+      const daemonId = h.store.getRuntimeLite(runtimeId)!.daemonId!;
+      const agent = h.store.createAgent({ name: "Waiting worker", provider: "claude", runtimeId });
+      const issue = createResponsibleTestIssue(h.store, { title: "Restart waiting callback", assigneeType: "agent", assigneeId: agent.id });
+      const task = h.store.createTask({ agentId: agent.id, issueId: issue.id, runtimeId, prompt: "Wait for a human", maxAttempts: 1 });
+      const turn = h.store.getTurnForAttempt(task.id)!;
+      const original = () => h.db.query("SELECT id FROM multiremi_conversation_log WHERE task_id=? AND message_kind='decision'").get(turn.id);
+      await waitFor(() => !!original(), "original native question", 5_000);
+      const questionId = String(original()!.id);
+      expect(h.store.getQuestion(questionId)).toMatchObject({ stage: "human", status: "pending", wait_status: "waiting" });
+      h.store.beginDaemonDrain("local", daemonId, "manual", 60_000);
+      h.store.plannedRestarts().request(task.id, { workspaceId: "local", runtimeId, daemonId });
+      await waitFor(() => h.store.plannedRestarts().get(task.id)?.state === "suspended", "waiting callback checkpoint", 10_000);
+      await waitFor(() => (h.daemon as any).activeTaskCount === 0, "native wait released");
+      expect(h.store.plannedRestarts().get(task.id)?.checkpoint?.question_ids).toEqual([questionId]);
+      expect(h.store.getQuestion(questionId)?.wait_status).toBe("waiting");
+      await h.stopDaemon();
+      const answer = () => h.store.answerQuestion(questionId, { expected_route_revision: h.store.getQuestion(questionId)!.route_revision,
+        response: kind === "permission" ? { option_id: "allow" } : { answers: { city: "Paris" } } }, { type: "member", id: "mem_local_local" });
+      if (answerAt === "suspended") answer();
+      h.store.undrainDaemon("local", daemonId);
+      await h.recreateDaemon();
+      if (answerAt === "resumed") {
+        await waitFor(() => rebound, "replacement reissued native request", 5_000);
+        answer();
+      }
+      await waitFor(() => h.store.getTask(task.id)?.status === "completed", "same attempt applied original answer", 10_000);
+      expect(replyUsed).toBe(true);
+      expect(h.store.getQuestion(questionId)).toMatchObject({ id: questionId, answer_revision: 1, wait_status: "consumed" });
+      expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1, result: "Original answer applied; full final response" });
+      expect(h.db.query("SELECT id FROM multiremi_conversation_log WHERE task_id=? AND message_kind='decision'").all(turn.id)).toHaveLength(1);
+      expect(h.db.query("SELECT id FROM multiremi_turn_attempts WHERE turn_id=?").all(turn.id)).toHaveLength(1);
+      expect(h.ledger.some(event => event.type === "task.fail")).toBe(false);
+    } finally { await h.dispose(); }
+  }, 25_000);
+}

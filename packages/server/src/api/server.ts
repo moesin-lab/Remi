@@ -1257,7 +1257,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     for (const rt of session.runtimeIds) if (store.hasCliUpdateDrainForRuntime(rt)) downlinks.kick(rt, "pending");
   } });
   registerTaskInputRpcs(daemonProtocol, store, rt => downlinks.kick(rt), daemonTurnBridge,
-    task => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki, false, daemonTurnBridge.offerInput(task), "running"));
+    task => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki, false, daemonTurnBridge.offerInput(task), "resumable"));
   registerBackgroundTaskHandlers(daemonProtocol, store, rt => downlinks.kick(rt, "pending"));
   const browserWebSockets: BrowserWebSocketRegistry = new Map();
   const daemonTrace = registerDaemonTraceHandlers(daemonProtocol, store,

@@ -1,3 +1,5 @@
+import { PlannedRestarts } from "../planned-restarts.js";
+import { restartQuestionKey } from "@multiremi/contracts/planned-restart.js";
 import { readTurnRow } from "@multiremi/store/execution-reads.js";
 import type { QuestionActor, QuestionAnswer, QuestionAnswerInput, QuestionHistoryEvent, QuestionMutationInput, QuestionStage, QuestionSubagent, QuestionView, QuestionWaitStatus } from '@multiremi/contracts';
 import { isHistoricalIssueQuestionRecord } from '@multiremi/contracts';
@@ -38,7 +40,7 @@ interface QuestionRecord {
   answer: QuestionAnswer | null;
   answer_revision: number;
   history: QuestionHistoryEvent[];
-  wait: { status: QuestionWaitStatus; reason: string | null; wait_id?: string; runtime_id?: string; reply_message_id?: string; consumer_turn_id?: string; consumer_attempt_id?: string; continuation_message_id?: string; consumed_at?: string };
+  wait: { status: QuestionWaitStatus; reason: string | null; wait_id?: string; runtime_id?: string; restart_handoff_id?: string; generation?: number; reply_message_id?: string; consumer_turn_id?: string; consumer_attempt_id?: string; continuation_message_id?: string; consumed_at?: string };
 }
 type QuestionSourceMessage = Pick<UnifiedMessage, 'id' | 'session_id' | 'task_id' | 'sender_type' | 'sender_id' | 'metadata'>;
 type IntegrityFacts = {
@@ -1047,6 +1049,7 @@ export class Questions {
   }
   consumeWithinTransaction(id: string, turnId: string, attemptId: string, replyId: string, events: CommitEventQueue, waitId?: string) {
     const { message, record } = this.lock(id);
+    if (record.wait.restart_handoff_id) throw new QuestionError(409, 'question_restart_binding_changed');
     if (record.wait.wait_id && record.wait.status !== 'continuation_pending' && record.wait.status !== 'continuation_consumed' && record.wait.wait_id !== waitId) throw new QuestionError(409, 'question_wait_binding_changed');
     if (record.wait.status === 'consumed' || record.wait.status === 'continuation_consumed') {
       if (record.wait.consumer_turn_id !== turnId || record.wait.consumer_attempt_id !== attemptId) throw new QuestionError(409, 'question_consumer_mismatch');
@@ -1056,6 +1059,52 @@ export class Questions {
     if (continuation ? record.wait.consumer_turn_id !== turnId || record.wait.continuation_message_id !== replyId : message.task_id !== turnId || record.source_attempt_id !== attemptId || record.wait.reply_message_id !== replyId || record.wait.status !== 'waiting') throw new QuestionError(409, 'question_consumer_mismatch');
     record.wait = { ...record.wait, status: continuation ? 'continuation_consumed' : 'consumed', consumer_turn_id: turnId, consumer_attempt_id: attemptId, consumed_at: nowIso() };
     this.event(record, 'consume', null); this.save(message, record, events);
+  }
+  /** Must be read under the restart workspace/lane lock. Only original live native waits qualify. */
+  plannedRestartWaits(attemptId: string): UnifiedMessage[] {
+    const rows = this.ctx.db.query(`SELECT m.id FROM multiremi_conversation_log m
+      WHERE m.message_kind='decision' AND m.deleted_at IS NULL
+      AND ${this.jsonText('m', 'question.source_attempt_id')}=?
+      AND ${this.jsonText('m', 'question.wait.status')}='waiting' ORDER BY m.seq`).all(attemptId);
+    return rows.flatMap(row => {
+      const loaded = this.read(row.id);
+      return loaded && loaded.record.wait.wait_id && this.integrity(loaded.message, loaded.record) ? [loaded.message] : [];
+    });
+  }
+  preparePlannedRestartResume(attemptId: string, handoffId: string, generation: number, ids: string[]): void {
+    this.transaction(events => {
+      for (const id of ids) {
+        const { message, record } = this.lock(id);
+        if (record.source_attempt_id !== attemptId) throw new QuestionError(409, 'question_source_attempt_changed');
+        if (record.wait.status !== 'waiting') continue; // An explicit close during replacement wins.
+        record.wait = { ...record.wait, reason: 'planned_restart', restart_handoff_id: handoffId, generation };
+        this.save(message, record, events);
+      }
+    });
+  }
+  rebindPlannedRestartWithinTransaction(id: string, attemptId: string, generation: number,
+    waitId: string, metadata: Record<string, unknown>, events: CommitEventQueue): UnifiedMessage {
+    const { message, record } = this.lock(id);
+    const handoff = new PlannedRestarts(this.ctx).get(attemptId);
+    const request = message.metadata.human_request as { payload?: Record<string, unknown> } | undefined;
+    if (!handoff || handoff.state !== 'running' || handoff.generation !== generation
+      || !handoff.checkpoint?.question_ids?.includes(id) || record.source_attempt_id !== attemptId
+      || record.wait.generation !== generation || record.status === 'closed'
+      || (record.wait.restart_handoff_id !== handoff.handoff_id && record.wait.wait_id !== waitId)
+      || !request?.payload || restartQuestionKey(request.payload) !== restartQuestionKey(metadata)) {
+      throw new QuestionError(409, 'question_restart_binding_changed');
+    }
+    if (record.wait.status !== 'waiting') throw new QuestionError(409, 'question_restart_binding_changed');
+    record.wait = { ...record.wait, wait_id: waitId, reason: null, restart_handoff_id: undefined };
+    this.save(message, record, events);
+    return getMessage(this.ctx, id)!;
+  }
+  private plannedRestartProtectsWait(message: UnifiedMessage, record: QuestionRecord): boolean {
+    const handoff = record.source_attempt_id ? new PlannedRestarts(this.ctx).get(record.source_attempt_id) : null;
+    return !!handoff?.checkpoint?.question_ids?.includes(message.id)
+      && (handoff.state === 'suspended' || handoff.state === 'resuming'
+        || handoff.state === 'running' && record.wait.restart_handoff_id === handoff.handoff_id
+          && record.wait.generation === handoff.generation);
   }
   reconcileRuntimeWaits(runtimeId: string, waits: import('@multiremi/contracts/daemon-protocol.js').DaemonQuestionWait[]) {
     return this.transaction(events => {
@@ -1070,6 +1119,7 @@ export class Questions {
         if (!this.integrity(message, record)) continue;
         if (record.wait.status !== 'waiting' || record.wait.runtime_id !== runtimeId || !record.wait.wait_id) continue;
         if (waits.some(wait => wait.message_id === message.id && wait.attempt_id === record.source_attempt_id && wait.wait_id === record.wait.wait_id)) continue;
+        if (this.plannedRestartProtectsWait(message, record)) continue;
         this.detachWithinTransaction(message.id, 'daemon_wait_lost', events, false);
         // The old native reply was addressed to the lost callback. It must not
         // become a second generic wake when cancelling advances the session.

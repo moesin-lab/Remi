@@ -35,8 +35,11 @@ function encode(execution: RestartExecution, checkpoint: PlannedRestartCheckpoin
     || !Array.isArray(checkpoint.delivered_message_ids) || checkpoint.delivered_message_ids.length > 1024
     || checkpoint.delivered_message_ids.some(id => typeof id !== "string" || !id || id.length > 256)
     || new Set(checkpoint.delivered_message_ids).size !== checkpoint.delivered_message_ids.length
+    || (checkpoint.question_ids !== undefined && (!Array.isArray(checkpoint.question_ids) || checkpoint.question_ids.length > 1024
+      || checkpoint.question_ids.some(id => typeof id !== "string" || !id || id.length > 256)
+      || new Set(checkpoint.question_ids).size !== checkpoint.question_ids.length))
     || Object.keys(execution).some(key => !["workspace_id", "daemon_id", "runtime_id", "turn_id", "attempt_id", "handoff_id", "generation"].includes(key))
-    || Object.keys(checkpoint).some(key => !["version", "session_id", "work_dir", "trace_head", "input_ack_seq", "delivered_message_ids"].includes(key))) {
+    || Object.keys(checkpoint).some(key => !["version", "session_id", "work_dir", "trace_head", "input_ack_seq", "delivered_message_ids", "question_ids"].includes(key))) {
     throw new Error("Invalid planned restart journal entry");
   }
   // Canonical field order makes retries insensitive to object construction order.
@@ -44,7 +47,8 @@ function encode(execution: RestartExecution, checkpoint: PlannedRestartCheckpoin
     runtime_id: execution.runtime_id, turn_id: execution.turn_id, attempt_id: execution.attempt_id,
     handoff_id: execution.handoff_id, generation: execution.generation }, checkpoint: {
     version: 1, session_id: checkpoint.session_id, work_dir: checkpoint.work_dir, trace_head: checkpoint.trace_head,
-    input_ack_seq: checkpoint.input_ack_seq, delivered_message_ids: checkpoint.delivered_message_ids } });
+    input_ack_seq: checkpoint.input_ack_seq, delivered_message_ids: checkpoint.delivered_message_ids,
+    ...(checkpoint.question_ids ? { question_ids: checkpoint.question_ids } : {}) } });
 }
 
 /**

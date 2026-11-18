@@ -215,6 +215,12 @@ export class DaemonTurnBridge {
       }
       if(type==='turn.decision'){
         if(typeof payload.body_md!=='string'||typeof payload.dedupe_key!=='string'||!Array.isArray(payload.options))throw new Error('invalid_report');
+        if (typeof payload.recover_question_id === 'string') {
+          if (typeof payload.wait_id !== 'string' || !payload.wait_id) throw new Error('invalid_report');
+          const message = new Questions(this.ctx).rebindPlannedRestartWithinTransaction(payload.recover_question_id,
+            turn.current_attempt_id, Number(payload.generation), payload.wait_id, payload.metadata as Record<string, unknown>, events);
+          return { ok: true, message, meta: { deduped: true } };
+        }
         const timeout=Number(payload.timeout_ms??0),expires=timeout>0?new Date(Date.now()+timeout).toISOString():null;
         const result=new Questions(this.ctx).createWithinTransaction({id: typeof payload.message_id === 'string' ? payload.message_id : undefined, session_id:turn.session_id,sender:{type:'agent',id:turn.agent_id},source_turn_id:turn.id,to:{type:'none'},
           body_md:payload.body_md,message_kind:'decision',wake_requested:'now',dedupe_key:payload.dedupe_key,options:payload.options as DecisionOption[],

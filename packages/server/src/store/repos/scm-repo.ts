@@ -1,3 +1,4 @@
+import { ScmMonitor } from "@multiremi/scm/monitor.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
@@ -76,7 +77,8 @@ interface ScmIssueOwnershipCandidate {
 }
 
 export class ScmRepo {
-  constructor(private readonly ctx: StoreContext) {}
+  readonly monitor: ScmMonitor;
+  constructor(private readonly ctx: StoreContext) { this.monitor = new ScmMonitor(ctx, this); }
 
   listConnections(input: {
     workspaceId?: string | null;
@@ -1215,6 +1217,7 @@ export class ScmRepo {
     const runs: MultiremiAutopilotRun[] = [];
     for (const event of this.claimPendingEvents(now, limit)) {
       this.processPendingMergeEffects(event);
+      this.ctx.db.transaction(() => this.monitor.enqueue(event, now))();
       this.ctx.db.transaction(() => this.ensureEventDeliveriesInitialized(event, now.toISOString()))();
       let deliveries = this.listEventDeliveries(event.id);
 
@@ -1307,7 +1310,7 @@ export class ScmRepo {
       deliveries = this.listEventDeliveries(event.id);
       const pendingEffect = this.ctx.db.query(
         `SELECT last_error FROM multiremi_scm_effects
-         WHERE event_id = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1`,
+         WHERE event_id = ? AND effect_type = 'complete_issue_on_merge' AND status = 'pending' ORDER BY created_at ASC LIMIT 1`,
       ).get(event.id) as Row | null;
       const hasPending = Boolean(pendingEffect)
         || deliveries.some((delivery) => delivery.status === "pending" || delivery.status === "processing");

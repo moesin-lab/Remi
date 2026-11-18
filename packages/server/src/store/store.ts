@@ -2800,6 +2800,15 @@ runMigrations(this.db);
     return this.scm.listEventEvidence(eventId);
   }
 
+  registerScmMonitorRule(rule: import("@multiremi/scm/monitor.js").ScmMonitorRule) { this.scm.monitor.registerRule(rule); }
+  processScmMonitorEffects(now = new Date(), limit = 25) { return this.scm.monitor.run(now, limit); }
+  scmMonitorStatus(workspaceId: string) { return this.scm.monitor.status(workspaceId); }
+  listScmWatches(workspaceId: string, repositoryId: string, number: number) { return this.scm.monitor.watches(workspaceId, repositoryId, number); }
+  setScmWatch(workspaceId: string, repositoryId: string, number: number, sessionId: string, until: string, active: boolean) {
+    return this.scm.monitor.watch(workspaceId, repositoryId, number, sessionId, until, active);
+  }
+  scmMonitorProjectConfig(projectId: string, seconds?: number) { return this.scm.monitor.projectConfig(projectId, seconds); }
+
   dispatchPendingScmEvents(now: Date = new Date(), limit = 25): MultiremiAutopilotRun[] {
     return this.scm.dispatchPendingEvents(now, limit);
   }

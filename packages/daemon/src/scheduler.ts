@@ -70,16 +70,17 @@ export class MultiremiScheduler {
     if (this.running) return;
     this.running = true;
     let recovered = false;
-    this.syncLoop = new DatabaseRetryLoop("scheduler.sync", () => withDbJob("scheduler.sync", () => {
+    this.syncLoop = new DatabaseRetryLoop("scheduler.sync", () => withDbJob("scheduler.sync", async () => {
       try {
-        // DatabaseRetryLoop serializes ticks and sync is synchronous: recovery
-        // runs only after the previous tick's claims are no longer in flight.
+        // DatabaseRetryLoop serializes ticks, including asynchronous SCM effects:
+        // recovery runs after the previous tick has finished its work.
         if (!recovered) {
           this.store.recoverLostScheduleTriggers();
           this.store.recoverLostRuntimeProvisionSchedules();
           recovered = true;
         }
         this.sync();
+        await this.store.processScmMonitorEffects?.();
       } catch (error) {
         // A failed tick can leave its whole claimed batch at next_run_at=NULL.
         // The next serialized tick recovers only while its immutable term is

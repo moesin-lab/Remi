@@ -198,7 +198,7 @@ function createLoopDaemon(options: {
 
   let sequence = 0;
   let push!: (type: string, payload: Record<string, unknown>) => void;
-  const protocolClient = new DaemonProtocolClient({ serverUrl: "http://127.0.0.1:1", daemonId: "cadence", cliVersion: "0.2.83",
+  const protocolClient = new DaemonProtocolClient({ serverUrl: "http://127.0.0.1:1", daemonId: "cadence", cliVersion: DAEMON_MIN_CLI_VERSION,
     connect: () => {
       const listeners = new Map<string, Set<(event: any) => void>>();
       const emit = (type: string, event: any) => { for (const listener of listeners.get(type) ?? []) listener(event); };
@@ -506,7 +506,7 @@ describe("daemon poll cadence", () => {
   it("never falls back to HTTP claim while the protocol channel is unavailable", async () => {
     jest.useFakeTimers();
     const client = new DaemonProtocolClient({
-      serverUrl: "http://127.0.0.1:1", daemonId: "offline", cliVersion: "0.2.83",
+      serverUrl: "http://127.0.0.1:1", daemonId: "offline", cliVersion: DAEMON_MIN_CLI_VERSION,
       connect: () => { throw new Error("Expected 101 status code"); },
     });
     const lane: DaemonProtocolLane = {

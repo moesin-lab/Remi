@@ -18,6 +18,21 @@ import fingerprintSource from './schema-fingerprint.mjs' with { type: 'text' };
 // @ts-ignore -- the preload is deliberately embedded rather than executed here.
 import fenceSource from '../../../deploy/docker/host-write-fence.ts' with { type: 'text' };
 
+// One embedded resource set for production control containers and rehearsal fixtures.
+const APPLICATION_BOOTSTRAP_FILES = {
+  'runtime.mjs': runtimeSource,
+  'schema-fingerprint.mjs': fingerprintSource,
+  'data-schema-inputs.json': JSON.stringify(DATA_SCHEMA_INPUTS),
+  'host-write-fence.ts': fenceSource,
+};
+
+export async function writeApplicationBootstrap(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true, mode: 0o755 });
+  for (const [name, source] of Object.entries(APPLICATION_BOOTSTRAP_FILES)) {
+    await writeFile(join(directory, name), source, { mode: 0o644 });
+  }
+}
+
 export interface ApplicationDriverConfig {
   kind: 'docker_compose' | 'local_profile';
   composeFile: string;
@@ -297,13 +312,11 @@ export class ContainerApplicationDriver implements PlatformDeploymentDriver {
 
   private async prepareControl(installation: Installation): Promise<Installation> {
     await mkdir(this.controlDir, { recursive: true, mode: 0o755 });
-    const digest = createHash('sha256').update(runtimeSource).update(fingerprintSource).update(JSON.stringify(DATA_SCHEMA_INPUTS)).update(fenceSource).digest('hex').slice(0, 16);
+    const hash = createHash('sha256');
+    for (const source of Object.values(APPLICATION_BOOTSTRAP_FILES)) hash.update(source);
+    const digest = hash.digest('hex').slice(0, 16);
     const bootstrap = join(this.controlDir, digest);
-    await mkdir(bootstrap, { recursive: true, mode: 0o755 });
-    await writeFile(join(bootstrap, 'runtime.mjs'), runtimeSource, { mode: 0o644 });
-    await writeFile(join(bootstrap, 'schema-fingerprint.mjs'), fingerprintSource, { mode: 0o644 });
-    await writeFile(join(bootstrap, 'data-schema-inputs.json'), JSON.stringify(DATA_SCHEMA_INPUTS), { mode: 0o644 });
-    await writeFile(join(bootstrap, 'host-write-fence.ts'), fenceSource, { mode: 0o644 });
+    await writeApplicationBootstrap(bootstrap);
     const found = await this.runner.run('docker', ['volume', 'ls', '--format', '{{.Name}}', '--filter', `name=^${installation.volume}$`]);
     if (found.exitCode !== 0) throw new Error('Cannot inspect application volume');
     if (found.stdout.trim()) {

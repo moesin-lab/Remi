@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
-import { ContainerApplicationDriver, LocalProfileCommandRunner } from '@remi-platform/updater/application-driver.js';
+import { ContainerApplicationDriver, LocalProfileCommandRunner, writeApplicationBootstrap } from '@remi-platform/updater/application-driver.js';
 import { assertApplicationCompatible, parseApplicationManifest, type ApplicationManifest } from '@remi-platform/updater/application-manifest.js';
 import { DATA_SCHEMA, READY_GATE, safetyCommand, testBackup } from './helpers.js';
 import type { MultiremiPlatformOperation, ReportPlatformOperationInput } from '@multiremi/contracts';
@@ -293,4 +293,16 @@ describe('container application updates', () => {
     expect((await readdir(f.root)).some(name => name.endsWith('.tar.gz'))).toBe(false);
     expect(f.events).not.toContain('stop');
   });
+});
+
+it('loads the production rehearsal runtime from an isolated bootstrap directory', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'remi-bootstrap-')); roots.push(root);
+  await writeApplicationBootstrap(root);
+  expect((await readdir(root)).sort()).toEqual([
+    'data-schema-inputs.json', 'host-write-fence.ts', 'runtime.mjs', 'schema-fingerprint.mjs',
+  ]);
+  // A separate process resolves imports only from the copied runtime, not the repository.
+  const result = Bun.spawnSync([process.execPath, '--eval', `await import(${JSON.stringify(join(root, 'runtime.mjs'))})`], { cwd: root });
+  expect(result.stderr.toString()).toBe('');
+  expect(result.exitCode).toBe(0);
 });

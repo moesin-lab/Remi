@@ -10,7 +10,8 @@ import { DaemonTaskDownlinks } from "@multiremi/worker/daemon-downlinks.js";
 import { MultiremiDaemon, type MultiremiTaskProvider } from "@multiremi/worker/daemon.js";
 import { MultiremiDaemonClient } from "@multiremi/client.js";
 import { materializeTaskSteerAttachments, buildSteerInjectionPrompt, TaskSteerFeed } from "@multiremi/worker/steer.js";
-import { bindReportFrames } from "../../fixtures/report-session.js";
+import { acquireDaemonTrace, releaseDaemonTrace } from "@multiremi/worker/trace-transport.js";
+import { acquireDaemonOutbox, daemonReportTransport, releaseDaemonOutbox } from "@multiremi/worker/report-transport.js";
 import { disabledSshMeshRuntime } from "../../helpers/ssh-mesh-isolation.js";
 import { createAgentResponse } from "@multiremi/contracts/provider-types.js";
 import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
@@ -64,7 +65,7 @@ async function setup({ store, db }: PendingTurnTestFixture, delegated = false, u
   let server = startMultiremiServer({ store, hostname: "127.0.0.1", port: 0, authToken: "callback-fixture" });
   const frames: Array<Record<string, any>> = [];
   const client = new DaemonProtocolClient({ serverUrl: `http://127.0.0.1:${server.port}`, token: "callback-fixture",
-    daemonId, cliVersion: DAEMON_MIN_CLI_VERSION, onFrame: f => { frames.push(f.raw); } });
+    daemonId, cliVersion: DAEMON_MIN_CLI_VERSION, caps: ["input_unread"], onFrame: f => { frames.push(f.raw); } });
   const inbox = new DaemonTaskDownlinks(client, () => rt);
   inbox.bindTurn(offer);
   const feed = new TaskSteerFeed(inbox, attempt.id);
@@ -505,7 +506,13 @@ pendingTurnBackendTests("decision callbacks over Store and native WS", fixture =
       sshMeshManager: disabledSshMeshRuntime(), providerFactory: () => provider });
     const state = daemon as any;
     const downloader = new MultiremiDaemonClient(h.serverUrl, "callback-fixture");
-    const drain = bindReportFrames(downloader, h.store, { runtimeId: h.rt });
+    // Exercise the actual completion receipt pump and negotiated unread gate.
+    // Direct report dispatch skips this local-only receipt prerequisite.
+    acquireDaemonTrace(h.client, undefined, () => false, error => { throw error; });
+    const outbox = acquireDaemonOutbox(h.client, {
+      path: join(workDir, "receipt-outbox.db"), deliver: async () => { throw new Error("unexpected message delivery"); },
+    });
+    downloader.setReportTransport(daemonReportTransport(h.client, () => h.rt, () => outbox));
     state.client = downloader;
     state.taskDownlinks = h.inbox;
     state.assertWorkspaceRootOwner = () => {};
@@ -524,7 +531,7 @@ pendingTurnBackendTests("decision callbacks over Store and native WS", fixture =
       expect(h.store.getTurn(h.offer.turn_id)?.status).toBe("completed");
       expect(h.store.getMessage(h.store.getTurn(h.offer.turn_id)!.reply_message_id!)?.body_md)
         .toBe(scenario === "late_interrupt" ? "Both directives handled" : scenario === "unread" ? "Recovered missing input in the same provider session" : "Ordinary context handled");
-    } finally { await drain(); await h.close(); rmSync(workDir, { recursive: true, force: true }); }
+    } finally { await releaseDaemonOutbox(h.client); await releaseDaemonTrace(h.client); await h.close(); rmSync(workDir, { recursive: true, force: true }); }
   }, 120_000);
 
   it("range receipts allow omitted read IDs but reject foreign, duplicate and reordered IDs", async () => {

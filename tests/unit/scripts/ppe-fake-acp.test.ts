@@ -7,9 +7,21 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore, resetMultiremiTestEnv } from "../multiremi/helpers.js";
 import { AcpProvider } from "@acp/index.js";
 import { DaemonProtocolHarness, waitFor } from "../../integration/daemon-protocol-v2/harness.js";
+import { streamTrace } from "../../../deploy/zadig/ppe/fake-acp.js";
 
 afterEach(resetMultiremiTestEnv);
 const root = resolve(import.meta.dir, "../../..");
+
+test("PPE stream finishes without scheduling a timer when emitting crosses the deadline", async () => {
+  let elapsed = 0;
+  const now = spyOn(performance, "now").mockImplementation(() => elapsed);
+  const timer = spyOn(globalThis, "setTimeout");
+  try {
+    const result = await streamTrace(60, () => { elapsed = 60_001; }, () => false);
+    expect(result).toBe("MUL-172 stream completed: 1 chunks over 60001 ms.");
+    expect(timer).not.toHaveBeenCalled();
+  } finally { now.mockRestore(); timer.mockRestore(); }
+});
 // Activity/thought updates precede the read; only message chunks are replies.
 const messageFrames = (frames: any[]) => frames.filter(frame => frame.method === "session/update"
   && frame.params.update.sessionUpdate === "agent_message_chunk");

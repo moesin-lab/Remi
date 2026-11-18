@@ -334,7 +334,13 @@ export class DaemonTaskOffers {
       currentBackgroundTerm()?.assertCurrent();
       invalidateRequestReadCache();
       const current = store.getTaskIdentity(task.id);
-      if (!payload || current?.status !== "dispatched" || current.runtimeId !== runtimeId) return;
+      if (current?.status !== "dispatched" || current.runtimeId !== runtimeId) return;
+      if (!payload) {
+        // Preparation can decline an offer after claiming it. No frame was
+        // sent, so release the claim rather than strand an unoffered dispatch.
+        this.rescind(runtimeId, pump, task.id);
+        return;
+      }
       if (this.session(runtimeId) !== session) { this.rescind(runtimeId, pump, task.id); return; }
       const budgeted = fitTaskOfferToBudget(payload, runtimeId, undefined, session.supportsWikiFetch);
       console.info(JSON.stringify({ event: "daemon_offer_budget", task_id: task.id, runtime_id: runtimeId, ...budgeted.report }));

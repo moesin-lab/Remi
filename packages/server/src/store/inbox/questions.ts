@@ -629,7 +629,7 @@ export class Questions {
     const facts = this.ctx.db.query(`SELECT ${field('id')} AS message_id,
       t.id,t.session_id,t.workspace_id,t.agent_id,t.execution_scope,
       h.workspace_id AS head_workspace, i.workspace_id AS source_workspace
-      FROM ${postgres ? 'json_array_elements(CAST(? AS JSON)) AS batch(value)' : 'json_each(?) AS batch'}
+      FROM ${postgres ? 'json_array_elements(CAST(CAST(? AS TEXT) AS JSON)) AS batch(value)' : 'json_each(?) AS batch'}
       LEFT JOIN multiremi_turn_attempts a ON a.id=${field('attempt')}
       LEFT JOIN multiremi_turns t ON t.id=a.turn_id
       LEFT JOIN multiremi_conversation_heads h ON h.session_id=${field('session')}

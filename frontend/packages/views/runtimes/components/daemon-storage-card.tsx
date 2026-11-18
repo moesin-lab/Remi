@@ -54,10 +54,10 @@ const RETAIN_REASONS = [
   "legacy_retained",
   "error",
 ] as const;
-const PLAN_REASONS = [...RETAIN_REASONS, "ended_ttl", "over_cap", "orphan"] as const;
+const PLAN_REASONS = [...RETAIN_REASONS, "ended_ttl", "over_cap", "orphan", "pressure"] as const;
 const PLAN_ACTIONS = ["reclaim", "forget", "keep"] as const;
 const SUBJECT_KINDS = ["issue", "chat", "task"] as const;
-const REPORT_MODES = ["periodic", "dry_run", "run"] as const;
+const REPORT_MODES = ["periodic", "dry_run", "run", "pressure"] as const;
 // A report on a busy machine can list thousands of subjects; the table shows
 // the items that matter most and says how many it left out.
 const PLAN_ROW_LIMIT = 100;
@@ -208,6 +208,16 @@ function ReportSummary({ report }: { report: StorageReport }) {
 
   return (
     <div className="space-y-5">
+      {report.disk && report.disk.level !== "ok" && (
+        <div role="alert" className="rounded-md border border-warning bg-warning/10 p-3 text-warning">
+          {t(($) => $.storage.disk_warning, { level: report.disk.level, free: formatBytes(report.disk.free_bytes), total: formatBytes(report.disk.total_bytes) })}
+          {" · "}{t(($) => report.disk?.level === "critical" ? $.storage.claims_paused : $.storage.claims_allowed)}
+          {report.disk.thresholds && <div className="text-xs">{t(($) => $.storage.disk_thresholds, {
+            pressure: report.disk.thresholds.pressure_free_percent, pressureBytes: formatBytes(report.disk.thresholds.pressure_free_bytes),
+            critical: report.disk.thresholds.critical_free_percent, criticalBytes: formatBytes(report.disk.thresholds.critical_free_bytes),
+          })}</div>}
+        </div>
+      )}
       <div>
         <div className="mb-2 text-[11px] uppercase tracking-wide text-muted-foreground">
           {t(($) => $.storage.bytes_title)}

@@ -1,3 +1,4 @@
+import { parseDaemonHealth } from "@multiremi/contracts/daemon-protocol.js";
 /**
  * Server-side connection layer for daemon protocol v2 (MUL-417).
  *
@@ -533,6 +534,7 @@ export class DaemonProtocolLayer {
       const reported = reportedRuntimes.find(entry => entry.runtime_id === runtimeId);
       this.store.reconcileDaemonDrain(runtimeId);
       const ack = this.store.heartbeatRuntime(runtimeId, { claimPending: false,
+        health: parseDaemonHealth(reported?.health ?? heartbeat.payload.health),
         ...runtimeCapabilityOptions(readPayload(reported?.capabilities) as DaemonRuntimeCapabilities) });
       if (ack.status !== "runtime_gone") this.recordExternalChatCapabilities(runtimeId, readPayload(reported?.capabilities) as DaemonRuntimeCapabilities);
       if (ack.status === "runtime_gone") {

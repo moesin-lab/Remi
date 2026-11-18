@@ -394,6 +394,7 @@ function renderGcRun(invocation: CommandInvocation, request: GcRunRequest): void
 }
 
 function renderStorageReport(report: StorageReport): void {
+  if (report.disk) console.log(`Disk: ${report.disk.level}; free ${report.disk.free_bytes}/${report.disk.total_bytes} bytes; claims ${report.disk.level === "critical" ? "paused" : "allowed"}; thresholds ${JSON.stringify(report.disk.thresholds ?? {})}`);
   console.log(`Root: ${report.root}`);
   console.log(`Round: ${report.mode} at ${report.generated_at}`);
   const { bytes, subjects } = report;
@@ -413,7 +414,7 @@ function renderStorageReport(report: StorageReport): void {
       { header: "SUBJECT", value: (item) => item.subject.id, maxWidth: 40 },
       { header: "KIND", value: (item) => item.subject.kind },
       { header: "ACTION", value: (item) => item.action },
-      { header: "REASON", value: (item) => item.reason },
+      { header: "REASON", value: (item) => item.reason === "pressure" ? "Disk pressure" : item.reason },
       { header: "SIZE", value: (item) => item.bytes === null ? null : formatBytes(item.bytes) },
       { header: "UNSAVED", value: (item) => item.unsaved_work ? "yes" : "no" },
     ],
@@ -1518,12 +1519,17 @@ function op(definition: OperationDefinition): CommandSpec {
             { header: "ID", value: row => row.id ?? "-", maxWidth: 28 },
             { header: "NAME", value: row => row.name ?? "-", maxWidth: 48 },
             { header: "STATUS", value: row => row.status ?? "-", maxWidth: 24 },
+            { header: "HEALTH", value: row => JSON.stringify((row.metadata as Record<string, unknown> | undefined)?.health ?? {}), maxWidth: 120 },
             { header: "DETAIL", value: row => row.email ?? row.url ?? row.description ?? "-", maxWidth: 72 },
             { header: "PROTOCOL", value: row => row.protocol ? formatRuntimeProtocol(row.protocol as RuntimeProtocolStatus) : "-" },
           ],
         });
       } else {
         renderSafe(invocation, response.data, definition.collections);
+        if (definition.id === "runtime.get" && outputMode(invocation) === "table") {
+          const data = response.data as { runtime?: { metadata?: Record<string, unknown> }; metadata?: Record<string, unknown> };
+          console.log(`Health: ${JSON.stringify((data.runtime ?? data).metadata?.health ?? {})}`);
+        }
         if (definition.id === "platform.status" && outputMode(invocation) === "table") {
           const summary = (response.data as { daemonProtocol?: { pending: number; failed: number } }).daemonProtocol;
           if (summary) console.log(`待升级 ${summary.pending} 台 / 失败 ${summary.failed} 台`);

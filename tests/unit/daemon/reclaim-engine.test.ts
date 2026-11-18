@@ -436,8 +436,9 @@ describe("retention cap", () => {
     expect(report.plan.map((item) => [item.subject.id, item.reason])).toEqual([["iss_1", "ended_ttl"]]);
   });
 
-  test("an automation Chat is reclaimed on the shorter TTL", async () => {
+  test("an automation Chat is reclaimed on its own TTL", async () => {
     const f = reclaimFixture();
+    f.policy.ttl_ms = 72 * HOUR;
     const automated = chat(1);
     const regular = chat(2);
     for (const subject of [automated, regular]) {

@@ -9,6 +9,7 @@ import { useWorkspaceId } from "@multiremi/core/hooks";
 import {
   STORAGE_SETTINGS_BOUNDS,
   STORAGE_SETTINGS_DEFAULTS,
+  storageThresholdErrors,
   useUpdateWorkspaceStorage,
   workspaceStorageDaemonsOptions,
   workspaceStorageOptions,
@@ -29,10 +30,15 @@ const HOUR_MS = 60 * 60 * 1000;
 const MIB = 1024 * 1024;
 
 type FieldKey = keyof StorageSettings;
-type FieldUnit = "hours" | "mb" | "days" | "count";
+type FieldUnit = "hours" | "mb" | "days" | "count" | "percent";
 
 // The wire keeps milliseconds and bytes; people edit hours and megabytes.
 const FIELDS: ReadonlyArray<{ key: FieldKey; unit: FieldUnit; factor: number; integer: boolean }> = [
+  { key: "pressure_free_percent", unit: "percent", factor: 1, integer: false },
+  { key: "pressure_free_bytes", unit: "mb", factor: MIB, integer: false },
+  { key: "critical_free_percent", unit: "percent", factor: 1, integer: false },
+  { key: "critical_free_bytes", unit: "mb", factor: MIB, integer: false },
+
   { key: "ttl_ms", unit: "hours", factor: HOUR_MS, integer: false },
   { key: "automation_ttl_ms", unit: "hours", factor: HOUR_MS, integer: false },
   { key: "max_retained", unit: "count", factor: 1, integer: true },
@@ -166,7 +172,12 @@ function PolicyForm({
     if (resets.has(field.key)) patch[field.key] = null;
     else if (value !== null && draft[field.key] !== initial[field.key]) patch[field.key] = value;
   }
-  const invalid = parsed.some(({ error }) => error !== null);
+  const effective = { ...policy.settings };
+  for (const key of Object.keys(patch) as FieldKey[]) {
+    effective[key] = patch[key] ?? STORAGE_SETTINGS_DEFAULTS[key];
+  }
+  const thresholdInvalid = storageThresholdErrors(effective).length > 0;
+  const invalid = parsed.some(({ error }) => error !== null) || thresholdInvalid;
   const changed = Object.keys(patch).length > 0;
 
   function edit(key: FieldKey, value: string) {
@@ -249,6 +260,9 @@ function PolicyForm({
             );
           })}
         </div>
+        {thresholdInvalid && <p role="alert" className="text-xs text-destructive">
+          {t(($) => $.storage.validation.threshold_order)}
+        </p>}
         {canManage ? (
           <div className="flex justify-end">
             <Button onClick={save} disabled={update.isPending || invalid || !changed}>

@@ -3733,6 +3733,7 @@ runMigrations(this.db);
     return this.usage.listAgentRuntime(input);
   }
   heartbeatRuntime(runtimeId: string, options: {
+    health?: import("@multiremi/contracts/daemon-protocol.js").DaemonHealth;
     claimPending?: boolean;
     supportsBatchImport?: boolean;
     supportsDirectoryScan?: boolean;

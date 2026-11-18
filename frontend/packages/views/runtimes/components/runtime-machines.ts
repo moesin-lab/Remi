@@ -74,6 +74,7 @@ interface RuntimeMachineDraft {
 
 const HEALTH_SEVERITY: Record<RuntimeHealth, number> = {
   online: 0,
+  degraded: 1,
   recently_lost: 1,
   offline: 2,
   about_to_gc: 3,

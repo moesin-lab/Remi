@@ -73,6 +73,11 @@ const FEISHU_BOT_FIELDS: readonly CliOptionSpec[] = [
 ];
 
 const STORAGE_FIELDS: readonly CliOptionSpec[] = [
+  { name: "pressure-free-percent", type: "integer", valueName: "n", description: "Pressure free space threshold (%); 0 disables this condition" },
+  { name: "pressure-free-bytes", type: "integer", valueName: "n", description: "Pressure free space threshold (bytes); 0 disables this condition" },
+  { name: "critical-free-percent", type: "integer", valueName: "n", description: "Critical free space threshold (%); 0 disables this condition" },
+  { name: "critical-free-bytes", type: "integer", valueName: "n", description: "Critical free space threshold (bytes); 0 disables this condition" },
+
   { name: "ttl-ms", type: "integer", valueName: "ms", description: "Retention after an Issue or Chat ends before its workspace is reclaimed" },
   { name: "automation-ttl-ms", type: "integer", valueName: "ms", description: "Same as --ttl-ms for Chats opened by automation runs" },
   { name: "max-retained", type: "integer", valueName: "n", description: "Ended subjects allowed to keep a workspace; 0 means no cap" },

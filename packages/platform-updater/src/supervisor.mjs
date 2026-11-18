@@ -4,6 +4,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { cp, mkdir, readFile, rename, rm, open, readdir } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
+import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { DATA_SCHEMA_INPUTS, API_BASE_INPUTS } from './container-runtime.mjs';
@@ -139,6 +140,32 @@ export async function supervise() {
     exit = new Promise(ok => { child.once('exit', ok); child.once('error', error => { spawnFailed = true; console.error(error.message); ok(); }); });
     current = id; runningVersion = selected.version; lastStart = Date.now();
   }
+  let slots = null, slotTask = null, slotError = null;
+  let restored = false;
+  // Keep the terminal outcome separate from heartbeats written during bootstrap.
+  const priorStatus = await readJson(join(directory, 'slot-selection.json')) ?? await readJson(join(directory, 'status.json'));
+  let savedOutcome = null;
+  const slotEnabled = role === 'api' && process.env.REMI_SLOT_SWITCH !== '0'
+    && (process.env.MULTIREMI_API_ROLE || 'all') === 'all' && !process.env.MULTIREMI_PEER_URL?.trim();
+  if (slotEnabled) {
+    const { SlotSupervisor } = await import('./slot-supervisor.mjs');
+    const { startEdge } = await import(new URL(existsSync(new URL('./edge/index.ts', import.meta.url)) ? './edge/index.ts' : '../../edge/src/index.ts', import.meta.url).href);
+    const port = Number(process.env.MULTIREMI_PORT || 6120);
+    const edge = startEdge({ hostname: process.env.MULTIREMI_HOST || '0.0.0.0', port,
+      controlSocket: join(directory, 'edge.sock'), holdMaxMs: 180000 });
+    slots = new SlotSupervisor(edge, async id => {
+      const selected = id ? await readJson(join(releaseDirectory(root, id), 'complete.json')) : base;
+      if (!selected) throw new Error('Release is incomplete');
+      return { ...location(id), version: selected.version,
+        args: ['run', '--preload', process.env.REMI_SUPERVISOR_FENCE || '/usr/local/lib/remi/host-write-fence.ts', 'apps/server/main.ts', 'serve'],
+        env: { ...process.env, MULTIREMI_VERSION: selected.version, REMI_APPLICATION_VERSION: selected.version,
+          MULTIREMI_HOST_WRITE_FENCE_FILE: join(control, 'write-fence.json') } };
+    }, { port, ...Object.fromEntries(['standbyWait', 'releaseWait', 'activateWait', 'confirmWait'].map(name => {
+      const value = process.env['REMI_SLOT_' + name.replace('Wait', '').toUpperCase() + '_WAIT_MS'];
+      if (value !== undefined && (!/^\d+$/.test(value) || Number(value) <= 0)) throw new Error('Invalid slot wait: ' + name);
+      return [name, value === undefined ? { standbyWait: 120000, releaseWait: 30000, activateWait: 60000, confirmWait: 180000 }[name] : Number(value)];
+    })) });
+  }
   const shutdown = () => { closing = true; };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
   try {
@@ -147,12 +174,28 @@ export async function supervise() {
       if (desired && (!['run', 'stop'].includes(desired.mode) || typeof desired.revision !== 'string')) throw new Error('Invalid supervisor command');
       const id = desired?.releaseId ?? null;
       if (id) releaseDirectory(root, id);
-      const dead = child && (spawnFailed || child.exitCode !== null || child.signalCode !== null);
-      if (dead) await stop();
-      if (desired?.mode === 'stop') await stop();
-      else if (child && (current !== id || revision !== (desired?.revision ?? null))) { await stop(); await start(id); }
-      else if (!child && Date.now() - lastStart >= 2000) await start(id);
-      revision = desired?.revision ?? null;
+      if (slotError) throw slotError;
+      if (slots) {
+        if (!slotTask) {
+          slotTask = (async () => {
+            // A terminal rollback must survive a container restart even though
+            // desired still names the rejected target. A new revision retries it.
+            if (!restored && priorStatus?.revision === desired?.revision
+              && ['succeeded', 'failed'].includes(priorStatus?.transition?.phase)) {
+              await slots.reconcile({ ...desired, releaseId: priorStatus.releaseId });
+              slots.transition = priorStatus.transition;
+            } else await slots.reconcile(desired);
+            restored = true;
+          })().catch(error => { slotError = error; }).finally(() => { slotTask = null; });
+        }
+      } else {
+        const dead = child && (spawnFailed || child.exitCode !== null || child.signalCode !== null);
+        if (dead) await stop();
+        if (desired?.mode === 'stop') await stop();
+        else if (child && (current !== id || revision !== (desired?.revision ?? null))) { await stop(); await start(id); }
+        else if (!child && Date.now() - lastStart >= 2000) await start(id);
+        revision = desired?.revision ?? null;
+      }
       const probe = await readJson(join(directory, 'probe.json'));
       if (probe && probe.id !== lastProbe?.id) {
         try {
@@ -165,13 +208,23 @@ export async function supervise() {
         } catch (error) { lastProbe = { id: probe.id, ok: false, error: error.message }; }
       }
       if (Date.now() - lastStatus >= 500) {
+        const snapshot = slots?.snapshot();
+        if (restored && snapshot?.childPid && snapshot.revision === snapshot.transition?.revision
+          && ['succeeded', 'failed'].includes(snapshot.transition?.phase)) {
+          const outcome = { revision: snapshot.revision, releaseId: snapshot.releaseId, transition: snapshot.transition };
+          const serialized = JSON.stringify(outcome);
+          if (serialized !== savedOutcome) {
+            await writeJson(join(directory, 'slot-selection.json'), outcome);
+            savedOutcome = serialized;
+          }
+        }
         await writeJson(join(directory, 'status.json'), { ...base, version: runningVersion, supervisorPid: process.pid, childPid: child?.pid ?? null,
-          releaseId: current, revision, stopped: !child, seedReady, seedError, probe: lastProbe, heartbeatAt: Date.now() });
+          releaseId: current, revision, stopped: !child, ...(snapshot ?? {}), seedReady, seedError, probe: lastProbe, heartbeatAt: Date.now() });
         lastStatus = Date.now();
       }
       await new Promise(ok => setTimeout(ok, 100));
     }
-  } finally { await stop(); }
+  } finally { if (slots) { slots.cancel(); await slotTask; await slots.stop(); } await stop(); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

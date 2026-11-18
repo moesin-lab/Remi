@@ -1,0 +1,107 @@
+import { test, expect } from 'bun:test';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { startEdge } from '../../packages/edge/src/index.js';
+import { SlotSupervisor } from '../../packages/platform-updater/src/slot-supervisor.mjs';
+
+for (const [name, behavior] of Object.entries({ success: {}, oldNoTerm: {}, noTerm: { noTerm: true }, releaseFailure: {}, unhealthyAfter: { unhealthyAfter: 200 }, immediateExit: { immediateExit: true },
+  standbyTimeout: { neverStandby: true }, activateFailure: { activateFails: true },
+  readinessTimeout: { neverReady: true }, crashAfter30s: { crashAfter: 30000 } })) {
+  test(`two releases: ${name}, continuous edge requests succeed`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'remi-slots-'));
+    const reservations = [0, 1].map(() => Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') }));
+    const ports = reservations.map(server => server.port!);
+    const edge = startEdge({ hostname: '127.0.0.1', port: 0, holdMaxMs: 10000, log: () => {} });
+    for (const server of reservations) await server.stop(true);
+    const controller = new SlotSupervisor(edge, async (id: string | null) => ({ cwd: join(root, id!), executable: process.execPath,
+      args: [resolve('tests/fixtures/supervisor-slot.ts')], version: id!, env: process.env }),
+      { ports, standbyWait: 500, activateWait: 500, releaseWait: 500, confirmWait: name === 'crashAfter30s' ? 32000 : name === 'unhealthyAfter' ? 4100 : 200 });
+    let probing = true, failures = 0, count = 0;
+    let probe: Promise<void> | undefined;
+    try {
+      for (const id of ['old', 'new']) { await mkdir(join(root, id!)); await writeFile(join(root, id, 'behavior.json'), JSON.stringify({ name: id, ...(id === 'new' ? behavior : { releaseFails: name === 'releaseFailure', noTerm: name === 'oldNoTerm' }) })); }
+      await controller.reconcile({ mode: 'run', releaseId: 'old', revision: 'initial' });
+      const oldPid = controller.snapshot().childPid;
+      probe = (async () => { while (probing) {
+        try { const response = await fetch(`http://127.0.0.1:${edge.server.port}/`, { signal: AbortSignal.timeout(9000) });
+          if (response.status !== 200 || !['old', 'new'].includes(await response.text())) failures++;
+        } catch { failures++; }
+        count++; await Bun.sleep(10);
+      } })();
+      await controller.reconcile({ mode: 'run', releaseId: 'new', revision: 'switch', strategy: 'switch' });
+      expect(controller.snapshot().transition!.phase).toBe(name === 'success' ? 'succeeded' : 'failed');
+      expect(controller.snapshot().releaseId).toBe(name === 'success' ? 'new' : 'old');
+      if (['immediateExit', 'standbyTimeout', 'activateFailure', 'readinessTimeout', 'releaseFailure', 'noTerm', 'oldNoTerm'].includes(name)) expect(controller.snapshot().childPid).toBe(oldPid);
+      probing = false; await probe;
+      expect(count).toBeGreaterThan(0); expect(failures).toBe(0);
+    } finally { probing = false; await probe; await controller.stop(); await rm(root, { recursive: true, force: true }); }
+  }, 45000);
+}
+
+test('image supervisor keeps heartbeats and a terminal rollback across restart', async () => {
+  const { readFile, symlink } = await import('node:fs/promises');
+  const { DATA_SCHEMA_INPUTS, API_BASE_INPUTS } = await import('../../packages/platform-updater/src/container-runtime.mjs');
+  const { readJson, writeJson } = await import('../../packages/platform-updater/src/supervisor.mjs');
+  const root = await mkdtemp(join(tmpdir(), 'remi-supervisor-'));
+  const source = join(root, 'source'), control = join(root, 'control'), program = join(root, 'program');
+  const reservations: ReturnType<typeof Bun.serve>[] = [];
+  let port = 0;
+  for (let attempt = 0; attempt < 30 && !port; attempt++) {
+    try {
+      const first = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') }); reservations.push(first);
+      for (const next of [first.port! + 1, first.port! + 2]) reservations.push(Bun.serve({ hostname: '127.0.0.1', port: next, fetch: () => new Response('') }));
+      port = first.port!;
+    } catch { for (const server of reservations.splice(0)) await server.stop(true); }
+  }
+  expect(port).toBeGreaterThan(0);
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  const statusPath = join(control, 'api/status.json');
+  async function until(check: () => Promise<boolean>, timeout = 10000) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) { if (await check()) return; await Bun.sleep(50); }
+    throw new Error('Supervisor state wait timed out');
+  }
+  const start = () => Bun.spawn([process.execPath, resolve('packages/platform-updater/src/supervisor.mjs')], {
+    env: { ...process.env, REMI_SUPERVISOR_ROLE: 'api', REMI_SUPERVISOR_SOURCE: source,
+      REMI_SUPERVISOR_CONTROL: control, REMI_APPLICATION_ROOT: program, REMI_SUPERVISOR_SEED: join(root, 'seed'),
+      REMI_SUPERVISOR_FENCE: join(source, 'empty.ts'), REMI_APPLICATION_BASE_VERSION: 'old',
+      REMI_APPLICATION_BASE_REF: 'test', MULTIREMI_PORT: String(port), MULTIREMI_HOST: '127.0.0.1',
+      REMI_SLOT_STANDBY_WAIT_MS: '1600', REMI_SLOT_ACTIVATE_WAIT_MS: '1000', REMI_SLOT_CONFIRM_WAIT_MS: '1000' },
+    stdout: 'ignore', stderr: 'inherit',
+  });
+  try {
+    for (const file of [...DATA_SCHEMA_INPUTS, ...API_BASE_INPUTS, 'apps/server/main.ts', 'empty.ts']) {
+      const path = join(source, file); await mkdir((await import('node:path')).dirname(path), { recursive: true });
+      await writeFile(path, '// fixture');
+    }
+    await writeFile(join(source, 'apps/server/main.ts'), await readFile(resolve('tests/fixtures/supervisor-slot.ts')));
+    await writeFile(join(source, 'behavior.json'), JSON.stringify({ name: 'old' }));
+    const release = join(program, 'releases', 'rejected');
+    await mkdir(join(release, 'api/apps/server'), { recursive: true }); await mkdir(join(release, 'runtime'));
+    await writeFile(join(release, 'api/apps/server/main.ts'), await readFile(resolve('tests/fixtures/supervisor-slot.ts')));
+    await writeFile(join(release, 'api/behavior.json'), JSON.stringify({ name: 'new', neverStandby: true }));
+    await writeJson(join(release, 'complete.json'), { version: 'new' });
+    await symlink(process.execPath, join(release, 'runtime/bun'));
+    for (const server of reservations.splice(0)) await server.stop(true);
+    child = start();
+    await until(async () => Boolean((await readJson(statusPath))?.seedReady && (await readJson(statusPath))?.childPid && (await readJson(statusPath))?.transition?.phase === 'succeeded'));
+    await writeJson(join(control, 'api/desired.json'), { revision: 'rejected-switch', releaseId: 'rejected', mode: 'run', strategy: 'switch' });
+    await until(async () => (await readJson(statusPath))?.transition?.phase === 'standby');
+    const heartbeat = (await readJson(statusPath)).heartbeatAt;
+    await until(async () => (await readJson(statusPath))?.heartbeatAt > heartbeat);
+    await until(async () => (await readJson(statusPath))?.transition?.phase === 'failed');
+    expect((await readJson(statusPath)).releaseId).toBeNull();
+    child.kill('SIGTERM'); await child.exited;
+    child = start();
+    await until(async () => Boolean((await readJson(statusPath))?.supervisorPid === child!.pid && (await readJson(statusPath))?.childPid));
+    await Bun.sleep(600);
+    expect((await readJson(statusPath)).transition.phase).toBe('failed');
+    expect((await readJson(statusPath)).releaseId).toBeNull();
+    expect(await (await fetch(`http://127.0.0.1:${port}/`)).text()).toBe('old');
+  } finally {
+    if (child) { child.kill('SIGTERM'); await child.exited; }
+    for (const server of reservations) await server.stop(true);
+    await rm(root, { recursive: true, force: true });
+  }
+}, 25000);

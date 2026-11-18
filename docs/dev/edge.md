@@ -8,7 +8,8 @@ summary: Independent Bun edge listener, slot control and verification.
 
 [Edge](../../packages/edge/src/index.ts) owns a long-lived HTTP listener and routes each
 request to a round-robin `live` backend. It does not start slots or modify deployment
-routing. Supervisor integration and trusted proxy configuration belong to MUL-102 A4.
+routing. The internal updater supervisor embeds edge and configures trusted loopback
+slots; see [dual-slot operations](../deploy/internal-slot-switch.md).
 
 Run with Bun 1.3.14:
 

@@ -65,6 +65,23 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
     expect(readSchemaLevels(db).contractLevel).toBe(0);
     console.info('explicit CLI contract --level 1: refused (No declared contract migration for the target level); contractLevel=0');
   });
+  it('rejects all four COLUMN-omitted destructive actions without advancing metadata', () => {
+    db.exec('CREATE TABLE mul173_omitted_column (c TEXT)');
+    const before = readSchemaLevels(db);
+    const columns = () => db.query("SELECT column_name,data_type,is_nullable FROM information_schema.columns WHERE table_name='mul173_omitted_column' ORDER BY ordinal_position").all();
+    const original = columns();
+    for (const [index, action] of ['DROP c', 'RENAME c TO d', 'ALTER c TYPE integer', 'ALTER c SET NOT NULL'].entries()) {
+      const sql = `ALTER TABLE mul173_omitted_column ${action}`;
+      const id = `pg-omitted-column-${index}`;
+      const steps: SchemaMigration[] = [{ id, phase: 'expand', level: before.expandLevel + 1,
+        expandRelease: '9.0.0', release: '9.0.0', run: guarded => guarded.exec(sql) }];
+      expect(() => runSchemaExpands(db, steps, '9.0.0', { minLevel: 2, maxLevel: 2 })).toThrow('Destructive DDL is forbidden');
+      expect(readSchemaLevels(db)).toEqual(before);
+      expect(db.query('SELECT id FROM multiremi_schema_steps WHERE id=?').get(id)).toBeNull();
+      expect(columns()).toEqual(original);
+      console.info(`Rejected through runSchemaExpands: ${sql}; expandLevel=${before.expandLevel}, contractLevel=${before.contractLevel}; step absent, columns unchanged`);
+    }
+  });
   it('checks actual online clients before contract, and executes after they disconnect', async () => {
     const steps: SchemaMigration[] = [{ id: 'pg-expand', phase: 'expand', level: 1, expandRelease: '1.0.0', release: '1.0.0',
       run: db => db.exec('CREATE TABLE mul173_retained (id INTEGER)') },

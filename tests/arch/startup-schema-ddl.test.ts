@@ -9,14 +9,15 @@ import historical from './startup-schema-ddl-allowlist.json';
 
 const root = resolve(import.meta.dir, '../..');
 describe('startup migration expand discipline', () => {
-  it('never grows the historical allowlist relative to the CI base', () => {
-    const base = process.env.SCHEMA_DDL_BASE_REF;
-    if (!base || /^0+$/.test(base)) return;
-    if (!/^[a-f0-9]{40}$/.test(base)) throw new Error('SCHEMA_DDL_BASE_REF must be a commit SHA');
+  const base = process.env.SCHEMA_DDL_BASE_REF;
+  const hasBase = Boolean(base && !/^0+$/.test(base!));
+  (hasBase ? it : it.skip)('never grows the historical allowlist relative to the CI base'
+    + (hasBase ? '' : ' (SCHEMA_DDL_BASE_REF unset or zero; CI base comparison unavailable)'), () => {
+    if (!/^[a-f0-9]{40}$/.test(base!)) throw new Error('SCHEMA_DDL_BASE_REF must be a commit SHA');
     const path = 'tests/arch/startup-schema-ddl-allowlist.json';
     // The initial protocol PR introduces this file. Every subsequent change
     // must be a multiset subset of the target branch's manifest.
-    const files = execFileSync('git', ['ls-tree', '--name-only', base, path], { cwd: root, encoding: 'utf8' });
+    const files = execFileSync('git', ['ls-tree', '--name-only', base!, path], { cwd: root, encoding: 'utf8' });
     if (!files.trim()) return;
     const previous = JSON.parse(execFileSync('git', ['show', `${base}:${path}`], { cwd: root, encoding: 'utf8' })) as typeof historical;
     const counts = new Map<string, number>();
@@ -26,7 +27,7 @@ describe('startup migration expand discipline', () => {
       counts.set(entry.fingerprint, (counts.get(entry.fingerprint) ?? 0) - 1);
     }
   });
-  it('rejects new destructive statements anywhere in the startup import chain', () => {
+  it('rejects new destructive statements anywhere in non-test server source', () => {
     const allowed = new Map<string, number>();
     for (const entry of historical) allowed.set(entry.fingerprint, (allowed.get(entry.fingerprint) ?? 0) + 1);
     const unexpected = startupSchemaDdl(root).filter(entry => {
@@ -37,14 +38,14 @@ describe('startup migration expand discipline', () => {
     });
     expect(unexpected.map(entry => `${entry.file}:${entry.line}: ${entry.sql}`)).toEqual([]);
   });
-  it('finds newly injected DDL in imported helpers and binds template expressions', () => {
+  it('finds DDL in new and unimported jobs and binds template expressions', () => {
     const fixture = mkdtempSync(resolve(tmpdir(), 'mul173-arch-'));
     try {
       const store = resolve(fixture, 'packages/server/src/store');
       mkdirSync(store, { recursive: true });
       writeFileSync(resolve(fixture, 'tsconfig.json'), JSON.stringify({ compilerOptions: { moduleResolution: 'bundler', module: 'esnext' } }));
       writeFileSync(resolve(store, 'migrations.ts'), "import './helper.js';\nimport type { T } from './types.js';");
-      writeFileSync(resolve(store, 'types.ts'), "export type T = 'DROP TABLE type_only';");
+      writeFileSync(resolve(store, 'types.ts'), "export type T = 'type_only';");
       const helper = resolve(store, 'helper.ts');
       writeFileSync(helper, 'export const sql = `ALTER TABLE ${first} RENAME TO retired`;');
       const first = startupSchemaDdl(fixture);
@@ -54,6 +55,11 @@ describe('startup migration expand discipline', () => {
       expect(startupSchemaDdl(fixture)[0]!.fingerprint).not.toBe(first[0]!.fingerprint);
       writeFileSync(helper, "export const sql = 'ALTER TABLE t ADD COLUMN added TEXT';");
       expect(startupSchemaDdl(fixture)).toEqual([]);
+      writeFileSync(resolve(store, 'new-background-job.ts'), 'export const run = db => db.exec("ALTER TABLE t RENAME c TO d");');
+      expect(startupSchemaDdl(fixture).map(entry => entry.file)).toEqual(['packages/server/src/store/new-background-job.ts']);
+      writeFileSync(resolve(store, 'schema-contracts.ts'), 'export const run = db => db.exec("DROP TABLE retired");');
+      writeFileSync(resolve(store, 'ignored.test.ts'), 'const sql = "DROP TABLE test_table";');
+      expect(startupSchemaDdl(fixture)).toHaveLength(1);
     } finally { rmSync(fixture, { recursive: true, force: true }); }
   });
   it('recognizes destructive DDL, including multiline and quoted columns', () => {

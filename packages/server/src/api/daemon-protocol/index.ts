@@ -53,14 +53,14 @@ import {
 } from "./session.js";
 import { readPayload, type DaemonParsedFrame } from "./frames.js";
 
-function runtimeCapabilityOptions(capabilities: DaemonRuntimeCapabilities | undefined) {
+function runtimeCapabilityOptions(capabilities: DaemonRuntimeCapabilities | undefined, supportsPlannedRestart: boolean) {
   const reported = capabilities ?? {};
   const version = (value: unknown) => {
     const number = Number(value);
     return Number.isSafeInteger(number) && number >= 0 ? number : 0;
   };
   return {
-    plannedRestartProtocol: reported.planned_restart === 1 ? 1 : 0,
+    plannedRestartProtocol: supportsPlannedRestart && reported.planned_restart === 1 ? 1 : 0,
     supportsBatchImport: reported.supports_batch_import === true,
     supportsDirectoryScan: reported.supports_directory_scan === true,
     supportsSkillDirectory: reported.supports_skill_directory === true,
@@ -162,7 +162,7 @@ export class DaemonProtocolLayer {
         for (const runtimeId of session.runtimeIds) {
           this.store.recordDaemonProtocol(runtimeId, hello.daemonId, DAEMON_PROTOCOL_VERSION, hello.cliVersion);
           const runtime = hello.runtimes.find(entry => entry.runtimeId === runtimeId);
-          this.store.heartbeatRuntime(runtimeId, { claimPending: false, ...runtimeCapabilityOptions(runtime?.capabilities) });
+          this.store.heartbeatRuntime(runtimeId, { claimPending: false, ...runtimeCapabilityOptions(runtime?.capabilities, session.supportsPlannedRestart) });
           this.recordExternalChatCapabilities(runtimeId, runtime?.capabilities);
           // PR 6 §5.2: a running background task survives a reconnect only on a
           // parked lane the hello lists, or on an attempt still active; the
@@ -175,7 +175,7 @@ export class DaemonProtocolLayer {
         for (const hooks of this.sessionHooks) hooks.hello?.(session, hello);
       },
       onHeartbeat: heartbeat => {
-        const reply = withSynchronousRequestReadCache(() => this.handleHeartbeat(heartbeat));
+        const reply = withSynchronousRequestReadCache(() => this.handleHeartbeat(heartbeat, session.supportsPlannedRestart));
         for (const hooks of this.sessionHooks) hooks.heartbeat?.(session, heartbeat);
         return reply;
       },
@@ -278,8 +278,8 @@ export class DaemonProtocolLayer {
   }
 
   /** The `hb` handler, exposed so its store effects and reply can be asserted. */
-  handleHeartbeatForTest(heartbeat: DaemonSessionHeartbeat): DaemonHeartbeatReplyPayload {
-    return this.handleHeartbeat(heartbeat);
+  handleHeartbeatForTest(heartbeat: DaemonSessionHeartbeat, supportsPlannedRestart = false): DaemonHeartbeatReplyPayload {
+    return this.handleHeartbeat(heartbeat, supportsPlannedRestart);
   }
 
   /** Register an RPC handler. A-6 uses this for `trace.head`/`subscribe`/`fetch`. */
@@ -505,7 +505,7 @@ export class DaemonProtocolLayer {
    * are never written: one of them may belong to a different daemon, and stamping
    * it would make this machine look alive for a runtime it does not own.
    */
-  private handleHeartbeat(heartbeat: DaemonSessionHeartbeat): DaemonHeartbeatReplyPayload {
+  private handleHeartbeat(heartbeat: DaemonSessionHeartbeat, supportsPlannedRestart: boolean): DaemonHeartbeatReplyPayload {
     // Recheck daemon-wide authority before stamping any runtime heartbeat.
     if (this.heartbeatOwnerCheck(heartbeat)) return { runtime_acks: [] };
     // Reading the maintenance row also enforces the drain lease TTL lazily, so a
@@ -526,7 +526,7 @@ export class DaemonProtocolLayer {
       const reported = reportedRuntimes.find(entry => entry.runtime_id === runtimeId);
       const ack = this.store.heartbeatRuntime(runtimeId, { claimPending: false,
         health: parseDaemonHealth(reported?.health ?? heartbeat.payload.health),
-        ...runtimeCapabilityOptions(readPayload(reported?.capabilities) as DaemonRuntimeCapabilities) });
+        ...runtimeCapabilityOptions(readPayload(reported?.capabilities) as DaemonRuntimeCapabilities, supportsPlannedRestart) });
       this.store.reconcileDaemonDrain(runtimeId);
       if (ack.status !== "runtime_gone") this.recordExternalChatCapabilities(runtimeId, readPayload(reported?.capabilities) as DaemonRuntimeCapabilities);
       if (ack.status === "runtime_gone") {

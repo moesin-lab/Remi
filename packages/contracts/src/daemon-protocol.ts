@@ -1061,6 +1061,8 @@ export const DAEMON_PROTOCOL_CAPS = [
   "offer",
   /** daemon accepts unified turn inputs and reports replies as messages. */
   "turn.message",
+  /** Same-attempt checkpoint, journal and restart RPCs. */
+  "turn.restart",
   "input_unread",
   /** daemon answers `trace.read` for its hot tasks. */
   "trace.read",

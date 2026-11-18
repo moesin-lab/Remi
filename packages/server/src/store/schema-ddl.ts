@@ -8,7 +8,10 @@ const isUnsupportedToken = (token: string): token is keyof typeof unsupportedSql
  * Template placeholders are opaque identifiers for the architecture scanner. */
 function sqlTokens(sql: string): string[] {
   const tokens: string[] = [];
-  const pattern = /\s+|--[^\n]*|E'(?:\\[\s\S]|''|[^'\\])*'|[BXN]?'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|\$([a-z_][a-z_0-9]*)?\$[\s\S]*?\$\1\$|(?:\$\{[^}]*\}|[\p{L}_](?:[\p{L}\p{N}_]|\$(?!\{))*|\$[0-9]+|\?)+|[^\s]/giu;
+  // PG 16 lexical rules: tags follow unquoted identifier rules without $,
+  // must not follow an identifier, and closing delimiters match exact case.
+  // https://www.postgresql.org/docs/16/sql-syntax-lexical.html#SQL-SYNTAX-DOLLAR-QUOTING
+  const pattern = /\s+|--[^\n]*|[Ee]'(?:\\[\s\S]|''|[^'\\])*'|[BbXxNn]?'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|(?<![A-Za-z0-9_$\x80-\u{10FFFF}])\$([A-Za-z_\x80-\u{10FFFF}][A-Za-z_0-9\x80-\u{10FFFF}]*)?\$[\s\S]*?\$\1\$|(?:\$\{[^}]*\}|[\p{L}_](?:[\p{L}\p{N}_]|\$(?!\{))*|\$[0-9]+|\?)+|[^\s]/gu;
   let offset = 0, afterLiteral = false, newlineTrivia = false;
   while (offset < sql.length) {
     if (sql.startsWith('/*', offset)) {
@@ -30,7 +33,7 @@ function sqlTokens(sql: string): string[] {
     }
     // Registered SQL deliberately excludes PG Unicode escapes. Do not try to
     // parse UESCAPE or its string continuations: reject the whole statement.
-    if (/^u&["']/i.test(sql.slice(offset, offset + 3))) {
+    if (/^[Uu]&["']/.test(sql.slice(offset, offset + 3))) {
       tokens.push('<unsupported-unicode-escape>');
       offset += 2;
       continue;
@@ -43,11 +46,11 @@ function sqlTokens(sql: string): string[] {
       if (afterLiteral && /[\r\n]/.test(token)) newlineTrivia = true;
       continue;
     }
-    afterLiteral = /^(?:[EBXN])?'/i.test(token);
+    afterLiteral = /^(?:[EeBbXxNn])?'/.test(token);
     newlineTrivia = false;
     tokens.push(token);
   }
-  return tokens.map(token => isUnsupportedToken(token) ? token : /^(?:["'$`\[]|[EBXN]')/i.test(token)
+  return tokens.map(token => isUnsupportedToken(token) ? token : /^(?:["'$`\[]|[EeBbXxNn]')/.test(token)
     ? '<identifier-or-value>' : token.toUpperCase());
 }
 

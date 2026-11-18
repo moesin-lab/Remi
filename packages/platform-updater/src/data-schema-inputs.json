@@ -7,5 +7,21 @@
   "packages/server/src/store/db/postgres.ts",
   "packages/server/src/store/db/pg-worker.ts",
   "packages/contracts/src/attachments.ts",
-  "packages/shared/src/db/index.ts"
+  "packages/shared/src/db/index.ts",
+  "packages/server/src/store/autopilot-run-records.ts",
+  "packages/server/src/store/inbox/attempt-counters.ts",
+  "packages/server/src/store/inbox/attempt-input.ts",
+  "packages/server/src/store/inbox/decision-migration.ts",
+  "packages/server/src/store/inbox/decision-records.ts",
+  "packages/server/src/store/inbox/lane-migration.ts",
+  "packages/server/src/store/inbox/question-indexes.ts",
+  "packages/server/src/store/live-term-fence.ts",
+  "packages/server/src/store/lock-order-sentinel.ts",
+  "packages/server/src/store/pending-turns.ts",
+  "packages/server/src/store/turn-execution-records.ts",
+  "packages/server/src/store/turn-list-indexes.ts",
+  "packages/server/src/store/unified-model-migration.ts",
+  "packages/server/src/store/unified-model-schema.ts",
+  "packages/server/src/store/usage-accounting.ts",
+  "packages/server/src/store/usage-migration.ts"
 ]

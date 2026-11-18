@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { installRuntimeBundle, runtimeBundleBridge, runtimeBundlePrefix, verifyRuntimeExecutable } from "@acp/runtime-bundle.js";
+import { removeRuntimeStaging, installRuntimeBundle, runtimeBundleBridge, runtimeBundlePrefix, verifyRuntimeExecutable } from "@acp/runtime-bundle.js";
 import { BRIDGE_PACKAGE, BRIDGE_PIN, RUNTIME_PIN } from "@acp/runtime-versions.js";
 
 const node = Bun.which("node")!;
@@ -114,3 +114,38 @@ test("a symlinked home installs the pinned SDK and preserves the old bundle", ()
   expect(readFileSync(join(bundles, backup!, "previous-install"), "utf8")).toBe("keep this working install");
   expect(names.some((name) => name.startsWith("."))).toBe(false);
 });
+
+for (const code of ["EBUSY", "EPERM", "ENOTEMPTY"]) {
+  test(`staging cleanup retries transient Windows ${code} until released`, () => {
+    const delays: number[] = [];
+    let attempts = 0;
+    removeRuntimeStaging("stage", { platform: "win32", remove: (path) => {
+      expect(path).toBe("stage");
+      if (++attempts < 3) throw Object.assign(new Error("locked"), { code });
+    }, wait: ms => { delays.push(ms); } });
+    expect(attempts).toBe(3);
+    expect(delays).toEqual([100, 200]);
+  });
+}
+
+test("staging cleanup preserves errors after a bounded Windows retry budget", () => {
+  const failure = Object.assign(new Error("still locked"), { code: "EBUSY" });
+  const delays: number[] = [];
+  let attempts = 0;
+  expect(() => removeRuntimeStaging("stage", { platform: "win32", remove: () => {
+    attempts++; throw failure;
+  }, wait: ms => { delays.push(ms); } })).toThrow(failure);
+  expect(attempts).toBe(6);
+  expect(delays).toEqual([100, 200, 300, 400, 500]);
+});
+
+for (const [platform, code] of [["linux", "EBUSY"], ["win32", "EACCES"]]) {
+  test(`staging cleanup immediately propagates ${platform} ${code}`, () => {
+    const failure = Object.assign(new Error("permanent"), { code });
+    let attempts = 0;
+    expect(() => removeRuntimeStaging("stage", { platform: platform!, remove: () => {
+      attempts++; throw failure;
+    }, wait: () => { throw new Error("must not wait"); } })).toThrow(failure);
+    expect(attempts).toBe(1);
+  });
+}

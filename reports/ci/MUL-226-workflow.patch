@@ -1,0 +1,193 @@
+diff --git a/.github/workflows/release-build-check.yml b/.github/workflows/release-build-check.yml
+index 7ee7b92ca..10a88059f 100644
+--- a/.github/workflows/release-build-check.yml
++++ b/.github/workflows/release-build-check.yml
+@@ -125,7 +125,7 @@ jobs:
+       - name: Install dependencies from the public registry
+         run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+       # Keep configuration, credentials, model selection and real daemon
+-      # dispatch covered on PRs too, where the full backend shards are skipped.
++      # dispatch covered early on PRs as well as in the full backend shards.
+       - name: Capability group contracts and daemon execution
+         run: >-
+           bun run test
+@@ -155,6 +155,7 @@ jobs:
+ 
+   platform-updater:
+     strategy:
++      fail-fast: false
+       matrix:
+         os: [ubuntu-latest, windows-latest, macos-latest]
+     runs-on: ${{ matrix.os }}
+@@ -212,6 +213,7 @@ jobs:
+ 
+   runtime-platform:
+     strategy:
++      fail-fast: false
+       matrix:
+         os: [ubuntu-latest, macos-latest]
+     runs-on: ${{ matrix.os }}
+@@ -312,7 +314,7 @@ jobs:
+           CI: "true"
+           GITHUB_ACTIONS: "true"
+         run: >-
+-          bun run test tests/unit/scripts/ci-backend.test.ts
++          bun run test tests/unit/scripts/ci-backend.test.ts tests/unit/scripts/ci-backend-required.test.ts
+           tests/unit/scripts/run-tests.test.ts tests/unit/scripts/run-tests-signals.test.ts
+           tests/unit/scripts/retry-failed-backend-tests.test.ts tests/unit/scripts/release-candidate.test.ts
+       # Intentionally repeated in full backend discovery: early structural feedback.
+@@ -510,10 +512,10 @@ jobs:
+           retention-days: 30
+ 
+   backend-plan:
+-    if: github.event_name != 'pull_request'
+     runs-on: ubuntu-latest
+     outputs:
+       shards: ${{ steps.plan.outputs.shards }}
++      required: ${{ steps.scope.outputs.required }}
+     env:
+       # The only place the backend shard count is set. The `backend` matrix is
+       # read back from the plan's own shard indices, and `verify` requires one
+@@ -521,16 +523,27 @@ jobs:
+       BACKEND_SHARDS: 8
+     steps:
+       - uses: actions/checkout@v4
++        with:
++          fetch-depth: 0
+       - uses: oven-sh/setup-bun@v2
+         with:
+           bun-version: 1.3.14
++      - name: Detect backend inputs
++        id: scope
++        env:
++          EVENT_NAME: ${{ github.event_name }}
++          BASE_SHA: ${{ github.event.pull_request.base.sha }}
++          HEAD_SHA: ${{ github.sha }}
++        run: bun run scripts/ci-backend-required.ts >> "$GITHUB_OUTPUT"
+       - name: Plan backend shards
++        if: steps.scope.outputs.required == 'true'
+         id: plan
+         run: |
+           bun run scripts/ci-backend.ts plan --sha "$GITHUB_SHA" --shards "$BACKEND_SHARDS" --out ci-backend/plan.json
+           shards="$(jq -c '[.shards[].index]' ci-backend/plan.json)"
+           echo "shards=$shards" >> "$GITHUB_OUTPUT"
+       - uses: actions/upload-artifact@v4
++        if: steps.scope.outputs.required == 'true'
+         with:
+           name: backend-plan
+           path: ci-backend/plan.json
+@@ -538,6 +551,7 @@ jobs:
+ 
+   backend:
+     needs: backend-plan
++    if: needs.backend-plan.outputs.required == 'true'
+     strategy:
+       fail-fast: false
+       matrix:
+@@ -673,6 +687,7 @@ jobs:
+       - name: Require every applicable check
+         env:
+           RESULTS: ${{ toJSON(needs) }}
++          BACKEND_REQUIRED: ${{ needs.backend-plan.outputs.required }}
+           EVENT: ${{ github.event_name }}
+           RETRY: ${{ inputs.retry_backend_run_id }}
+           REF: ${{ github.ref }}
+@@ -680,9 +695,12 @@ jobs:
+           python3 - <<'PYCODE'
+           import json, os
+           results = {k: v['result'] for k,v in json.loads(os.environ['RESULTS']).items()}
+-          skipped = {'backend-plan', 'backend', 'backend-evidence', 'backend-retry'}
+-          if os.environ['EVENT'] == 'pull_request':
++          required = os.environ['BACKEND_REQUIRED']
++          assert required in ('true', 'false'), 'missing backend scope'
++          skipped = {'backend-retry'}
++          if os.environ['EVENT'] == 'pull_request' and required == 'false':
+               mode = 'pr-fast'
++              skipped |= {'backend', 'backend-evidence'}
+           else:
+               mode = 'full'
+               skipped = {'backend-retry'}
+diff --git a/AGENTS.md b/AGENTS.md
+index eb68ccb39..6fe6fdea0 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -37,8 +37,7 @@
+   必须一致且不得复用 tag，平台部署与 daemon CLI 发版分开处理。
+ - 发版必须使用公共依赖源和固定 Bun 版本，并先通过
+   `.github/workflows/release-build-check.yml` 的完整检查；失败时不得发版。
+-  完整检查指目标 main SHA 的 main push 运行或 main 上的手动运行：合并请求上的
+-  运行跳过后端全套 `bun test`，不能作为发版依据（见 [TESTING.md](TESTING.md) 的 CI 覆盖）。
++  完整检查指目标 main SHA 的 main push 运行或 main 上的手动运行：合并请求按路径选择后端全套 `bun test`，仍不能作为发版依据（见 [TESTING.md](TESTING.md) 的 CI 覆盖）。
+ - 每次发版（包括夜间发版）先运行 `bun run release:prepare --version <下一版本>`，
+   查询并验证最新稳定 ACP / Claude SDK / CC / Codex，更新 `package.json` 与
+   `packages/acp/src/runtime-versions.json`，同批提交后再跑 CI、打 tag。
+diff --git a/TESTING.md b/TESTING.md
+index 9170d40d6..ab683fad0 100644
+--- a/TESTING.md
++++ b/TESTING.md
+@@ -146,10 +146,10 @@ MUL-71 首轮在隔离 daemon 注册前超时：本任务执行端的 `/tmp` 路
+ | 工作流 | 实际检查范围 |
+ |---|---|
+ | [dev-context.yml](.github/workflows/dev-context.yml) | PR / main push；Linux、Windows 上的 Node 检查器测试及默认文档阅读链校验 |
+-| [release-build-check.yml](.github/workflows/release-build-check.yml) | 按路径触发；独立的架构/CLI 守卫、CI 编排小回归、前端类型、前端测试、CLI/API/Web 构建、平台专项和浏览器专项；main push 与手动运行另有八个后端分片及完整覆盖校验 |
++| [release-build-check.yml](.github/workflows/release-build-check.yml) | 按路径触发；独立的架构/CLI 守卫、CI 编排小回归、前端类型、前端测试、CLI/API/Web 构建、平台专项和浏览器专项；后端输入相关 PR、main push 与手动运行另有八个后端分片及完整覆盖校验 |
+ | [release.yml](.github/workflows/release.yml) / [platform-release.yml](.github/workflows/platform-release.yml) | 校验准备快照、tag 版本及同一 main SHA 的成功完整 CI（包括八个后端分片与覆盖校验）；CLI 复用符合来源与内容校验的正式 candidate，正式平台镜像保持多架构原构建路径，缺少可用 candidate 时保留原构建路径 |
+ 
+-`build` 保留为分支保护的必需检查，是所有适用 job 的汇总，不再承载串行测试与构建。平台专项 job `session-archive-platform` 已更名为 `runtime-platform`（ubuntu-latest 与 macos-latest 两个矩阵项，仍验证固定的 ACP 桥与内置 agent runtime，归档回归随 ADR 0018 删除）；`build` 的 `needs` 已改用新名。若分支保护的必需检查直接列出了 `session-archive-platform (ubuntu-latest)` / `session-archive-platform (macos-latest)`，需由仓库管理员改为 `runtime-platform (ubuntu-latest)` / `runtime-platform (macos-latest)`，否则旧名永远等不到状态而阻塞合并。它逐项要求预期的 success / skipped；失败、取消、缺少分片报告或非预期 skipped 均不能给出绿灯。PR 跳过后端分片；main push 与所有手动运行要求完整后端覆盖，指定 retry 也不跳过完整分片。PR 新提交取消该 PR 的旧运行，main 运行互不取消。浏览器副本专项 `frontend-replica` 保留路径检测，路径不相关时跳过专项步骤，job 仍需正常成功。前端零跳动浏览器检查已移除；[ADR 0008](docs/adr/0008-issue-detail-anchored-reveal-and-stick-to-bottom.md) 的零跳动设计规则保留，详见[性能调查](docs/dev/performance.md)的「CI 零跳动检查（已删除）」。API/Web 镜像构建在 PR 上只读取 main 的 gha 层缓存、不导出；main push 与手动运行照常导出。
++`build` 保留为分支保护的必需检查，是所有适用 job 的汇总，不再承载串行测试与构建。平台专项 job `session-archive-platform` 已更名为 `runtime-platform`（ubuntu-latest 与 macos-latest 两个矩阵项，仍验证固定的 ACP 桥与内置 agent runtime，归档回归随 ADR 0018 删除）；`build` 的 `needs` 已改用新名。若分支保护的必需检查直接列出了 `session-archive-platform (ubuntu-latest)` / `session-archive-platform (macos-latest)`，需由仓库管理员改为 `runtime-platform (ubuntu-latest)` / `runtime-platform (macos-latest)`，否则旧名永远等不到状态而阻塞合并。它逐项要求预期的 success / skipped；失败、取消、缺少分片报告或非预期 skipped 均不能给出绿灯。PR 由 `scripts/ci-backend-required.ts` 检查 base 到 merge SHA 的变更：`packages/`、`apps/`、`tests/`、`scripts/`、`bin/`、`deploy/`、workflow 或根依赖/测试配置变化运行完整八片（含 PG），纯 docs/前端跳过；无法读取 diff 时保守运行全量。`backend-plan` 始终成功完成路径判定，`build` 按其输出要求后端 success 或 skipped；平台矩阵关闭 fail-fast，单个平台失败不会取消其他平台，但仍令汇总失败。main push 与所有手动运行要求完整后端覆盖，指定 retry 也不跳过完整分片。PR 新提交取消该 PR 的旧运行，main 运行互不取消。浏览器副本专项 `frontend-replica` 保留路径检测，路径不相关时跳过专项步骤，job 仍需正常成功。前端零跳动浏览器检查已移除；[ADR 0008](docs/adr/0008-issue-detail-anchored-reveal-and-stick-to-bottom.md) 的零跳动设计规则保留，详见[性能调查](docs/dev/performance.md)的「CI 零跳动检查（已删除）」。API/Web 镜像构建在 PR 上只读取 main 的 gha 层缓存、不导出；main push 与手动运行照常导出。
+ 
+ [ci-backend.ts](scripts/ci-backend.ts) 从 bunfig 的 test root 自动发现 Bun 支持的 `.test` / `_test` / `.spec` / `_spec` 文件和八种 JS/TS 扩展，排除隐藏目录与 node_modules，隐藏文件名仍按后缀发现；不维护测试文件清单。它按 [历史权重](scripts/ci-backend-weights.json) 做 LPT 分配，新文件使用至少 60 秒或历史 p90 的保守权重。现行权重由下文 `weights` 命令从文件中标识的完整运行（run ID 与 SHA）的覆盖报告导入，是该次运行各文件的实测时间；覆盖报告里没有的旧条目（已删除的文件）原样保留，规划只取当前发现的文件，不影响分配。权重只用于调度估算，不能视为当前版本的实测耗时。
+ 
+diff --git a/tests/arch/release-workflows.test.ts b/tests/arch/release-workflows.test.ts
+index c6aba62e4..b0330a5b9 100644
+--- a/tests/arch/release-workflows.test.ts
++++ b/tests/arch/release-workflows.test.ts
+@@ -59,7 +59,9 @@ describe("release workflows", () => {
+     expect(ci.on).toHaveProperty("workflow_dispatch");
+     expect(ci.jobs.backend.strategy.matrix.shard).toBe("${{ fromJSON(needs.backend-plan.outputs.shards) }}");
+     const backend = ci.jobs.backend.steps.find((step: any) => step.name === "Backend test shard");
+-    expect(ci.jobs["backend-plan"].if).toBe("github.event_name != 'pull_request'");
++    expect(ci.jobs["backend-plan"].if).toBeUndefined();
++    expect(ci.jobs.backend.if).toBe("needs.backend-plan.outputs.required == 'true'");
++    for (const job of ["platform-updater", "runtime-platform", "backend"]) expect(ci.jobs[job].strategy["fail-fast"]).toBe(false);
+     expect(backend.run).toContain("scripts/ci-backend.ts run --plan");
+     expect(ci.jobs.build.steps.some((step: any) => step.name === "Backend test suite")).toBe(false);
+   });
+@@ -126,16 +128,22 @@ describe("release workflows", () => {
+   test("the real summary rejects any failed full gate even when diagnostics pass", () => {
+     const ci = readWorkflow("release-build-check.yml");
+     const summary = ci.jobs.build.steps[0].run;
+-    const run = (event: string, retry: string, failures: Record<string, string> = {}) => {
+-      const skipped = event === "pull_request" ? ["backend-plan", "backend", "backend-evidence", "backend-retry"] : retry ? [] : ["backend-retry"];
++    const run = (event: string, retry: string, failures: Record<string, string> = {}, required = event !== "pull_request") => {
++      const skipped = event === "pull_request" && !required ? ["backend", "backend-evidence", "backend-retry"] : retry ? [] : ["backend-retry"];
+       const results = Object.fromEntries(ci.jobs.build.needs.map((job: string) => [job, { result: failures[job] ?? (skipped.includes(job) ? "skipped" : "success") }]));
+       return spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", summary], {
+-        encoding: "utf8", env: { ...process.env, RESULTS: JSON.stringify(results), EVENT: event, RETRY: retry, REF: "refs/heads/main", GITHUB_SHA: "a".repeat(40) },
++        encoding: "utf8", env: { ...process.env, BACKEND_REQUIRED: String(required), RESULTS: JSON.stringify(results), EVENT: event, RETRY: retry, REF: "refs/heads/main", GITHUB_SHA: "a".repeat(40) },
+       });
+     };
+     for (const [event, retry] of [["pull_request", ""], ["push", ""], ["workflow_dispatch", ""], ["workflow_dispatch", "123"]]) {
+       expect(run(event!, retry!).status).toBe(0);
+     }
++    expect(run("pull_request", "", {}, true).status).toBe(0);
++    for (const job of ["backend-plan", "backend", "backend-evidence", "platform-updater", "runtime-platform"]) {
++      for (const result of ["failure", "cancelled", "skipped"]) {
++        expect(run("pull_request", "", { [job]: result }, true).status).not.toBe(0);
++      }
++    }
+     for (const job of ["backend", "backend-evidence", "im-platform-smoke", "execution-configuration", "platform-updater"]) {
+       for (const result of ["failure", "cancelled", "skipped"]) expect(run("workflow_dispatch", "123", { [job]: result }).status).not.toBe(0);
+     }
+@@ -228,9 +236,9 @@ describe("release workflows", () => {
+     expect(step.if).toBeUndefined();
+     expect(step.env).toEqual({ CI: "true", GITHUB_ACTIONS: "true" });
+     expect(step.run.trim().split(/\s+/)).toEqual(["bun", "run", "test", ...[
+-      "ci-backend", "run-tests", "run-tests-signals", "retry-failed-backend-tests", "release-candidate",
++      "ci-backend", "ci-backend-required", "run-tests", "run-tests-signals", "retry-failed-backend-tests", "release-candidate",
+     ].map(name => `tests/unit/scripts/${name}.test.ts`)]);
+-    expect(ci.jobs["backend-plan"].if).toContain("github.event_name != 'pull_request'");
++    expect(ci.jobs["backend-plan"].steps.find((step: any) => step.id === "scope").run).toContain("scripts/ci-backend-required.ts");
+   });
+ 
+   test("publishes the platform automatically after the tag release", () => {

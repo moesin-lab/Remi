@@ -147,3 +147,35 @@ test("title model completion after takeover cannot apply its database changes", 
   await result.catch(error => { expect(error).toBeInstanceOf(StaleLiveTermError); });
   expect(store.getIssue(issue.id)!.title).toBe("Remi");
 });
+
+
+for (const apiRole of ["all", "ui", "runtime"] as const) {
+  test(`read-only ${apiRole} server does not take over the background term`, async () => {
+    const store = createLocalStore();
+    const active = store.activateBackgroundTerm("live", () => { throw new Error("live owner was displaced"); });
+    const server = startMultiremiServer({ store, apiRole, backgroundJobs: false, port: 0, hostname: "127.0.0.1" });
+    try {
+      await server.slotStartup;
+      expect(() => active.assertCurrent()).not.toThrow();
+    } finally { await server.shutdown(); }
+  });
+}
+
+
+for (const apiRole of ["ui", "runtime"] as const) {
+  test(`split ${apiRole} jobs preserve the existing unfenced path`, async () => {
+    const store = createLocalStore();
+    const active = store.activateBackgroundTerm("live", () => { throw new Error("live owner was displaced"); });
+    const scheduler = new MultiremiScheduler({ store });
+    let context: ReturnType<typeof currentBackgroundTerm>;
+    const start = spyOn(scheduler, "start").mockImplementation(() => { context = currentBackgroundTerm(); });
+    const server = startMultiremiServer({ store, apiRole, backgroundJobs: true, scheduler,
+      scmPolling: null, messaging: null, issueTitleScheduler: null, bodyHtmlBackfill: null, controlPlaneSshMesh: null,
+      port: 0, hostname: "127.0.0.1" });
+    try {
+      await server.slotStartup;
+      expect(context).toBeUndefined();
+      expect(() => active.assertCurrent()).not.toThrow();
+    } finally { await server.shutdown(); start.mockRestore(); }
+  });
+}

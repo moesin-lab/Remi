@@ -45,3 +45,26 @@ test("temporary daemon refuses disk-critical offers and automatically recovers a
     console.log(`MUL-212 recovered: ${JSON.stringify({ task: h.store.getTask(task.id)?.status, health: h.store.getRuntime(runtimeId)?.metadata.health, offers: offers.length, provider_execution: "not validated" })}`);
   } finally { await h.dispose(); }
 }, 75_000);
+
+// Fake statfs sequence, real daemon offer handler, report engine and protocol.
+test("4 -> 6 GiB keeps report, health and actual offer rejection on the same critical watermark", async () => {
+  const h = await DaemonProtocolHarness.create({ providers: ["codex"] });
+  try {
+    await h.startDaemon();
+    const daemon = h.daemon as any;
+    let free = 4;
+    daemon.diskMonitor.options.read = async () => ({ free_bytes: free * 1024 ** 3, total_bytes: 100 * 1024 ** 3 });
+    await daemon.diskMonitor.check();
+    free = 6;
+    const report = await daemon.reclaim.run("periodic");
+    expect(report.disk).toEqual(daemon.diskMonitor.latest);
+    expect(report.disk.level).toBe("critical");
+    expect(daemon.diskMonitor.health()).toMatchObject({ state: "degraded", reasons: [{ code: "disk_critical" }] });
+    const runtimeId = h.ledger.find(entry => entry.type === "hello")!.frame.p.runtimes[0].runtime_id;
+    const agent = h.store.createAgent({ name: "hysteresis gate", provider: "codex", runtimeId, workspaceId: "local" });
+    const task = h.store.createTask({ agentId: agent.id, prompt: "must stay queued at 6 GiB" });
+    await waitFor(() => h.ledger.some(entry => entry.type === "res" && entry.frame.p.code === "disk_critical"), "hysteresis rejection");
+    expect(h.store.getTask(task.id)?.status).toBe("queued");
+    expect(h.ledger.some(entry => entry.type === "task.start")).toBe(false);
+  } finally { await h.dispose(); }
+}, 20_000);

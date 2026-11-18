@@ -23,6 +23,7 @@ import { existsSync, lstatSync, readdirSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import type { DaemonGcSubjectReclaimedPayload } from "@multiremi/contracts/daemon-protocol.js";
 import type {
+  StorageDisk,
   StoragePlanItem,
   StorageReport,
   StorageRetainReason,
@@ -89,7 +90,7 @@ import { recoverOwnedDirectoryQuarantineSync, removeOwnedDirectory } from "./saf
 import { TOPIC_MIGRATION_INTENT, readTopicMigrationIntent, readTopicTaskDossier, topicLifecycleKey } from "./topic-lifecycle.js";
 import { collectWikiChanges, snapshotWiki } from "./wiki-snapshot.js";
 
-import { classifyDiskSpace, diskThreshold, strictestDiskThresholds, type DiskThresholds } from "./disk-pressure.js";
+import { DISK_HYSTERESIS_BYTES, DISK_HYSTERESIS_PERCENT, diskThreshold, strictestDiskThresholds, type DiskThresholds } from "./disk-pressure.js";
 
 const log = createLogger("multiremi-reclaim");
 
@@ -149,8 +150,9 @@ export interface ReclaimEngineOptions {
   /** Root-wide thresholds supplied by the daemon, including workspaces with no registry entry yet. */
   diskThresholds?: () => DiskThresholds;
   diskSpace?: typeof diskSpace;
-  /** Extension point for provider execution cache residue; called before other pressure cleanup. */
-  cleanExecutionCaches?: () => Promise<void>;
+  /** Read the daemon monitor watermark; absent until its first successful measurement. */
+  storageDisk?: () => StorageDisk | undefined;
+  checkDisk?: () => Promise<void>;
   client: ReclaimClient;
   /** The Runtime reports are sent under; null before registration. */
   runtimeId: () => string | null;
@@ -372,31 +374,34 @@ export class ReclaimEngine {
       await this.recoverTopicMigrations(errors);
     }
 
-    const cacheFreeBefore = mutate ? await freeDiskBytes(this.root) : null;
-    const codexPluginCache = await sweepCodexPluginCaches({
-      root: this.root, mutate, tracker, locker: this.options.locker,
-      assertRootOwner: this.options.assertRootOwner, errors,
-    });
-    if (mutate) freedBytes += freedBetween(cacheFreeBefore, await freeDiskBytes(this.root));
-
     const records = listSubjectRecords(this.root, (path, error) => {
       errors.push({ subject_id: null, message: `unreadable registry record ${path}: ${errorMessage(error)}` });
     });
     this.consecutiveUnreachable = 0;
-    const candidates = await this.classifyAll(records, requested !== "periodic");
     const pressure = requested === "pressure";
     const thresholds = this.options.diskThresholds?.() ?? strictestDiskThresholds(records.map(record => this.options.policyFor(record.workspace_id)));
     const readDisk = () => (this.options.diskSpace ?? diskSpace)(this.root);
     const pressureNeeded = async () => {
       const space = await readDisk();
       // Unknown disk space never authorizes pressure eviction.
-      return space !== null && space.free_bytes < diskThreshold(space, thresholds, "pressure");
+      if (!space) return false;
+      const critical = diskThreshold(space, thresholds, "critical");
+      const margin = Math.max(DISK_HYSTERESIS_BYTES, space.total_bytes * DISK_HYSTERESIS_PERCENT / 100);
+      return space.free_bytes < diskThreshold(space, thresholds, "pressure")
+        || (critical > 0 && space.free_bytes <= critical + margin);
     };
+    const cacheFreeBefore = mutate ? await freeDiskBytes(this.root) : null;
+    const codexPluginCache = await sweepCodexPluginCaches({
+      root: this.root, mutate, tracker, locker: this.options.locker,
+      pressureNeeded: pressure ? pressureNeeded : undefined,
+      assertRootOwner: this.options.assertRootOwner, errors,
+    });
+    if (mutate) freedBytes += freedBetween(cacheFreeBefore, await freeDiskBytes(this.root));
+
+    const candidates = await this.classifyAll(records, requested !== "periodic");
     let needsPressure = pressure && await pressureNeeded();
     if (pressure) {
       if (mutate && needsPressure) {
-        if (this.options.cleanExecutionCaches) await this.options.cleanExecutionCaches();
-        needsPressure = await pressureNeeded();
         if (needsPressure) await this.sweepTaskTemp(candidates, tracker, errors, pressureNeeded);
         needsPressure = await pressureNeeded();
         if (needsPressure) await this.cleanSuperseded(candidates, tracker, errors, pressureNeeded);
@@ -467,9 +472,10 @@ export class ReclaimEngine {
     const usage = this.diskUsage.latest();
 
     const live = candidates.filter((candidate) => candidate.finalState !== "forgotten");
-    const space = await readDisk();
+    await this.options.checkDisk?.();
+    const disk = this.options.storageDisk?.();
     const report: StorageReport = {
-      ...(space ? { disk: { ...space, level: classifyDiskSpace(space, thresholds), thresholds, measured_at: new Date(this.now()).toISOString() } } : {}),
+      ...(disk ? { disk } : {}),
       version: 1,
       generated_at: new Date(startedAt).toISOString(),
       mode,

@@ -49,9 +49,27 @@ describe("workspace storage policy", () => {
     expect((await request("admin", "PUT", path, { critical_free_percent: 99 })).status).toBe(400);
     expect((await request("admin", "PUT", path, { pressure_free_percent: 100, critical_free_percent: 99 })).status).toBe(200);
     expect((await request("admin", "PUT", path, { pressure_free_percent: null })).status).toBe(400);
-    expect((await request("admin", "PUT", path, { pressure_free_bytes: 0 })).status).toBe(400);
+    expect((await request("admin", "PUT", path, { pressure_free_bytes: 4 * 1024 ** 3 })).status).toBe(400);
+    expect((await request("admin", "PUT", path, { pressure_free_bytes: 0 })).status).toBe(200);
     expect((await request("admin", "PUT", path, { pressure_free_bytes: 0, critical_free_bytes: 0 })).status).toBe(200);
   });
+  it("rejects inconsistent storage through generic workspace POST, PUT and PATCH too", async () => {
+    const { request, store, workspace } = await fixture();
+    for (const method of ["PUT", "PATCH"]) {
+      const response = await request("admin", method, `/api/workspaces/${workspace.id}`, {
+        settings: { storage: { critical_free_percent: 99 } },
+      });
+      expect(response.status).toBe(400);
+      expect(store.getWorkspace(workspace.id)?.settings.storage).toBeUndefined();
+    }
+    const response = await request("root", "POST", "/api/workspaces", {
+      name: "Invalid thresholds", slug: "invalid-thresholds", issue_prefix: "INV",
+      settings: { storage: { critical_free_bytes: 30 * 1024 ** 3 } },
+    });
+    expect(response.status).toBe(400);
+    expect(JSON.stringify(await response.json())).toContain("critical_free_bytes");
+  });
+
   it("persists heartbeat health orthogonally to online status and exposes it through runtime APIs", async () => {
     const { store, request, workspace } = await fixture();
     const runtime = store.registerRuntime({ workspaceId: workspace.id, name: "disk-test", provider: "codex", daemonId: "disk-test" });

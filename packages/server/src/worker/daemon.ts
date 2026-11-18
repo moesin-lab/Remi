@@ -1543,6 +1543,8 @@ export class MultiremiDaemon {
       },
     });
     this.reclaim = new ReclaimEngine({
+      storageDisk: () => this.diskMonitor.latest,
+      checkDisk: () => this.diskMonitor.check(),
       diskThresholds: () => this.rootDiskThresholds(),
       root: workspacesRoot,
       client: this.client,

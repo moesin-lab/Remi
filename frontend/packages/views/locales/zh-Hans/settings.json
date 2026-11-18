@@ -795,6 +795,7 @@
     },
     "default_value": "默认：{{value}} {{unit}}",
     "validation": {
+      "threshold_order": "告急阈值不能大于压力阈值（两项均启用时）。",
       "required": "请输入数字。",
       "integer": "请输入整数。",
       "range": "须在 {{min}} 到 {{max}} {{unit}}之间。"

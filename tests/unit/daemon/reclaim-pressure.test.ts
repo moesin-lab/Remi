@@ -1,5 +1,7 @@
+import { join } from "node:path";
+import { DiskPressureMonitor } from "@daemon/agent-runtime/workspace/disk-pressure.js";
 import { afterEach, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { workDirectory } from "@daemon/agent-runtime/workspace/layout.js";
 import { cleanupFixtures, reclaimFixture } from "./reclaim-fixture.js";
 import { executionTrackerFor } from "@daemon/agent-runtime/workspace/execution-tracker.js";
@@ -15,11 +17,10 @@ test("pressure clears residue first then reclaims ended subjects by LRU, stoppin
     f.subject(subject, { usedAgoMs: age }); f.worktree(subject);
     f.server.answer(subject.id, { status: "done", updated_at: new Date(f.now).toISOString() });
   }
-  let caches = false;
-  const report = await f.engine({ cleanExecutionCaches: async () => { caches = true; },
-    diskSpace: async () => { expect(caches || !f.server.reclaimed.length).toBe(true); return f.server.reclaimed.length ? high : low; } }).run("pressure");
-  expect(caches).toBe(true);
-  expect(report).toMatchObject({ mode: "pressure", reclaimed_this_round: 1, disk: { level: "ok" } });
+  const report = await f.engine({
+    diskSpace: async () => f.server.reclaimed.length ? high : low }).run("pressure");
+  expect(report).toMatchObject({ mode: "pressure", reclaimed_this_round: 1 });
+  expect(report.disk).toBeUndefined();
   expect(report.plan).toContainEqual(expect.objectContaining({ subject: older, reason: "pressure" }));
   expect(existsSync(workDirectory(f.root, newer))).toBe(true);
 });
@@ -82,4 +83,71 @@ test("pressure retains unsaved standalone work and never deletes an external wor
   expect(report.retained.snapshot_failed).toBe(1);
   expect(existsSync(join(tree, "standalone", "local-only"))).toBe(true);
   expect(existsSync(join(ext, "keep"))).toBe(true);
+});
+
+function monitorFor(f: ReturnType<typeof reclaimFixture>, read: () => Promise<typeof low>, criticalChanged = () => {}) {
+  const monitor = new DiskPressureMonitor({ path: f.root, read, thresholds: () => f.policy,
+    criticalChanged, pressure: async () => {} });
+  return { monitor, options: { diskSpace: read, checkDisk: () => monitor.check(), storageDisk: () => monitor.latest } };
+}
+
+test("report shares the monitor's critical hysteresis watermark at 4 -> 6 GiB", async () => {
+  const f = reclaimFixture();
+  let free = 4;
+  const { monitor, options } = monitorFor(f, async () => ({ ...low, free_bytes: free * GiB }));
+  await monitor.check();
+  free = 6;
+  const report = await f.engine(options).run("periodic");
+  expect(report.disk).toEqual(monitor.latest);
+  expect(report.disk?.level).toBe("critical");
+  expect(monitor.health()).toMatchObject({ state: "degraded", reasons: [{ code: "disk_critical" }] });
+  expect(monitor.critical).toBe(true); // the daemon's offer rejection gate
+});
+
+test("equal pressure and critical thresholds reclaim beyond the critical exit line and restore claims", async () => {
+  const f = reclaimFixture();
+  f.policy.pressure_free_percent = f.policy.critical_free_percent = 5;
+  f.policy.pressure_free_bytes = f.policy.critical_free_bytes = 5 * GiB;
+  for (let n = 0; n < 3; n++) {
+    const subject = { kind: "issue" as const, id: `iss_equal_${n}` };
+    f.subject(subject, { usedAgoMs: (3 - n) * 1000 }); f.worktree(subject);
+    f.server.answer(subject.id, { status: "done" });
+  }
+  let wakes = 0;
+  const { monitor, options } = monitorFor(f,
+    async () => ({ ...low, free_bytes: [4, 6, 8][Math.min(2, f.server.reclaimed.length)]! * GiB }),
+    () => { if (!monitor.critical) wakes++; });
+  await monitor.check(); expect(monitor.critical).toBe(true);
+  const report = await f.engine(options).run("pressure");
+  expect(report.reclaimed_this_round).toBe(2); // 6 GiB is above pressure but still critical
+  expect(report.disk?.level).toBe("ok");
+  expect(monitor.critical).toBe(false);
+  expect(monitor.health()).toEqual({ state: "ok", reasons: [] });
+  expect(wakes).toBe(1);
+});
+
+test("pressure cleans finished execution caches first, keeps running caches and stops before ended subjects", async () => {
+  const f = reclaimFixture();
+  const ended = { kind: "issue" as const, id: "iss_cache_ended" };
+  const running = { kind: "issue" as const, id: "iss_cache_running" };
+  const paths = [ended, running].map(subject => {
+    f.subject(subject); f.worktree(subject); f.server.answer(subject.id, { status: "done" });
+    const lane = f.lane(subject, 1);
+    const home = join(lane, "executions", "exec_finished", "home", ".tmp");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "plugins.sha"), "cached");
+    writeFileSync(join(home, "plugins.sync.lock"), "cached");
+    return home;
+  });
+  const release = executionTrackerFor(f.root).begin(running.id, "tsk_running");
+  try {
+    const report = await f.engine({ diskSpace: async () => existsSync(join(paths[0]!, "plugins.sha")) ? low : high }).run("pressure");
+    expect(existsSync(join(paths[0]!, "plugins.sha"))).toBe(false);
+    // Check after every entry: enough space means leave even the next cache entry alone.
+    expect(existsSync(join(paths[0]!, "plugins.sync.lock"))).toBe(true);
+    expect(existsSync(join(paths[1]!, "plugins.sha"))).toBe(true);
+    expect(existsSync(workDirectory(f.root, ended))).toBe(true);
+    expect(report.reclaimed_this_round).toBe(0);
+    expect(report.codex_plugin_cache).toEqual({ planned_homes: 1, cleaned_homes: 0 });
+  } finally { release(); }
 });

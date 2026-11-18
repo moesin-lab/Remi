@@ -77,3 +77,19 @@ test("machine disk thresholds override workspace values, including disabled cond
   });
   expect(policy).toMatchObject({ pressure_free_percent: 30, critical_free_percent: 0, pressure_free_bytes: 100000000000, critical_free_bytes: 0 });
 });
+
+test("conflicting env thresholds are ignored, and legacy workspace values are normalized", () => {
+  expect(resolveStoragePolicy(undefined, { MULTIREMI_GC_CRITICAL_FREE_PERCENT: "99" }).critical_free_percent).toBe(5);
+  expect(resolveStoragePolicy({ storage: { critical_free_percent: 99 } }, {}).critical_free_percent).toBe(15);
+  expect(resolveStoragePolicy({ storage: { pressure_free_percent: 25, critical_free_percent: 10 } },
+    { MULTIREMI_GC_PRESSURE_FREE_PERCENT: "5" })).toMatchObject({ pressure_free_percent: 25, critical_free_percent: 10 });
+  expect(resolveStoragePolicy(undefined, { MULTIREMI_GC_CRITICAL_FREE_PERCENT: "99", MULTIREMI_GC_PRESSURE_FREE_PERCENT: "100" }))
+    .toMatchObject({ critical_free_percent: 99, pressure_free_percent: 100 });
+  expect(resolveStoragePolicy(undefined, { MULTIREMI_GC_CRITICAL_FREE_BYTES: String(30 * 1024 ** 3) }).critical_free_bytes).toBe(5 * 1024 ** 3);
+});
+
+
+test("a conflicting critical override does not discard a valid pressure override", () => {
+  expect(resolveStoragePolicy(undefined, { MULTIREMI_GC_CRITICAL_FREE_PERCENT: "99", MULTIREMI_GC_PRESSURE_FREE_PERCENT: "25" }))
+    .toMatchObject({ critical_free_percent: 5, pressure_free_percent: 25 });
+});

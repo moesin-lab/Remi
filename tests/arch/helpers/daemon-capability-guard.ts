@@ -1,5 +1,10 @@
 import ts from "typescript";
 
+// Single-file binding guard: follows initializers, destructuring and assignments
+// conservatively (a version-derived binding stays marked). Symbols keep lexical
+// scopes separate. No cross-file or general data-flow analysis: passing a version
+// through a helper parameter/return value is a known limitation and needs review.
+
 // Directories/globs cover future files as well as today's claim/recheck,
 // scheduler, runtime admission, and both sides of daemon negotiation.
 export const capabilityDecisionGlobs = [
@@ -75,12 +80,26 @@ const versionName = /^(?:cli_?version|version|build)$/i;
 
 export function findVersionDecisions(file: string, source: string): string[] {
   const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  // Bind only this source file; do not load imports or libraries. The checker is
+  // used for lexical identity, not type inference or interprocedural analysis.
+  const host = ts.createCompilerHost({ noLib: true, noResolve: true });
+  host.getSourceFile = name => name === file ? tree : undefined;
+  const checker = ts.createProgram([file], { noLib: true, noResolve: true }, host).getTypeChecker();
+  const marked = new Set<ts.Symbol>();
+  const symbol = (node: ts.Node) => checker.getSymbolAtLocation(node);
   const failures: string[] = [];
+  const importedNames = new Map<ts.Symbol, string>();
   const semverBindings = new Set<string>(["semver"]);
   for (const statement of tree.statements) {
-    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)
-      || !/(?:^|\/)semver(?:\/|$)/.test(statement.moduleSpecifier.text)) continue;
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
     const clause = statement.importClause;
+    if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const binding of clause.namedBindings.elements) {
+        const local = symbol(binding.name);
+        if (local) importedNames.set(local, (binding.propertyName ?? binding.name).text);
+      }
+    }
+    if (!/(?:^|\/)semver(?:\/|$)/.test(statement.moduleSpecifier.text)) continue;
     if (clause?.name) semverBindings.add(clause.name.text);
     const bindings = clause?.namedBindings;
     if (bindings && ts.isNamespaceImport(bindings)) semverBindings.add(bindings.name.text);
@@ -90,7 +109,8 @@ export function findVersionDecisions(file: string, source: string): string[] {
   }
   const isVersionCall = (expression: ts.Expression): boolean => {
     if (ts.isIdentifier(expression)) return semverBindings.has(expression.text)
-      || /^(?:compare\w*versions?\w*|meetsDaemonMinCliVersion)$/i.test(expression.text);
+      || /^(?:compare\w*versions?\w*|meetsDaemonMinCliVersion)$/i.test(
+        importedNames.get(symbol(expression)!) ?? expression.text);
     if (ts.isPropertyAccessExpression(expression)) return isVersionCall(expression.expression)
       || /compare\w*versions?/i.test(expression.name.text);
     if (ts.isElementAccessExpression(expression)) return isVersionCall(expression.expression)
@@ -101,7 +121,7 @@ export function findVersionDecisions(file: string, source: string): string[] {
   const allowed = (node: ts.Node) => versionDecisionExceptions.some(exception =>
     exception.file === file && exception.expression === node.getText(tree));
   const isVersionRead = (node: ts.Node): boolean => {
-    if (ts.isIdentifier(node)) return versionName.test(node.text);
+    if (ts.isIdentifier(node)) return versionName.test(node.text) || marked.has(symbol(node)!);
     if (ts.isPropertyAccessExpression(node)) return versionName.test(node.name.text);
     return ts.isElementAccessExpression(node) && !!node.argumentExpression
       && ts.isStringLiteralLike(node.argumentExpression) && versionName.test(node.argumentExpression.text);
@@ -110,11 +130,66 @@ export function findVersionDecisions(file: string, source: string): string[] {
     // Contract calls have their own exact allowlist; their operands must not
     // cause a second violation on the surrounding `< 0` comparison.
     if (allowed(node)) return false;
+    // typeof produces a type tag, not the CLI/build value being inspected.
+    if (ts.isTypeOfExpression(node)) return false;
     if (ts.isCallExpression(node)) return node.arguments.some(containsVersionRead)
       || (ts.isPropertyAccessExpression(node.expression) && containsVersionRead(node.expression.expression))
       || (ts.isElementAccessExpression(node.expression) && containsVersionRead(node.expression.expression));
     return isVersionRead(node) || !!ts.forEachChild(node, child => containsVersionRead(child) || undefined);
   };
+  const mark = (name: ts.Identifier): void => {
+    const binding = symbol(name);
+    if (binding) marked.add(binding);
+  };
+  const bind = (name: ts.BindingName, derived: boolean): void => {
+    if (ts.isIdentifier(name)) {
+      if (derived) mark(name);
+      return;
+    }
+    for (const element of name.elements) {
+      if (ts.isOmittedExpression(element)) continue;
+      const key = element.propertyName ?? element.name;
+      const field = (ts.isIdentifier(key) || ts.isStringLiteralLike(key)) && versionName.test(key.text);
+      bind(element.name, derived || field || (!!element.initializer && containsVersionRead(element.initializer)));
+    }
+  };
+  const assign = (target: ts.Expression, derived: boolean): void => {
+    if (ts.isIdentifier(target)) {
+      if (derived) mark(target);
+    } else if (ts.isParenthesizedExpression(target)) {
+      assign(target.expression, derived);
+    } else if (ts.isObjectLiteralExpression(target)) {
+      for (const property of target.properties) {
+        if (ts.isShorthandPropertyAssignment(property)) {
+          assign(property.name, derived || versionName.test(property.name.text)
+            || (!!property.objectAssignmentInitializer && containsVersionRead(property.objectAssignmentInitializer)));
+        } else if (ts.isPropertyAssignment(property)) {
+          const key = property.name;
+          assign(property.initializer, derived
+            || ((ts.isIdentifier(key) || ts.isStringLiteralLike(key)) && versionName.test(key.text)));
+        } else if (ts.isSpreadAssignment(property)) assign(property.expression, derived);
+      }
+    } else if (ts.isArrayLiteralExpression(target)) {
+      for (const element of target.elements) if (!ts.isOmittedExpression(element)) assign(element, derived);
+    } else if (ts.isBinaryExpression(target) && target.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      assign(target.left, derived || containsVersionRead(target.right));
+    }
+  };
+  const collect = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node)) {
+      bind(node.name, !!node.initializer && containsVersionRead(node.initializer));
+    } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      assign(node.left, containsVersionRead(node.right));
+    }
+    ts.forEachChild(node, collect);
+  };
+  // Fixed point handles assignment chains, including a use preceding its source
+  // assignment. Deliberately conservative, without control-flow/path inference.
+  let previousSize: number;
+  do {
+    previousSize = marked.size;
+    collect(tree);
+  } while (marked.size !== previousSize);
   const visit = (node: ts.Node): void => {
     if (allowed(node)) return;
     const versionCall = ts.isCallExpression(node) && isVersionCall(node.expression);

@@ -1195,6 +1195,15 @@ daemon protocol rejected by server (min X, self Y); waiting for pending_update, 
 记录版本、最低版本和原因，并在该版本发布时执行；CI 的
 [`check-daemon-contract.ts`](../scripts/check-daemon-contract.ts) 与基线比较并阻止普通版本修改门槛。
 
+[`能力决策架构守卫`](../tests/arch/helpers/daemon-capability-guard.ts) 按目录/glob 扫描
+worker、握手、任务 claim/recheck、调度与 runtime 准入源码。它在单个文件内按词法符号追踪
+`const`/`let`/`var` 初始化、解构（重命名、嵌套、默认值）和赋值链；版本来源一经登记便保守保留，
+不做分支路径推断。比较任一侧含 CLI/version/build 来源、`compare*Version` 调用（包括具名导入别名、
+namespace 访问）和 semver 调用均检查。`typeof` 返回类型标签，不视为版本值比较。
+准入、升级、展示或其它协议格式的合法比较，须逐条登记「文件 + 完整表达式 + 理由」，
+不能按文件整体豁免。守卫不做跨文件或通用数据流分析，尤其不能保证发现经辅助函数参数或返回值
+转手的版本来源；这类间接决策仍须代码审阅，不能以守卫通过证明不存在。
+
 能力名称、旧名、加入时的源码版本和计划 contract 版本集中登记在该兼容文件。
 `contract: null` 表示尚无移除计划。读取 hello/welcome 时接受规范名和旧名；welcome 回显
 hello 使用的拼写；daemon 的首次 hello 使用旧名以兼容尚未声明能力的新旧服务端。

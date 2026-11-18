@@ -408,7 +408,7 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
         throw new Error(journal.error);
       }
       return state.transition.phase === 'succeeded' && state.releaseId === journal.target.id;
-    }, 8 * 60_000, 'API slot switch result timed out; inspect supervisor state before retrying').catch(error => {
+    }, 15 * 60_000, 'API slot switch result timed out; inspect supervisor state before retrying').catch(error => {
       if (String(journal.phase) === 'recovered') throw error;
       throw new RecoveryRequiredError(error instanceof Error ? error.message : String(error));
     });

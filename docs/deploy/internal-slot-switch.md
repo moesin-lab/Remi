@@ -61,8 +61,9 @@ releaseId 和新的 revision。不要用 edge 的 setState 绕过 release/activa
 
 API supervisor 支持正整数毫秒环境变量：`REMI_SLOT_STANDBY_WAIT_MS`（120000）、
 `REMI_SLOT_RELEASE_WAIT_MS`（30000）、`REMI_SLOT_ACTIVATE_WAIT_MS`（60000）、
-`REMI_SLOT_CONFIRM_WAIT_MS`（180000）。edge hold 上限为 180000 ms；updater 等待结果
-上限为 8 分钟。调高预算应同时审视这两个上限。live slot 意外退出先 hold，再按
+`REMI_SLOT_CONFIRM_WAIT_MS`（180000）。edge hold 上限按 release + 两次 activate + standby + 30 秒退出宽限计算（默认 5 分钟），
+覆盖观察期崩溃后等待旧 slot 退出并重启的预算；updater 等待结果上限为 15 分钟。
+调高预算应同时审视 updater 的上限。live slot 意外退出先 hold，再按
 1 秒至 30 秒退避重启，连续失败 5 次退出；健康运行一分钟后清除失败计数。
 
 在 Compose 环境设置 `REMI_SLOT_SWITCH=0` 并重新创建 API/updater 容器，恢复旧的单子进程

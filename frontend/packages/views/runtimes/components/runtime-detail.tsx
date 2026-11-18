@@ -650,7 +650,7 @@ function DiagnosticsCard({
   const { t } = useT("runtimes");
   const paths = useWorkspacePaths();
   const isLocal = runtime.runtime_mode === "local";
-  const selfHealing = isLocal && health === "online";
+  const selfHealing = isLocal && (health === "online" || health === "degraded");
   // canDelete here doubles as the "can edit runtime" predicate — it already
   // means "workspace owner/admin OR runtime owner", which is the same gate
   // the server enforces for the visibility PATCH.
@@ -686,7 +686,7 @@ function DiagnosticsCard({
               provider={runtime.provider}
               agentVersion={agentVersion}
               acpVersion={acpVersion}
-              isOnline={health === "online"}
+              isOnline={health === "online" || health === "degraded"}
             />
           </div>
         )}

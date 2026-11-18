@@ -48,7 +48,7 @@ WebSocket 关闭握手最多等待 1 秒，未确认的连接随后断开，避�
 
 Bun 1.3.14 在服务端关闭 WebSocket 后可能保留 `pendingWebSockets` 计数，使原生 `stop(false)` 的 Promise 不结束。监听已停止且所有跟踪的 WebSocket 已关闭时，最终停机改为等待实际 HTTP 响应与 `pendingRequests` 清零；总预算内仍等待 HTTP，超过预算由 CLI 终止整个进程。回归测试同时验证停机后原端口可重新绑定。
 
-`slotFence` 是 A3 注入 live term 的异步钩子；A2 默认 `term:null`，没有实现持久化 term 或后台写入 fencing。supervisor 的顺序、路由切换及回滚由 A4 负责：release A 后 activate B；若 B 失败，可重新 activate A。
+`slotFence` 是 A3 注入 live term 的异步钩子；A2 默认 `term:null`，没有实现持久化 term 或后台写入 fencing。supervisor 的顺序、路由切换及回滚见[双 slot 运维](../deploy/internal-slot-switch.md)：release A 后 activate B；若 B 失败，重新 activate A。
 
 ## 验证入口
 

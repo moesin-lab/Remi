@@ -45,7 +45,7 @@ async function fixture() {
   }
   await writeJson(join(config.control, 'rehearsal/status.json'), { protocol: 1, isolated: true, heartbeatAt: Date.now() });
   const calls: string[] = [], events: string[] = [];
-  const state = { backupFails: false, rehearsalFails: false, healthFails: false, failure: undefined as PlatformSchemaContractFailure | undefined };
+  const state = { backupFails: false, rehearsalFails: false, healthFails: false, switchFails: false, failure: undefined as PlatformSchemaContractFailure | undefined };
   const driver = new InternalApplicationDriver(config, { async run(command, args, options) {
     calls.push(command);
     expect(options?.env?.PGPASSWORD).toBe('fixture-password');
@@ -68,9 +68,10 @@ async function fixture() {
         const desired = await readJson<any>(join(config.control, role, 'desired.json'));
         const probe = await readJson<any>(join(config.control, role, 'probe.json'));
         if (desired && desired.revision !== statuses[role].revision) {
+          if (desired.strategy === 'switch') statuses[role].transition = { revision: desired.revision, phase: state.switchFails ? 'failed' : 'succeeded', error: state.switchFails ? 'standby failed' : undefined };
           events.push(role + ':' + desired.mode);
           Object.assign(statuses[role], { revision: desired.revision, childPid: desired.mode === 'run' ? 22 : null,
-            stopped: desired.mode === 'stop', releaseId: desired.mode === 'run' ? desired.releaseId : null });
+            stopped: desired.mode === 'stop', releaseId: desired.mode === 'run' ? state.switchFails ? statuses[role].releaseId : desired.releaseId : null });
         }
         if (probe) statuses[role].probe = { id: probe.id, ok: true };
         if (desired || probe) await writeJson(join(config.control, role, 'status.json'), { ...statuses[role], heartbeatAt: Date.now() });
@@ -86,10 +87,94 @@ async function fixture() {
   const report = async (value: { status?: string }) => { events.push('report:' + value.status); };
   const journal = async (phase: string) => writeJson(join(config.state, 'operations', operation.id + '.json'), { operationId: operation.id, kind: operation.kind, phase, previous: selection, target: selection });
   const preflight = () => { const mock = spyOn(driver, 'preflight').mockResolvedValue(preflightResult([])); cleanup.push(async () => { mock.mockRestore(); }); };
-  return { config, driver, manifest, operation, report, selection, journal, preflight, state, calls, events, fetchSpy };
+  return { config, driver, manifest, operation, report, selection, journal, preflight, state, calls, events, fetchSpy, statuses };
 }
 
 describe('socket-free internal application updates', () => {
+  it.each([false, true])('equal schemas switch without drain, including best-effort backup failure=%s', async backupFails => {
+    const f = await fixture(); f.preflight(); f.statuses.api.slotSwitch = true; f.state.backupFails = backupFails;
+    await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
+    f.operation.kind = 'update'; f.operation.targetManifest = f.manifest as any;
+    const stage = spyOn(f.driver as any, 'stage').mockResolvedValue(f.selection);
+    const gate = { waitUntilDrained: async () => { throw new Error('must not drain'); }, assertReady: async () => { throw new Error('must not fence'); }, release: async () => {} };
+    try {
+      await expect(f.driver.execute(f.operation, f.report, gate)).resolves.toEqual(f.manifest);
+      expect((await readJson<any>(join(f.config.control, 'api/desired.json'))).strategy).toBe('switch');
+      expect(f.events).not.toContain('api:stop'); expect(f.calls).not.toContain('tar');
+      expect(await readJson(join(f.config.control, 'write-fence.json'))).toBeNull();
+      expect(await readJson(join(f.config.control, 'rehearsal/job.json'))).toBeNull();
+      expect(f.calls).toContain('pg_dump');
+    } finally { stage.mockRestore(); }
+  });
+  it('different schema retains drain and fenced rehearsal path', async () => {
+    const f = await fixture(); f.preflight(); f.statuses.api.slotSwitch = true;
+    await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
+    const target = { id: f.selection.id, release: { ...f.manifest, dataSchema: 'f'.repeat(64),
+      application: { ...f.manifest.application, rollbackSafeFrom: [f.manifest.dataSchema] } } };
+    f.operation.kind = 'update'; f.operation.targetManifest = target.release as any;
+    const stage = spyOn(f.driver as any, 'stage').mockResolvedValue(target);
+    const verify = spyOn(f.driver as any, 'verifyFiles').mockResolvedValue(undefined);
+    let drained = false;
+    try {
+      await f.driver.execute(f.operation, f.report, { ...READY_GATE, waitUntilDrained: async () => { drained = true; } });
+      expect(drained).toBe(true); expect(f.events).toContain('api:stop');
+      expect(await readJson(join(f.config.control, 'write-fence.json'))).not.toBeNull();
+      expect(await readJson(join(f.config.control, 'rehearsal/job.json'))).not.toBeNull();
+    } finally { stage.mockRestore(); verify.mockRestore(); }
+  });
+  it('rolled-back switch reports failure without fencing the serving old release', async () => {
+    const f = await fixture(); f.preflight(); f.statuses.api.slotSwitch = true; f.state.switchFails = true;
+    await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
+    f.operation.kind = 'update'; f.operation.targetManifest = f.manifest as any;
+    const stage = spyOn(f.driver as any, 'stage').mockResolvedValue(f.selection);
+    try {
+      await expect(f.driver.execute(f.operation, f.report, READY_GATE)).rejects.toThrow('standby failed');
+      expect((await f.driver.pendingFinalization())?.report.status).toBe('failed');
+      expect(await readJson(join(f.config.control, 'write-fence.json'))).toBeNull();
+      await f.driver.finalize(f.operation.id); expect(await f.driver.pendingFinalization()).toBeNull();
+    } finally { stage.mockRestore(); }
+  });
+  it('replays a committed switch journal whose desired write was interrupted', async () => {
+    const f = await fixture();
+    await f.journal('committed');
+    const path = join(f.config.state, 'operations', f.operation.id + '.json');
+    await writeJson(path, { ...await readJson<any>(path), strategy: 'switch', revision: 'interrupted-switch' });
+    await f.driver.recoverInterrupted();
+    expect((await readJson<any>(path)).phase).toBe('verified');
+    expect(f.events).not.toContain('api:stop');
+    expect(await readJson(join(f.config.control, 'write-fence.json'))).toBeNull();
+    expect((await f.driver.pendingFinalization())?.report.status).toBe('succeeded');
+  });
+  it('retains switch recovery when web verification fails after API confirmation', async () => {
+    const f = await fixture(); f.preflight(); f.statuses.api.slotSwitch = true; f.state.healthFails = true;
+    await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
+    f.operation.kind = 'update'; f.operation.targetManifest = f.manifest as any;
+    const stage = spyOn(f.driver as any, 'stage').mockResolvedValue(f.selection);
+    try {
+      await expect(f.driver.execute(f.operation, f.report, READY_GATE)).rejects.toBeInstanceOf(RecoveryRequiredError);
+      f.state.healthFails = false;
+      await f.driver.recoverInterrupted();
+      expect((await f.driver.pendingFinalization())?.report.status).toBe('succeeded');
+      expect(await readJson(join(f.config.control, 'write-fence.json'))).toBeNull();
+    } finally { stage.mockRestore(); }
+  });
+  it.each(['missing capability', 'disabled switch'])('equal schemas retain old path for %s', async reason => {
+    const f = await fixture(); f.preflight();
+    const previousFlag = process.env.REMI_SLOT_SWITCH;
+    if (reason === 'disabled switch') { process.env.REMI_SLOT_SWITCH = '0'; f.statuses.api.slotSwitch = true; }
+    await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
+    f.operation.kind = 'update'; f.operation.targetManifest = f.manifest as any;
+    const stage = spyOn(f.driver as any, 'stage').mockResolvedValue(f.selection);
+    let drained = false;
+    try {
+      await f.driver.execute(f.operation, f.report, { ...READY_GATE, waitUntilDrained: async () => { drained = true; } });
+      expect(drained).toBe(true); expect(f.events).toContain('api:stop');
+      expect(await readJson(join(f.config.control, 'write-fence.json'))).not.toBeNull();
+    } finally {
+      stage.mockRestore();
+      if (previousFlag === undefined) delete process.env.REMI_SLOT_SWITCH; else process.env.REMI_SLOT_SWITCH = previousFlag;
+    }
+  });
   it('preserves structured rehearsal refusal in the internal recovery journal', async () => {
     const f = await fixture(); f.preflight(); f.state.rehearsalFails = true;
     try { assertSchemaContract(['public.old.id:text:text:NO'], [], { stage: 'previous', currentVersion: '1.0.0', targetVersion: '1.0.0' }); }

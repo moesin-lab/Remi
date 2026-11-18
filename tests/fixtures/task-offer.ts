@@ -57,9 +57,15 @@ export async function receiveTaskOffer(store: MultiremiStore, runtimeId: string,
   } finally { layer.closeAll(); layer.stop(); await layer.drain(); }
 }
 
+/** Reconcile through runtime.ready, stopping dispatch before recovery creates retries. */
 export async function reconcileRuntimeReady(store: MultiremiStore, runtimeId: string, activeTaskIds: string[] = []): Promise<Record<string, any>[]> {
   const layer = new DaemonProtocolLayer({ store });
-  const offers = new DaemonTaskOffers({ store, layer, prepare: async () => null, autostart: false });
+  const offers = new DaemonTaskOffers({ store, layer, autostart: false,
+    prepare: async () => { throw new Error("Reconciliation fixture must not claim tasks"); },
+    // ready invokes this synchronously before recoverOrphans and its final kick.
+    // Returning null from prepare is too late: the pump has already claimed work.
+    onRuntimeReady: () => layer.stop(),
+  });
   const runtime = store.getRuntime(runtimeId);
   const frames: Record<string, any>[] = [];
   const session = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return text.length; }, close() {} },
@@ -71,6 +77,7 @@ export async function reconcileRuntimeReady(store: MultiremiStore, runtimeId: st
     } }));
     offers.start();
     await session.handleMessage(JSON.stringify({ v: 2, t: "runtime.ready", rt: runtimeId, p: { active_task_ids: activeTaskIds } }));
+    await layer.drain();
     return frames;
   } finally { layer.closeAll(); layer.stop(); await layer.drain(); }
 }

@@ -1249,7 +1249,8 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(store.claimTask(runtime.id)?.id).toBe(waiting.id);
     store.markTaskWaitingLocalDirectory(waiting.id, "/tmp/project");
 
-    await reconcileRuntimeReady(store, runtime.id);
+    const recoveryFrames = await reconcileRuntimeReady(store, runtime.id);
+    expect(recoveryFrames.filter(frame => frame.t === "task.offer")).toHaveLength(0);
     expect([running, waiting].filter(task => store.getTask(task.id)?.status === "failed")).toHaveLength(2);
     expect(store.listTasks().filter(task => task.parentTaskId === running.id || task.parentTaskId === waiting.id)).toHaveLength(2);
     expect(store.getTask(running.id)?.failureReason).toBe("runtime_recovery");
@@ -1263,6 +1264,23 @@ describe("Multiremi API — daemon endpoints", () => {
       maxAttempts: 3,
       runtimeId: runtime.id,
       issueId: runningIssue.id,
+      sessionId: "sess-running",
+      workDir: "/tmp/running",
+    });
+
+    // Dispatch is a separate phase: the recovered retry stays queued until a
+    // fresh offer pump claims it, and the offer preserves its resume context.
+    const offeredRetryIds: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const offerResponse = await taskOfferResponse(store, runtime.id);
+      expect(offerResponse.status).toBe(200);
+      const { task } = await offerResponse.json();
+      offeredRetryIds.push(task.attempt_id);
+    }
+    expect(offeredRetryIds).toContain(retryRunning!.id);
+    expect(new Set(offeredRetryIds).size).toBe(2);
+    expect(store.getTask(retryRunning!.id)).toMatchObject({
+      status: "dispatched",
       sessionId: "sess-running",
       workDir: "/tmp/running",
     });

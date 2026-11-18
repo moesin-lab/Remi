@@ -42,10 +42,10 @@ expand 的 SQL、完成标记和 level 更新位于同一事务；失败可重�
 必须保留；删除、改名、定义变化均回滚，步骤和 level 不推进。已经应用的步骤在快照前返回，稳态启动不查 catalog。
 PostgreSQL 每次快照固定 11 条集合查询，不按 namespace 循环；范围排除 `pg_catalog`、`information_schema`、
 `pg_toast*`、临时系统 namespace。建模覆盖 schema；全部 pg_class relkind（含复合类型、分区表、外部表、
-视图/物化视图、索引和序列）的持久性、RLS、分区边界/键、继承顺序、视图/索引定义、序列参数；
+视图/物化视图、索引和序列）的持久性、RLS、分区边界/键、继承顺序、视图/索引定义、视图与物化视图的排序后 reloptions、序列参数；
 全部列（含复合类型属性）的顺序、类型、identity/generated 与生成表达式；type/domain/enum；
 表/domain 约束定义（忽略 convalidated）；非 internal trigger 定义和启用状态；policy；rule 定义和启用状态；
-function/procedure 定义；extension 版本。schema、relation、type、routine 的 ACL 按单项权限比较，允许增授。
+function/procedure 定义；extension 版本。schema、relation、column、type、routine 的 ACL 按单项权限比较，允许增授。
 另以一条 `pg_depend` + `pg_identify_object` 查询登记依赖用户 namespace/relation 的对象身份；
 未建模类型的对象消失也会被拒绝。默认值的 pg_attrdef 身份除外，generated 表达式由列定义比较。
 
@@ -58,7 +58,8 @@ SQLite 同样执行 expand：index/view/trigger 的 SQL 精确比较；table 比
 命名约束定义，以及索引结构；已有表上新增 UNIQUE 索引同样禁止。
 
 已知边界：未建模 catalog 类的同名定义变化不保证被发现；不验证数据内容变化；
-新 trigger 的数据副作用需人工审查。SQLite CHECK 表达式不做语义分析，命名 CHECK 的 token 变化会拒绝，
+新 trigger 的数据副作用需人工审查；catalog 不比较 internal trigger 的启用状态，
+禁用内部 FK trigger 需要超级用户权限，此类操作不保证被间接 DDL 守卫发现。SQLite CHECK 表达式不做语义分析，命名 CHECK 的 token 变化会拒绝，
 未命名 CHECK 不保证覆盖。默认值变更按决定允许，仍须评估依赖默认值的旧 writer。
 受保护句柄与 arch 共用文本 lint 提供 fail-fast；函数调用等间接 DDL 由 catalog 权威守卫判断。
 

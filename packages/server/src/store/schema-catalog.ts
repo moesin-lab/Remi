@@ -12,6 +12,8 @@ export interface SchemaCatalogEntry {
 export type SchemaCatalog = Map<string, SchemaCatalogEntry>;
 const userNamespace = "n.nspname <> 'pg_catalog' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_toast' AND n.nspname !~ '^pg_temp'";
 const relationKey = (schema: unknown, name: unknown) => `relation:${JSON.stringify([schema, name])}`;
+// acldefault('c', owner) is an empty column ACL: table grants are separate.
+// Split grant options into atoms so removing grantability also removes an atom.
 const acl = (expression: string, kind: string, owner: string) =>
   `ARRAY(SELECT atom FROM pg_catalog.aclexplode(coalesce(${expression}, pg_catalog.acldefault(${kind.startsWith('CASE') ? kind : "'" + kind + "'"}, ${owner}))) x
     CROSS JOIN LATERAL unnest(ARRAY[x.grantor::text || ':' || x.grantee::text || ':' || x.privilege_type,
@@ -55,6 +57,7 @@ export function snapshotSchemaCatalog(db: SqlDatabase): SchemaCatalog {
         JOIN pg_catalog.pg_class pc ON pc.oid=i.inhparent JOIN pg_catalog.pg_namespace pn ON pn.oid=pc.relnamespace
         WHERE i.inhrelid=c.oid ORDER BY i.inhseqno) AS parents,
       CASE WHEN c.relkind IN ('v','m') THEN pg_catalog.pg_get_viewdef(c.oid,false) END AS view_definition,
+      CASE WHEN c.relkind IN ('v','m') THEN ARRAY(SELECT option FROM unnest(c.reloptions) option ORDER BY option) END AS view_options,
       CASE WHEN c.relkind IN ('i','I') THEN pg_catalog.pg_get_indexdef(c.oid) END AS index_definition,
       CASE WHEN seq.seqrelid IS NOT NULL THEN json_build_array(pg_catalog.format_type(seq.seqtypid,NULL),seq.seqstart::text,seq.seqincrement::text,seq.seqmax::text,seq.seqmin::text,seq.seqcache::text,seq.seqcycle)::text END AS sequence_definition,
       ${acl('c.relacl', "CASE WHEN c.relkind='S' THEN 's'::\"char\" ELSE 'r'::\"char\" END", 'c.relowner')} AS acl,
@@ -71,14 +74,15 @@ export function snapshotSchemaCatalog(db: SqlDatabase): SchemaCatalog {
     for (const r of db.query(`SELECT n.nspname,c.relname,a.attname,a.attnum,
       pg_catalog.format_type(a.atttypid,a.atttypmod) AS data_type,a.attnotnull,a.attidentity,a.attgenerated,
       cn.nspname AS collation_schema,co.collname,
+      ${acl('a.attacl', 'c', 'c.relowner')} AS acl,
       CASE WHEN a.attgenerated<>'' THEN pg_catalog.pg_get_expr(d.adbin,d.adrelid) END AS generated_expression
       FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid=a.attrelid
       JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
       LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum
       LEFT JOIN pg_catalog.pg_collation co ON co.oid=a.attcollation LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid=co.collnamespace
       WHERE ${userNamespace} AND a.attnum>0 AND NOT a.attisdropped`).all()) {
-      const { nspname, relname, attname, attnotnull, ...definition } = r;
-      add('column', [nspname, relname, attname], definition, { notNull: attnotnull });
+      const { nspname, relname, attname, attnotnull, acl: permissions, ...definition } = r;
+      add('column', [nspname, relname, attname], definition, { notNull: attnotnull, acl: permissions });
     }
     for (const r of db.query(`SELECT n.nspname,t.typname,t.typtype,t.typnotnull,
       pg_catalog.format_type(NULLIF(t.typbasetype,0),t.typtypmod) AS base_type,

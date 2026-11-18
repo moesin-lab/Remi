@@ -122,6 +122,66 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
     if (indirect) expect(hasDestructiveSchemaSql(sql)).toBe(false);
     rejected(`hidden-${index}-${indirect}`, sql, indirect || !hasDestructiveSchemaSql(sql) ? 'Destructive schema catalog change' : 'Destructive DDL is forbidden');
   });
+  function oldReader(sql: string) {
+    db.exec('SET ROLE pg_monitor');
+    try { return db.query(sql).all(); }
+    finally { db.exec('RESET ROLE'); }
+  }
+  for (const indirect of [false, true]) {
+    for (const options of ['security_invoker=true', 'security_barrier=true', 'check_option=local']) {
+      it(`preserves view options and old reader (${options}, indirect=${indirect})`, () => {
+        const schema = fixture();
+        db.exec(`GRANT USAGE ON SCHEMA ${schema} TO pg_monitor`);
+        db.exec(`CREATE TABLE ${schema}.view_base(id integer); INSERT INTO ${schema}.view_base VALUES(42); CREATE VIEW ${schema}.old_view AS SELECT id FROM ${schema}.view_base; GRANT SELECT ON ${schema}.old_view TO pg_monitor`);
+        const query = `SELECT * FROM ${schema}.old_view`;
+        expect(oldReader(query)).toEqual([{ id: 42 }]);
+        const ddl = `CREATE OR REPLACE VIEW ${schema}.old_view WITH (${options}) AS SELECT id FROM ${schema}.view_base`;
+        db.query(`CREATE FUNCTION ${schema}.change_view() RETURNS void LANGUAGE plpgsql AS $$ BEGIN ${ddl}; END $$`).run();
+        rejected(`view-options-${serial}`, indirect ? `SELECT ${schema}.change_view()` : ddl, 'Destructive schema catalog change');
+        expect(oldReader(query)).toEqual([{ id: 42 }]);
+        console.info(`OLD READER view ${options} indirect=${indirect}: id=42 after rollback`);
+      });
+    }
+    for (const grantOptionOnly of [false, true]) {
+      it(`preserves column ACL and old reader (grant option=${grantOptionOnly}, indirect=${indirect})`, () => {
+        const schema = fixture();
+        db.exec(`CREATE TABLE ${schema}.column_acl_target(c integer); INSERT INTO ${schema}.column_acl_target VALUES(42)`);
+        db.exec(`GRANT USAGE ON SCHEMA ${schema} TO pg_monitor`);
+        db.exec(`GRANT SELECT(c) ON ${schema}.column_acl_target TO pg_monitor WITH GRANT OPTION`);
+        const query = `SELECT c FROM ${schema}.column_acl_target`;
+        expect(oldReader(query)).toEqual([{ c: 42 }]);
+        const ddl = `REVOKE ${grantOptionOnly ? 'GRANT OPTION FOR ' : ''}SELECT(c) ON ${schema}.column_acl_target FROM pg_monitor`;
+        db.query(`CREATE FUNCTION ${schema}.change_column_acl() RETURNS void LANGUAGE plpgsql AS $$ BEGIN ${ddl}; END $$`).run();
+        rejected(`column-acl-${serial}`, indirect ? `SELECT ${schema}.change_column_acl()` : ddl,
+          indirect ? 'Destructive schema catalog change' : 'Destructive DDL is forbidden');
+        expect(oldReader(query)).toEqual([{ c: 42 }]);
+        console.info(`OLD READER column ACL grantOptionOnly=${grantOptionOnly} indirect=${indirect}: c=42 after rollback`);
+      });
+    }
+  }
+  it('preserves materialized view reloptions through indirect DDL', () => {
+    const schema = fixture();
+    db.query(`CREATE FUNCTION ${schema}.change_mv() RETURNS void LANGUAGE plpgsql AS $$ BEGIN
+      ALTER MATERIALIZED VIEW ${schema}.mv SET (fillfactor=80); END $$`).run();
+    rejected(`mv-options-${serial}`, `SELECT ${schema}.change_mv()`, 'Destructive schema catalog change');
+  });
+  it('allows column grants and new security-invoker views', () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.column_acl_target(c integer); INSERT INTO ${schema}.column_acl_target VALUES(42)`);
+    db.exec(`GRANT USAGE ON SCHEMA ${schema} TO pg_monitor`);
+    for (const [index,sql] of [
+      `GRANT SELECT(c) ON ${schema}.column_acl_target TO pg_monitor`,
+      `GRANT SELECT(c) ON ${schema}.column_acl_target TO pg_monitor WITH GRANT OPTION`,
+      `CREATE VIEW ${schema}.new_invoker WITH (security_invoker=true) AS SELECT c FROM ${schema}.column_acl_target`,
+      `GRANT SELECT ON ${schema}.new_invoker TO pg_monitor`,
+    ].entries()) {
+      const id = `permissions-allowed-${serial}-${index}`;
+      runSchemaExpands(db,[step(id,sql)],'9.0.0',{ minLevel:0,maxLevel:100 });
+      expect(db.query('SELECT id FROM multiremi_schema_steps WHERE id=?').get(id)?.id).toBe(id);
+      console.info(`ALLOW ${sql}`);
+    }
+    expect(oldReader(`SELECT c FROM ${schema}.new_invoker`)).toEqual([{ c: 42 }]);
+  });
   it('covers every dependency object type present in the rich fixture', () => {
     const schema = fixture();
     const snapshot = snapshotSchemaCatalog(db);

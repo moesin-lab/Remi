@@ -79,3 +79,22 @@ describe('SQLite expand catalog authority', () => {
   });
 
 });
+
+it('exec uses guarded statement boundaries and never delegates its batch to bridge exec', () => {
+  const db = openSqliteDatabase(':memory:');
+  const batch = "CREATE TABLE pieces(v text); INSERT INTO pieces VALUES('a;b'); -- ; comment\nINSERT INTO pieces VALUES('c'';d')";
+  const statements: string[] = [];
+  const handle = new Proxy(db, { get(target, key) {
+    if (key === 'exec') return (sql: string) => { expect(sql).not.toBe(batch); target.exec(sql); };
+    if (key === 'query') return (sql: string) => { statements.push(sql); return target.query(sql); };
+    const value = Reflect.get(target, key, target);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  try {
+    runSchemaExpands(handle, [{id:'split',phase:'expand',level:1,release:'1.0.0',expandRelease:'1.0.0',run: guarded => guarded.exec(batch)}], '1.0.0', {minLevel:1,maxLevel:1});
+    expect(statements).toContain('CREATE TABLE pieces(v text)');
+    expect(statements).toContain(" INSERT INTO pieces VALUES('a;b')");
+    expect(statements).toContain(" -- ; comment\nINSERT INTO pieces VALUES('c'';d')");
+    expect(db.query('SELECT v FROM pieces ORDER BY rowid').all()).toEqual([{v:'a;b'},{v:"c';d"}]);
+  } finally { db.close(); }
+});

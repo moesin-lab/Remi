@@ -1,4 +1,5 @@
-import { unsupportedStringContinuations, supportedSingleLiterals, destructiveDollarQuotes, supportedDollarQuotes } from '../fixtures/schema-string-continuations.js';
+import { unsupportedRegisteredSql } from '../fixtures/schema-sql-allowlist.js';
+import { unsupportedStringContinuations, supportedSingleLiterals, destructiveDollarQuotes, unsupportedDollarQuotes, unsupportedSingleLiterals, allowedDollarIdentifiers } from '../fixtures/schema-string-continuations.js';
 import { describe, expect, it } from 'bun:test';
 import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -71,22 +72,22 @@ describe('startup migration expand discipline', () => {
         `DROP TABLE U&"ret!0061ined" UESCAPE '!'`,
         String.raw`ALTER TABLE U&"ret\0061ined" ALTER U&"c" TYPE bigint`, 'DROP TABLE `retained`', 'ALTER TABLE "retained" RENAME TO "replacement"']) {
         writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
-        expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql]);
+        expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql.replaceAll('\r\n', '\n')]);
       }
       for (const escape of ["E'!'", '$$!$$', "'!'\n''", "'!'\n-- continuation\n''", "E'!'\n-- continuation\n''"]) {
         const sql = `ALTER TABLE U&"ret!0061ined" UESCAPE ${escape} ADD COLUMN U&"c!006fl" UESCAPE ${escape} text`;
         writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
-        expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql]);
+        expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql.replaceAll('\r\n', '\n')]);
         for (const unicodeSql of [`TRUNCATE public.U&"ret!0061ined" UESCAPE ${escape}`, `SELECT u&'hello'`]) {
           writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(unicodeSql)};`);
           expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([unicodeSql]);
         }
       }
-      for (const sql of [...unsupportedStringContinuations, ...destructiveDollarQuotes]) {
+      for (const sql of [...unsupportedStringContinuations, ...destructiveDollarQuotes, ...unsupportedRegisteredSql, ...unsupportedDollarQuotes, ...unsupportedSingleLiterals]) {
         writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
-        expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql]);
+        expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql.replaceAll('\r\n', '\n')]);
       }
-      for (const sql of [...supportedSingleLiterals, ...supportedDollarQuotes]) {
+      for (const sql of [...supportedSingleLiterals, ...allowedDollarIdentifiers]) {
         writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
         expect(startupSchemaDdl(fixture)).toEqual([]);
       }

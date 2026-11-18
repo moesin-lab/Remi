@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { startupSchemaDdl } from '../../scripts/startup-schema-ddl.js';
 import inputs from '../../packages/platform-updater/src/data-schema-inputs.json';
-import { migrationDdlModules, missingMigrationInputs } from '../../packages/platform-updater/src/schema-input-coverage.mjs';
+import { missingMigrationInputs } from '../../packages/platform-updater/src/schema-input-coverage.mjs';
 
 // Frozen pre-B1 main (80f749990): legacy /app archives have only these paths.
 const frozenLegacyInputs = [
@@ -39,21 +39,22 @@ test('keeps legacy archive fingerprint inputs frozen', () => {
 });
 test('legacy inputs or B1 scanner cover transitive migration DDL', () => {
   const root = resolve(import.meta.dir, '../..');
-  expect(migrationDdlModules(root)).toContain('packages/server/src/store/unified-model-migration.ts');
-  expect(migrationDdlModules(root)).toContain('packages/server/src/store/live-term-fence.ts');
   const scanned = new Set<string>();
   startupSchemaDdl(root, scanned);
   expect(scanned.has('packages/server/src/store/schema-levels.ts')).toBe(true);
+  expect(scanned.has('packages/server/src/store/schema-compatibility.json')).toBe(true);
+  expect(scanned.has('package.json')).toBe(true);
   expect(missingMigrationInputs(root, inputs, scanned)).toEqual([]);
 });
 test('detects a missing DDL helper through a re-export', () => {
   const root = mkdtempSync(join(tmpdir(), 'schema-inputs-'));
   try {
     const store = join(root, 'packages/server/src/store'); mkdirSync(store, { recursive: true });
+    writeFileSync(join(root, 'tsconfig.json'), JSON.stringify({ compilerOptions: { moduleResolution: 'bundler', module: 'esnext' } }));
     writeFileSync(join(store, 'migrations.ts'), "import { migrate } from './exports.js'; migrate();");
     writeFileSync(join(store, 'exports.ts'), "export { migrate } from './hidden.js';");
     writeFileSync(join(store, 'hidden.ts'), 'export function migrate() { return `ALTER TABLE tasks ADD COLUMN x TEXT`; }');
-    expect(missingMigrationInputs(root, ['packages/server/src/store/migrations.ts'])).toEqual(['packages/server/src/store/hidden.ts']);
+    expect(missingMigrationInputs(root, ['packages/server/src/store/migrations.ts'])).toEqual(['packages/server/src/store/exports.ts', 'packages/server/src/store/hidden.ts']);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -67,9 +68,13 @@ test('rejects new DDL reachable only through a scanner-exempt module', () => {
     // exempt contract file; it is not in the server scanner's default roots.
     mkdirSync(join(root, 'packages/shared/src'), { recursive: true });
     writeFileSync(join(store, 'schema-contracts.ts'), "export { migrate } from '../../../shared/src/hidden.js';");
-    writeFileSync(join(root, 'packages/shared/src/hidden.ts'), 'export const migrate = `CREATE TABLE new_module (id int)`;');
-    const scanned = new Set<string>(); startupSchemaDdl(root, scanned);
-    expect(scanned.has('packages/shared/src/hidden.ts')).toBe(false);
-    expect(missingMigrationInputs(root, ['packages/server/src/store/migrations.ts'], scanned)).toEqual(['packages/shared/src/hidden.ts']);
+    for (const sql of ['CREATE TABLE new_module(id int)', 'CREATE SEQUENCE hidden_seq', 'CREATE /* marker */ TABLE hidden(id int)', 'TRUNCATE retained']) {
+      writeFileSync(join(root, 'packages/shared/src/hidden.ts'), `export const migrate = ${JSON.stringify(sql)};`);
+      const scanned = new Set<string>(); startupSchemaDdl(root, scanned);
+      expect(scanned.has('packages/shared/src/hidden.ts')).toBe(false);
+      expect(missingMigrationInputs(root, ['packages/server/src/store/migrations.ts'], scanned)).toEqual([
+        'packages/server/src/store/schema-contracts.ts', 'packages/shared/src/hidden.ts',
+      ]);
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

@@ -129,6 +129,8 @@ PLATFORM_SCHEMA_ROLLBACK_EVIDENCE=ci-schema/rollback-evidence.json node scripts/
 owner 在本 PR 合入后另开 PR 应用补丁，经 CI 通过再合入；因此该 job 在补丁合入前尚未常态运行。
 补丁可用 `git apply --check docs/deploy/MUL-173-workflow.patch` 检查。
 
+## SQL 允许清单与检测边界
+
 [arch test](../../tests/arch/startup-schema-ddl.test.ts) 扫描所有非测试 `packages/server/src/**`（含自动后台回填和新文件），
 按 tsconfig 解析并递归扫描运行时 import、export-from、动态 import 的仓库依赖（跳过 type-only）；
 解析失败报错。仅按固定路径排除显式 contract 模块；从 `packages/server/src/api/server.ts`（standby 初始化、
@@ -137,20 +139,27 @@ active 后台任务入口）的传递运行时依赖图断言这两个模块不�
 SET DEFAULT/DROP DEFAULT/DROP NOT NULL 的 ALTER TABLE、ALTER TYPE ADD VALUE、COMMENT ON、GRANT、
 IMPORT FOREIGN SCHEMA。CREATE OR REPLACE 的既有定义保护由运行时 catalog 承担。
 候选对象类封闭常量及 PostgreSQL 16 SQL Commands / SQLite VIRTUAL TABLE 来源见
-[schema-ddl.ts](../../packages/server/src/store/schema-ddl.ts)；支持嵌套注释、Unicode、模板标识符与位置参数，以及双引号、反引号和 SQLite 方括号引用标识符；
-arch 与 expand guard 使用相同的 token 归一化。登记迁移禁止 PostgreSQL `U&"…"` 和 `U&'…'`
-Unicode 转义标识符/字符串（不区分大小写，包括所有 UESCAPE/注释/续接变体），即使是加法 ALTER 也拒绝。
-迁移 SQL 由项目维护，不需要这种语法；为保证 fail-closed，不尝试实现完整 PostgreSQL lexer。
-字符串字面量也禁止换行续接：普通单引号、E/e、B/X/N 前缀字面量结束后，
-若仅隔着含换行的空白（可夹行注释或嵌套块注释）又出现单引号，整体拒绝；请合成一个字面量。
-普通单个 E 串（含反斜杠转义）和逗号分隔的字面量不受影响。
-续接串内部即使只有 U& 等普通文本，也按上述限制整体拒绝。
-Dollar-quote 标签按 PostgreSQL 规则区分大小写，异大小写标签只是串内文本；
-标签遵循不含 `$` 的标识符规则，且不能紧接标识符字符。串内 U& 文本不会触发拒绝。
-守卫的 PostgreSQL 前提是 `standard_conforming_strings=on`（PG 默认值）；不支持关闭此设置后的字符串语义。
-两类不支持的 token 共用拒绝路径。请改用普通双引号标识符或单个字符串。
-运行时在执行前明确报错，不记账、不推进 level；
-arch 对含该 token 的源码 SQL 字符串无条件报违规，不依赖语句头消歧。
+[schema-ddl.ts](../../packages/server/src/store/schema-ddl.ts)。B1 登记迁移使用词法**允许清单**，
+运行时与 arch 共用 tokenizer；这里只维护我们自己编写的迁移 SQL，不实现完整 PG lexer。
+仅允许空格、Tab、LF；`--` 到 LF 的注释；不嵌套的 `/* */`；无前缀单引号串（内部以 `''` 转义）；
+普通双引号标识符（内部以 `""` 转义）；无引号标识符、数字、位置参数 `$<数字>`、运算符和标点。
+arch 将源码模板插值作为不透明占位符，不能据此保证插值生成的 SQL；运行时检查实际 SQL。
+
+以下形式在任何已知迁移 SQL 中拒绝：`U&"…"` / `U&'…'`（包括所有 UESCAPE 变体）；
+E/B/X/N 前缀字符串；dollar quote；字符串换行续接（包括夹行/块注释）；嵌套块注释；
+反引号、方括号（包括 ARRAY 方括号）；圆括号内的分号，以及无法识别的字符/未闭合引用。
+`\r`、`\f`、`\v` 在任何位置均禁止，包括字符串和注释内部。请只用 LF，
+改用普通双引号标识符和单个普通字符串。ACL catalog helper 使用 `LATERAL (VALUES …)`，
+保持既有权限原子及排序，避免 ARRAY 方括号；catalog 查询仍在扫描集合内。
+冻结 legacy 列表中的历史模块保留原 lint 行为，不扩大历史 allowlist。
+
+PostgreSQL 在执行 expand 前读取 `SHOW standard_conforming_strings`，必须为 `on`（PG 默认），
+否则拒绝，不能依赖关闭该设置后的反斜杠语义。所有 unsupported 形式共用一个拒绝路径，
+错误说明具体形式；执行前整体拒绝，不记账、不推进 level。`exec` 由同一 tokenizer 按顶层分号切分，
+整批检查后逐段通过 `query(...).run()` 执行，不经过 bridge 的 `splitStatements`。
+这不是数据库协议层的多命令保证；worker 协议和通用 SQL adapter 不变，
+允许清单之外的现存 SQL 必须先报告并重写，不能为其加例外。
+arch 仅对 B1 扫描集合内的 SQL 候选检查允许清单，不将散文和 shell 当成已知 SQL。
 运行时面对已知 SQL，任何顶层语句以 TRUNCATE 开头都直接拒绝，不依赖尾部形态或 catalog diff；
 arch 仅作 fail-fast：TRUNCATE 后接 TABLE、ONLY 或引用名称时
 不论尾部是否可识别都拒绝；只有裸单词名称仍需形态检查以区分散文。
@@ -163,5 +172,5 @@ A4 切换接入和 A5 live 验收不由本单实现；本地 PG 混跑不等于�
 legacy 归档指纹的 [data-schema-inputs.json](../../packages/platform-updater/src/data-schema-inputs.json)
 冻结为 B1 合入前 main `80f749990` 的逐项内容，不添加新版独有路径，否则 updater 从旧 `/app` 读取时会失败。
 新增 DDL 模块走 level 纪律；[覆盖门禁](../../tests/arch/data-schema-inputs.test.ts)
-要求 migrations.ts 可达的每个 DDL 模块要么在冻结列表中，要么在 B1 arch scanner 的实际扫描集合中；
-该集合由 scanner 的同一次遍历报告，包含 schema-levels.ts。此规则不改变 level 指纹或 legacy 哈希算法。
+要求 migrations.ts 可达的每个运行时源码模块要么在冻结列表中，要么在 B1 arch scanner 的实际扫描集合中；
+导入的 JSON 同样纳入实际扫描集合。scanner 与覆盖门禁共用 [可达图遍历](../../scripts/schema-module-graph.mjs)，不按 DDL 源码正则过滤模块；实际扫描集合包含 schema-levels.ts，非 DDL 模块扫描结果可为零。此规则不改变 level 指纹或 legacy 哈希算法。

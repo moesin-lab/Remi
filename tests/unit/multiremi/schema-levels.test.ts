@@ -122,7 +122,7 @@ describe('schema compatibility protocol', () => {
       console.info('COPY_SWAP', JSON.stringify({ quote: open, rejected: Boolean(failure),
         rows: database.query('SELECT * FROM retained').all(), levels: readSchemaLevels(database),
         steps: database.query('SELECT id FROM multiremi_schema_steps').all() }));
-      expect(() => { if (failure) throw failure; }).toThrow('Destructive DDL');
+      expect(() => { if (failure) throw failure; }).toThrow(open === '"' ? 'Destructive DDL' : 'backtick and bracket forms are unsupported');
       expect(database.query('SELECT * FROM retained').all()).toEqual([{ id: 42 }]);
       expect(database.query("SELECT name FROM sqlite_master WHERE name='replacement'").get()).toBeNull();
       expect(readSchemaLevels(database)).toEqual({ expandLevel: 0, contractLevel: 0 });

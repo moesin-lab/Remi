@@ -14,6 +14,8 @@ export async function readMigrationSource(root: string): Promise<string> {
 }
 
 export interface BackupConfig {
+  /** Online slot switches may retain only the PostgreSQL snapshot. */
+  databaseOnly?: boolean;
   directory: string;
   /** argv only: writes a transactionally consistent database dump to stdout. */
   databaseDumpCommand: string[];
@@ -36,7 +38,7 @@ export function preflightResult(checks: MultiremiPlatformPreflight["checks"]): M
 }
 
 export async function checkBackup(config: BackupConfig | undefined): Promise<void> {
-  if (!config || !isAbsolute(config.directory) || !config.databaseDumpCommand?.length || !config.databaseVerifyCommand?.length || (!config.dataPaths?.length && !config.archives?.length)) {
+  if (!config || !isAbsolute(config.directory) || !config.databaseDumpCommand?.length || !config.databaseVerifyCommand?.length || (!config.databaseOnly && !config.dataPaths?.length && !config.archives?.length)) {
     throw new Error("Configure a database dump, restore verification command and all persistent data paths before updating");
   }
   for (const command of [config.databaseDumpCommand, config.databaseVerifyCommand, ...(config.archives ?? []).flatMap((archive) => [archive.dumpCommand, archive.verifyCommand])]) {

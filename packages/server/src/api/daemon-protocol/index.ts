@@ -46,7 +46,6 @@ import { DaemonSessionRegistry } from "./session-registry.js";
 import {
   DaemonProtocolSession,
   daemonAuthorizationCloseCode,
-  setDaemonProtocolDbCounters,
   type DaemonProtocolSocket,
   type DaemonSessionHeartbeat,
   type DaemonSessionHello,
@@ -103,13 +102,6 @@ export interface DaemonProtocolLayerOptions {
   /** Metrics configuration; `startMultiremiServer` supplies the env-resolved one. */
   metrics?: WsFrameMetricsOptions;
   /**
-   * Process DB counters used for per-frame attribution.
-   *
-   * Feeds the per-frame `db_ms` only. The process total is reported once, by
-   * `api_minute_summary`; see `metrics.ts` for why it is not repeated here.
-   */
-  dbCounters?: () => { dbMs: number; dbQueries: number };
-  /**
    * PR 6: the caps `welcome` echoes when a hello declares them; defaults to
    * `DAEMON_SERVER_WELCOME_CAPS`. `[]` makes this server behave as an older
    * one (daemons stop background tasks at the attempt's end).
@@ -137,7 +129,6 @@ export class DaemonProtocolLayer {
     this.store = options.store;
     this.welcomeCaps = options.welcomeCaps;
     this.serverVersion = options.serverVersion ?? multiremiVersion;
-    if (options.dbCounters) setDaemonProtocolDbCounters(options.dbCounters);
     this.metrics = options.metrics ? startWsFrameMetricsSummary(options.metrics) : null;
   }
 

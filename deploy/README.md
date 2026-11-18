@@ -259,13 +259,16 @@ The separate [updater](../apps/platform-updater/internal.ts) runs
 [InternalApplicationDriver](../packages/platform-updater/src/internal-driver.ts),
 which claims the existing admin-created operation queue. It downloads verified
 application archives to the `program` volume, executes candidate Bun/Node
-`--version` probes inside the target containers, waits for agent drain, commits
-a recovery journal and write fence, and stops only the application children.
-It then backs up PostgreSQL/API home, asks the network-isolated
+`--version` probes inside the target containers. On a single `all` API without peers,
+equal-schema updates use [dual-slot switching](../docs/deploy/internal-slot-switch.md):
+online database backup is best effort, with no platform drain, write fence or
+rehearsal; edge holds new requests during slot ownership transfer and the supervisor
+rolls back failed activation or confirmation. Web still restarts. Other updates wait
+for agent drain, commit a recovery journal and write fence, stop application children,
+back up PostgreSQL/API home, and ask the network-isolated
 [rehearsal service](../apps/platform-updater/rehearsal.ts) to restore and test the
-backup, and starts the selected code with its bundled runtimes. API/Web are
-temporarily unavailable during backup, rehearsal and child startup. Their
-containers, supervisors, PostgreSQL container and independent agents stay alive.
+backup before starting selected code. In that fallback path API/Web are temporarily
+unavailable. Containers, supervisors, PostgreSQL and independent agents stay alive.
 
 The first `REMI_INTERNAL_BACKUP_PATHS` entry must be API HOME (`/remi-data`
 in the supplied Compose topology). For each target/previous startup, rehearsal

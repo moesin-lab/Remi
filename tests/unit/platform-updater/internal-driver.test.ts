@@ -186,12 +186,12 @@ describe('socket-free internal application updates', () => {
     }
   });
   it('refines published preflight for the resolved target without requiring offline-only services for a switch', async () => {
-    // Internal updates run in Linux containers even when this suite's host is
-    // Windows/macOS. Exercise the real preflight without bypassing its guard.
-    simulateHostPlatform('linux');
     const f = await fixture(); f.statuses.api.slotSwitch = true;
     await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
     await rm(join(f.config.control, 'rehearsal/status.json'));
+    // Internal updates run in Linux containers. Simulate only the read-only
+    // preflight, after fixture writes that need the host's real fsync behavior.
+    simulateHostPlatform('linux');
     expect((await f.driver.preflight()).ready).toBe(false);
     const compatible = await f.driver.preflightForRelease(f.manifest);
     expect(compatible.ready).toBe(true);
@@ -202,10 +202,10 @@ describe('socket-free internal application updates', () => {
     expect(incompatible.checks.find(check => check.code === 'isolated_rehearsal')?.ok).toBe(false);
   });
   it.each(['darwin', 'win32'] as const)('rejects compatible switch preflight on a %s host', async platform => {
-    simulateHostPlatform(platform);
     const f = await fixture(); f.statuses.api.slotSwitch = true;
     await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
     await rm(join(f.config.control, 'rehearsal/status.json'));
+    simulateHostPlatform(platform);
     const compatible = await f.driver.preflightForRelease(f.manifest);
     expect(compatible.ready).toBe(false);
     expect(compatible.checks.filter(check => !check.ok)).toEqual([

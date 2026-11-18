@@ -126,7 +126,7 @@ export interface PlannedRestartRemote {
   resume(entry: RestartJournalEntry): Promise<{ generation: number }>;
 }
 
-/** Ordering shared by manual/deploy/update adapters; not yet wired into daemon.ts. */
+/** Ordering shared by manual/deploy/update adapters; used by daemon.ts after provider shutdown. */
 export class PlannedRestartTransfer {
   private readonly stopping = new Map<string, { execution: string; pending: Promise<RestartJournalEntry> }>();
   constructor(private readonly journal: PlannedRestartJournal, private readonly remote: PlannedRestartRemote) {}

@@ -1,3 +1,5 @@
+import { PlannedRestartError } from "@multiremi/store/planned-restarts.js";
+import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import type { DaemonProtocolLayer } from "./index.js";
 import type { DaemonParsedFrame } from "./frames.js";
@@ -33,6 +35,31 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
         workspaceId: store.getRuntimeLite(frame.rt!)!.workspaceId ?? "local" });
       if (result.ok === true) kick(frame.rt!);
       return result;
+    });
+  }
+  for (const type of ["turn.restart.checkpoint", "turn.restart.suspend"] as const) {
+    layer.registerRpcHandler(type, async (frame, session) => {
+      if (!await authorized(frame, session)) return denied("authority_revoked");
+      const p = frame.payload;
+      if (typeof p.attempt_id !== "string" || typeof p.turn_id !== "string") return denied();
+      const task = store.getTaskIdentity(p.attempt_id);
+      if (!task || task.runtimeId !== frame.rt || task.workspaceId !== (store.getRuntimeLite(frame.rt!)?.workspaceId ?? "local")) return denied("authority_revoked");
+      const scope = { runtimeId: frame.rt!, daemonId: session.daemonId, workspaceId: task.workspaceId };
+      try {
+        const restarts = store.plannedRestarts();
+        const handoff = restarts.get(p.attempt_id);
+        if (!handoff || handoff.turn_id !== p.turn_id || handoff.handoff_id !== p.handoff_id
+          || handoff.generation !== p.generation) return denied("stale_execution");
+        if (type === "turn.restart.checkpoint") return { ok: true, checkpoint: restarts.checkpointReferences(p.attempt_id, scope) };
+        if (!p.checkpoint || typeof p.checkpoint !== "object" || Array.isArray(p.checkpoint)) return denied();
+        const committed = restarts.suspend(p.attempt_id, handoff.handoff_id, handoff.generation,
+          p.checkpoint as unknown as PlannedRestartCheckpoint, scope);
+        kick(frame.rt!);
+        return { ok: true, handoff: committed };
+      } catch (error) {
+        if (error instanceof PlannedRestartError) return denied(error.code);
+        throw error;
+      }
     });
   }
   layer.registerRpcHandler("plugin.desired", async (frame, session) => {

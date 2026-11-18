@@ -116,6 +116,20 @@ export class TraceStreamer {
     }
   }
 
+  /** Join the final trace upload before revoking this execution generation. */
+  async flushTask(taskId: string, signal: AbortSignal): Promise<void> {
+    const head = this.store.head(taskId)?.head ?? 0;
+    if (!head) return;
+    while (true) {
+      signal.throwIfAborted();
+      const cursor = this.tasks.get(taskId);
+      if (!cursor || cursor.blocked || this.stopped) throw new Error("Trace execution is no longer uploadable");
+      if (cursor.afterSeq >= head) return;
+      this.wake();
+      await new Promise<void>(resolve => setTimeout(resolve, 10));
+    }
+  }
+
   async stop(): Promise<void> {
     this.stopped = true;
     this.unsubscribe();

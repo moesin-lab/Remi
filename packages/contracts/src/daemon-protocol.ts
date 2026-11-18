@@ -147,6 +147,8 @@ export const DAEMON_UPLINK_BEST_EFFORT_FRAMES = [
 /** Non-trace-stream daemon -> server RPC requests, paired with a `res` by `id`. */
 export const DAEMON_UPLINK_RPC_FRAMES = [
   "concierge.status_report",
+  "turn.restart.checkpoint",
+  "turn.restart.suspend",
   "turn.input",
   "turn.decision",
   "turn.decision.get",
@@ -176,6 +178,7 @@ export const DAEMON_DOWNLINK_EVENT_FRAMES = [
   "turn.message",
   "input_unread",
   "turn.wrap_up",
+  "turn.restart",
   "runtime.update",
   "runtime.command",
   "runtime.model_list",
@@ -910,6 +913,10 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   "task_not_found",
   "authority_revoked",
   "invalid_report",
+  "stale_execution",
+  "invalid_checkpoint",
+  "drain_not_active",
+  "resume_fenced",
   "cli_update_not_admitted",
   "cli_update_not_runnable",
   "report_shape_retired",

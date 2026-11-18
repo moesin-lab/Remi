@@ -1,3 +1,4 @@
+import { afterCommit } from "./db/postgres.js";
 import { createHash } from "node:crypto";
 import type { StoreContext } from "./context.js";
 import { PlatformMaintenanceRepo } from "./repos/platform-maintenance-repo.js";
@@ -43,6 +44,11 @@ export class PlannedRestarts {
   get(attemptId: string): PlannedRestartHandoff | null {
     const row = this.ctx.db.query("SELECT * FROM multiremi_planned_restarts WHERE attempt_id=?").get(attemptId);
     return row ? decode(row) : null;
+  }
+
+  pendingForRuntime(runtimeId: string): Map<string, PlannedRestartHandoff> {
+    const rows = this.ctx.db.query("SELECT * FROM multiremi_planned_restarts WHERE runtime_id=? AND state IN ('requested','suspended','resuming')").all(runtimeId);
+    return new Map(rows.map(row => { const value = decode(row); return [value.attempt_id, value]; }));
   }
 
   private lock(attemptId: string, scope: PlannedRestartScope) {
@@ -95,6 +101,8 @@ export class PlannedRestarts {
         consumer_id=NULL,checkpoint=NULL,checkpoint_sha256=NULL,updated_at=excluded.updated_at`,
       [attemptId, attempt.turn_id, scope.workspaceId, scope.runtimeId, scope.daemonId, id,
         drain.drain_id, generation, at, at]);
+      afterCommit(this.ctx.db, () => this.ctx.emitWorkspaceEvent({ type: "daemon:task_input", workspaceId: scope.workspaceId,
+        actorType: "system", actorId: null, payload: { runtime_id: scope.runtimeId, task_id: attemptId } }));
       return this.get(attemptId)!;
     })();
   }
@@ -156,12 +164,35 @@ export class PlannedRestarts {
   /** All execution writes (including decisions/input/terminal reports) must call under their lock. */
   assertExecutionWithinTransaction(attemptId: string, generation: number | undefined): void {
     if (!this.ctx.db.inTransaction) throw new Error("Execution generation requires the caller transaction and workspace/lane locks");
+    if (generation !== undefined && (!Number.isSafeInteger(generation) || generation < 0)) throw new PlannedRestartError("stale_execution");
     const current = this.get(attemptId);
     if (!current) {
       if ((generation ?? 0) !== 0) throw new PlannedRestartError("stale_execution");
       return;
     }
     if (!["requested", "running"].includes(current.state) || current.generation !== (generation ?? 0)) throw new PlannedRestartError("stale_execution");
+  }
+
+  /** Transport writes serialize with resume CAS, including the live trace sink. */
+  withExecution<T>(attemptId: string, generation: unknown, scope: PlannedRestartScope, write: () => T): T {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(scope.workspaceId);
+      if (generation !== undefined && (!Number.isSafeInteger(generation) || Number(generation) < 0)) throw new PlannedRestartError("stale_execution");
+      if (this.get(attemptId)) this.lock(attemptId, scope);
+      this.assertExecutionWithinTransaction(attemptId, generation as number | undefined);
+      return write();
+    })();
+  }
+
+  /** Read after the provider stopped and its ordered reports were acknowledged. */
+  checkpointReferences(attemptId: string, scope: PlannedRestartScope): PlannedRestartCheckpoint {
+    return this.ctx.db.transaction(() => {
+      const attempt = this.lock(attemptId, scope);
+      this.assertLive(attempt);
+      if (this.get(attemptId)?.state !== "requested") throw new PlannedRestartError("stale_execution");
+      return { version: 1 as const, session_id: attempt.session_id ?? null, work_dir: attempt.work_dir ?? null,
+        input_ack_seq: Number(attempt.input_ack_seq ?? 0), trace_head: 0, delivered_message_ids: [] };
+    })();
   }
 
   /** No checkpoint acknowledgement => ordinary crash policy, including a requested handoff. */

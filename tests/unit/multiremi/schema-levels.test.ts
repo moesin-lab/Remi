@@ -30,12 +30,12 @@ describe('schema compatibility protocol', () => {
     const database = db();
     expect(readSchemaLevels(database)).toEqual({ expandLevel: 0, contractLevel: 0 });
     runMigrations(database);
-    expect(readSchemaLevels(database)).toEqual({ expandLevel: 1, contractLevel: 0 });
+    expect(readSchemaLevels(database)).toEqual({ expandLevel: 2, contractLevel: 0 });
     runMigrations(database);
-    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(1);
-    database.exec('UPDATE multiremi_schema_meta SET expand_level=2, contract_level=2');
+    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(2);
+    database.exec('UPDATE multiremi_schema_meta SET expand_level=3, contract_level=3');
     const before = database.query('SELECT total_changes() AS count').get();
-    expect(() => runMigrations(database)).toThrow('contract_level=2 exceeds code maxLevel=1');
+    expect(() => runMigrations(database)).toThrow('contract_level=3 exceeds code maxLevel=2');
     expect(database.query('SELECT total_changes() AS count').get()).toEqual(before);
   });
   it('requires maintenance for populated pre-protocol databases and never replays enrolled history', () => {
@@ -53,6 +53,18 @@ describe('schema compatibility protocol', () => {
       return typeof value === 'function' ? value.bind(target) : value;
     } });
     expect(() => runStartupMigrations(guarded)).not.toThrow();
+  });
+  it('expands an enrolled level 1 database with the live term table without historical replay', () => {
+    const database = db();
+    runMigrations(database);
+    // Reproduce the previously enrolled B1 schema, before A3's additive table.
+    database.exec("DROP TABLE multiremi_live_terms");
+    database.exec("DELETE FROM multiremi_schema_steps WHERE level=2");
+    database.exec("UPDATE multiremi_schema_meta SET expand_level=1");
+    runStartupMigrations(database);
+    expect(readSchemaLevels(database)).toEqual({ expandLevel: 2, contractLevel: 0 });
+    expect(database.query("SELECT name FROM sqlite_master WHERE name='multiremi_live_terms'").get()).not.toBeNull();
+    expect(database.query("SELECT id FROM multiremi_schema_steps WHERE level=2").get().id).toBe('20261118_live_term_fence');
   });
   it('rejects an empty/corrupt metadata table instead of treating it as legacy', () => {
     const database = db(); ensureSchemaMeta(database);

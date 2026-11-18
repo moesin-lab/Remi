@@ -1,3 +1,4 @@
+import { LIVE_TERM_SCHEMA } from './live-term-fence.js';
 import type { SchemaMigration } from './schema-migration-runner.js';
 
 /** Historical bootstrap is frozen at level 0. New DDL belongs in this list;
@@ -6,4 +7,8 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
   id: '20261118_schema_level_protocol', phase: 'expand', level: 1,
   expandRelease: '0.2.95', release: '0.2.95',
   run: () => {}, // ensureSchemaMeta creates the additive protocol tables.
+}, {
+  id: '20261118_live_term_fence', phase: 'expand', level: 2,
+  expandRelease: '0.2.95', release: '0.2.95',
+  run: db => { db.exec(LIVE_TERM_SCHEMA); },
 }];

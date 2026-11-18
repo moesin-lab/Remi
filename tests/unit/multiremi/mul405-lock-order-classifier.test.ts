@@ -2,6 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { classifyLockOrderStatement, type LockOrderClass } from "@multiremi/store/lock-order-sentinel.js";
 
 const cases: Array<[string, string, LockOrderClass[]]> = [
+  ["live term lock", "UPDATE multiremi_live_terms SET term = term WHERE scope = ? RETURNING term", ["F"]],
+  ["live term initialization", "INSERT INTO multiremi_live_terms(scope, term) VALUES (?, 0)", ["F"]],
+  ["live term locking SELECT", "SELECT term FROM multiremi_live_terms FOR UPDATE", ["F"]],
   ["ordinary SELECT", "SELECT id FROM multiremi_issues", []],
   ["ordinary WITH SELECT", "WITH i AS (SELECT * FROM multiremi_issues) SELECT * FROM i", []],
   ["read snapshot characteristics", "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", []],

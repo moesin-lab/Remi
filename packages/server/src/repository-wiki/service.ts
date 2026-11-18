@@ -1,3 +1,4 @@
+import { currentBackgroundTerm } from "@shared/db/live-term.js";
 import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 import { createId, nowIso } from "@multiremi/ids.js";
@@ -262,15 +263,20 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
   }
 
   runStorageJobs(signal?: AbortSignal, now = Date.now()): Promise<void> {
+    currentBackgroundTerm()?.assertCurrent();
     if (this.storageRun) return this.storageRun;
     const run = (async () => {
       if (this.mode === "sql") return;
       for (const workspace of this.store.listWorkspaces()) {
         for (const job of this.store.listWorkspaceRepositoryWikiStorageJobs(workspace.id)) {
           if (signal?.aborted) return;
+          currentBackgroundTerm()?.assertCurrent();
           const backoff = job.lastError ? Math.min(300_000, 5_000 * 2 ** Math.min(job.attemptCount, 6)) : 0;
           if (now - Date.parse(job.updatedAt) < backoff) continue;
-          await this.withWriteLock(job.workspaceId, job.repositoryId, service => service.processStorageJobUnlocked(job, true, signal));
+          await this.withWriteLock(job.workspaceId, job.repositoryId, service => {
+            currentBackgroundTerm()?.assertCurrent();
+            return service.processStorageJobUnlocked(job, true, signal);
+          });
         }
       }
     })();

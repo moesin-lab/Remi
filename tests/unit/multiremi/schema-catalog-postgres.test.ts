@@ -106,6 +106,13 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
     rejected(`unknown-tail-${serial}`, `TRUNCATE ${schema}.retained @ unknown_tail`, 'Destructive DDL is forbidden');
     expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
   });
+  for (const escape of ['not_a_string', '$1']) it(`fails closed on unrecognized UESCAPE ${escape}`, () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.retained (id integer); INSERT INTO ${schema}.retained VALUES (42)`);
+    rejected(`unknown-uescape-${serial}`,
+      `ALTER TABLE ${schema}.U&"retained" UESCAPE ${escape} ADD COLUMN c text`, 'Destructive DDL is forbidden');
+    expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
+  });
   // These SELECT statements deliberately pass text lint. Only before/after
   // catalog comparison can detect the function's transactional side effects.
   const hidden = [

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { hasDestructiveSchemaSql as hasDestructiveSchemaStatement, hasDestructiveSchemaSql, SCHEMA_DDL_OBJECT_CLASSES } from '@multiremi/store/schema-ddl.js';
+import { hasDestructiveSchemaStatement, hasDestructiveSchemaSql, SCHEMA_DDL_OBJECT_CLASSES } from '@multiremi/store/schema-ddl.js';
 
 // Cross product: table modifiers, qualification, quoted names (spaces/commas),
 // optional COLUMN and IF EXISTS; every action is also checked after ADD.
@@ -120,7 +120,7 @@ describe('known SQL fail-closed boundary', () => {
   }
   for (const sql of ['TRUNCATE t unexpected @ tail', 'SELECT 1; TRUNCATE ?',
     'TRUNCATE', `ALTER TABLE U&"t" UESCAPE not_a_string ADD COLUMN c text`,
-    `SELECT U&"t" UESCAPE 42`, `ALTER TABLE U&"t" UESCAPE E ADD COLUMN c text`]) {
+    `SELECT U&"t" UESCAPE 42`, `SELECT U&"t" UESCAPE $1`, `SELECT U&"t" UESCAPE '`, `ALTER TABLE U&"t" UESCAPE E ADD COLUMN c text`]) {
     it(`fails closed in known SQL: ${sql}`, () => expect(hasDestructiveSchemaStatement(sql)).toBe(true));
   }
   for (const prefix of ['TABLE t', 'ONLY t', '"t"', 'U&"t"']) {

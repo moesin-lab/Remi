@@ -1937,7 +1937,7 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     expect(store.getIssueWorkspace(issue.id)).toMatchObject({ status: "ready", runtimeId: owner.id });
   });
 
-  it("keeps Issue tasks off legacy runtimes without blocking ordinary tasks", () => {
+  it("does not infer Issue workspace support from runtime CLI metadata", () => {
     const store = createStore();
     const legacyRuntime = store.registerRuntime({
       id: "rt_legacy_issue_workspace",
@@ -1956,11 +1956,11 @@ describe("Multiremi store — task claim, routing, and workspace scoping", () =>
     const issueTask = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "issue work" });
     const ordinaryTask = store.createTask({ agentId: agent.id, prompt: "ordinary work" });
 
-    expect(store.claimTask(legacyRuntime.id)?.id).toBe(ordinaryTask.id);
-    store.startTask(ordinaryTask.id);
-    store.completeTask(ordinaryTask.id, { output: "done" });
-    expect(store.claimTask(legacyRuntime.id)).toBeNull();
-    expect(store.claimTask(currentRuntime.id)?.id).toBe(issueTask.id);
+    // Socket admission enforces the contract floor; metadata is descriptive.
+    expect(store.claimTask(legacyRuntime.id)?.id).toBe(issueTask.id);
+    store.startTask(issueTask.id);
+    store.completeTask(issueTask.id, { output: "done" });
+    expect(store.claimTask(currentRuntime.id)?.id).toBe(ordinaryTask.id);
   });
 
   it("claims queued tasks by runtime provider and completes them", () => {

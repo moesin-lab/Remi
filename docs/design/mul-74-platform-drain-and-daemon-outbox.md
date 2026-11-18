@@ -168,3 +168,31 @@ daemon 会把不可重试 WS 错误持久化为分区 blocked；平台升级后�
 验证入口：`tests/unit/multiremi/daemon-drain.test.ts`、
 `tests/unit/daemon/cli-update-coordinator.test.ts`、`tests/unit/daemon/cli-update-lifecycle.test.ts`、
 `tests/unit/daemon/update-admission.test.ts`（真实 HTTP result、协议 report handler 和磁盘 outbox）。
+
+## MUL-31：持久化交接存储原语（执行路径尚未接入）
+
+[planned-restarts.ts](../../packages/server/src/store/planned-restarts.ts) 提供独立于
+Turn/attempt 状态的计划内交接记录。[共享 schema](../../packages/server/src/store/planned-restart-schema.ts)
+在 SQLite 和 PostgreSQL 的迁移入口添加表，不改写已有尝试；旧 drain 回填独立 `drain_id`，
+重复 begin 保留身份与期限，更新 owner 交接产生新身份。时间戳不承担唯一身份，避免同一时刻
+undrain 后重新 drain 接受旧 checkpoint。
+
+`request` 校验当前 attempt、workspace/runtime/daemon 和持久化 drain；`suspend` 只接受同一
+fence/generation 的 checkpoint，重放必须有相同摘要。checkpoint 只保存 provider session/work_dir、
+trace head 与输入 receipt 引用，不保存凭据、消息正文或 translator 内存。输入确认水位必须与
+服务端一致，delivered ID 必须属于同一会话且已投影；写 checkpoint 不推进确认水位。
+
+`resume` 在 workspace→lane 锁与单一事务内消费 checkpoint、递增 generation 并运行调用方的
+新执行段授权；授权抛错时整个恢复回滚，另一消费者仍可接手。相同消费者可重读已提交结果，
+另一消费者被拒绝。manual/deploy drain 需要先 undrain，CLI owner 的 fence 与平台维护 fence
+同样阻止恢复。generation 检查必须在执行写入的同一事务、持有上述锁时调用。
+
+这些是**尚未接入 daemon 的内部存储原语**，没有新增用户 API/CLI，也没有启用孤儿豁免。
+`reconcileDaemonDrain` 的现有超时行为、`reconcileRuntimeWaits` 的原回调丢失处理仍按上文执行。
+完成续接还需接入 daemon 安全点与本地 journal、服务端报告/输入/trace 的分代授权、恢复派发、
+Q 重绑定、steer 对账与 translator 状态恢复；飞书补收另需真实入站游标。
+不能仅根据存在 `suspended` 记录改变排空计数或允许更新。
+
+存储验证入口：`bun run test tests/unit/multiremi/planned-restarts.test.ts`，覆盖双 dialect fixture
+（PG 需显式配置）、SQLite 真正 close/open 和双连接消费者、重放、陈旧 generation/fence、
+取消竞争、摘要损坏与事务回滚。它不替代假 provider 的真正进程替换验收。

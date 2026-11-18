@@ -13,6 +13,42 @@ afterAll(() => {
   rmSync(dedupTestRoot, { recursive: true, force: true });
 });
 
+for (const overlap of ["queued", "delivering", "acknowledged"] as const) it(`keeps live denial notification when history overlaps ${overlap} input`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "feishu-overlap-denied-")), now = Date.now();
+  const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  let cards = 0, callbacks = 0, admissions = 0;
+  const client = { im: { message: { reply: async () => {
+    cards++; return { code: 0, data: { message_id: "om_denial_card" } };
+  } } } } as any;
+  const history = feishuHistoryEvent({ message_id: `om_overlap_${crypto.randomUUID()}`, create_time: String(now - 1000),
+    msg_type: "text", sender: { id_type: "open_id", id: "ou_nonmember", sender_type: "user" }, body: { content: '{"text":"hello"}' } }, "oc_private", "p2p")!;
+  const live = { ...history, recovery_source: undefined };
+  try {
+    const journal = new FeishuInboundRecovery(join(root, "journal.json"), () => now);
+    const deliver = createFeishuInboundDelivery({ client, recovery: journal, appId: "cli_test",
+      authorizeSender: async () => {
+        if (++admissions === 1 && overlap === "delivering") { entered.resolve(); await release.promise; }
+        return false;
+      }, botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() },
+      onMessage: async () => { callbacks++; } });
+    const first = overlap === "queued"
+      ? journal.accept({ ...history, message: { ...history.message, message_id: "om_blocker" } }, async () => {
+        entered.resolve(); await release.promise;
+      })
+      : journal.accept(history, deliver);
+    if (overlap === "acknowledged") await first;
+    else await entered.promise;
+    const arrivingLive = journal.accept(live, deliver);
+    const arrivingHistory = overlap === "queued" ? journal.accept(history, deliver) : Promise.resolve();
+    release.resolve();
+    await Promise.all([first, arrivingLive, arrivingHistory]);
+    expect(cards).toBe(1);
+    expect(callbacks).toBe(0);
+    expect(admissions).toBe(overlap === "queued" ? 1 : 2);
+    expect(JSON.parse(readFileSync(join(root, "journal.json"), "utf8")).pending).toEqual({});
+  } finally { release.resolve(); rmSync(root, { recursive: true, force: true }); }
+});
+
 it("denies overlapping history without repeated cards while retaining live denial notifications", async () => {
   const root = mkdtempSync(join(tmpdir(), "feishu-history-denied-"));
   let now = Date.now(), deniedCards = 0, callbacks = 0, admissions = 0;

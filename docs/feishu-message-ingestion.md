@@ -98,6 +98,7 @@ daemon 以服务端既有 `multiremi_feishu_bot_chat_bindings.chat_id`（含话�
 `multiremi_feishu_bot_agent_routes.chat_id` 为已知会话种子，不另建会话目录。
 启用此配置的连接器将实时事件先原子写入本地 app/domain 隔离的 pending 日志，
 业务 callback 成功后确认；失败保留 pending，启动及每 30 秒重放并分页读取历史。
+同一 message_id 的实时副本优先于历史副本；旧回调完成时保留其间后到的副本，避免吞掉实时通知。
 历史 sender/mention 转为同一接收事件，沿用发送者授权、群准入及附件链路。
 历史准入拒绝不发送用户卡片，避免重叠回扫重复通知；实时拒绝提示按 message_id 本地去重一次。
 Task 去重仍只由服务端 `multiremi_feishu_bot_deliveries.external_message_id` 负责；

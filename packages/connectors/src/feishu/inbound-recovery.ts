@@ -69,7 +69,11 @@ export class FeishuInboundRecovery {
     const id = event.message.message_id;
     this.rememberChat(event.message.chat_id, event.message.chat_type);
     // This synchronous write happens before any await, even behind another callback.
-    this.state.pending[id] = event;
+    const pending = this.state.pending[id];
+    // A history overlap must not erase a live notification obligation already
+    // journaled for this ID. A later live copy can replace a history copy.
+    this.state.pending[id] = pending && pending.recovery_source !== "history" && event.recovery_source === "history"
+      ? pending : event;
     this.save();
     return this.serialized(() => this.deliver(id, deliver));
   }
@@ -83,7 +87,10 @@ export class FeishuInboundRecovery {
       const chat = this.state.chats[event.message.chat_id]!;
       chat.through = Math.max(chat.through, timestamp);
     }
-    delete this.state.pending[id];
+    // The callback may have yielded while a newer copy arrived. Its queued
+    // delivery still owns that copy, even when this older history callback was
+    // successful; keep it durable until its own callback acknowledges it.
+    if (this.state.pending[id] === event) delete this.state.pending[id];
     this.save();
   }
 

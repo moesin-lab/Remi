@@ -7,11 +7,12 @@ import type { CommitEventQueue, StoreContext } from '../context.js';
 import { createCommitEventQueue } from '../context.js';
 import { afterCommit } from '../db/postgres.js';
 import { nowIso } from '@multiremi/ids.js';
-import { getMessage, messageFromRow, sendMessageWithinTransaction } from './send-message.js';
+import { getMessage, sendMessageWithinTransaction } from './send-message.js';
 import { normalizeHumanResponse } from './human-response.js';
 import { assertQuestionCardToken, type QuestionCardCredential } from '../question-card-token.js';
 import { deriveIssueStatusWithinTransaction } from './issue-status.js';
 import { createHash } from 'node:crypto';
+import { parseJson } from '../helpers.js';
 import { questionMetadataText } from './question-indexes.js';
 import { RuntimeWorkspaceError } from '../repos/runtime-workspaces-repo.js';
 
@@ -38,6 +39,7 @@ interface QuestionRecord {
   history: QuestionHistoryEvent[];
   wait: { status: QuestionWaitStatus; reason: string | null; wait_id?: string; runtime_id?: string; reply_message_id?: string; consumer_turn_id?: string; consumer_attempt_id?: string; continuation_message_id?: string; consumed_at?: string };
 }
+type QuestionSourceMessage = Pick<UnifiedMessage, 'id' | 'session_id' | 'task_id' | 'sender_type' | 'sender_id' | 'metadata'>;
 type IntegrityFacts = {
   source: Record<string, any> | null;
   session: {
@@ -185,7 +187,7 @@ export class Questions {
     if (!this.integrity(result.message, result.record)) throw new QuestionError(403, 'question_source_workspace_changed');
     return result;
   }
-  private integrity(message: UnifiedMessage, record: QuestionRecord, batch?: IntegrityFacts): boolean {
+  private integrity(message: QuestionSourceMessage, record: QuestionRecord, batch?: IntegrityFacts): boolean {
     // Historical business Qs can live on a parent lane or a different scope.
     // Their exact source relation is checked by historicalSource/canAccessFromTurn.
     const historical = message.metadata.decision_record && !message.metadata.human_request && !record.wait.wait_id;
@@ -209,7 +211,7 @@ export class Questions {
     const facts = batch ? batch.head : this.ctx.db.query('SELECT h.workspace_id,i.workspace_id AS source_workspace FROM multiremi_conversation_heads h LEFT JOIN multiremi_issues i ON i.id=? WHERE h.session_id=?').get(record.source_issue_id, message.session_id);
     return facts?.workspace_id === record.workspace_id && (!record.source_issue_id || facts?.source_workspace === record.workspace_id);
   }
-  private nativeAutomationSource(message: UnifiedMessage, record: QuestionRecord): boolean {
+  private nativeAutomationSource(message: QuestionSourceMessage, record: QuestionRecord): boolean {
     const native = message.metadata.question as QuestionRecord | undefined;
     const request = message.metadata.human_request as { kind?: string } | undefined;
     if (native?.version !== 1 || !request || !['permission', 'question'].includes(String(request.kind))
@@ -563,7 +565,8 @@ export class Questions {
       SELECT m.id FROM multiremi_issue_sessions s JOIN multiremi_conversation_log m ON m.session_id=s.id
       WHERE s.issue_id=? AND m.kind='message' AND m.message_kind='decision'
         AND m.deleted_at IS NULL AND m.resolved_at IS NULL)
-      SELECT m.*, t.issue_id AS count_turn_issue_id, t.current_attempt_id AS count_attempt_id,
+      SELECT m.id,m.session_id,m.task_id,m.sender_type,m.sender_id,m.metadata,
+        t.issue_id AS count_turn_issue_id, t.current_attempt_id AS count_attempt_id,
         chat.workspace_id AS count_chat_workspace,
         legacy.id AS count_legacy_attempt, legacy_turn.agent_id AS count_legacy_agent,
         legacy_turn.workspace_id AS count_legacy_workspace, legacy_turn.issue_id AS count_legacy_issue
@@ -577,9 +580,10 @@ export class Questions {
     // Historical routes all have the requested source Issue. Resolve its chain
     // once, even when each decision came from a different asker/session.
     let responsibility: ReturnType<StoreContext['resolveIssueResponsibility']> | undefined;
-    const candidates: { message: UnifiedMessage; record: QuestionRecord; chat: IntegrityFacts['chat'] }[] = [];
+    const candidates: { message: QuestionSourceMessage; record: QuestionRecord; chat: IntegrityFacts['chat'] }[] = [];
     for (const row of rows) {
-      const message = messageFromRow(row);
+      const message: QuestionSourceMessage = { id: row.id, session_id: row.session_id, task_id: row.task_id,
+        sender_type: row.sender_type, sender_id: row.sender_id, metadata: parseJson(row.metadata, {}) };
       let record = message.metadata.question as QuestionRecord | undefined;
       if (record?.version === 1) record = this.upgraded(record);
       else {

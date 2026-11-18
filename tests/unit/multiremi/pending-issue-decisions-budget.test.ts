@@ -141,10 +141,11 @@ pendingTurnBackendTests('MUL-208 pending decision query budget', (fixture, backe
       h.clone({ decision_record: { source_issue_id: h.issue.id, kind, status } });
     expect(h.store.countPendingIssueDecisions(h.issue.id)).toBe(h.oracle());
     const foreignParent = h.store.createIssueSession(h.issue.id, { title: 'Other parent', holdsWorkspace: false });
+    h.db.run("UPDATE multiremi_issue_sessions SET workspace_id='foreign' WHERE id=?", [foreignParent.id]);
     for (const mutation of [
       "UPDATE multiremi_issue_sessions SET workspace_id='foreign' WHERE id=?",
       "UPDATE multiremi_conversation_heads SET workspace_id='foreign' WHERE session_id=?",
-      `UPDATE multiremi_issue_sessions SET parent_session_id='${foreignParent.id}', workspace_id='foreign' WHERE id=?`,
+      `UPDATE multiremi_issue_sessions SET parent_session_id='${foreignParent.id}' WHERE id=?`,
     ]) {
       h.db.transaction(() => {
         // Keep mutations isolated without changing the original fixture.

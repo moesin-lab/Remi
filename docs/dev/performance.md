@@ -25,7 +25,8 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 
 `countPendingIssueDecisions` 不再为每条候选调用 `Questions.get()`。空候选为一次读；
 非空原生 Question 使用四次读（候选、会话归属、迁移审计、来源 attempt/head/issue），
-不写库。历史 decision 需要按源 Issue 解析一次责任链，额外读取数取决于该 Issue 的
+不写库；候选只投影 metadata 和来源身份，不读取正文或卡片字段。
+历史 decision 需要按源 Issue 解析一次责任链，额外读取数取决于该 Issue 的
 祖先/负责人结构，不随 decision 数量、asker 或会话数增长。批量参数使用 JSON rowset，
 不按 ID 数量拆 SQL，也不依赖 SQLite bind 上限。
 

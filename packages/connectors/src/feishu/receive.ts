@@ -805,6 +805,12 @@ export function createFeishuInboundDelivery(options: {
       authorizeSender,
       durableIntake: Boolean(recovery),
       onDenied: async (context, reason) => {
+        // Overlapping history scans may revisit denied messages. They have no
+        // durable outbound delivery identity; notify only on live admission.
+        if (event.recovery_source === "history") return;
+        // Without recovery the pipeline already recorded this message. Durable
+        // intake bypasses that gate, so deduplicate this live side effect here.
+        if (recovery && !tryRecordMessage(context.messageId)) return;
         await sendMarkdownCardFeishu(client, context.chatId, feishuAdmissionDenialMessage(reason), { replyToMessageId: context.messageId });
       },
     });

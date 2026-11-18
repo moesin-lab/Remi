@@ -54,3 +54,40 @@ test("scheduler sync preserves programming errors at every tick", () => {
     expect(() => new MultiremiScheduler({ store: store as never }).sync()).toThrow(`bug in ${name}`);
   }
 });
+
+test("a suspended SCM monitor does not block sync ticks and shutdown drains it", async () => {
+  let syncTicks = 0;
+  let monitorCalls = 0;
+  let release!: () => void;
+  const suspended = new Promise<void>(resolve => { release = resolve; });
+  const scheduler = new MultiremiScheduler({
+    store: {
+      recoverLostScheduleTriggers() {}, recoverLostRuntimeProvisionSchedules() {},
+      advanceScheduledTargetRuns() { syncTicks++; }, claimDueScheduleTriggers: () => [],
+      claimDueRuntimeProvisions: () => [], dispatchPendingSystemEvents: () => [],
+      dispatchPendingScmEvents: () => [], listAutopilots: () => [],
+      processScmMonitorEffects() { monitorCalls++; return suspended; },
+    } as never,
+    pollIntervalMs: 5, failureMonitorIntervalMs: 0, issueArchiveSweepStartupDelayMs: 0,
+  });
+  try {
+    scheduler.start();
+    const deadline = Date.now() + 2_000;
+    while (syncTicks < 3 && Date.now() < deadline) await Bun.sleep(5);
+    expect(syncTicks).toBeGreaterThanOrEqual(3);
+    expect(monitorCalls).toBe(1); // No overlapping drains while the provider is suspended.
+    let stopped = false;
+    const stopping = scheduler.stop().then(() => { stopped = true; });
+    await Bun.sleep(20);
+    expect(stopped).toBe(false);
+    const stoppedTicks = syncTicks;
+    release();
+    await stopping;
+    await Bun.sleep(20);
+    expect(syncTicks).toBe(stoppedTicks);
+    expect(monitorCalls).toBe(1);
+  } finally {
+    release();
+    await scheduler.stop();
+  }
+});

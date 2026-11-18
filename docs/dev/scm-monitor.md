@@ -7,8 +7,11 @@ summary: SCM outbox rules notify Issue owners and subscribed Issue sessions; obs
 # SCM Monitor
 
 `ScmRepo.dispatchPendingEvents` registers monitor effects alongside merge effects.
-The existing scheduler consumes them through `processScmMonitorEffects`; there is no
-additional timer or repeated capacity polling. GitHub is supported. Codebase keeps
+The scheduler consumes them through `processScmMonitorEffects` in a separate
+`DatabaseRetryLoop` (`scheduler.scm-monitor`), using the scheduler poll interval.
+Slow provider reads do not block the synchronous dispatch loop. Monitor drains are
+serial, use the existing retry boundary, and are awaited on shutdown; no new
+`setInterval` or repeated capacity polling is introduced. GitHub is supported. Codebase keeps
 its current ingestion capability boundaries.
 
 ## Rules and delivery

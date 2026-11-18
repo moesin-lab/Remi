@@ -49,6 +49,7 @@ export class MultiremiScheduler {
   private issueArchiveSweepStartupDelayMs: number;
   private jobs = new Map<string, ScheduledAutopilotJob>();
   private syncLoop: DatabaseRetryLoop | null = null;
+  private scmMonitorLoop: DatabaseRetryLoop | null = null;
   private failureLoop: DatabaseRetryLoop | null = null;
   private archiveLoop: DatabaseRetryLoop | null = null;
   private running = false;
@@ -70,17 +71,16 @@ export class MultiremiScheduler {
     if (this.running) return;
     this.running = true;
     let recovered = false;
-    this.syncLoop = new DatabaseRetryLoop("scheduler.sync", () => withDbJob("scheduler.sync", async () => {
+    this.syncLoop = new DatabaseRetryLoop("scheduler.sync", () => withDbJob("scheduler.sync", () => {
       try {
-        // DatabaseRetryLoop serializes ticks, including asynchronous SCM effects:
-        // recovery runs after the previous tick has finished its work.
+        // DatabaseRetryLoop serializes ticks and sync is synchronous: recovery
+        // runs only after the previous tick's claims are no longer in flight.
         if (!recovered) {
           this.store.recoverLostScheduleTriggers();
           this.store.recoverLostRuntimeProvisionSchedules();
           recovered = true;
         }
         this.sync();
-        await this.store.processScmMonitorEffects?.();
       } catch (error) {
         // A failed tick can leave its whole claimed batch at next_run_at=NULL.
         // The next serialized tick recovers only while its immutable term is
@@ -90,13 +90,14 @@ export class MultiremiScheduler {
       }
     }), this.pollIntervalMs);
     this.syncLoop.start();
+    this.startScmMonitor();
     this.startFailureMonitor();
     this.startIssueArchiveSweep();
   }
 
   async stop(): Promise<void> {
     this.running = false;
-    const stopped = [this.syncLoop?.stop(), this.failureLoop?.stop(), this.archiveLoop?.stop()];
+    const stopped = [this.syncLoop?.stop(), this.failureLoop?.stop(), this.archiveLoop?.stop(), this.scmMonitorLoop?.stop()];
     for (const entry of this.jobs.values()) { entry.job.stop(); stopped.push(entry.retry.stop()); }
     this.jobs.clear();
     await Promise.all(stopped);
@@ -193,6 +194,13 @@ export class MultiremiScheduler {
     const archived = this.store.archiveEligibleIssues(now);
     if (archived.length) log.info(`Issue archive sweep archived ${archived.length} issue(s)`);
     return archived;
+  }
+
+  private startScmMonitor(): void {
+    if (!this.store.processScmMonitorEffects) return;
+    this.scmMonitorLoop = new DatabaseRetryLoop("scheduler.scm-monitor",
+      () => withDbJob("scheduler.scm-monitor", () => this.store.processScmMonitorEffects!()), this.pollIntervalMs);
+    this.scmMonitorLoop.start();
   }
 
   private startFailureMonitor(): void {

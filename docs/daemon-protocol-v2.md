@@ -1326,3 +1326,20 @@ checkpoint 的可选 `question_ids` 只引用该 attempt 的原生等待，正�
 “以下消息在 Remi 更新前发出，可能已经收到过，处理过的请忽略。”
 trace 按原 steer ID 更新同一个条目，服务端消息也不另建副本。没有带 ID 消费回显的 provider
 会保守重投；窗口内模型可能看到同一消息两次。桥进程跨重启存活与 exactly-once 不在本单范围。
+
+
+### 计划内重启的 trace 连续性
+
+桥及其输出源关闭后，daemon 刷盘 trace，把尚未结束的工具、原生子代理和后台任务
+统一收口为 `stopped`；后台任务的 `stop_reason` 为 `cancelled`。原 Q/权限请求继续等待。
+恢复只保留条目标识、alias/session 路由、失败与 steer 标识及 ID 计数器，
+不恢复工具执行、活动计数或自主轮义务。被中断的工具调用由新桥重做。
+
+这些标识可选保存在 daemon 本地 journal 的独立快照中，绑定 execution、generation、
+`trace_head` 并校验 SHA-256，最大 512 KiB，不保存工具输入输出正文。
+缺失、摘要错误、绑定不符或旧格式都告警并仅用已有 trace fold 恢复，不阻塞同 attempt 续接。
+同一个原生 agent ID 继续使用原条目；缺少快照时仅能恢复 canonical agent ID 路由，
+无法推回只存在于旧桥内存中的 alias。
+
+新执行段在旧活动收口后追加一条「Remi 已更新」，按 generation 使用固定 ID 去重。
+正常崩溃重试不追加该条目。Turn 历史沿用原 Turn/attempt，trace 的事件序号继续递增。

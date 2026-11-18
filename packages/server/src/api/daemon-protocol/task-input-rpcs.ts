@@ -84,7 +84,7 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
           revision: 0, complete: false, units: [] }, scope);
       });
       if (!store.isTaskUsageExecutionAuthorized(task.id, p.consumer_id, frame.rt!)) return denied("stale_execution");
-      return { ok: true, generation: receipt.generation, task: { ...offer, ...turns.offerInput(task) },
+      return { ok: true, generation: receipt.generation, task: offer,
         recovered_questions: (receipt.checkpoint?.question_ids ?? []).map(id => store.getMessage(id)).filter(Boolean) };
     } catch (error) {
       if (error instanceof PlannedRestartError) return denied(error.code);

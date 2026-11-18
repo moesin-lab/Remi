@@ -59,10 +59,3 @@ export function acknowledgeAttemptInput(ctx: StoreContext, turn: any, toSeq: num
     ctx.db.run('UPDATE multiremi_turn_attempts SET input_ack_seq=?,input_read_seq=?,input_read_offset=?,input_trigger_ack=1 WHERE id=?',
         [Math.max(state.ack, toSeq), read, read > state.read ? 0 : state.offset, turn.current_attempt_id]);
 }
-
-/** Sparse receipts confirmed by a fsynced planned-restart checkpoint, never a crash. */
-export function plannedRestartDeliveredInputs(ctx: StoreContext, attemptId: string): Set<string> {
-    const row = ctx.db.query("SELECT checkpoint FROM multiremi_planned_restarts WHERE attempt_id=? AND state='running' AND generation>0").get(attemptId);
-    const checkpoint = typeof row?.checkpoint === 'string' ? JSON.parse(row.checkpoint) : row?.checkpoint;
-    return new Set(checkpoint?.delivered_message_ids ?? []);
-}

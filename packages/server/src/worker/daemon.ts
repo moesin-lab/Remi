@@ -4418,7 +4418,7 @@ export class MultiremiDaemon {
             await this.ensureTrace().streamer.flushTask(task.id, AbortSignal.timeout(this.options.requestTimeoutMs));
             const result = await this.taskDownlinks.rpc("turn.restart.checkpoint", checkpointRestart! as unknown as Record<string, unknown>, this.options.requestTimeoutMs);
             const checkpoint = result.checkpoint as PlannedRestartCheckpoint;
-            return { ...checkpoint, delivered_message_ids: [...(this.restartDeliveredInputs.get(task.id) ?? [])], trace_head: this.ensureTrace().store.head(task.id)?.head ?? 0 };
+            return { ...checkpoint, trace_head: this.ensureTrace().store.head(task.id)?.head ?? 0 };
           });
           const deadline = this.restartDeadlines.get(task.id);
           if (deadline) clearTimeout(deadline);
@@ -4445,7 +4445,6 @@ export class MultiremiDaemon {
       stopWatching();
       this.taskDownlinks.release(task.id);
       this.restartQuestions.delete(task.id);
-      this.restartDeliveredInputs.delete(task.id);
       if (timeout) clearTimeout(timeout);
     }
   }
@@ -4489,7 +4488,6 @@ export class MultiremiDaemon {
         this.resumedUsageRuns.set(task.id, entry.consumer_id);
         this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
         this.taskDownlinks.bindTurn({ ...task, generation });
-        this.restartDeliveredInputs.set(task.id, new Set(entry.checkpoint.delivered_message_ids));
         const questions = (result.recovered_questions ?? []) as UnifiedMessage[];
         this.restartQuestions.set(task.id, questions);
         for (const question of questions) this.taskDownlinks.registerDecision(question, task.id);
@@ -4953,8 +4951,6 @@ export class MultiremiDaemon {
       this.options.runtimeName,
     ].map((value) => value?.trim()).filter((value): value is string => Boolean(value));
   }
-
-  private readonly restartDeliveredInputs = new Map<string, Set<string>>();
 
   private readonly restartQuestions = new Map<string, UnifiedMessage[]>();
 
@@ -5680,12 +5676,6 @@ export class MultiremiDaemon {
       // injection (`none`) so completion can proceed.
       const recordedSteerIds = new Set<string>();
       let injectedSteerIds: string[] = [];
-      let pendingPromptSteerIds: string[] = [];
-      const confirmSteerDelivery = (ids: string[]) => {
-        let delivered = this.restartDeliveredInputs.get(task.id);
-        if (!delivered) this.restartDeliveredInputs.set(task.id, delivered = new Set());
-        for (const id of ids) if (!id.startsWith("wrap_up:") && !id.startsWith("input_resync:")) delivered.add(id);
-      };
       const recordSteerBatch = async (messages: MultiremiTaskSteerMessage[], via: TraceSteerResult["via"]): Promise<void> => {
         const ids = messages.map((m) => m.id);
         // A range hint must reach the provider before its CLI read can satisfy
@@ -5694,8 +5684,6 @@ export class MultiremiDaemon {
         // Both injected and force-answer-expired batches belong to the final
         // receipt. Never wait for their ACK before the reply is durable.
         injectedSteerIds.push(...ids);
-        if (via === "native") confirmSteerDelivery(ids);
-        else pendingPromptSteerIds.push(...ids);
         for (const message of messages) recordedSteerIds.add(message.id);
         // A reconnect replay of an already-handled id must not re-enqueue
         // them, or the stale duplicate would trip the next turn's interrupt.
@@ -5917,10 +5905,7 @@ export class MultiremiDaemon {
         const roundPump = pump;
         roundPump?.beginRound(() => turnAbort.abort());
         // A native steer joins only a prompt that is already on the wire.
-        config.onPromptStarted = () => {
-          confirmSteerDelivery(pendingPromptSteerIds); pendingPromptSteerIds = [];
-          roundPump?.promptStarted();
-        };
+        config.onPromptStarted = roundPump ? () => roundPump.promptStarted() : undefined;
         steerFeed.setInterrupt(roundPump ? () => roundPump.interrupt() : () => turnAbort.abort());
         let turnError: unknown = null;
         providerFailureDuringStop = null;
@@ -5933,7 +5918,6 @@ export class MultiremiDaemon {
             onProviderEntry?.();
           }
           if (!skipRound) for await (const event of session.run(prompt)) {
-            confirmSteerDelivery(pendingPromptSteerIds); pendingPromptSteerIds = [];
             // Billing stays on `_meta.remiUsageUnits` to the ledger; the trace
             // keeps only context occupancy (billing-only frames are dropped).
             const usageUnits = (event as { _meta?: Record<string, unknown> })._meta?.remiUsageUnits;

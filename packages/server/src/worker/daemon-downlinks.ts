@@ -128,7 +128,7 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
   private queueInput(attemptId: string, message: MultiremiTaskSteerMessage, notify = true): void {
     let messages = this.steers.get(attemptId);
     if (!messages) { messages = new Map(); this.steers.set(attemptId, messages); }
-    if (messages.has(message.id) || this.confirmedDecisionInputs.get(attemptId)?.has(message.id)) return;
+    if (messages.has(message.id)) return;
     messages.set(message.id, message);
     if (notify) for (const listener of this.steerListeners.get(attemptId) ?? []) listener(message);
   }

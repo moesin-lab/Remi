@@ -64,7 +64,7 @@ describe("systemd release recovery", () => {
 });
 
 for (const invalidRetention of [false, true]) {
-  it(`prunes only marked releases after activation; cleanup failure warns (${invalidRetention})`, async () => {
+  it.skipIf(process.platform !== "linux")(`prunes only marked releases after activation; cleanup failure warns (${invalidRetention})`, async () => {
     const root = mkdtempSync(join(tmpdir(), "systemd-pruning-")); roots.push(root);
     const paths: string[] = [];
     const releases = [];

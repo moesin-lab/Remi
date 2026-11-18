@@ -27,6 +27,7 @@ export const MIGRATION_ADVISORY_LOCK_KEY = "multiremi:migrations:startup";
  * Global lock order (MUL-405). Every transaction that takes more than one of
  * these locks MUST take them in this order, from outermost to innermost:
  *
+ *   0. the background live-term row lock, when running in a fenced activation;
  *   1. the workspace lifecycle row lock
  *      (`StoreContext.lockWorkspaceRuntimeLifecycle`);
  *   2. a number-allocation advisory lock (this module);

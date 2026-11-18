@@ -27,13 +27,14 @@ export interface InternalUpdateConfig {
 interface Selection { id: string; release: ApplicationManifest }
 interface Journal {
   operationId: string; kind: string; phase: 'prepared' | 'committed' | 'verified' | 'recovered';
-  previous: Selection; target: Selection; backup?: string; error?: string; failure?: PlatformSchemaContractFailure;
+  previous: Selection; target: Selection; strategy?: 'switch'; revision?: string; backupError?: string; backup?: string; error?: string; failure?: PlatformSchemaContractFailure;
 }
 interface SupervisorStatus {
   protocol: number; role: string; arch: string; version: string; ref: string; runtime: string; libc: string;
   dataSchema?: string; apiBase?: string; nativeTools?: string;
   supervisorPid: number; childPid: number | null; releaseId: string | null; revision: string | null;
   stopped: boolean; heartbeatAt: number; seedReady: boolean; seedError?: string;
+  slotSwitch?: boolean; transition?: { revision: string; phase: string; error?: string };
   probe?: { id: string; ok: boolean; error?: string };
 }
 const ROLES = ['api', 'web'] as const;
@@ -79,6 +80,7 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
   private async journal(id: string): Promise<Journal | null> {
     return readRecoveryJournal<Journal>(this.journalPath(id), value => {
       if (value.operationId !== id || !['restart', 'update', 'rollback'].includes(value.kind) || !['prepared', 'committed', 'verified', 'recovered'].includes(value.phase)) throw new RecoveryRequiredError('Invalid internal update journal');
+      if (value.strategy !== undefined && (value.strategy !== 'switch' || typeof value.revision !== 'string' || !value.revision)) throw new RecoveryRequiredError('Invalid slot switch journal');
       for (const selection of [value.previous, value.target]) {
         this.validateSelection(selection);
       }
@@ -100,7 +102,7 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
     if (!currentRelease) { try { currentRelease = (await this.baseSelection()).release; } catch {} }
     return { driver: this.kind, updateMode: this.updateMode, currentRelease, recentReleases: recent.filter((value): value is Selection => Boolean(value)).map(value => value.release), services };
   }
-  async preflight() {
+  async preflight(requireOfflineSafety = true) {
     const checks: Array<{ code: string; ok: boolean; message: string }> = [];
     const check = async (code: string, action: () => Promise<void>) => {
       try { await action(); checks.push({ code, ok: true, message: code + ' ready' }); }
@@ -114,12 +116,12 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
       }
       await this.baseSelection();
     });
-    await check('isolated_rehearsal', async () => {
+    if (requireOfflineSafety) await check('isolated_rehearsal', async () => {
       const state = await readJson<{ protocol: number; isolated: boolean; heartbeatAt: number }>(join(this.config.control, 'rehearsal', 'status.json'));
       if (!this.fresh(state) || state?.protocol !== 1 || state.isolated !== true) throw new Error('Isolated migration rehearsal service is offline');
     });
-    await check('backup', () => checkBackup(this.backup));
-    await check('postgresql', async () => {
+    if (requireOfflineSafety) await check('backup', () => checkBackup(this.backup));
+    if (requireOfflineSafety) await check('postgresql', async () => {
       const result = await this.runner.run('pg_isready', []);
       if (result.exitCode !== 0) throw new Error('PostgreSQL is unavailable for backup');
     });
@@ -129,6 +131,14 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
       if (Number(disk.bavail) * Number(disk.bsize) < (this.config.minimumFreeBytes ?? 5 * 1024 ** 3)) throw new Error('Insufficient space for retained application/runtime versions');
     });
     return preflightResult(checks);
+  }
+  async preflightForRelease(value: unknown) {
+    const target = parseApplicationManifest(value);
+    const current = (await this.selected()) ?? await this.baseSelection();
+    const api = await this.status('api');
+    const switching = process.env.REMI_SLOT_SWITCH === '1' && api?.slotSwitch
+      && current.release.dataSchema === target.dataSchema;
+    return this.preflight(!switching);
   }
   async validateRelease(value: unknown) {
     const manifest = parseApplicationManifest(value);
@@ -305,16 +315,15 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
       if (previousJournal?.phase === 'prepared') throw new Error('Update was interrupted before the container commit; application children were not changed');
       throw new RecoveryRequiredError('Committed operation requires internal journal recovery');
     }
-    const preflight = await this.preflight();
-    if (!preflight.ready) throw new Error(preflight.checks.filter(value => !value.ok).map(value => value.message).join('; '));
     const previous = await this.seed();
     let target = previous;
+    let stagedManifest: ApplicationManifest | null = null;
     if (operation.kind === 'update') {
       const manifest = parseApplicationManifest(operation.targetManifest);
       if (operation.targetVersion && operation.targetVersion.replace(/^v/, '') !== manifest.version.replace(/^v/, '')) throw new Error('Requested version differs from the application bundle');
       await this.validateRelease(manifest);
-      await report({ status: 'pulling', previousRelease: previous.release, progress: { message: 'Downloading application and bundled runtimes inside Compose' } });
-      target = await this.stage(manifest, operation.id);
+      stagedManifest = manifest;
+      target = { id: operation.id, release: manifest };
     } else if (operation.kind === 'rollback') {
       const files = await readdir(join(this.config.state, 'history'));
       const retained = await Promise.all(files.map(file => readJson<Selection>(join(this.config.state, 'history', file))));
@@ -324,8 +333,20 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
       if (previous.release.dataSchema !== match.release.dataSchema && !previous.release.application.rollbackSafeFrom.includes(match.release.dataSchema)) throw new Error('Rollback migration compatibility was not reviewed');
       target = match;
     }
+    const api = await this.status('api');
+    const switching = operation.kind !== 'restart' && process.env.REMI_SLOT_SWITCH === '1' && api?.slotSwitch
+      && previous.release.dataSchema === target.release.dataSchema;
+    const preflight = await this.preflight(!switching);
+    if (!preflight.ready) throw new Error(preflight.checks.filter(value => !value.ok).map(value => value.message).join('; '));
+    if (stagedManifest) {
+      await report({ status: 'pulling', previousRelease: previous.release, progress: { message: 'Downloading application and bundled runtimes inside Compose' } });
+      target = await this.stage(stagedManifest, operation.id);
+    }
     await this.verifyFiles(releaseDirectory(this.config.root, target.id), target.release);
     await this.probe(target);
+    if (switching) {
+      return this.switchSlots(operation, previous, target, report);
+    }
     await drain.waitUntilDrained(report);
     await drain.assertReady();
     const journal: Journal = { operationId: operation.id, kind: operation.kind, phase: 'prepared', previous, target };
@@ -355,6 +376,50 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
       throw error;
     }
   }
+  private async switchSlots(operation: MultiremiPlatformOperation, previous: Selection, target: Selection,
+    report: (value: ReportPlatformOperationInput) => Promise<void>) {
+    const journal: Journal = { operationId: operation.id, kind: operation.kind, phase: 'prepared', previous, target,
+      strategy: 'switch', revision: randomUUID() };
+    await writeJson(this.journalPath(operation.id), journal);
+    try {
+      // pg_dump supplies its own consistent snapshot; no application write fence.
+      journal.backup = await createBackup({ ...this.backup, databaseOnly: true, archives: [] }, this.runner, operation.id);
+    } catch (error) { journal.backupError = error instanceof Error ? error.message : String(error); }
+    await report({ status: 'switching', previousRelease: previous.release,
+      progress: { message: 'Switching API slots without platform drain', ...(journal.backupError ? { backupWarning: journal.backupError } : {}) } });
+    journal.phase = 'committed';
+    await writeJson(this.journalPath(operation.id), journal);
+    try { return await this.finishSwitch(journal); }
+    catch (error) {
+      if (String(journal.phase) === 'recovered') throw error;
+      throw new RecoveryRequiredError(error instanceof Error ? error.message : String(error));
+    }
+  }
+  private async finishSwitch(journal: Journal) {
+    // Replay the journal/desired write gap after an updater restart.
+    await writeJson(join(this.config.control, 'api', 'desired.json'), { revision: journal.revision, mode: 'run', releaseId: journal.target.id, strategy: 'switch' });
+    await this.until(async () => {
+      const state = await this.status('api');
+      if (!state || !this.fresh(state) || !state.transition || state.transition.revision !== journal.revision) return false;
+      if (state.transition.phase === 'failed') {
+        journal.error = state.transition.error || 'API slot switch failed and was rolled back';
+        await this.record(journal.previous);
+        journal.phase = 'recovered'; await writeJson(this.journalPath(journal.operationId), journal);
+        throw new Error(journal.error);
+      }
+      return state.transition.phase === 'succeeded' && state.releaseId === journal.target.id;
+    }, 15 * 60_000, 'API slot switch result timed out; inspect supervisor state before retrying').catch(error => {
+      if (String(journal.phase) === 'recovered') throw error;
+      throw new RecoveryRequiredError(error instanceof Error ? error.message : String(error));
+    });
+    // Web retains its existing restart protocol, after API confirmation.
+    const revision = randomUUID();
+    await writeJson(join(this.config.control, 'web', 'desired.json'), { revision, mode: 'run', releaseId: journal.target.id });
+    await this.verify(journal.target);
+    await this.record(journal.target);
+    journal.phase = 'verified'; await writeJson(this.journalPath(journal.operationId), journal);
+    return journal.target.release;
+  }
   private async record(selection: Selection) {
     await writeJson(join(this.config.state, 'history', selection.id + '.json'), selection);
     await writeJson(join(this.config.state, 'current.json'), selection);
@@ -374,12 +439,30 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
     const names = await entries(join(this.config.state, 'operations'));
     for (const file of names.filter(name => name.endsWith('.json'))) {
       const journal = await this.journal(file.slice(0, -5));
-      if (journal?.phase === 'committed') await this.recover(journal);
+      if (journal?.phase === 'committed') {
+        if (journal.strategy === 'switch') {
+          try { await this.finishSwitch(journal); }
+          catch (error) { if (String(journal.phase) !== 'recovered') throw error; }
+        }
+        else await this.recover(journal);
+      }
     }
   }
   async pendingFinalization() {
     const fence = await readJson<{ operationId: string }>(join(this.config.control, 'write-fence.json'));
-    if (!fence) return null;
+    if (!fence) {
+      for (const file of await entries(join(this.config.state, 'operations'))) {
+        if (!file.endsWith('.json')) continue;
+        const journal = await this.journal(file.slice(0, -5));
+        if (journal?.strategy === 'switch' && ['verified', 'recovered'].includes(journal.phase)) {
+          const finalized = await readJson(join(this.config.state, 'finalized', journal.operationId + '.json'));
+          if (!finalized) return { operationId: journal.operationId, report: {
+            status: journal.phase === 'recovered' ? 'failed' as const : journal.kind === 'rollback' ? 'rolled_back' as const : 'succeeded' as const,
+            resultRelease: (journal.phase === 'recovered' ? journal.previous : journal.target).release, error: journal.error ?? null } };
+        }
+      }
+      return null;
+    }
     const journal = await this.journal(fence.operationId);
     if (!journal || !['verified', 'recovered'].includes(journal.phase)) throw new RecoveryRequiredError('Internal update still requires recovery');
     return { operationId: journal.operationId, report: {
@@ -390,7 +473,12 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
   }
   async finalize(id: string) {
     const fence = await readJson<{ operationId: string }>(join(this.config.control, 'write-fence.json'));
-    if (!fence) return;
+    if (!fence) {
+      const journal = await this.journal(id);
+      if (journal?.strategy === 'switch' && ['verified', 'recovered'].includes(journal.phase))
+        await writeJson(join(this.config.state, 'finalized', id + '.json'), { finalizedAt: Date.now() });
+      return;
+    }
     if (fence.operationId !== id) throw new RecoveryRequiredError('Another internal operation owns the write fence');
     const journal = await this.journal(id);
     if (!journal || !['verified', 'recovered'].includes(journal.phase)) throw new RecoveryRequiredError('Refusing to release an unverified update');

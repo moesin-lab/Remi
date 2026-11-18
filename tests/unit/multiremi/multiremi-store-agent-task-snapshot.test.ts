@@ -137,7 +137,8 @@ describe("listWorkspaceAgentTaskSnapshot", () => {
 
     expect(snapshot).toHaveLength(501);
     expect(snapshot.find((task) => task.id === tasks.at(-1)!.id)?.autopilotRunId).toBe(runId);
-  });
+  // Includes construction of 501 real tasks before exercising the batched read.
+  }, 20_000);
 });
 
 // Register hooks in this file; shared modules only load once per test process.

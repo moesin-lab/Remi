@@ -51,6 +51,20 @@ describe("platform updater worker", () => {
     expect((await f.driver.inspect()).currentRelease?.version).toBe('1.0.0');
   });
 
+  it('publishes target-specific preflight so offline-only checks cannot block a compatible switch', async () => {
+    const f = fixture();
+    const generic = await f.driver.preflight();
+    f.driver.preflight = async () => ({ ...generic, ready: false, checks: [{ code: 'offline_backup', ok: false, message: 'offline' }] });
+    f.driver.preflightForRelease = async manifest => {
+      expect((manifest as { version: string }).version).toBe('1.0.1');
+      return { ...generic, checks: [{ code: 'slot_switch', ok: true, message: 'compatible' }] };
+    };
+    await f.worker.tick();
+    const published = f.inspections.find(item => item.preflight)?.preflight;
+    expect(published?.ready).toBe(true);
+    expect(published?.checks.map(check => check.code)).not.toContain('offline_backup');
+    expect(published?.checks.map(check => check.code)).toContain('release_feed');
+  });
   it('reports source artifacts and blocks a new internal updater against an image-only source', async () => {
     const test = fixture();
     Object.assign(test.driver, { updateMode: 'internal_application' });

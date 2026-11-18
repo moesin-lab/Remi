@@ -17,7 +17,10 @@
  * The real-socket path (upgrade, `Bun.serve` limits, and the wiring in
  * `api/server.ts`) is covered by `daemon-protocol-server.test.ts`.
  */
+import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { describe, expect, it } from "bun:test";
+import { drainDbSources, withDbJob, withDbSource } from "@shared/observability/db-sources.js";
+import { createRequestMetricsMiddleware, recordDbQuery, resetRequestMetricsForTest } from "@multiremi/observability/request-metrics.js";
 import {
   DAEMON_ACK_TIMEOUT_MS,
   DAEMON_MIN_CLI_VERSION,
@@ -1202,4 +1205,76 @@ describe("MUL-417 daemon protocol session — heartbeat and serialization", () =
     expect(violation.protocolViolation).toBe(true);
     expect(violation.errorCode).toBe("protocol_violation");
   });
+});
+
+// Exercise the real Session serialization chains and SQL completion hook. These
+// Local hook calls test attribution. CI with MULTIREMI_TEST_POSTGRES_URL
+// executes SELECT 1 through the real PG bridge for each connection instead.
+for (const sourceSummary of [true, false]) it(`attributes eight concurrent connections exclusively (db_sources=${sourceSummary})`, async () => {
+  createRequestMetricsMiddleware({ enabled: true, summaryDbRoutes: sourceSummary, bufferCapacity: 64, summaryIntervalMs: 60_000, summaryTopRoutes: 20, slowRequestMs: 1e9, role: "all" });
+  const database = process.env.MULTIREMI_TEST_POSTGRES_URL
+    ? new PostgresSyncDatabase(process.env.MULTIREMI_TEST_POSTGRES_URL) : null;
+  const peers: Harness[] = [];
+  let entered = 0;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let allEntered!: () => void;
+  const ready = new Promise<void>(resolve => { allEntered = resolve; });
+  try {
+    for (let index = 0; index < 8; index++) {
+      const h = harness({ rpc: async () => {
+        if (database) expect(database.query("SELECT 1 AS n").get()?.n).toBe(1);
+        else recordDbQuery(2, 0);
+        if (++entered === 8) allEntered();
+        await gate;
+        return { ok: true };
+      } });
+      peers.push(h);
+      await handshake(h);
+      h.frames.length = 0;
+    }
+    drainDbSources(100);
+    const pending = peers.map(h => h.session.handleMessage(JSON.stringify({
+      v: 2, t: "trace.head", id: "probe", p: {},
+    })));
+    await ready;
+    await withDbSource("http", "GET /fixture", async () => { recordDbQuery(7, 0); });
+    await withDbJob("scm.poll", async () => { recordDbQuery(11, 0); });
+    recordDbQuery(13, 0); // unrelated process activity
+    release();
+    await Promise.all(pending);
+    expect(peers.flatMap(h => h.frames).map(f => f.dbQueries)).toEqual(Array(8).fill(1));
+    expect(peers.flatMap(h => h.frames).reduce((sum, f) => sum + f.dbQueries, 0)).toBe(8);
+    if (!database) expect(peers.flatMap(h => h.frames).map(f => f.dbMs)).toEqual(Array(8).fill(2));
+    else expect(peers.flatMap(h => h.frames).every(f => f.dbMs >= 0)).toBe(true);
+    const summary = drainDbSources(100);
+    expect(summary.db_attributed).toEqual(sourceSummary ? { ws: 8, http: 1, job: 1 } : { ws: 0, http: 0, job: 0 });
+  } finally {
+    release?.();
+    for (const h of peers) h.session.closeForServerShutdown();
+    database?.close();
+    resetRequestMetricsForTest();
+  }
+});
+
+it("excludes nested jobs from frame SQL, including failures and summary rollover", async () => {
+  createRequestMetricsMiddleware({ enabled: true, summaryDbRoutes: true, bufferCapacity: 64, summaryIntervalMs: 60_000, summaryTopRoutes: 20, slowRequestMs: 1e9, role: "all" });
+  const h = harness({ rpc: async () => {
+    recordDbQuery(2, 0);
+    expect(drainDbSources(100).db_attributed.ws).toBe(1);
+    await withDbJob("scm.poll", async () => { recordDbQuery(7, 0); });
+    recordDbQuery(3, 0);
+    throw new Error("attribution fixture");
+  } });
+  try {
+    await handshake(h);
+    h.frames.length = 0;
+    drainDbSources(100);
+    await captureWarnings(() => h.session.handleMessage(JSON.stringify({ v: 2, t: "trace.head", id: "probe", p: {} })));
+    expect(h.frames).toEqual([expect.objectContaining({ dbQueries: 2, dbMs: 5, errorCode: "server_error" })]);
+    expect(drainDbSources(100).db_attributed).toEqual({ ws: 1, http: 0, job: 1 });
+  } finally {
+    h.session.closeForServerShutdown();
+    resetRequestMetricsForTest();
+  }
 });

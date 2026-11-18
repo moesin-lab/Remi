@@ -72,6 +72,19 @@ describe("unified turn input", () => {
     expect(h.inbox.pendingTaskSteerMessages("tsk_one")).toHaveLength(1);
   });
 
+  it("persists delivered steers in the completion receipt while retaining gap guards", () => {
+    const h = downlinks();
+    h.push(2); h.push(3);
+    expect(() => h.inbox.completionInput("tsk_one", ["msg_3"])).toThrow("unconfirmed turn input gap");
+    expect(h.inbox.completionInput("tsk_one", ["msg_3", "msg_2", "msg_2"])).toEqual({
+      turn_id: "turn_one", attempt_id: "tsk_one", input_to_seq: 3,
+      input_receipt: { messages: [{ id: "msg_2", seq: 2 }, { id: "msg_3", seq: 3 }] },
+    });
+    expect(h.calls).toHaveLength(0);
+    expect(h.inbox.turnInput("tsk_one").input_to_seq).toBe(1);
+    expect(h.inbox.pendingTaskSteerMessages("tsk_one")).toHaveLength(2);
+  });
+
   it("orders and deduplicates messages, rejects foreign attempts and advances only confirmed input", async () => {
     const h = downlinks();
     h.push(3); h.push(2); h.push(2);

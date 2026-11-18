@@ -77,3 +77,38 @@ bun run test tests/integration/daemon-protocol-v2/final-input-timeout.test.ts
 `bunx tsc --noEmit` 通过；`npm run docs:test` 13 pass、0 fail；
 `npm run docs:check` 通过；`git diff --check` 通过。仓库未提供独立后端 Lint 命令。
 PR/最终 SHA 的远端检查以交付评论内 stable 同版本 CLI 查询结果为准。
+
+## 2026-11-18 增量：已投递 steer 的同步 ACK 缺口
+
+普通合入 `origin/main@99da1cdbd3e16ab00223ebbdea7832a3e1c0cbcd`，保留原提交，
+未 rebase、未强推。此前审阅发现的自然结束分支在 `roundPump.idle()` 后同步
+`consumeTaskSteerMessages(injectedSteerIds)`，仍可能在 completion 入库前失败。
+现在已投递 native/reprompt steer、force-answer 到期记录的输入、completion conflict
+后重试的已记录输入，都随 completion 的本地 receipt 持久化，由 outbox 确认。
+未投递输入的连续性校验、折叠正文读取与 bounded unread reminder/fallback 保持有效。
+
+本轮 `remi turn trace read tsk_314pflrrvnpe --json` 确认：
+
+- final `msg:msg_011ChA27n2ZKWbbQ52v9czVB`，07:44:31.861–31.891 UTC；
+- failed 07:44:48.877 UTC，`daemon_timeout` / `agent_error.unknown`；相隔 17.016 秒。
+- 本机 `~/.multiremi/daemon.log:239301` 明确记录该 attempt 的 **usage seq 161924**
+  outbox 送达超时并重试；239304 行记录整轮失败。239300 行仅有
+  `daemon protocol client frame failed`，没有请求名、请求 ID 或栈。
+- 该日志证明 usage 帧确曾超时，**不能证明导致整轮失败的同步 RPC 也是 usage**。
+  trace 也不含 RPC 名；失败 RPC 的确切名称仍待验证。基线最终输入确认的同步
+  `turn.input` 是源码确认的失败入口，不将其冒充本次线上 RPC 直接证据。
+- 新增回归分别阻断 `turn.input`、`task.usage`、`turn.complete`，每种覆盖传输恢复
+  和 daemon 对象重建后重放；均先真实投递 native steer，再自然产出 final。
+  检查一次 provider、一次 attempt/offer、零 fail、一次回复。因而覆盖已证实的
+  usage 超时和同步输入确认嫌疑路径，以及完成帧超时，不依赖历史 RPC 名推断。
+
+### main 语义核对
+
+- #99 的 `turn.input` 批量读取、offered/read 校验仍在服务端执行；本地 receipt 不绕过它。
+- #105 的终态事务/快照批量处理、完成重复送达守卫未被修改；完成 ACK 丢失仍重放终态。
+- #117 的 pending Issue decision 批量统计没有与本地收据路径重叠，未作改动。
+- #96 的 `input_gap` resync 和已确认 cursor 过滤仍由原 transport 处理，新增输入收据
+  按 seq 去重排序，不提前推进本地 acknowledged cursor。
+
+本轮实际校验命令、结果、最终 head 与远端完整工作流证据见交付评论/附件；
+CI 进行中、缺失、跳过不计为 PG 分片通过。未合并、未部署、未作生产修复验证。

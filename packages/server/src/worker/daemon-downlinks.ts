@@ -106,12 +106,12 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
   }
 
   /** Persist these receipts with the final reply before waiting for platform ACKs. */
-  completionInput(attemptId: string) {
+  completionInput(attemptId: string, deliveredIds: string[] = []) {
     for (const pending of this.steers.get(attemptId)?.values() ?? []) {
-      if (this.decisionRangeHints.has(pending.id)) throw new Error("unconfirmed turn input gap");
+      if (this.decisionRangeHints.has(pending.id) && !deliveredIds.includes(pending.id)) throw new Error("unconfirmed turn input gap");
     }
     const input = this.turnInput(attemptId);
-    const messages = [...(this.confirmedDecisionInputs.get(attemptId) ?? [])]
+    const messages = [...new Set([...deliveredIds, ...(this.confirmedDecisionInputs.get(attemptId) ?? [])])]
       .map(id => ({ id, seq: this.inputSeqs.get(`${attemptId}:${id}`) }))
       .filter((message): message is { id: string; seq: number } => message.seq !== undefined)
       .sort((a, b) => a.seq - b.seq);

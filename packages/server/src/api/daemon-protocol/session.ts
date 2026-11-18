@@ -501,7 +501,7 @@ export class DaemonProtocolSession {
   private async processFrame(text: string, bytes: number): Promise<void> {
     if (this.closed) return;
     const startedAt = performance.now();
-    const dbBefore = this.options.onFrame ? readDbCounters() : { dbMs: 0, dbQueries: 0 };
+    const dbMetrics = { dbMs: 0, dbQueries: 0 };
 
     const parsed = parseDaemonProtocolFrame(text);
 
@@ -525,7 +525,7 @@ export class DaemonProtocolSession {
           message: `frame exceeds the ${frameLimit} byte protocol limit`,
           retryable: false,
         });
-        this.emitFrameSample(parsed.ok ? parsed.frame.type : "oversized", startedAt, dbBefore, {
+        this.emitFrameSample(parsed.ok ? parsed.frame.type : "oversized", startedAt, dbMetrics, {
           errorCode: "protocol_violation",
           violation: true,
         });
@@ -534,7 +534,7 @@ export class DaemonProtocolSession {
       // Nothing to address: no reply could tell the peer which row to isolate, and
       // the daemon side cannot reference it either (A-5 blocks it before the
       // outbox). A retryable close is the honest answer.
-      this.emitFrameSample("oversized", startedAt, dbBefore, { errorCode: "protocol_violation", violation: true });
+      this.emitFrameSample("oversized", startedAt, dbMetrics, { errorCode: "protocol_violation", violation: true });
       this.close(DAEMON_PROTOCOL_CLOSE_CODES.protocol_violation, "oversized frame that names no outbox row");
       return;
     }
@@ -543,22 +543,22 @@ export class DaemonProtocolSession {
       // Unparseable, so nothing can be addressed. 4002 rather than 4001: the peer
       // is not merely unlucky, it is sending rubbish, and an operator needs to see
       // that. Still retryable, so a transient corruption costs a reconnect.
-      this.emitFrameSample("malformed", startedAt, dbBefore, { errorCode: "protocol_violation", violation: true });
+      this.emitFrameSample("malformed", startedAt, dbMetrics, { errorCode: "protocol_violation", violation: true });
       this.close(DAEMON_PROTOCOL_CLOSE_CODES.protocol_violation, "malformed frame");
       return;
     }
 
     const frame = parsed.frame;
     return withDbSource("ws", daemonFrameCategory(frame.type) === null ? "<unknown>" : frame.type,
-      () => this.dispatchMeasuredFrame(frame, startedAt, dbBefore));
+      () => this.dispatchMeasuredFrame(frame, startedAt, dbMetrics), this.options.onFrame ? dbMetrics : undefined);
   }
 
   private async dispatchMeasuredFrame(frame: DaemonParsedFrame, startedAt: number,
-    dbBefore: { dbMs: number; dbQueries: number }): Promise<void> {
+    dbMetrics: { dbMs: number; dbQueries: number }): Promise<void> {
     try {
       if (!this.handshakeComplete) {
         const code = await this.handleHandshakeFrame(frame);
-        this.emitFrameSample(frame.type, startedAt, dbBefore, { errorCode: code, violation: false });
+        this.emitFrameSample(frame.type, startedAt, dbMetrics, { errorCode: code, violation: false });
         return;
       }
 
@@ -586,7 +586,7 @@ export class DaemonProtocolSession {
             retryable: false,
           });
         }
-        this.emitFrameSample(frame.type, startedAt, dbBefore, { errorCode: unknownFrameType, violation: false });
+        this.emitFrameSample(frame.type, startedAt, dbMetrics, { errorCode: unknownFrameType, violation: false });
         return;
       }
 
@@ -628,9 +628,9 @@ export class DaemonProtocolSession {
           errorCode = unknownFrameType;
           break;
       }
-      this.emitFrameSample(frame.type, startedAt, dbBefore, { errorCode, violation: false, direction });
+      this.emitFrameSample(frame.type, startedAt, dbMetrics, { errorCode, violation: false, direction });
     } catch (error) {
-      this.handleFrameFailure(frame, startedAt, dbBefore, error);
+      this.handleFrameFailure(frame, startedAt, dbMetrics, error);
     }
   }
 
@@ -648,7 +648,7 @@ export class DaemonProtocolSession {
   private handleFrameFailure(
     frame: DaemonParsedFrame,
     startedAt: number,
-    dbBefore: { dbMs: number; dbQueries: number },
+    dbMetrics: { dbMs: number; dbQueries: number },
     error: unknown,
   ): void {
     const replyTo = frame.seq !== null ? String(frame.seq) : frame.id;
@@ -670,7 +670,7 @@ export class DaemonProtocolSession {
     }
 
     if (!this.handshakeComplete) {
-      this.emitFrameSample(frame.type, startedAt, dbBefore, { errorCode: "server_error", violation: false });
+      this.emitFrameSample(frame.type, startedAt, dbMetrics, { errorCode: "server_error", violation: false });
       this.close(DAEMON_PROTOCOL_CLOSE_CODES.server_closing, "handshake handler failed");
       return;
     }
@@ -682,7 +682,7 @@ export class DaemonProtocolSession {
         retryable: true,
       });
     }
-    this.emitFrameSample(frame.type, startedAt, dbBefore, { errorCode: "server_error", violation: false });
+    this.emitFrameSample(frame.type, startedAt, dbMetrics, { errorCode: "server_error", violation: false });
   }
 
   private async handleHandshakeFrame(frame: DaemonParsedFrame): Promise<string | null> {
@@ -1017,42 +1017,19 @@ export class DaemonProtocolSession {
   private emitFrameSample(
     type: string,
     startedAt: number,
-    dbBefore: { dbMs: number; dbQueries: number },
+    dbMetrics: { dbMs: number; dbQueries: number },
     details: { errorCode: string | null; violation: boolean; direction?: "uplink" | "rpc" },
   ): void {
     if (!this.options.onFrame) return;
-    const dbAfter = readDbCounters();
     this.options.onFrame({
       type,
       direction: details.direction ?? "uplink",
       errorCode: details.errorCode,
       totalMs: performance.now() - startedAt,
-      dbMs: Math.max(0, dbAfter.dbMs - dbBefore.dbMs),
-      dbQueries: Math.max(0, dbAfter.dbQueries - dbBefore.dbQueries),
+      dbMs: dbMetrics.dbMs,
+      dbQueries: dbMetrics.dbQueries,
       protocolViolation: details.violation,
     });
-  }
-}
-
-/**
- * Process-wide DB counters, installed by the wiring.
- *
- * The session may not import the observation stack (that would make the
- * transport untestable without it), so the counters arrive as a hook. When no
- * hook is installed the sampler answers zeros, which is honest: a session with
- * no store attached spends no DB time.
- */
-let dbCounterReader: () => { dbMs: number; dbQueries: number } = () => ({ dbMs: 0, dbQueries: 0 });
-
-export function setDaemonProtocolDbCounters(reader: () => { dbMs: number; dbQueries: number }): void {
-  dbCounterReader = reader;
-}
-
-function readDbCounters(): { dbMs: number; dbQueries: number } {
-  try {
-    return dbCounterReader();
-  } catch {
-    return { dbMs: 0, dbQueries: 0 };
   }
 }
 

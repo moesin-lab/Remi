@@ -89,6 +89,7 @@ vi.mock("@multiremi/core/auth", () => ({
 }));
 
 vi.mock("@multiremi/core/runtimes", () => ({
+  runtimeHealthReasons: () => "",
   deriveRuntimeHealth: () => "online",
   executionGroupListOptions: (wsId: string) => ({ queryKey: ["runtimes", wsId, "execution-groups"] }),
 }));

@@ -1,13 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 
 const pgAdminUrl = process.env.MULTIREMI_TEST_POSTGRES_URL;
 const workerUrl = new URL("../../../packages/server/src/store/db/pg-worker.ts", import.meta.url);
-const errorReply = 'JSON.stringify({ error: String(err?.message ?? err), source: queryCompleted ? "reply" : "query" })';
+const errorReply = 'JSON.stringify({ error: String(err?.message ?? err), source: queryCompleted ? "reply" : "query", connectionError: isDatabaseConnectionError(err) })';
 
 describe("MUL-427: oversized worker errors fail closed", () => {
   for (const malformed of ["missing", "non-string"] as const) {
@@ -26,9 +26,15 @@ describe("MUL-427: oversized worker errors fail closed", () => {
         // its truncation, Atomics and the main-thread bridge remain production code.
         const envelope = `{ error: String(err?.message ?? err)${malformed === "non-string" ? ", source: 17" : ""} }`;
         const injected = source.replace(errorReply,
-          `JSON.stringify(query?.includes("MUL427_MALFORMED_SOURCE") ? ${envelope} : { error: String(err?.message ?? err), source: queryCompleted ? "reply" : "query" })`);
+          `JSON.stringify(query?.includes("MUL427_MALFORMED_SOURCE") ? ${envelope} : { error: String(err?.message ?? err), source: queryCompleted ? "reply" : "query", connectionError: isDatabaseConnectionError(err) })`);
         const path = join(dir, "pg-worker.ts");
-        writeFileSync(path, injected);
+        const built = await Bun.build({
+          entrypoints: [fileURLToPath(workerUrl)], target: "bun", outdir: dir, naming: "pg-worker.ts",
+          plugins: [{ name: "inject-error-envelope", setup(build) {
+            build.onLoad({ filter: /\/pg-worker\.ts$/ }, () => ({ contents: injected, loader: "ts" }));
+          } }],
+        });
+        expect(built.success).toBe(true);
         db = new PostgresSyncDatabase(url.toString(), 2048);
         const bridge = (db as unknown as { bridge: {
           worker: Worker; ctl: Int32Array; buf: Uint8Array; request: (message: { init: string }) => unknown;

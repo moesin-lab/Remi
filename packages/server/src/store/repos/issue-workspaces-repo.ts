@@ -99,7 +99,7 @@ export class IssueWorkspacesRepo {
     if (!issue || String(issue.workspace_id ?? "local") !== workspaceId) {
       throw new Error(`Issue not found: ${input.issueId}`);
     }
-    const runtime = this.ctx.runtimes().getRuntime(input.runtimeId);
+    const runtime = this.ctx.runtimes().getRuntimeLite(input.runtimeId);
     if (!runtime) throw new Error(`Runtime not found: ${input.runtimeId}`);
     if ((runtime.workspaceId ?? "local") !== workspaceId) {
       throw new Error("runtime belongs to another workspace");
@@ -213,8 +213,8 @@ export class IssueWorkspacesRepo {
   }
 
   private runtimesShareDaemon(firstRuntimeId: string, secondRuntimeId: string): boolean {
-    const first = this.ctx.runtimes().getRuntime(firstRuntimeId);
-    const second = this.ctx.runtimes().getRuntime(secondRuntimeId);
+    const first = this.ctx.runtimes().getRuntimeLite(firstRuntimeId);
+    const second = this.ctx.runtimes().getRuntimeLite(secondRuntimeId);
     return Boolean(first && second && runtimesShareDaemon(first, second));
   }
 }

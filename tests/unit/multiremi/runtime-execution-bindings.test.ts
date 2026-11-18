@@ -68,8 +68,8 @@ describe("central execution binding application", () => {
     let payload: any;
     const desired = [binding()];
     const acks = [{ generation: "ebg_test", groupId: "group-a", profileId: "ep_a", profileRevision: 1, status: "ready" as const }];
-    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
-      payload = JSON.parse(String(init?.body));
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      payload = await new Request(_input, init).json();
       return Response.json({ runtime_bindings: desired });
     }) as typeof fetch;
     const result = await new MultiremiDaemonClient("https://remi.example", "daemon-token")

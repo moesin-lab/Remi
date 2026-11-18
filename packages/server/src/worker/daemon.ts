@@ -1,3 +1,5 @@
+import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
+import { resolveCoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
 import { performUpdate } from "@shared/cli-update.js";
 import { armUpdateWatchdog, restorePreviousLauncher, journalForInstall, updateJournalDir, readUpdateJournal, updateDecision, decideUpdate, DAEMON_STOP_TIMEOUT_MS } from "@shared/daemon-update.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
@@ -155,6 +157,8 @@ import {
   type TaskFailureReasonValue,
 } from "./task-failure.js";
 import { executeRuntimeCommand } from "./runtime-command.js";
+import { BUILD_COMMIT } from "@shared/version.js";
+import { matchesUpdateIdentity } from "@shared/daemon-update.js";
 import { multiremiVersion } from "@multiremi/version.js";
 import {
   writeTaskContext,
@@ -254,6 +258,7 @@ import { runLegacySweep } from "@daemon/agent-runtime/workspace/legacy-sweep.js"
 import { executionTrackerFor } from "@daemon/agent-runtime/workspace/execution-tracker.js";
 import { ReclaimEngine } from "@daemon/agent-runtime/workspace/reclaim.js";
 import { restoreReclaimedSubject } from "@daemon/agent-runtime/workspace/restore.js";
+import { DiskPressureMonitor, DISK_CHECK_MS, strictestDiskThresholds } from "@daemon/agent-runtime/workspace/disk-pressure.js";
 import { resolveStorageMachineOptions, resolveStoragePolicy } from "@daemon/agent-runtime/workspace/storage-policy.js";
 import { readSubjectRecord, upsertSubjectRecord } from "@daemon/agent-runtime/workspace/registry.js";
 import {
@@ -1291,6 +1296,8 @@ export class MultiremiDaemon {
   private readonly outboxBackoffMs: number[] | undefined;
   private readonly outboxMaxBytes: number | undefined;
   private restartRequestedFlag = false;
+  private readonly diskMonitor: DiskPressureMonitor;
+  private diskTimer: ReturnType<typeof setInterval> | null = null;
   private gcTimer: ReturnType<typeof setInterval> | null = null;
   private gcInFlight: Promise<void> | null = null;
   private readonly reclaim: ReclaimEngine;
@@ -1479,6 +1486,7 @@ export class MultiremiDaemon {
     this.cliUpdateCoordinator?.register({
       provider: this.options.provider,
       activeTaskCount: () => this.activeTaskCount,
+      activeTaskIds: () => [...this.activeTaskIds],
       pendingClaimCount: () => this.pendingClaimCount,
       claimsPaused: () => this.claimsPaused,
       pauseClaims: () => { this.claimsPaused = true; },
@@ -1521,7 +1529,23 @@ export class MultiremiDaemon {
       },
       ...repoCacheTimeoutOverrides(process.env),
     });
+    this.diskMonitor = new DiskPressureMonitor({
+      path: workspacesRoot,
+      thresholds: () => this.rootDiskThresholds(),
+      criticalChanged: (disk, wasCritical) => {
+        log.warn(`Disk critical ${wasCritical ? "recovered" : "entered"}`, disk);
+        this.protocolClient?.sendHeartbeatNow();
+        if (wasCritical) this.wakeClaim();
+      },
+      pressureError: error => log.warn(`Pressure reclaim failed: ${String(error)}`),
+      pressure: async () => {
+        if (this.options.gcEnabled && !this.options.once && !this.stopped) await this.runGcOnce("pressure");
+      },
+    });
     this.reclaim = new ReclaimEngine({
+      storageDisk: () => this.diskMonitor.latest,
+      checkDisk: () => this.diskMonitor.check(),
+      diskThresholds: () => this.rootDiskThresholds(),
       root: workspacesRoot,
       client: this.client,
       runtimeId: () => this.options.runtimeId,
@@ -1645,6 +1669,7 @@ export class MultiremiDaemon {
       } : null,
       heartbeat: () => ({
         active_task_count: this.activeTaskCount,
+        health: this.diskMonitor.health(),
         outbox: { pending: this.outboxStats()?.pending ?? 0, unacked: 0 },
         drain_ack_generation: this.appliedDrainGeneration,
         ssh_mesh_protocol: MULTIREMI_SSH_MESH_PROTOCOL_VERSION,
@@ -1672,7 +1697,7 @@ export class MultiremiDaemon {
               this.taskDownlinks.reconcileCancellation(task.task_id, task.status);
             }
           }
-          if (ack.pending_update) await this.handleRuntimeUpdate(this.options.runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli");
+          if (ack.pending_update) await this.handleRuntimeUpdate(this.options.runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli", ack.pending_update.drain_deadline, ack.pending_update.target_commit);
         } catch (error) {
           if (isTerminalDaemonAuthorityError(error)) await this.stopAfterTerminalAuthority();
         }
@@ -1705,6 +1730,7 @@ export class MultiremiDaemon {
     registerDaemonOfferHandler(this.protocolClient, {
       runtimeId: () => this.options.runtimeId,
       rejection: (task) => {
+        if (this.diskMonitor.critical) return "disk_critical";
         if (this.options.once && this.onceTaskAccepted) return "draining";
         if (this.serverDrainActive) return "draining";
         if (this.stopped || !this.ready || !this.supervisorReady() || this.claimsPaused || this.runtimeGoneInflight.size) return "claims_paused";
@@ -1934,6 +1960,18 @@ export class MultiremiDaemon {
 
   async start(): Promise<void> {
     this.runActive = true;
+    try {
+      await this.runUntilStopped();
+    } finally {
+      // Startup may stop during the layout sweep, before the poll-loop cleanup.
+      // No stop deadline may outlive the start() invocation that armed it.
+      if (this.stopDeadlineTimer) clearTimeout(this.stopDeadlineTimer);
+      this.stopDeadlineTimer = null;
+      this.runActive = false;
+    }
+  }
+
+  private async runUntilStopped(): Promise<void> {
     this.ensureTrace();
     this.startedAt = new Date();
     this.ready = false;
@@ -1968,6 +2006,11 @@ export class MultiremiDaemon {
       outbox.pumpAll();
       await this.refreshWorkspaceRepos(this.options.workspaceId);
       this.assertWorkspaceRootOwner();
+      // Every daemon checks before it can accept its first offer, including non-GC leaders.
+      await this.diskMonitor.check();
+      this.diskTimer = setInterval(() => {
+        void this.diskMonitor.check().catch(error => log.warn(`Disk monitor failed: ${String(error)}`));
+      }, DISK_CHECK_MS);
       this.startGcLoop();
       // One-shot mode is primarily used for a single queued task (and tests), so
       // avoid paying for a second ACP process unless a model-list request exists.
@@ -2087,9 +2130,6 @@ export class MultiremiDaemon {
           log.warn(`outbox close failed: ${error instanceof Error ? error.message : String(error)}`);
         });
       }
-      if (this.stopDeadlineTimer) clearTimeout(this.stopDeadlineTimer);
-      this.stopDeadlineTimer = null;
-      this.runActive = false;
     }
   }
 
@@ -2245,6 +2285,7 @@ export class MultiremiDaemon {
       metadata: {
         version: multiremiVersion,
         cli_version: multiremiVersion,
+        ...(BUILD_COMMIT ? { cli_commit: BUILD_COMMIT } : {}),
         parallel_agent_execution: 1,
         acp_version: this.acpVersion() ?? undefined,
         agent_version: this.agentVersion() ?? undefined,
@@ -2308,7 +2349,7 @@ export class MultiremiDaemon {
       this.workspaceRelays.set(workspaceId, ack.relay);
     }
     if (ack.pending_update) {
-      await this.handleRuntimeUpdate(runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli");
+      await this.handleRuntimeUpdate(runtimeId, ack.pending_update.id, ack.pending_update.target_version, ack.pending_update.scope ?? "cli", ack.pending_update.drain_deadline, ack.pending_update.target_commit);
     }
     if (ack.pending_model_list) {
       const requestId = ack.pending_model_list.id;
@@ -2411,6 +2452,8 @@ export class MultiremiDaemon {
     requestId: string,
     targetVersion: string,
     scope: MultiremiRuntimeUpdateScope = "cli",
+    drainDeadline?: string,
+    targetCommit?: string,
   ): Promise<void> {
     // Only the CLI binary is owned by the Desktop app; the ACP bridges live in
     // ~/.remi and are independent of how the daemon was launched.
@@ -2421,7 +2464,9 @@ export class MultiremiDaemon {
       });
       return;
     }
-    const claimPause = this.tryPauseClaimsForUpdate(scope);
+    const claimPause = scope === "cli"
+      ? await this.pauseCliClaimsUntilIdle(drainDeadline)
+      : this.tryPauseLocalClaimsForUpdate();
     if (!claimPause.ok) {
       await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
         status: "failed",
@@ -2429,14 +2474,41 @@ export class MultiremiDaemon {
       });
       return;
     }
+    // Admission is deliberately non-durable: a timed-out running report must
+    // never replay after this executor has given up and queued failed.
+    const platformDeadline = drainDeadline === undefined ? Infinity : Date.parse(drainDeadline);
+    const admissionEnd = Math.min(Date.now() + 30_000,
+      Number.isNaN(platformDeadline) ? Date.now() : platformDeadline);
+    while (true) {
+      try {
+        await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "running" },
+          AbortSignal.timeout(Math.max(1, admissionEnd - Date.now())));
+        break;
+      } catch (error) {
+        if (error instanceof Error && "code" in error && (error.code === "cli_update_not_admitted" || error.code === "cli_update_not_runnable")) {
+          this.releaseUpdateClaimPause(scope);
+          // Propagate so the WS downlink releases its dedupe key. Heartbeat
+          // also retries the same pending id on its next poll.
+          throw error;
+        }
+        if (Date.now() >= admissionEnd) {
+          try {
+            await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
+              status: "failed", error: `CLI update admission confirmation deadline exceeded: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          } finally { this.releaseUpdateClaimPause(scope); }
+          return;
+        }
+        await Bun.sleep(Math.min(250, Math.max(0, admissionEnd - Date.now())));
+      }
+    }
     try {
-      await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "running" });
       const output = scope === "acp"
         ? await this.reinstallAcpBridge()
         : scope === "agent"
           ? await this.updateAgentCli()
           : this.updateRunner ? await this.updateRunner(targetVersion)
-            : await this.installRuntimeUpdate(runtimeId, requestId, targetVersion);
+            : await this.installRuntimeUpdate(runtimeId, requestId, targetVersion, targetCommit);
       await this.client.reportRuntimeUpdateResult(runtimeId, requestId, {
         status: scope === "cli" ? "restarting" : "completed",
         output: output || (scope === "acp" ? "ACP bridge updated" : scope === "agent" ? "Agent updated" : `Updated to ${targetVersion}`),
@@ -2459,10 +2531,11 @@ export class MultiremiDaemon {
     }
   }
 
-  private async installRuntimeUpdate(runtimeId: string, requestId: string, targetVersion: string): Promise<string> {
+  private async installRuntimeUpdate(runtimeId: string, requestId: string, targetVersion: string, targetCommit?: string): Promise<string> {
     const restart = this.updateRestartSpec;
     if (!restart) throw new Error("This daemon launch has no recoverable update restart specification");
-    const result = await performUpdate({ targetVersion, currentVersion: multiremiVersion, serviceRestart: restart,
+    const result = await performUpdate({ targetVersion, targetCommit, currentCommit: BUILD_COMMIT, serverUrl: this.options.serverUrl, token: this.options.token,
+      onProgress: message => log.info(`[cli-update] ${message}`), currentVersion: multiremiVersion, serviceRestart: restart,
       ...(basename(process.execPath) === "remi" ? { rollbackExecutable: process.execPath } : {}),
       beforeActivate: async installed => {
         const journal = journalForInstall(installed, runtimeId, requestId, multiremiVersion);
@@ -2471,7 +2544,7 @@ export class MultiremiDaemon {
           restart: restart.command, manager: restart.manager, timeoutSeconds: this.updateVerifyTimeoutSeconds });
       },
     });
-    return `Installed ${result.version}; awaiting target-version hello and startup self-check`;
+    return `Installed ${result.version} from ${result.source}${result.commit ? ` (${result.commit})` : ""}; awaiting target-version hello and startup self-check`;
   }
 
   private async confirmRuntimeUpdate(): Promise<void> {
@@ -2480,9 +2553,9 @@ export class MultiremiDaemon {
     const journal = readUpdateJournal(directory);
     if (!journal) return;
     const version = multiremiVersion.replace(/^v/, "");
-    if (!updateDecision(directory) && version === journal.targetVersion) decideUpdate(directory, "completed");
+    if (!updateDecision(directory) && matchesUpdateIdentity(journal, version, BUILD_COMMIT)) decideUpdate(directory, "completed");
     const decision = updateDecision(directory);
-    if (decision === "completed" && version === journal.targetVersion) {
+    if (decision === "completed" && matchesUpdateIdentity(journal, version, BUILD_COMMIT)) {
       await this.client.reportRuntimeUpdateResult(journal.runtimeId, journal.requestId, {
         status: "completed", self_check: true, output: `Registered ${version}; startup self-check passed`,
       });
@@ -3518,9 +3591,18 @@ export class MultiremiDaemon {
     });
   }
 
-  async runGcOnce(): Promise<void> {
-    if (this.gcInFlight) return await this.gcInFlight;
-    const run = this.executeGcOnce();
+  private rootDiskThresholds() {
+    const policies = [...this.workspaceSettings.values()].map(settings => resolveStoragePolicy(settings));
+    return strictestDiskThresholds(policies.length ? policies : [resolveStoragePolicy(undefined)]);
+  }
+
+  async runGcOnce(mode: "periodic" | "pressure" = "periodic"): Promise<void> {
+    if (this.gcInFlight) {
+      await this.gcInFlight;
+      if (mode === "pressure") return this.runGcOnce(mode);
+      return;
+    }
+    const run = this.executeGcOnce(mode);
     this.gcInFlight = run;
     try {
       return await run;
@@ -3529,18 +3611,22 @@ export class MultiremiDaemon {
     }
   }
 
-  private async executeGcOnce(): Promise<void> {
+  private async executeGcOnce(mode: "periodic" | "pressure" = "periodic"): Promise<void> {
     this.assertWorkspaceRootOwner();
     let reclaimFailure: unknown = null;
     // Without a registered Runtime there is no way to ask the server about a subject.
     if (this.options.runtimeId) {
       try {
-        await this.runReclaimRound("periodic");
+        await this.runReclaimRound(mode);
       } catch (error) {
         // Losing the root ends the sweep; anything else must not starve the code-view sweep below.
         this.assertWorkspaceRootOwner();
         reclaimFailure = error;
       }
+    }
+    if (mode === "pressure") {
+      if (reclaimFailure) throw reclaimFailure;
+      return;
     }
     this.traceTransport?.pruneMissing();
     try {
@@ -3565,7 +3651,7 @@ export class MultiremiDaemon {
   }
 
   /** One reclaim round; a real round also reports its findings to the server. */
-  private async runReclaimRound(mode: "periodic" | "dry_run" | "run"): Promise<StorageReport> {
+  private async runReclaimRound(mode: StorageReport["mode"]): Promise<StorageReport> {
     const report = await this.reclaim.run(mode);
     if (mode !== "dry_run") this.client.reportStorageReport(this.options.runtimeId!, report);
     log.info(`Reclaim ${report.mode} round finished`, {
@@ -3585,7 +3671,11 @@ export class MultiremiDaemon {
         this.assertWorkspaceRootOwner();
         // Only an explicit `run` may change anything; an unknown mode is refused, never applied.
         if (request.mode !== "dry_run" && request.mode !== "run") throw new Error(`unknown reclaim mode: ${String(request.mode)}`);
-        const report = await this.runReclaimRound(request.mode);
+        while (this.gcInFlight) await this.gcInFlight;
+        let report!: StorageReport;
+        const round = this.runReclaimRound(request.mode).then(value => { report = value; });
+        this.gcInFlight = round;
+        try { await round; } finally { if (this.gcInFlight === round) this.gcInFlight = null; }
         await this.client.reportGcRunResult(runtimeId, request.id, { status: "completed", report, error: null });
       } catch (error) {
         this.assertWorkspaceRootOwner();
@@ -3771,10 +3861,26 @@ export class MultiremiDaemon {
     return this.outbox?.stats() ?? null;
   }
 
-  private tryPauseClaimsForUpdate(scope: MultiremiRuntimeUpdateScope): MultiremiCliUpdatePauseResult {
-    if (scope === "cli" && this.cliUpdateCoordinator) {
-      return this.cliUpdateCoordinator.tryPauseClaims();
-    }
+  private async pauseCliClaimsUntilIdle(drainDeadline?: string): Promise<MultiremiCliUpdatePauseResult> {
+    // The server normally hands off only after drain. This covers accepted
+    // local work racing its last report, using the same persisted deadline.
+    const coordinator = this.cliUpdateCoordinator ?? new MultiremiCliUpdateCoordinator();
+    if (!this.cliUpdateCoordinator) coordinator.register({
+      provider: this.options.provider,
+      activeTaskCount: () => this.activeTaskCount,
+      activeTaskIds: () => [...this.activeTaskIds],
+      pendingClaimCount: () => this.pendingClaimCount,
+      claimsPaused: () => this.claimsPaused,
+      pauseClaims: () => { this.claimsPaused = true; },
+      releaseClaims: () => this.releaseLocalUpdateClaimPause(),
+    });
+    const configured = Number(process.env.MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS ?? DEFAULT_DAEMON_DRAIN_MS);
+    const fallback = Number.isSafeInteger(configured) && configured > 0 && configured <= 86_400_000 ? configured : DEFAULT_DAEMON_DRAIN_MS;
+    const deadline = drainDeadline !== undefined ? Date.parse(drainDeadline) : Date.now() + fallback;
+    return coordinator.pauseClaimsUntilIdle(Number.isFinite(deadline) ? deadline : Date.now(), () => this.stopped);
+  }
+
+  private tryPauseLocalClaimsForUpdate(): MultiremiCliUpdatePauseResult {
     if (this.claimsPaused || this.activeTaskCount > 0) {
       return { ok: false, error: "daemon is busy; retry update when idle" };
     }
@@ -4401,6 +4507,7 @@ export class MultiremiDaemon {
           skipFetch: true,
           signal,
           coAuthoredByEnabled: this.workspaceCoAuthoredByEnabled(task.workspaceId),
+          coAuthoredBy: this.workspaceCoAuthoredBy(task.workspaceId),
         });
         if (result.preferredRefResolved === false) {
           const message = `Configured default branch ${JSON.stringify(repo.defaultBranch)} could not be resolved; fell back to ${result.baseRef}`;
@@ -5947,6 +6054,8 @@ export class MultiremiDaemon {
   }
 
   private stopGcLoop(): void {
+    if (this.diskTimer) clearInterval(this.diskTimer);
+    this.diskTimer = null;
     if (this.gcTimer) clearInterval(this.gcTimer);
     this.gcTimer = null;
   }
@@ -6018,6 +6127,7 @@ export class MultiremiDaemon {
         ...(subjectBranch ? { branchName: subjectBranch, reuseExisting: true } : {}),
         signal: request.signal,
         coAuthoredByEnabled: this.workspaceCoAuthoredByEnabled(workspaceId),
+        coAuthoredBy: this.workspaceCoAuthoredBy(workspaceId),
       });
       // A reclaimed subject checks its repositories out again on demand; this is where its unsaved work returns.
       if (subjectId) {
@@ -6107,6 +6217,7 @@ export class MultiremiDaemon {
       workspace_id: this.options.workspaceId,
       server_url: this.options.serverUrl,
       cli_version: multiremiVersion,
+      ...(BUILD_COMMIT ? { cli_commit: BUILD_COMMIT } : {}),
       supervisor_ready: this.supervisorReady(),
       active_task_count: this.activeTaskCount,
       draining_task_count: this.drainingTaskCount,
@@ -6204,6 +6315,10 @@ export class MultiremiDaemon {
 
   private isRepoAllowed(workspaceId: string, repoUrl: string): boolean {
     return this.workspaceRepoUrls.get(workspaceId)?.has(repoUrl.trim()) ?? false;
+  }
+
+  private workspaceCoAuthoredBy(workspaceId: string) {
+    return resolveCoAuthoredByIdentity(this.workspaceSettings.get(workspaceId) ?? {});
   }
 
   private workspaceCoAuthoredByEnabled(workspaceId: string): boolean {

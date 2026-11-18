@@ -1,3 +1,4 @@
+import { DEFAULT_CO_AUTHORED_BY } from "@multiremi/contracts/co-authored-by";
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -34,6 +35,26 @@ describe("daemon repository default branches", () => {
       expect(prepared.repos[0].baseCommit).toBe(workflowCommit);
       expect(prepared.warnings).toEqual([]);
     }
+  });
+
+  it.each([undefined, { co_authored_by_name: " Custom ", co_authored_by_email: " custom@example.test " }])("passes configured or default identity through both checkout paths: %j", async settings => {
+    const { daemon, repoUrl, workDir } = await fixture();
+    daemon.workspaceSettings.set("local", settings ?? {});
+    const expected = settings ? { name: "Custom", email: "custom@example.test" } : DEFAULT_CO_AUTHORED_BY;
+    const calls: any[] = [];
+    const original = daemon.repoCache.createWorktree.bind(daemon.repoCache);
+    daemon.repoCache.createWorktree = async (params: any) => { calls.push(params); return original(params); };
+    await daemon.autoCheckoutTaskRepos({
+      id: "tsk_identity", workspaceId: "local", issueId: "iss_identity", issue: { key: "MUL-87" }, repos: [{ url: repoUrl }],
+    }, { workDir, ensureDir: true }, [], new AbortController().signal);
+    expect(calls.at(-1).coAuthoredBy).toEqual(expected);
+    const response = await daemon.handleLocalDaemonRequest(new Request("http://localhost/repo/checkout", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: repoUrl, workspace_id: "local", workdir: workDir + "-local" }),
+    }));
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(2);
+    expect(calls[1].coAuthoredBy).toEqual(expected);
   });
 
   it("preserves stale-cache diagnostics when the preferred branch also falls back", async () => {
@@ -85,7 +106,7 @@ async function fixture() {
   await repoCache.sync("local", [{ url: repoUrl }]);
   const reports: any[] = [];
   const daemon = Object.assign(Object.create(MultiremiDaemon.prototype), {
-    repoCache, options: { workspacesRoot: join(root, "workspaces") }, terminalAuthorityMode: false,
+    workspaceSettings: new Map(), repoCache, options: { workspacesRoot: join(root, "workspaces") }, terminalAuthorityMode: false,
     issueWorkspaceLifecycleLocks: new IssueWorkspaceLifecycleLocker(),
     ensureRepoReady: async () => {}, assertWorkspaceRootOwner: () => {},
     workspaceCoAuthoredByEnabled: () => false,

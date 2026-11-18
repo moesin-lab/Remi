@@ -17,8 +17,26 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 - **实现事实：** 工作区列表显式请求 `include_archived_total=true`，用响应的 `archived_total` 更新原有归档计数缓存；计数订阅本身不发 HTTP。工作区负责人看板在其活跃的 `/api/issues/grouped` 响应中携带同一可选字段，避免订阅隐藏的状态列表。计数是整个工作区的归档总数，不受列表筛选影响；不传参数时服务端不额外 COUNT。API 返回 404 时，一个 API client 会记住不支持 status-pages，使用旧的逐状态请求；新会话重新探测。
 - **实现事实：** [issues router](../../packages/server/src/api/routers/issues.ts) 的列表响应调用 `listIssues` 和 `countIssues`。[PgBridge.request](../../packages/server/src/store/db/postgres.ts) 使用 `Atomics.wait` 等待 worker，worker 以 [Bun.SQL 的 `max: 1`](../../packages/server/src/store/db/pg-worker.ts) 保证事务语句共用连接。该限制是每个桥实例的连接数，不是整个部署只能有一个连接。
 - **同步回包边界：** 唤醒通知不等于当前查询已完成。桥必须循环检查共享状态离开 `pending` 后才解码回包，避免早到或上一轮延迟的通知让新查询读取旧结果；多次唤醒共用原来的 60 秒截止时间。真实 PostgreSQL 的[回归测试](../../tests/unit/multiremi/multiremi-postgres-store.test.ts)让新查询保持等待并注入提前唤醒，验证返回的是新查询结果，同时覆盖跨连接领取和 Chat 队列顺序。
+- **关闭边界：** PG 同步桥关闭后立即拒绝查询，不再向已终止的 worker 发请求。异步调用仍由调用方 await；测试超时不会取消原 Promise，夹具必须在关闭数据库前等待其结束。[MUL-204 诊断](../../reports/performance/MUL-204/decisions-postgres.md)记录历史决策夹具的平方级查询、真实 PG 前后耗时和强制超时后的清理验证。
 - **风险推断：** 并行 HTTP 请求无法自动消除主线程同步数据库等待；额外 SQL 往返和较大的响应序列化可能放大排队，影响同进程其他请求。吞吐拐点与 PostgreSQL 网络延迟的影响尚未测量。
 - **采集重点：** 冷/热页面请求数量、单请求 SQL 数与响应 bytes、列表可操作时间，以及 API 并发升高时的 p50/p95、错误率和事件循环延迟。
+
+### Issue 待人工 decision 计数
+
+`countPendingIssueDecisions` 不再为每条候选调用 `Questions.get()`。空候选为一次读；
+非空原生 Question 使用四次读（候选、会话归属、迁移审计、来源 attempt/head/issue），
+不写库；候选只投影 metadata 和来源身份，不读取正文或卡片字段。
+历史 decision 额外用一次递归查询读取责任链与负责人事实，复用同一个 resolver；
+总共五次读，不随 decision 数量、asker、会话数或祖先层数增长。批量参数使用 JSON rowset，
+不按 ID 数量拆 SQL，也不依赖 SQLite bind 上限。
+
+计数复用原生记录的 read-time upgrade、来源 integrity 与会话迁移审计，保留无效来源、
+跨工作区、退休会话、非 human stage、普通 choice 和已结束记录的排除规则；只省去
+计数不需要的 wait/answer/action 视图展开。
+[查询预算与等价测试](../../tests/unit/multiremi/pending-issue-decisions-budget.test.ts)
+覆盖 2/1202 条原生 Question（四读、零写）、2/102 条混合历史记录（五读、零写），
+并以原逐条 `Questions.get()` 谓词核对结果。测试在 SQLite 和配置了真实服务的 PostgreSQL
+两种后端运行；缺少 PG 时的 skip 不构成 PG 验证。
 
 ### 2. 搜索：候选 issue → 逐 issue 搜评论 → 过滤与分页
 
@@ -45,6 +63,23 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 [大文件复现与验证](../../reports/performance/MUL-85-skill-files.md)记录操作者 PostgreSQL
 采样与本地 1,277 文件夹具；本地 SQLite 耗时不能代表生产 PG 同步桥或部署后的性能。
 
+## 终态完成的原子校验
+
+turn.complete 的 turn/attempt、输入范围与宿主校验在完成事务内执行，复用该事务取得的
+workspace 互斥，不再先提交一次独立预检。完成重放仍返回已提交的 reply；失败分类、
+unread-input 拒绝以及自动回复失败后的事务回滚重试保持原入口。任务初始定位读取身份列，
+完整终态与用量投影仍由规范任务变更器读取和生成。
+
+## 活跃轮次下行快照
+
+`DaemonTurnBridge.snapshot` 在同一 workspace 生命周期锁下，按确定顺序批量取得 lane
+互斥，再批量读取当前 attempt、宿主、输入回执、会话 head 与日志窗口。输入回执的首次
+初始化和 projection 水位各用一条集合写入；跨宿主、旧 attempt 和终态 turn 仍不产生输入。
+按 lane 投影时复用已锁定的 read 水位，不逐 task 再读 attempt。查询往返数不随同宿主活跃
+轮次数增长；返回行数和序列化成本仍随实际输入量增长。
+共享规模夹具另有 12 个并发活跃 attempt、8 个未答 AUQ/权限请求、20 条待发送飞书记录和
+12 个 runtime；具体测量与未验证项见 MUL-199 的 performance 报告。
+
 ## Daemon 保活与事件唤醒边界
 
 保活写入与业务变化通知分开：机器人相同状态报告仍更新 `reported_at`，SSH 相同状态心跳
@@ -57,7 +92,7 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 插件心跳只协调当前 Runtime 的 desired 状态；绑定、版本和任务快照等业务变更仍协调工作区。
 心跳仍读取工作区插件绑定和活跃任务的版本需求，不能认为所有工作区读取已消除。
 Daemon 报告的 Runtime 身份校验使用 `getRuntimeLite`，不附带历史用量、模型和执行组。
-`task:usage` 继续向浏览器更新统计，但不唤醒 daemon 下行；账本逐单位写入成本仍需单独评估。
+`task:usage` 继续向浏览器更新统计，但不唤醒 daemon 下行；账本仅按本帧 unit_id 批量预取修订事实、回执与冲突水位，不读取整个 run 的历史单位；无累计 meter/增量金额 coverage 的多单位快照将事实和接受回执各用一条 JSON 展开 INSERT 写入，避免 10,000 unit 帧触及 bind 上限；单单位增量各用一次参数化 VALUES 写入。provider request 所有权仍逐项校验；累计 meter 与增量 coverage 保持原序列化路径。
 `task.activity` 的子代理计数只在变化时写库，`task:subagents` 同样只推浏览器、不唤醒 daemon 下行。
 PR 6 的后台任务计数随同一帧、按同一规则写库。后台任务快照（`lane.background_tasks`）内容不变时只更新 revision、不推事件；
 `chat:background_tasks` 只推 Chat 创建者、不唤醒 daemon 下行或 offer，引起它的快照或停止请求只重算相关 runtime 的下行。
@@ -71,12 +106,60 @@ PR 6 的后台任务计数随同一帧、按同一规则写库。后台任务快
 不计算历史用量。CLI 排空、重试时点、任务下发的宿主所有者信息与飞书卡片能力判断也不附带统计；用户侧统计继续使用
 规范化台账的原查询。空派活仍有锁、资格和恢复检查，不能把“没有聚合”理解为“没有 SQL”。
 
+WebSocket 心跳处理共用一次同步范围的读取缓存，返回时关闭并清空缓存；同步 workspace 事件
+创建的 Promise/定时器即使继承 AsyncLocalStorage，也不能复用已关闭缓存，后台 pump 可建立新范围。
+Session hooks 在缓存范围外运行。drain 围栏并入 Runtime 行读取；
+写 drain 表时同时失效 Runtime 缓存，事务和锁仍强制重读。心跳复用本次读取的 maintenance，
+普通 liveness 写入后把新行写回缓存；drain 唤醒定时仅查询 deadline，不水合任务/ack 汇总。
+[心跳预算回归](../../tests/integration/daemon-protocol-v2/heartbeat-plugin-cost.test.ts)保持旧宿主单心跳
+7 次 SELECT / 2 次 UPDATE、mesh 全链路 SELECT ≤30 的预算；这不代表生产 DB 负载已验证下降。
+
 成本检查要计入排队的下行和派活及 `WITH` 查询，不能在同步 heartbeat handler 返回时停止。
 [多 Runtime 回归](../../tests/unit/multiremi/daemon-heartbeat-fanout-cost.test.ts)用 8 个 Runtime、
 初始 0 个任务覆盖相同报告、真实变化、目标范围与活动记录；新增任务用例验证入队立即推送，
 容量释放后在冷却到期前重试且只检查同一 daemon。默认 SQLite，显式
 `MULTIREMI_TEST_POSTGRES_URL` 则创建并清理独立 PostgreSQL 测试库，连接失败不回落。
 这是 SQL 成本与行为检查，不提供生产延迟、吞吐或恢复时间结论。
+
+## 认领候选与 offer 唤醒边界
+
+正常认领与陈旧 dispatch 恢复从 attempts/turns 基表选一次 ID，PG 锁候选时使用
+`SKIP LOCKED`；工作区生命周期锁继续保护并发上限与配置。随后按 ID 进入规范化变更器。
+活跃 attempt ID 集合物化一次供容量/lane/共享目录探针复用，保留当前 turn 的
+awaiting_human 状态覆盖及 unknown offer 保留的共享目录租约。索引、完整谓词对照、查询数范围及隔离 PG 计划见
+[MUL-163 报告](../../reports/performance/MUL-163-claim.md)。生产 offer 默认保留 60 s 兜底扫描，泵忙、等待或冷却时跳过；
+普通 ack/drain 只恢复背压等待；入队、终态、容量/配置变化及已有期限仍立即触发。
+扫描恢复派发时记 warn 和 `offer_sweep_recovered`，用于定位遗漏事件；测试环境默认禁用扫描。
+线上延迟与一小时稳定性仍需部署后测量。
+
+## Daemon 报告和消息接口的历史放大
+
+Daemon turn 输入范围和终态 input-read 校验均直接批量读取消息所需列；Chat retry ancestry 在 attempts 基表中一次回溯，
+历史消息的来源任务只批量读取 queue status。批量 task 水合对整个批次求 usage，
+workspace offer 扇出批量读取 Runtime 和 drain 围栏。会话 messages 的分页和 from/to 范围
+复用当前页的 related-message/source-subject 预取及原权限判定。
+原生 Question 通知先在分页 SQL 中排除失效路由；响应页中的通知复用批量权限事实检查，
+仍在 JavaScript 中执行与单条读取相同的严格 metadata 校验。普通回复间接继承的来源过滤
+仍可能扫描多个候选页，不能把直接 Question 通知的大/小夹具当作所有隐藏来源路径的常数证明。
+飞书入站 POST 的 Runtime 身份读取不水合历史 usage；已有会话的追加路径有单独预算。
+
+workspace 报告只唤醒所属 daemon（含别名对应的 provider）的派活条件；start 派生的 Issue 状态事件定向刷新启动 Runtime，浏览器仍接收状态变化。
+下行批量读取 attempt 身份，终态继续发送取消与保留 ACK/discard 清理，但不再投影轮输入。飞书结果只刷新已验证 bot host 的 pending 队列。
+消息和终态事件刷新活跃任务、bot、后台 lane 与 drain host 的输入，配置和维护事件保留完整扇出。
+同步读取范围退出即关闭，后台异步工作重新读取。
+[预算和复现报告](../../reports/performance/MUL-182-daemon-report-queries.md)区分历史放大消除、
+终态仍有的固定 SQL 成本、隐藏页/Question 权限查询边界与未完成的 stable 现场验收。
+[MUL-199 规模测量](../../reports/performance/MUL-199-daemon-report-scale.md)提供 100 Issue、40 会话各 501 日志等共享夹具、逐语句差异与固定预算；七类帧在真实 PG 与 SQLite 的 small/stable 计数一致，Release 证据见下文。更多现场数据分布与 stable 一小时验收仍待验证。
+
+终态事务复用 workspace/lane 首锁，savepoint/嵌套事务回滚恢复入口锁集合；
+终态轮卡通知在事务内累积，最终一次投影并按原次数累计 revision/log_version。
+Session/owner scope、Issue/标签、Agent/Skills 与 usage 的显式原始读缓存登记所有依赖表，
+任一依赖写入、事务首锁或回滚后重读；跨异步范围不复用。
+下行快照只查询既有 UNION 探测命中的队列，platform maintenance 单例存在时无需重复插入。
+[MUL-191 逐语句报告](../../reports/performance/MUL-191-terminal-sql.md)记录共享 stable 规模夹具的 SQLite/PG complete 227（175 读/52 写）、fail 141（116 读/25 写），两档相同；
+派活工作区唤醒只检查 queued/dispatched 的 runtime（未分配任务保留全宿主 admission）；
+Skill 文件按关联 Skill 批量读取；Chat queue 的浏览器失效通知不唤醒 daemon，释放消息仍走正常任务通知。
+这仍未达到 60/40；真实 PG 与 SQLite 查询数一致，完整 [Release build check 44194827781](https://github.com/moesin-lab/Remi/actions/runs/44194827781) 全绿（含真实 PG 后端分片）。该运行验证的是合并 main 前的 head；后续改动需重新验证。
 
 ## Issue 详情首屏的工作区读取
 
@@ -775,3 +858,5 @@ CHAT_PANEL_TOKEN=<token> CHAT_PANEL_CHAT=<第一个 chat> CHAT_PANEL_ROUNDS=5 bu
 
 本次定位、同规模对照、N/M 敏感性及未完成的生产验收见
 [MUL-85 混合负载报告](../../reports/performance/MUL-85-mixed-load.md)。
+
+MUL-191 的 daemon 终态测量与逐语句边界见[剩余 SQL 审计](../../reports/performance/MUL-191-terminal-remaining.md)。共享执行读取在单个同步帧内复用 turn/attempt 行；事务入口、取得新锁、依赖表写入和回滚仍使缓存失效。异步下行快照每个同步段使用独立缓存，不借用上一帧或 yield 前的行。规模夹具在计数前通过真实 Hub 对齐批量 SQL 历史的 head，避免准备阶段跳过通知产生的日志补洞分页混入当前帧；ACK 后的下行和派活仍计到 layer.drain()。报告中的 SQLite 数字不能作为 PG 或线上 lag 验收。

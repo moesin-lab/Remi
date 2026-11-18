@@ -1,3 +1,4 @@
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 /** Scheduling ledger projection; execution outcome is read from its turn. */
 import type { SqlDatabase } from './db/postgres.js';
 import { splitExecutionSql, executionParameterCount, appendExecutionLog } from './turn-execution-records.js';
@@ -23,7 +24,7 @@ export function createAutopilotRunReadProjection(db:SqlDatabase):void {
 function normalizedRun(db:SqlDatabase,input:Record<string,any>,previous?:Record<string,any>):Record<string,any> {
   const result={...input};delete result.status;delete result.result;
   if(Object.hasOwn(result,'task_id')){const id=result.task_id;delete result.task_id;
-    result.turn_id=id?db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(id)?.turn_id??null:null;}
+    result.turn_id=id?readAttemptTurn(db, id)?.turn_id??null:null;}
   if(input.status==='skipped'&&!result.completed_at)result.completed_at=nowIso();
   if(input.result!=null || input.status==='skipped') {
     const run={...previous,...input};

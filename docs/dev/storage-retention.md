@@ -37,7 +37,7 @@ daemon 上的东西分四类：工作区（代码目录）、运行环境（prov
 | 回收 | 结束后超过 `ttl_ms`（自动化 Chat 用 `automation_ttl_ms`）；或已结束且仍占用工作区的主体超过 `max_retained` 时淘汰最久未用的 |
 | 不回收 | 有正在跑的执行；Chat 被置顶；Issue 未结束；外部目录（只清运行环境） |
 | 旧一代运行环境 | 同一会话线下低于最高代的目录，修改时间超过 `ttl_ms` 后清理，不等主体结束；这一代里（私有 `work/`、provider home、插件运行目录）有无法保存的未保存工作时保留这一代 |
-| 私有临时目录 | 执行结束即删；每轮删除 `env/*/tmp` 下不在运行的执行留下的残留（不要求主体有登记） |
+| 私有临时目录 | 执行结束即删；每轮删除 `env/*/tmp` 下不在运行的执行留下的残留（不要求主体有登记）；Codex curated 插件缓存另按下述规则清理 |
 | 硬删除 | 服务端 404 且最后使用超过 `orphan_ttl_ms`：linked worktree 有未保存工作先打快照 ref，再删工作区、运行环境、trace 和登记；独立克隆里有未保存工作则保留（`snapshot_failed`） |
 | 已迁走的 Issue | `gc.check_issue` 应答 `moved` 只给执行过该 Issue 的 daemon（其他 daemon 仍得 404，避免被枚举）。daemon 视其为已结束：超过 `ttl_ms`（从最后使用算起，应答不带时间戳）后先快照再回收 `work/<iss>` 与运行环境，与已结束的 Issue 完全一致；但**永不遗忘**，trace、原生会话历史和登记都保留。之后若服务端对它应答 404（真被删除），才走硬删除 |
 | 失败 | 任一步失败则保留并上报原因，下一轮重试；根目录所有权丢失中止整轮 |
@@ -75,22 +75,60 @@ daemon 上的东西分四类：工作区（代码目录）、运行环境（prov
 - `dir` 在 `env/` 下的条目（会话线某一代的私有 `work/`、provider home 里的 worktree 的快照）只是参考：新的一代里没有地方可以恢复它们，ref 留在仓库里待人工处理。它们随回收一起上报一次（`unsaved_work`），不使登记保持 `reclaimed`，也不在每次启动时告警；重开后的第一次恢复把它们从登记里摘掉，已经 `reclaimed` 的登记在下一次回收时也不再带着它们，所以不会重复上报。
 - 快照只在本机；重开落到另一台 daemon 时只从分支恢复。
 
+### Codex curated 插件缓存
+
+Codex 默认启用 `features.plugins`，启动时自行把 OpenAI curated marketplace 同步到
+`$CODEX_HOME/.tmp/plugins`，会让每个执行 home 各存一份。Remi 不使用这份 marketplace：
+没有安装 Remi Agent Plugin 的 Codex session config 默认写 `features.plugins = false`；
+安装了 Agent Plugin 的 home 不写这个默认值。已有 features 条目、用户或 Relay 显式指定的
+`plugins` 值优先，非表的 `features` 原样保留。skills 与 MCP 不依赖这个插件开关。
+
+每个周期轮次、手动 `run` 及压力轮都独立扫描 `env/` 下的 lane 一代 `home/` 及
+`executions/<fingerprint>/home/`，删除 `.tmp/plugins`、`plugins.sha`、`plugins.sync.lock`，
+以及 Codex 同步产生的 `plugins-clone-<随机字母数字>`、`plugins-backup-<随机字母数字>` staging 条目
+（命名见 [Codex 0.163.0 同步实现](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/core-plugins/src/startup_sync.rs)，本机实测观察到 `plugins-clone-wmUzz4`）。
+不要求主体登记或结束、不等保留期；其他 `.tmp` 内容、`projects/`、`sessions/`、`work/` 不受影响。
+同一主体有正在运行的执行或生命周期锁被占用时，全部缓存留到下轮。扫描不跟随符号链接，
+删除使用现有安全删除；单个失败写入 `errors` 后继续，根目录所有权丢失仍中止整轮。
+
+`dry_run`（包括环境变量强制的预演）只计算计划，不删除。报告可选字段
+`codex_plugin_cache.planned_homes` 表示本轮可清理的 home 数，`cleaned_homes` 表示本轮完整清理的
+home 数（预演为 0）；这次清理释放的空间并入 `freed_bytes`，沿用文件系统空闲空间差的近似口径。
+只上报计数，不添加每个缓存的路径清单，沿用原有报告大小限制。
+
 ## 策略
 
 策略是工作区设置 `settings.storage`，由服务端统一管理，经现有 `workspace.settings` 下行下发给 daemon。契约、默认值和范围见 [storage.ts](../../packages/contracts/src/storage.ts)。
 
 | 键 | CLI 选项 | 环境变量覆盖（单机） | 默认 |
 |---|---|---|---|
-| `ttl_ms` | `--ttl-ms` | `MULTIREMI_GC_TTL_MS` | 72 小时 |
+| `ttl_ms` | `--ttl-ms` | `MULTIREMI_GC_TTL_MS` | 24 小时 |
 | `automation_ttl_ms` | `--automation-ttl-ms` | `MULTIREMI_GC_AUTOMATION_TTL_MS` | 24 小时 |
-| `max_retained` | `--max-retained` | `MULTIREMI_GC_MAX_RETAINED` | 50（0 为不限） |
+| `max_retained` | `--max-retained` | `MULTIREMI_GC_MAX_RETAINED` | 20（0 为不限） |
 | `orphan_ttl_ms` | `--orphan-ttl-ms` | `MULTIREMI_GC_ORPHAN_TTL_MS` | 72 小时 |
 | `snapshot_max_bytes` | `--snapshot-max-bytes` | `MULTIREMI_GC_SNAPSHOT_MAX_BYTES` | 256 MiB |
+| `pressure_free_percent` | `--pressure-free-percent` | `MULTIREMI_GC_PRESSURE_FREE_PERCENT` | 15% |
+| `pressure_free_bytes` | `--pressure-free-bytes` | `MULTIREMI_GC_PRESSURE_FREE_BYTES` | 20 GiB |
+| `critical_free_percent` | `--critical-free-percent` | `MULTIREMI_GC_CRITICAL_FREE_PERCENT` | 5% |
+| `critical_free_bytes` | `--critical-free-bytes` | `MULTIREMI_GC_CRITICAL_FREE_BYTES` | 5 GiB |
 | `chat_idle_days` | `--chat-idle-days` | — | 14（0 为不自动归档） |
 
 机器参数只读环境变量：`MULTIREMI_GC_ENABLED`（默认 true）、`MULTIREMI_GC_INTERVAL_MS`（15 分钟）、`MULTIREMI_GC_DRY_RUN`（false，只出计划不动手）、`MULTIREMI_LEGACY_KEEP_DAYS`（7）。部署环境变量见 [daemon 环境说明](../deploy/66-8-remi-environment.md)。
 
 读写：`GET/PUT /api/workspaces/:id/storage`（PUT 仅通过入口鉴权且有目标工作区访问权的人类操作者，使用共享 operator；Task 与 daemon 凭据拒绝，`null` 把某项重置为默认）；CLI 为 `remi workspace storage get|set <workspace>`，`set` 用 `--reset <选项>` 重置。设置页的「存储」页提供同样的表单。
+
+## 磁盘压力
+
+每个 daemon（包括非 GC leader）在首次领取前和每 30 秒用 `statfs` 读取 workspaces 根的可用空间与总容量；读取失败保留上次水位。百分比或字节条件中任一个低于阈值就进入对应水位，告急优先。0 关闭对应条件；同单位的 critical 与 pressure 均非 0 时，critical 不得高于 pressure，存储 PUT 在合并现有设置和重置值后校验，通用工作区 POST/PUT/PATCH 同样校验 `settings.storage`，违反返回 400。同根服务多个工作区时，每项阈值取最大值；单机环境变量仍可覆盖；覆盖后破坏阈值顺序时，先忽略 critical 覆盖；仍冲突则忽略 pressure 覆盖，回到工作区值。历史不一致设置在解析时将 critical 压到 pressure（0 表示关闭，不比较）。退出水位要求超过阈值加 `max(总容量的 1%, 2 GiB)`，两个条件都关闭时无需余量。
+
+压力或告急触发 GC leader 立即执行 `pressure` 轮次，持续压力最多每 5 分钟重试；周期、压力和运维轮共用执行门禁，不重叠。关闭 GC 或开启只预演仍不删除，磁盘监测与拒绝领取照常工作。压力轮按以下顺序推进，每个删除步骤后重新读空间，达到 pressure 阈值且超过 critical 退出线（critical 阈值加滞回余量）才停止，确保两阈值相等时也能恢复领取：
+
+1. Codex curated 执行缓存（逐个条目清理并检查空间，运行中的主体跳过）、不运行的执行临时目录、非最高代且没有运行的旧运行环境（忽略 TTL，仍做仓库检查）、过期 legacy（永久保留 retained）。
+2. 已结束主体按最后使用时间 LRU 回收，忽略 TTL 和数量上限，仍执行仓库检查、快照和所有权保护。运行中、未结束、置顶、检查或快照失败的主体保持不动；外部工作目录永不删除。
+
+pressure 只警告。critical 用独立标志拒绝所有新 offer（`disk_critical`，服务端沿现有冷却重排），不打断正在运行的任务，也不解除更新或所有权保护带来的暂停。进入和退出 critical 都写 warn，立即发心跳；恢复后自动唤醒领取。心跳 `health` 保存至 runtime `metadata.health`，critical 为 `degraded`，与 `online/offline` 正交。前端与 CLI 显示降级及原因，存储报告的可选 `disk` 只读取同一个 monitor 的最新水位，含可用/总空间、测量时间和生效阈值；生成报告前重新监测，没有成功测量时省略，不另行无历史分类。
+
+默认保留期为 24 小时、保留数量为 20。刻意不设置按字节的保留预算：回收轮不运行 `du`，由廉价的文件系统空闲空间读数驱动压力收紧，目录占用仍在后台测量。
 
 ## 记录
 

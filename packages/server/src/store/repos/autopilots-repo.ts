@@ -1,3 +1,4 @@
+import { isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { afterCommit } from '../db/postgres.js';
 import { sendMessageWithinTransaction } from '../inbox/send-message.js';
 import { clampEnvelopeBody } from '@multiremi/store/envelope-body.js';
@@ -1117,6 +1118,7 @@ export class AutopilotsRepo {
           [nowIso(), event.id],
         );
       } catch (error) {
+        if (isDatabaseConnectionError(error) || error instanceof TypeError || error instanceof ReferenceError) throw error;
         const message = (error instanceof Error ? error.message : String(error)).slice(0, 1_000);
         const terminal = event.attemptCount >= 8;
         const delayMs = Math.min(5 * 60_000, 1_000 * (2 ** Math.max(0, event.attemptCount - 1)));

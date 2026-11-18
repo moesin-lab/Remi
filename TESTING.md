@@ -14,6 +14,27 @@
 
 后端测试集中在 `tests/`；前端测试随所属包运行。没有 `.test` 后缀的手动 harness 不由 `bun test` 自动发现。前端 UI 包是否提供 test 脚本以各自 package.json 为准。
 
+数据库恢复回归：`bun run test tests/integration/database-recovery.test.ts tests/unit/shared/db-recovery.test.ts tests/unit/multiremi/background-db-recovery.test.ts`。
+集成用例启动真实 Bun API 子进程，在同步 SQL 边界注入连接失败，实际执行 Store、scheduler、HTTP 和租约去重；
+覆盖断连期间存活、503/200 探针、自动恢复及提交运行后确认事件前断连的重领场景。
+重试循环的非连接异常策略：action 或动态 interval 抛错时以 ERROR 记录原始异常，
+按正常 interval 运行下一轮；interval <= 0 的一次性任务结束本次执行，等待下一次显式 start（例如 cron）。
+动态 interval 自身出错时使用上次成功读取的周期；尚未读取成功时暂用 `retryMaxMs`（默认 30 秒）。
+非连接异常不修改数据库故障计数或恢复状态。连接异常仍使用独立的指数退避；成功完成 action 和 interval 后重置退避。
+停止或 generation 已失效的轮次仍报告非连接异常，但不得重新调度。
+能力维护扫描逐项隔离程序错误并记录 ERROR，执行其余任务后再传播连接错误以保留整轮退避。
+ERROR 的 JSONL 保留异常 name、message 和 stack。
+单元回归覆盖一次性任务不重放、长周期与动态周期、TypeError 拒绝后的进程存活、下一轮运行、interval 抛错、stop/restart 和混合故障退避。
+计划 claim 后断连回归：`bun run test tests/unit/multiremi/scheduler-claim-recovery.test.ts`。
+真实 SQLite Store 与同一个 scheduler 重试循环覆盖单条、批量 trigger 和 runtime provision；
+断连后重新执行启动恢复，从当前时间安排下一次，不补跑错过的那次，也不重放可能已经提交的运行。
+另以真实 PG worker 连接本机未监听端口检查错误分类，不要求外部数据库。
+该组不证明真实 PostgreSQL 重启、网络黑洞或 Compose 重启行为；后者应在隔离部署另行验证。
+
+查询预算测试在每次测量前显式预热 readiness 缓存，继续限制业务 SQL 的原有预算，避免一秒 TTL
+使同一路由的冷、热请求混为一谈。[readiness 成本回归](tests/unit/multiremi/database-readiness-query-count.test.ts)
+单独断言冷请求、TTL 到期、强制 readiness 与已知断连各增加一次 `SELECT 1 AS ready`，缓存命中不增加。
+
 ## 后端测试入口
 
 ```bash
@@ -162,6 +183,7 @@ main 后端变红时应定位相应合并并修复或回滚；测试问题由 QA
 `node --test scripts/local-profile.test.mjs scripts/platform-updater-runner.test.mjs`；Windows 验证宿主互斥并编译 updater，
 Windows 互斥夹具允许 PowerShell 冷启动用时 30 秒，完整生命周期仍有 90 秒上限；
 对创建、迁移并删除独立 PostgreSQL 数据库的会话日志用例，使用 30 秒集成测试上限，保留全部事务与数据断言。
+历史 sweep schema 升级的 3 个 `07` 用例同样使用 30 秒迁移集成测试上限：MUL-198 在 main 基线上单独运行 PostgreSQL 17，重复测得约 8.5–10.8 秒，超过默认 5 秒；全部回填、幂等与约束断言保留。
 发版快照门禁用例创建真实 Git 仓库并执行多个子进程，使用 30 秒夹具期限，保留未准备依赖时阻止发版的全部断言。
 Linux 设置 `MULTIREMI_TEST_DOCKER_RECOVERY=1` 运行隔离的 PostgreSQL 17 恢复和回执对账测试，
 并运行 `bun run tests/integration/platform-application-smoke.ts`：从 Web 代理调用真实鉴权 API、
@@ -210,3 +232,13 @@ Daemon 测试和独立 harness 必须注入 [disabledSshMeshRuntime()](tests/hel
 [包装信号回归](tests/unit/scripts/run-tests-signals.test.ts)实际转发 SIGINT/SIGTERM；中断后子进程退出 0 时包装仍返回失败，原非零退出码继续保留，并检查 HOME 清理；[包装环境回归](tests/unit/scripts/run-tests.test.ts)核对 CI 的测试数据库 URL 与 lock sentinel 输入；[多文件 preload 回归](tests/unit/scripts/hermetic-preload-process.test.ts)验证多个文件及其 awaited afterAll 子进程结束前共享运行根仍在，整个套件结束才清理。
 
 [Remi core 测试](tests/unit/remi/core.test.ts)通过构造参数把旧 sessions.json 迁移和 metrics 写入临时 home；shared/config 的生产常量仍按原 HOME 解析，不读取 REMI_HOME 环境变量。[Claude wrapper 测试](tests/unit/acp/claude-runtime-wrapper.test.ts)为子进程设置 npm_config_logs_dir 与 npm_config_cache。[Lark CLI 集成测试](tests/integration/lark-cli-message-provider.test.ts)保留真实健康探测；无配置文件时将 CLI 配置、数据、日志目录放入测试运行根，避免未登录探测生成 HOME 缓存。直接 bun test 且存在 CLI 配置时保留原登录环境，继续运行真实 CLI 用例。
+
+## Daemon 报告规模预算
+
+`tests/fixtures/multiremi/daemon-report-scale.ts` 提供参数化的小档与 stable 档；
+`daemon-report-scale-budget.test.ts` 每档仅在 `beforeAll` seed 一次，测量前排空 ACK 窗口，
+计数直到 queued downlinks/offers drain 完成。默认 SQLite 的非终态帧断言读/写固定常量；
+配置 `MULTIREMI_TEST_POSTGRES_URL` 后同一文件必须完成真实 PG 两档相等检查，连接失败不能回退。
+`MULTIREMI_TEST_QUERY_PROFILE=/tmp/profile.json` 可导出逐语句计数。
+本地 SQLite 规模套件低于 30 秒；PG 的真实耗时、固定常量与完整 Release build check 尚待采集，
+见 [MUL-199 测量边界](reports/performance/MUL-199-daemon-report-scale.md)。

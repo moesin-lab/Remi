@@ -192,6 +192,8 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     const child = createResponsibleTestIssue(store, { title: "Waiting child", parentIssueId: parent.id,
       status: "backlog", blockedBy: [prerequisite.id] });
 
+    // Pin a warm readiness cache; cold/expired probe cost is tested separately.
+    store.checkDatabaseReady(true);
     probe.reset();
     const waiting = await app.request(`/api/issues/${child.id}`, { headers: AUTH_HEADERS });
     expect(waiting.status).toBe(200);
@@ -201,6 +203,8 @@ describe("MUL-385 issue detail first-screen query counts", () => {
       .reduce((sum, [, count]) => sum + count, 0)).toBe(1);
 
     store.updateIssue(child.id, { status: "todo", force: true, actorType: "member", actorId: "mem_local" });
+    // Pin a warm readiness cache; cold/expired probe cost is tested separately.
+    store.checkDatabaseReady(true);
     probe.reset();
     const started = await app.request(`/api/issues/${child.id}`, { headers: AUTH_HEADERS });
     expect(started.status).toBe(200);
@@ -217,8 +221,9 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     const root = store.createIssue({ title: "Count root", assigneeType: "agent", assigneeId: owner.id });
     const child = store.createIssue({ title: "Count child", parentIssueId: root.id, assigneeType: "agent", assigneeId: worker.id });
     const member = testWorkspaceMember(store, root.workspaceId);
-    const aggregate = (sql: string) => sql.includes("message_kind = 'decision'") && sql.includes("resolved_at IS NULL");
+    const aggregate = (sql: string) => /message_kind\s*=\s*'decision'/.test(sql) && sql.includes("resolved_at IS NULL");
     const count = async (issueId: string) => {
+      store.checkDatabaseReady(true);
       probe.reset();
       const response = await app.request(`/api/issues/${issueId}`, { headers: AUTH_HEADERS });
       expect(response.status).toBe(200);
@@ -286,6 +291,7 @@ describe("MUL-385 issue detail first-screen query counts", () => {
         decoratedComments: 0,
       });
 
+      store.checkDatabaseReady(true);
       probe.reset();
       const response = await app.request(`/api/issues/${fixture.issueId}/sessions`, { headers: AUTH_HEADERS });
       expect(response.status).toBe(200);
@@ -347,6 +353,8 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     // Warm token verification so the first last-used write does not distort
     // the comparison against later requests with the same credential.
     await read(aliceHeaders);
+    // Pin a warm readiness cache; cold/expired probe cost is tested separately.
+    store.checkDatabaseReady(true);
     probe.reset();
     const initialSessions = await read(aliceHeaders);
     const sharedIds = [main.id, aliceVisible, bobVisible, alicePrivate, adminVisible].sort();
@@ -359,6 +367,8 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     const outsiders = await headersFor("outsider");
     expect((await read(outsiders)).map((session) => session.id).sort()).toEqual(sharedIds);
     for (let index = 0; index < 12; index += 1) addChat(`chat_first_screen_extra_${index}`, "alice");
+    // Pin a warm readiness cache; cold/expired probe cost is tested separately.
+    store.checkDatabaseReady(true);
     probe.reset();
     const expanded = await read(aliceHeaders);
     expect(expanded).toHaveLength(initialSessions.length + 12);

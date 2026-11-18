@@ -1,3 +1,4 @@
+import { proxyWebSocket, withNoProxyRoute } from "@shared/proxy-fetch.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -344,7 +345,7 @@ export class DaemonProtocolClient {
     const generation = ++this.generation;
     this.transition("connecting");
     try {
-      const socket = (this.options.connect ?? ((target, init) => new WebSocket(target, init as never)))(url, { headers });
+      const socket = (this.options.connect ?? proxyWebSocket)(url, { headers });
       this.socket = socket;
       let inspecting = false;
       const listen = (type: string, handler: (event: any) => void) => {
@@ -472,12 +473,14 @@ export class DaemonProtocolClient {
       const current = lane.heartbeat();
       const runtime = lane.runtime();
       if (runtime?.runtime_id === runtimeId) payload.runtimes!.push({
-        runtime_id: runtimeId, capabilities: runtime.capabilities,
+        runtime_id: runtimeId, capabilities: runtime.capabilities, health: current.health,
         ...(current.ssh_mesh_protocol === undefined ? {} : {
           ssh_mesh_protocol: current.ssh_mesh_protocol,
           ssh_mesh_status: current.ssh_mesh_status,
         }),
       });
+      if (current.health && (!payload.health || current.health.state === "degraded"
+        || (payload.health.state === "ok" && payload.health.reasons.length === 0))) payload.health = current.health;
       payload.active_task_count += current.active_task_count;
       payload.outbox!.pending += current.outbox?.pending ?? 0;
       payload.outbox!.unacked += current.outbox?.unacked ?? 0;
@@ -611,7 +614,7 @@ export function inspectDaemonUpgradeRejection(
 ): Promise<{ status: number; code: string | null; minProtocol?: number } | null> {
   const url = new URL(socketUrl);
   url.protocol = url.protocol === "wss:" ? "https:" : "http:";
-  return new Promise((resolve, reject) => {
+  return withNoProxyRoute(url, () => new Promise((resolve, reject) => {
     const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
       headers: { ...headers, Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": randomBytes(16).toString("base64") },
       signal,
@@ -638,5 +641,5 @@ export function inspectDaemonUpgradeRejection(
     });
     request.on("error", reject);
     request.end();
-  });
+  }));
 }

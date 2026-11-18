@@ -333,7 +333,15 @@
     "section_repositories": "代码仓库",
     "repositories_shortcut_label": "仓库 URL 仍在「代码仓库」标签页中管理",
     "repositories_shortcut_link": "前往管理 →",
-    "toast_failed": "更新代码托管设置失败"
+    "toast_failed": "更新代码托管设置失败",
+    "co_author_description": "自动为 Agent 提交添加共同作者信息。",
+    "co_author_name": "名称",
+    "co_author_email": "邮箱",
+    "co_author_invalid_name": "请输入 1–100 个字符的名称，不含控制字符或尖括号。",
+    "co_author_invalid_email": "请输入有效邮箱，域名须包含点，最多 254 个字符。",
+    "co_author_disabled": "共同作者信息未启用。",
+    "co_author_save": "保存",
+    "co_author_reset": "恢复默认"
   },
   "repositories": {
     "section_title": "代码仓库",
@@ -760,16 +768,34 @@
       "chat_idle_days": {
         "label": "对话自动归档",
         "hint": "活跃对话无活动多少天后自动归档。0 表示不自动归档。"
+      },
+      "pressure_free_percent": {
+        "label": "压力空闲百分比",
+        "hint": "0 关闭此条件。告急阈值不得高于压力阈值。"
+      },
+      "pressure_free_bytes": {
+        "label": "压力空闲字节数",
+        "hint": "0 关闭此条件。告急阈值不得高于压力阈值。"
+      },
+      "critical_free_percent": {
+        "label": "告急空闲百分比",
+        "hint": "0 关闭此条件。告急阈值不得高于压力阈值。"
+      },
+      "critical_free_bytes": {
+        "label": "告急空闲字节数",
+        "hint": "0 关闭此条件。告急阈值不得高于压力阈值。"
       }
     },
     "units": {
       "hours": "小时",
       "mb": "MB",
       "days": "天",
-      "count": "个"
+      "count": "个",
+      "percent": "%"
     },
     "default_value": "默认：{{value}} {{unit}}",
     "validation": {
+      "threshold_order": "告急阈值不能大于压力阈值（两项均启用时）。",
       "required": "请输入数字。",
       "integer": "请输入整数。",
       "range": "须在 {{min}} 到 {{max}} {{unit}}之间。"

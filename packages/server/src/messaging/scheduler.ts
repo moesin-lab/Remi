@@ -1,3 +1,4 @@
+import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 import { randomUUID } from "node:crypto";
 import {
@@ -109,7 +110,7 @@ export class MessagingScheduler {
   private readonly onSourceFailure: MessagingSchedulerOptions["onSourceFailure"];
   private readonly inFlight = new Set<string>();
   private readonly healthCheckedAt = new Map<string, number>();
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private timer: DatabaseRetryLoop | null = null;
   private tickPromise: Promise<MessagingRunResult> | null = null;
 
   constructor(options: MessagingSchedulerOptions) {
@@ -126,16 +127,14 @@ export class MessagingScheduler {
 
   start(): void {
     if (this.timer) return;
-    void this.runOnce().catch((error) => log.warn(`Initial message sync failed: ${errorLabel(error)}`));
-    this.timer = setInterval(() => {
-      void this.runOnce().catch((error) => log.warn(`Message sync tick failed: ${errorLabel(error)}`));
-    }, this.tickIntervalMs);
-    this.timer.unref?.();
+    this.timer = new DatabaseRetryLoop("messaging.sync", () => this.runOnce(), this.tickIntervalMs);
+    this.timer.start();
   }
 
-  stop(): void {
-    if (this.timer) clearInterval(this.timer);
+  stop(): Promise<void> {
+    const stopped = this.timer?.stop();
     this.timer = null;
+    return stopped ?? Promise.resolve();
   }
 
   runOnce(now: Date = this.now()): Promise<MessagingRunResult> {
@@ -286,6 +285,7 @@ export class MessagingScheduler {
       // resumes this window rather than restarting it.
       return { completed: false, inserted, updated, rejected, error: null };
     } catch (error) {
+      if (isDatabaseConnectionError(error) || error instanceof TypeError || error instanceof ReferenceError) throw error;
       if (error instanceof LeaseLostError) {
         log.warn(`Message sync lease was lost for source ${source.id}`);
         return { completed: false, inserted, updated, rejected, error: null };
@@ -304,8 +304,8 @@ export class MessagingScheduler {
       log.warn(`Message sync failed for source ${source.id}: ${code}`);
       return { completed: false, inserted, updated, rejected, error: code };
     } finally {
-      if (leaseToken) this.store.releaseSyncStream(source.id, STREAM, leaseToken);
       this.inFlight.delete(source.id);
+      if (leaseToken) this.store.releaseSyncStream(source.id, STREAM, leaseToken);
     }
   }
 

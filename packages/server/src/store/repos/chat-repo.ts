@@ -1,3 +1,5 @@
+import { memoizeRequestRead } from "@multiremi/store/request-read-cache.js";
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { sendMessageWithinTransaction } from '../inbox/send-message.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 // Chat domain (chat sessions and chat messages), extracted verbatim from MultiremiStore
@@ -249,7 +251,9 @@ export class ChatRepo {
   }
 
   getChatSession(id: string): MultiremiChatSession | null {
-    const row = this.ctx.db.query(`${CHAT_SESSION_SELECT} WHERE chat.id = ?`).get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_chat_sessions', 'multiremi_conversation_log',
+      'multiremi_chat_message_records', 'multiremi_session_lanes', 'multiremi_workspace_read_cursors'], `chat:${id}`,
+      () => this.ctx.db.query(`${CHAT_SESSION_SELECT} WHERE chat.id = ?`).get(id) as Row | null);
     return row ? toChatSession(row) : null;
   }
 
@@ -548,7 +552,7 @@ export class ChatRepo {
     const staged=input.role==='assistant'&&input.taskId?this.ctx.db.query('SELECT reply_message_id FROM multiremi_turns WHERE current_attempt_id=?').get(input.taskId)?.reply_message_id:null;
     const id=input.id??staged??createId('msg');
     const task=input.taskId?this.ctx.tasks().getTask(input.taskId):null;
-    const source=input.taskId?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(input.taskId):null;
+    const source=input.taskId?readAttemptTurn(this.ctx.db, input.taskId):null;
     const member=this.ctx.workspaces().ensureWorkspaceOperator(session.workspaceId);
     const result=sendMessageWithinTransaction(this.ctx,{id,session_id:session.id,
       sender:{type:input.role==='assistant'?'agent':input.role==='user'?'member':'platform',id:input.role==='assistant'?task?.agentId??null:input.role==='user'?member?.id??null:null},
@@ -574,12 +578,17 @@ export class ChatRepo {
       const agent = this.ctx.agents().getAgent(task.agentId);
       const currentLineageTaskIds = chatTaskLineageIds(this.ctx, task);
       const entries = this.ctx.conversationLog().listConversationLogEntries(session.id);
+      // Only queue state is needed here. Read it for the whole conversation
+      // without hydrating each source's usage or autopilot history.
+      const sourceStatuses = new Map((this.ctx.db.query(`SELECT task.id,task.status
+        FROM multiremi_turn_execution_records task WHERE task.id IN (
+          SELECT task_id FROM multiremi_conversation_log WHERE session_id=? AND task_id IS NOT NULL
+        )`).all(session.id) as Row[]).map(row => [String(row.id), String(row.status)]));
       const messages = entries
         .filter((entry) => entry.kind !== "head" && entry.deleted_at === null)
         .map((entry) => ({ ...conversationLogChatMessage(entry), seq: entry.seq, metadata: entry.metadata })).filter((message) => {
         if (message.role !== "user" || !message.taskId || currentLineageTaskIds.has(message.taskId)) return true;
-        const source = this.ctx.tasks().getTask(message.taskId);
-        return source?.status !== "queued";
+        return sourceStatuses.get(message.taskId) !== "queued";
       });
       const events = chatMessagesAsSessionEvents(messages, session, task.id, currentLineageTaskIds);
       const entriesBySeq = new Map(entries.map((entry) => [entry.seq, entry]));
@@ -789,17 +798,15 @@ export class ChatRepo {
 }
 
 function chatTaskLineageIds(ctx: StoreContext, task: MultiremiTask): Set<string> {
-  const ids = new Set<string>();
-  let current: MultiremiTask | null = task;
-  while (
-    current?.chatSessionId === task.chatSessionId
-    && current.prompt.trim() === task.prompt.trim()
-    && !ids.has(current.id)
-  ) {
-    ids.add(current.id);
-    current = current.parentTaskId ? ctx.tasks().getTask(current.parentTaskId) : null;
-  }
-  return ids;
+  // Retry attempts share their turn's Chat and prompt. Follow consecutive
+  // attempt numbers in one read, including gaps exactly as parentTaskId does.
+  const rows = ctx.db.query(`WITH RECURSIVE lineage AS (
+    SELECT id,turn_id,attempt_no FROM multiremi_turn_attempts WHERE id=?
+    UNION ALL
+    SELECT parent.id,parent.turn_id,parent.attempt_no FROM multiremi_turn_attempts parent
+    JOIN lineage child ON parent.turn_id=child.turn_id AND parent.attempt_no=child.attempt_no-1
+  ) SELECT id FROM lineage`).all(task.id) as Row[];
+  return new Set(rows.map(row => String(row.id)));
 }
 
 function chatMessagesAsSessionEvents(

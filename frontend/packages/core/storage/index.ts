@@ -1,7 +1,7 @@
 export * from "./queries";
 export * from "./mutations";
 export * from "./gc-run";
-export { STORAGE_SETTINGS_BOUNDS, STORAGE_SETTINGS_DEFAULTS } from "@multiremi/contracts/storage";
+export { STORAGE_SETTINGS_BOUNDS, STORAGE_SETTINGS_DEFAULTS, storageThresholdErrors } from "@multiremi/contracts/storage";
 export type {
   GcRunMode,
   GcRunRequest,

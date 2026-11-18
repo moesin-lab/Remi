@@ -1,3 +1,4 @@
+import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 /**
  * Idle backfill for `multiremi_conversation_log.body_html`.
@@ -97,7 +98,8 @@ export class BodyHtmlBackfillTask {
   private readonly render: (markdown: string) => { html: string; render_version: string };
   private readonly renderVersion: string;
 
-  private timer: ReturnType<typeof setTimeout> | null = null;
+  private timer: DatabaseRetryLoop | null = null;
+  private nextDelay = 1;
   private running = false;
   private stopped = true;
   private columnsReady: boolean | null = null;
@@ -128,24 +130,26 @@ export class BodyHtmlBackfillTask {
    */
   start(): boolean {
     if (!this.stopped) return true;
-    const ready = conversationLogBodyHtmlColumnsExist(this.store);
-    this.columnsReady = ready;
-    if (!ready) {
+    try { this.columnsReady = conversationLogBodyHtmlColumnsExist(this.store); }
+    catch (error) { if (!isDatabaseConnectionError(error)) throw error; }
+    if (this.columnsReady === false) {
       log.info(
         `body_html backfill not started: ${CONVERSATION_LOG_TABLE} has no body_html/render_version columns yet`,
       );
       return false;
     }
     this.stopped = false;
-    this.timer = setTimeout(() => void withDbJob("body-html.backfill", () => this.tick()), 0);
-    this.timer.unref?.();
+    this.timer = new DatabaseRetryLoop("body-html.backfill",
+      () => withDbJob("body-html.backfill", () => this.tick()), () => this.nextDelay);
+    this.timer.start(1);
     return true;
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearTimeout(this.timer);
+    const stopped = this.timer?.stop();
     this.timer = null;
+    return stopped ?? Promise.resolve();
   }
 
   /** Re-run the probe; used by tests and by a caller that missed the table. */
@@ -156,19 +160,9 @@ export class BodyHtmlBackfillTask {
 
   private async tick(): Promise<void> {
     if (this.stopped) return;
-    let processed = 0;
-    try {
-      processed = await this.runBatch();
-    } catch (error) {
-      log.warn(`body_html backfill batch failed: ${scrubErrorForLog(error)}`);
-    }
-    if (this.stopped) return;
-    // A full batch means there is more waiting, so come back immediately; a
-    // short one means the queue is drained and the pause applies. The pause is
-    // the timer itself, so `stop()` cancels it rather than waiting it out.
-    const delay = processed >= this.batchSize ? 0 : this.intervalMs;
-    this.timer = setTimeout(() => void withDbJob("body-html.backfill", () => this.tick()), delay);
-    this.timer.unref?.();
+    if (this.columnsReady !== true && !this.probe()) { this.stop(); return; }
+    const processed = await this.runBatch();
+    this.nextDelay = processed >= this.batchSize ? 1 : this.intervalMs;
   }
 
   /**

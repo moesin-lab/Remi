@@ -752,7 +752,13 @@ export interface DaemonTraceAppendPayload {
  * A live socket proves reachability. Each runtime also re-advertises its
  * capabilities because a host can gain or lose one after the initial hello.
  */
+export interface DaemonHealth {
+  state: "ok" | "degraded";
+  reasons: Array<{ code: "disk_critical" | "disk_pressure"; detail: { path: string; free_bytes: number; total_bytes: number } }>;
+}
+
 export interface DaemonHeartbeatPayload {
+  health?: DaemonHealth;
   /** Tasks this process is executing right now, across every runtime it serves. */
   active_task_count: number;
   /** Local outbox pressure, so an operator can see a daemon that cannot drain. */
@@ -761,6 +767,7 @@ export interface DaemonHeartbeatPayload {
   drain_ack_generation?: number;
   runtimes?: Array<{
     runtime_id: string;
+    health?: DaemonHealth;
     capabilities?: DaemonRuntimeCapabilities;
     /** Omitted by older v2 daemons; zero explicitly reports no mesh support. */
     ssh_mesh_protocol?: number;
@@ -903,6 +910,8 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   "task_not_found",
   "authority_revoked",
   "invalid_report",
+  "cli_update_not_admitted",
+  "cli_update_not_runnable",
   "report_shape_retired",
   "turn_input_pending",
   "input_unread",
@@ -911,6 +920,7 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   // offer rejections and dispatch
   "capacity",
   "claims_paused",
+  "disk_critical",
   "draining",
   "binary_skill_files_unsupported",
   "task_not_offered",
@@ -1154,4 +1164,30 @@ export function compareDaemonCliVersion(left: string, right: string): number {
 /** Whether a daemon advertising `cliVersion` may use the v2 socket. */
 export function meetsDaemonMinCliVersion(cliVersion: string): boolean {
   return compareDaemonCliVersion(cliVersion, DAEMON_MIN_CLI_VERSION) >= 0;
+}
+
+/** Process-scoped CLI update directive. Explicit commits are resolved only through the platform. */
+export interface DaemonRuntimeUpdatePayload {
+  /** Persisted deadline only when this update owns the drain. */
+  drain_deadline?: string;
+  id: string;
+  target_version: string;
+  target_commit?: string;
+  scope?: "cli" | "acp" | "agent";
+}
+
+/** Validate untrusted heartbeat metadata; malformed health never replaces the last known state. */
+export function parseDaemonHealth(value: unknown): DaemonHealth | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const input = value as Record<string, unknown>;
+  if ((input.state !== "ok" && input.state !== "degraded") || !Array.isArray(input.reasons) || input.reasons.length > 2) return undefined;
+  for (const reason of input.reasons) {
+    if (!reason || (reason.code !== "disk_critical" && reason.code !== "disk_pressure")) return undefined;
+    const detail = reason.detail;
+    if (!detail || typeof detail.path !== "string" || detail.path.length > 4096 ||
+      !Number.isFinite(detail.free_bytes) || detail.free_bytes < 0 ||
+      !Number.isFinite(detail.total_bytes) || detail.total_bytes <= 0) return undefined;
+  }
+  return { state: input.state, reasons: input.reasons.map(reason => ({ code: reason.code,
+    detail: { path: reason.detail.path, free_bytes: reason.detail.free_bytes, total_bytes: reason.detail.total_bytes } })) };
 }

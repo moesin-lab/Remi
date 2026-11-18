@@ -34,8 +34,21 @@ export function redactor(secrets) {
 }
 
 if (process.argv[2] === '--run') {
-  const { command, args, input, secrets, cwd } = JSON.parse(readFileSync(0, 'utf8'));
+  const { command, args, input, secrets, cwd, detectPortBinding } = JSON.parse(readFileSync(0, 'utf8'));
   const child = spawn(command, args, { cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  // Observe bounded tails while preserving streaming output and redaction.
+  // 98 is reserved for a classified bind failure; other child failures map to 1.
+  let portBinding = false;
+  if (detectPortBinding) {
+    for (const stream of [child.stdout, child.stderr]) {
+      let tail = '';
+      stream.on('data', (chunk) => {
+        tail += chunk.toString('utf8');
+        if (/bind: address already in use|port is already allocated|Only one usage of each socket address|ports? (?:are|is) not available[^\r\n]*bind/iu.test(tail)) portBinding = true;
+        tail = tail.slice(-8192);
+      });
+    }
+  }
   child.stdout.pipe(redactor(secrets)).pipe(process.stdout);
   child.stderr.pipe(redactor(secrets)).pipe(process.stderr);
   child.stdin.on('error', () => {}); // An early Docker failure can close stdin.
@@ -43,5 +56,7 @@ if (process.argv[2] === '--run') {
   let interrupted = false;
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { interrupted = true; child.kill(signal); });
   child.on('error', () => { process.stderr.write('Docker runtime proxy command could not start\n'); process.exitCode = 1; });
-  child.on('close', (code) => { process.exitCode = interrupted ? 1 : (code || (code === 0 ? 0 : 1)); });
+  child.on('close', (code) => {
+    process.exitCode = interrupted ? 1 : code === 0 ? 0 : detectPortBinding ? (portBinding ? 98 : 1) : (code || 1);
+  });
 }

@@ -1,3 +1,4 @@
+import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import { createLogger } from "@shared/logger.js";
@@ -129,7 +130,7 @@ export interface RepositoryWikiServiceContract {
   /** Reads whose OpenViking calls all share one deadline; use one per API request. */
   withRequestDeadline(budgetMs?: number): RepositoryWikiRequestReader;
   startStorageWorker?(): void;
-  stopStorageWorker?(): void;
+  stopStorageWorker?(): void | Promise<void>;
 }
 
 /** Read-only on purpose: writes must stay on the service that owns the per-repository write lane. */
@@ -207,7 +208,7 @@ interface RepositoryWikiBatchInternalOptions {
 
 export class RepositoryWikiService implements RepositoryWikiServiceContract {
   private readonly writeQueues = new Map<string, Promise<void>>();
-  private storageTimer: ReturnType<typeof setTimeout> | null = null;
+  private storageTimer: DatabaseRetryLoop | null = null;
   private storageAbort: AbortController | null = null;
   private storageRun: Promise<void> | null = null;
   private readonly cleanupConcurrency: number;
@@ -246,22 +247,18 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
     if (this.mode === "sql" || this.storageAbort) return;
     const abort = new AbortController();
     this.storageAbort = abort;
-    const tick = async () => {
-      try { await withDbJob("repository-wiki.storage", () => this.runStorageJobs(abort.signal)); }
-      catch (error) { if (!abort.signal.aborted) log.warn(`Wiki storage worker failed: ${safeError(error)}`); }
-      if (!abort.signal.aborted) {
-        this.storageTimer = setTimeout(tick, 5_000);
-        this.storageTimer.unref?.();
-      }
-    };
-    void tick();
+    this.storageTimer = new DatabaseRetryLoop("repository-wiki.storage",
+      () => withDbJob("repository-wiki.storage", () => this.runStorageJobs(abort.signal)), 5_000);
+    this.storageTimer.start();
   }
 
-  stopStorageWorker(): void {
+  async stopStorageWorker(): Promise<void> {
     this.storageAbort?.abort();
     this.storageAbort = null;
-    if (this.storageTimer) clearTimeout(this.storageTimer);
+    const stopped = this.storageTimer?.stop();
     this.storageTimer = null;
+    await stopped;
+    await this.storageRun;
   }
 
   runStorageJobs(signal?: AbortSignal, now = Date.now()): Promise<void> {
@@ -1020,6 +1017,7 @@ export class RepositoryWikiService implements RepositoryWikiServiceContract {
       log.info(`OpenViking storage job completed for ${job.workspaceId}/${job.repositoryId} (${job.id})`);
       return true;
     } catch (error) {
+      if (isDatabaseConnectionError(error) || error instanceof TypeError || error instanceof ReferenceError) throw error;
       if (phase === "pending" && !scopedSignal.aborted) {
         await this.restoreCanonicalUris(client, rootUri, previousCanonical, job.batchId);
       }

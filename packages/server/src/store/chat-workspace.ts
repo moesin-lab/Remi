@@ -41,7 +41,7 @@ export function resolveChatWorkspace(ctx: StoreContext, chat: MultiremiChatSessi
       workDir: previous.work_dir ? String(previous.work_dir) : null, runtimeId: previous.runtime_id ? String(previous.runtime_id) : null };
   }
   const snapshot = parseChatWorkspaceFingerprint(lineage.executionFingerprint);
-  const runtime = lineage.runtimeId ? ctx.runtimes().getRuntime(lineage.runtimeId) : null;
+  const runtime = lineage.runtimeId ? ctx.runtimes().getRuntimeLite(lineage.runtimeId) : null;
   const pendingDirectoryRuntime = !runtime && assignment && lineage.runtimeId ===
     daemonRuntimeId(assignment.daemon, ctx.agents().getAgent(chat.agentId)?.provider ?? "");
   const matchesAssignment = Boolean(lineage.workDir && assignment &&

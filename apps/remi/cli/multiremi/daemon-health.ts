@@ -1,3 +1,4 @@
+import { proxyFetch } from "@shared/proxy-fetch.js";
 /**
  * Multiremi CLI — supported runtime providers and daemon health probing.
  *
@@ -107,7 +108,7 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await proxyFetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }

@@ -1,3 +1,4 @@
+import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 import type {
   MultiremiNotificationChannelKind,
@@ -60,7 +61,8 @@ export class OutboundNotificationDispatcher {
   private readonly publicUrl: string | null;
   private readonly inFlight = new Set<string>();
   private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private stopping = false;
+  private sweepTimer: DatabaseRetryLoop | null = null;
 
   constructor(options: OutboundNotificationDispatcherOptions) {
     this.store = options.store;
@@ -77,31 +79,37 @@ export class OutboundNotificationDispatcher {
   }
 
   start(): void {
+    this.stopping = false;
     if (this.sweepTimer) return;
-    void withDbJob("notifications.sweep", () => this.sweep());
-    this.sweepTimer = setInterval(() => void withDbJob("notifications.sweep", () => this.sweep()), this.sweepIntervalMs);
-    this.sweepTimer.unref?.();
+    this.sweepTimer = new DatabaseRetryLoop("notifications.sweep",
+      () => withDbJob("notifications.sweep", () => this.sweep()), this.sweepIntervalMs);
+    this.sweepTimer.start();
   }
 
-  stop(): void {
-    if (this.sweepTimer) clearInterval(this.sweepTimer);
+  async stop(): Promise<void> {
+    this.stopping = true;
+    const stopped = this.sweepTimer?.stop();
     this.sweepTimer = null;
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
+    await stopped;
+    while (this.inFlight.size) await new Promise(resolve => setTimeout(resolve, 10));
   }
 
   async sweep(): Promise<void> {
     const now = new Date().toISOString();
     const pending = this.store.listPendingNotificationDeliveries(now, 100);
-    await Promise.allSettled(pending.map((delivery) => this.dispatch(delivery.id)));
+    const results = await Promise.allSettled(pending.map((delivery) => this.dispatch(delivery.id)));
+    for (const result of results) if (result.status === "rejected") throw result.reason;
   }
 
   async dispatch(id: string): Promise<void> {
-    if (this.inFlight.has(id)) return;
+    if (this.stopping || this.inFlight.has(id)) return;
     this.inFlight.add(id);
     try {
       await this.dispatchClaimed(id);
     } catch (error) {
+      if (isDatabaseConnectionError(error) || error instanceof TypeError || error instanceof ReferenceError) throw error;
       log.warn(`notification delivery ${id} dispatcher error: ${redactNotificationError(error)}`);
     } finally {
       this.inFlight.delete(id);
@@ -110,7 +118,9 @@ export class OutboundNotificationDispatcher {
 
   retry(id: string): MultiremiNotificationDelivery | null {
     const delivery = this.store.resetNotificationDeliveryForRetry(id, new Date().toISOString());
-    if (delivery) queueMicrotask(() => void this.dispatch(id));
+    if (delivery) queueMicrotask(() => { void this.dispatch(id).catch(error => {
+      if (!isDatabaseConnectionError(error)) throw error;
+    }); });
     return delivery;
   }
 
@@ -179,6 +189,7 @@ export class OutboundNotificationDispatcher {
       );
       this.store.markNotificationDeliverySent(id, claimed.claimSeq);
     } catch (error) {
+      if (isDatabaseConnectionError(error) || error instanceof TypeError || error instanceof ReferenceError) throw error;
       const message = redactNotificationError(error);
       if (error instanceof PermanentNotificationDeliveryError || claimed.attempts >= this.maxAttempts) {
         this.store.markNotificationDeliveryFailed(id, message, claimed.claimSeq);
@@ -190,11 +201,14 @@ export class OutboundNotificationDispatcher {
   }
 
   private scheduleRetry(id: string, delayMs: number): void {
+    if (this.stopping) return;
     const existing = this.retryTimers.get(id);
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
       this.retryTimers.delete(id);
-      void withDbJob("notifications.retry", () => this.dispatch(id));
+      void withDbJob("notifications.retry", () => this.dispatch(id)).catch(error => {
+        if (!isDatabaseConnectionError(error)) throw error;
+      });
     }, delayMs);
     timer.unref?.();
     this.retryTimers.set(id, timer);

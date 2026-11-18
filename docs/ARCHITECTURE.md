@@ -15,6 +15,7 @@ summary: 从 CLI、Web 和飞书入口追踪到 API、存储与 Agent 执行，�
 |---|---|---|
 | `apps/remi` | `remi` CLI、登录、服务生命周期和平台命令 | [main.ts](../apps/remi/main.ts)、[CommandRegistry](../apps/remi/cli/core/command-registry.ts) |
 | `apps/server` | 平台 CLI 入口，复用服务端启动分发 | [main.ts](../apps/server/main.ts)、[multiremi.ts](../apps/remi/cli/multiremi.ts) |
+| `apps/edge` / `packages/edge` | 独立 L7 代理，持有监听端口；HTTP/WS 流式转发、hold、健康检查和后端摘流；不拉起 slot | [入口](../apps/edge/main.ts)、[库](../packages/edge/src/index.ts)、[控制与验证](dev/edge.md) |
 | `apps/platform-updater` | 独立更新循环；Compose 内部更新器经共享卷监管 API/Web 子进程，应用包携带 Bun/Node；另保留宿主应用包、systemd 与镜像驱动 | [内部入口](../apps/platform-updater/internal.ts)、[内部驱动](../packages/platform-updater/src/internal-driver.ts)、[监管进程](../packages/platform-updater/src/supervisor.mjs)、[部署说明](../deploy/README.md#internal-compose-updater) |
 | `frontend/apps/web` | Next.js Web 入口；主侧栏含工作区、[IM 平台](dev/im-platforms.md)和配置分组 | [应用目录](../frontend/apps/web)、[前端地图](dev/frontend.md) |
 | `packages/server` | Hono API、wire 序列化、领域存储、平台 worker | [API 组合与服务启动](../packages/server/src/api/server.ts)、[Store](../packages/server/src/store/store.ts) |
@@ -120,6 +121,20 @@ shared 的 `getDb` 不依赖 server，由 `openMultiremiDatabase` 给返回的�
 [架构扫描](../tests/arch/sqlite-handle-entry.test.ts)禁止其他 git 跟踪源码直接构造或恢复 `bun:sqlite` handle。
 SQLite 最外层事务以 `BEGIN IMMEDIATE` 取得写锁，嵌套事务仍用 savepoint，避免跨进程先读后写升级锁时立即失败；PostgreSQL 事务语义不变。详见 [ADR 0011](adr/0011-transaction-ownership-and-side-effect-timing.md)。
 这是底层存储适配的选择；生产 server 启动还有[必要配置检查](dev/auth.md)，不能据此省略部署配置。
+数据库可用性与进程存活分离：`/healthz` 不访问数据库，`/readyz` 执行轻量探针，连接不可用时返回
+503 与 `database_unavailable`。HTTP 在鉴权前探测（健康结果最多缓存一秒），失败响应带 `Retry-After: 1`；
+请求期间数据库断连也映射为 503。同步桥在连接失败后一秒内快速拒绝后续 SQL，随后允许探测恢复，
+不自动重放 SQL 或提交。HTTP 单条 SQL 的等待预算为两秒，后台循环为五秒；超时后丢弃连接，
+写入结果可能未知，调用者必须使用既有幂等键重试。迁移等无预算作用域的操作保留桥原来的等待上限。
+
+[后台恢复边界](../packages/shared/src/db/recovery.ts)只重试有类型标记的连接/服务不可用错误，
+按循环以 1、2、4、8、16、30 秒退避，警告每循环最多每 30 秒一次，恢复后回到正常间隔。
+Scheduler 的各 tick 共用一次 sync 边界；failure monitor、归档、SCM、messaging、标题、通知、
+能力维护、HTML 回填和 Wiki storage 各自恢复。Offer pump 和 downlink 按 Runtime 使用相同上限与日志频率。
+循环边界将非连接错误记为 ERROR 并按正常周期继续，一次性任务结束而不自动重放；动态周期读取失败时沿用上次周期（首次失败暂用 30 秒）。
+能力维护逐项隔离程序错误，整轮结束后传播连接错误以保留退避。已有 provider/领域错误仍由各模块处理。断连时不确认 system event，
+保留 processing 租约；到期后重新领取，已提交的自动化运行由 `(trigger_id, event_id)` 去重。
+
 PostgreSQL 的 `PgBridge.request` 用 `Atomics.wait` 等待 [pg-worker](../packages/server/src/store/db/pg-worker.ts)，worker 使用单连接。
 这是真实实现约束，不应被“整体 async/await”概述掩盖。
 嵌套 `transaction()` 在 PostgreSQL 使用 savepoint；外层提交前会拒绝未恢复的语句失败。

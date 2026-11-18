@@ -88,6 +88,10 @@ local-profile 默认使用上述应用驱动和保留数据的回退。旧镜像
 数据的保证。更新流程先等待任务和本地执行归零，再切换服务。
 Windows 上保留重试定时器的事件循环引用，避免 Bun 1.3.14 的无引用定时器
 卡住终态回传；`close()` 仍会唤醒并清理重试，不阻塞正常关闭。
+Outbox 显式缓存自己的固定 SQL 语句；关闭时等待在途投递，再 finalize 全部语句并严格关闭
+SQLite，避免 Bun 1.3.14 默认 20 条 query 缓存之外的语句等到 GC 才释放文件锁。
+磁盘回归在删除夹具前验证关闭：Linux 扫描 `/proc/self/fd`，Windows 由文件删除检查锁；
+关闭失败直接使测试失败，不吞异常、不重试删除。
 
 ## 验证入口
 
@@ -97,3 +101,70 @@ Windows 上保留重试定时器的事件循环引用，避免 Bun 1.3.14 的无
 - `bun test tests/unit/multiremi/multiremi-platform-lifecycle.test.ts tests/unit/multiremi/multiremi-platform-drain.test.ts tests/unit/multiremi/multiremi-platform-safety.test.ts`：API 鉴权、更新源、预检、调度边界和提交后维护状态。
 - views 的 `settings/components/platform-tab.test.tsx`、`settings-page.test.tsx`，core 的 `api/schemas/platform.test.ts`：设置入口、来源表单、阻塞原因和响应边界。
 - `.github/workflows/release-build-check.yml` 的 `platform-updater` job 在 Windows/macOS/Linux 运行相关测试。配置了矩阵不等于本次三平台运行均已验证；实际结果见任务/CI。
+
+## CLI 更新的 daemon drain
+
+CLI 更新在 runtimes-repo 创建带 requestId 的持久化 daemon drain，等待期间请求
+保持 pending；`daemon.drain` 状态显示排空进度，无需新增请求状态。默认期限沿用
+MUL-68 的 5 分钟，`MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS` 可覆盖，避免引入两套期限。
+服务端排空后才下发更新，HTTP heartbeat 与 WebSocket 下行均携带持久化的原 deadline；daemon 对接受任务的竞态暂停各
+provider 接单，在剩余期限内等待。到期仍繁忙时更新失败，错误列出剩余任务，
+解除该更新持有的 drain，已有轮次继续运行，不执行 runtime recovery。
+人工和部署 drain 保持原有超时回收契约，不能被更新接管或释放。
+
+准入在 workspace lifecycle 锁内串行：同一物理 daemon 同时最多一个 CLI 请求离开
+pending。有 update owner 时只有该 owner 可准入；人工/部署 drain 没有 owner 时，
+必须没有其他 running/restarting/verifying CLI 请求。所有准入均要求 drained 或
+drained_forced。HTTP claim、WebSocket 下行及其迟到 ACK、pending→running 上报共用此判定；
+未准入的请求保持 pending，下行不发送。pending→running 准入拒绝使用稳定错误码 `cli_update_not_admitted`（HTTP 409；WS 不可重试协议错误）。
+daemon 按 code 识别后释放本地暂停、释放 WS 去重键，不安装、不切换 launcher、不上报
+failed；同 id 在 WS 或 heartbeat 后续下发时可再次执行。
+
+CLI running 回执只有 pending→running（通过上述准入）与 running→running（幂等确认）
+可以成功。lifecycle 锁内对终态、restarting、verifying 的 running 一律返回
+`cli_update_not_runnable`（HTTP 409；WS retryable=false），不把空操作的 HTTP 200 当作
+安装许可。daemon 收到此 code 立即释放暂停并抛出以释放下行去重键，不安装、不重启、
+不补报 failed，也不按未知结果重试；平台已有终态或已有执行者。终态的其它上报保持幂等成功。
+
+HTTP heartbeat 和 WS 下行仅在 drain 的 `update_request_id` 等于本请求 id 时携带
+`drain_deadline`；人工/部署 drain 的期限不约束更新准入，即使该期限已经过去。
+没有本请求持有的 deadline 时，daemon 使用本地默认排空期限和 30 秒准入确认窗口。
+
+running 准入确认使用非持久化同步 HTTP result，兼容没有准入逻辑的旧服务端；终态仍走
+持久化 outbox。接受后才安装。超时、断线、5xx 等结果未知时，每 250ms 幂等重试，
+窗口取平台剩余 drain 期限与 30 秒的较小值（旧服务端无 deadline 时取 30 秒），每次请求
+也受该窗口的 AbortSignal 限制。30 秒限制避免无执行者长时间占用更新围栏，同时允许短暂
+网络恢复。窗口耗尽后仅投递一次带 admission confirmation deadline exceeded 原因的 failed，
+随后释放本地暂停。没有 running outbox 记录可在放弃后 replay；已到达服务端但响应丢失的
+HTTP 请求由幂等 running→running 确认，终态拒绝迟到状态回退。
+
+旧实现普通 Error 在 WS session 映射为可重试 server_error，running outbox 会持续重试；
+新实现明确拒绝为不可重试，兼容清理旧队列中该条 running 记录并拒绝其 waiter，不阻塞
+整个 rt 分区；`cli_update_not_admitted` 和 `cli_update_not_runnable` 均只删除被拒的那条
+running 记录。旧 daemon 正常只收到已准入下行，running→running 继续幂等接受。
+N-1 边界：新服务端对旧 daemon 的迟到 running 增加 HTTP 409 或不可重试 WS 错误；
+升级后的 daemon 除上述投递时单条清理外，在打开 outbox DB 时做一次有界启动恢复：
+仅处理 blocked-code 为 `cli_update_not_admitted` 或 `cli_update_not_runnable` 的分区；
+事务内先删除其中 blocked 的 `runtime.update_result` running 记录（旧执行者已退出，
+不能重放为准入），再将其余 blocked 行恢复 pending、清空 last_error/next_attempt_at，
+删除该分区的 blocked/blocked-code 元数据，让后续报告重新接受服务端校验。
+其它永久错误码（如 `protocol_violation`）保持 blocked，不扩大恢复范围。
+未升级的 0bb8c3256 daemon 对 HTTP 409 会在原有最多 30 秒窗口内重试后补报 failed，
+不会安装或无限重试，平台终态仍保持幂等。更早使用 running outbox 且不识别该 code 的
+daemon 会把不可重试 WS 错误持久化为分区 blocked；平台升级后、daemon 升级前该分区
+仍会阻塞。服务端无法改变其本地分支，这段窗口以 daemon 升级为界：升级后打开同一 DB
+即按上述规则自愈，遗留 running 不会再次投递。正常只收到已准入下行的路径不变。
+新 daemon 连接旧服务端仍按现有 HTTP 成功确认安装，旧端对终态返回 200 的许可缺口
+无法由新 daemon 单独消除，需服务端升级后获得本节保证。
+因此 owner 终态交接只需寻找 pending sibling，可在 restarting/verifying 保护之前处理。
+
+下载或校验失败的终态立即释放本次 requestId 的 drain；重启期间 drain 保持持久化，
+新进程完成版本注册和启动自检、确认 completed 后释放。恢复旧版本确认 rolled_back
+同样释放。owner 进入终态（含排空超时）时，若同一物理 daemon 仍有 pending CLI 更新，
+则把 drain 交接给最早创建的请求，并从交接时刻重新计算期限；没有 pending sibling 才释放。
+人工/部署 drain 不参与交接。进入 restarting/verifying 后排空期限不干扰新进程确认，仍由更新验证期限管理。
+`daemon.drain` 的 `expiry_action=fail_update` 区分更新围栏和人工/部署的 `runtime_recovery`。
+
+验证入口：`tests/unit/multiremi/daemon-drain.test.ts`、
+`tests/unit/daemon/cli-update-coordinator.test.ts`、`tests/unit/daemon/cli-update-lifecycle.test.ts`、
+`tests/unit/daemon/update-admission.test.ts`（真实 HTTP result、协议 report handler 和磁盘 outbox）。

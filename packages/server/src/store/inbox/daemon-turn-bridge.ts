@@ -123,9 +123,11 @@ export class DaemonTurnBridge {
         AND a.runtime_id=? AND t.status IN ('running','awaiting_human')`;
       const args=[JSON.stringify(ids),scope.workspaceId,scope.runtimeId];
       const at=nowIso();
+      // Multiple live attempts can share a lane; PostgreSQL upserts require
+      // each conflict target to occur only once in the selected batch.
       this.ctx.db.run(`INSERT INTO multiremi_session_lanes
         (session_id,reader_type,reader_id,execution_scope,created_at,updated_at)
-        SELECT t.session_id,'agent',t.agent_id,t.execution_scope,?,?
+        SELECT DISTINCT t.session_id,'agent',t.agent_id,t.execution_scope,?,?
         FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id
         WHERE ${where} ORDER BY t.session_id,t.agent_id,t.execution_scope
         ON CONFLICT(session_id,reader_type,reader_id,execution_scope)

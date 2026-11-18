@@ -8,6 +8,11 @@ const db = new PostgresSyncDatabase(process.env.MULTIREMI_DATABASE_URL!);
 try {
   const store = new MultiremiStore(db);
   store.ensureLocalWorkspace();
+  if (process.env.MUL173_EXPECT_TASK) {
+    const preserved = store.getTask(process.env.MUL173_EXPECT_TASK);
+    assert.equal(preserved?.status, 'completed', 'Previous task must survive candidate migrations');
+    assert.equal(preserved?.prompt, 'MUL-173 mixed-version PostgreSQL core probe');
+  }
   const runtime = store.registerRuntime({ name: `mixed-${crypto.randomUUID()}`, provider: 'codex', workspaceId: 'local', ownerId: 'local' });
   const agent = store.createAgent({ name: `mixed-${crypto.randomUUID()}`, provider: 'codex', workspaceId: 'local', runtimeId: runtime.id });
   const task = store.createTask({ agentId: agent.id, prompt: 'MUL-173 mixed-version PostgreSQL core probe', workspaceId: 'local' });

@@ -1,4 +1,6 @@
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
+/** Feishu message UUID dedup is one hour; reserve five minutes for transit/clock skew. */
+export const FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS = 55 * 60_000;
 import { patchDecisionRecord } from "../inbox/decision-records.js";
 import { questionMetadataText } from '../inbox/question-indexes.js';
 /**
@@ -829,6 +831,7 @@ export class FeishuBotRepo {
         field: "app_secret",
       }),
       domain: normalizeDomain(row.domain),
+
     };
   }
 
@@ -856,6 +859,14 @@ export class FeishuBotRepo {
         field: "app_secret",
       }),
       domain: normalizeDomain(row.domain),
+      recovery_chats: this.ctx.db.query(`SELECT chat_id, MAX(is_group) AS is_group FROM (
+        SELECT chat_id, CASE WHEN thread_id IS NOT NULL OR reply_to_message_id IS NOT NULL THEN 1 ELSE 0 END AS is_group
+        FROM multiremi_feishu_bot_chat_bindings
+        WHERE workspace_id = ? AND bot_id = ? AND app_id = ? AND chat_id IS NOT NULL AND chat_id <> ''
+        UNION ALL SELECT chat_id, 1 AS is_group FROM multiremi_feishu_bot_agent_routes
+        WHERE workspace_id = ? AND bot_id = ? AND scope = 'chat' AND chat_id IS NOT NULL AND chat_id <> ''
+      ) known GROUP BY chat_id`).all(workspaceId, this.botId, String(row.app_id), workspaceId, this.botId)
+        .map(chat => ({ chat_id: String(chat.chat_id), chat_type: Number(chat.is_group) ? "group" as const : "p2p" as const })),
     };
   }
 
@@ -3411,6 +3422,21 @@ export class FeishuBotRepo {
       if (!row) return null;
       const carrier = row.task_id && (!row.kind || row.kind === 'cot') && row.unit_key === '';
       const presentationState = parseFeishuPresentation(parseJson(row.presentation_checkpoint, null));
+      // CoT owns its writePending recovery; reactions and patches address a
+      // known external object and do not create another message.
+      const createsMessage = !presentationState?.resultMessageId && row.kind !== 'cot' && row.kind !== 'receipt' && row.kind !== 'decision_card_patch'
+        && !(carrier && presentationState?.cot);
+      if (createsMessage && row.status === 'sending' && String(row.leased_until ?? '') <= nowIsoValue
+          && !(now.getTime() - Date.parse(String(row.created_at)) < FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS)) {
+        const error = 'dedupe_window_expired';
+        this.ctx.db.run(`UPDATE multiremi_feishu_bot_outbound_deliveries SET status = 'failed',
+          claim_token = NULL, leased_until = NULL, last_error = ?, updated_at = ? WHERE id = ? AND workspace_id = ?`,
+        [error, nowIsoValue, row.id, workspaceId]);
+        this.failOutboundSuccessorsWithinTransaction(workspaceId, String(row.id), error, nowIsoValue);
+        log.warn(JSON.stringify({ event: 'feishu_outbound_failed', code: error, app_id: config.appId,
+          chat_id: row.chat_id, delivery_id: row.id, attempt_count: Number(row.attempt_count) }));
+        return null;
+      }
       // Never split a Task that an older consumer might already have presented.
       const mode = carrier ? row.delivery_mode ?? (row.kind === 'cot' && supportsKinds && feishuOutboundKindsEnabled() && Number(row.attempt_count) === 0
         && !row.external_message_id && !presentationState?.cot && !presentationState?.resultMessageId
@@ -3827,26 +3853,25 @@ export class FeishuBotRepo {
       if (terminal && row.kind !== 'receipt') {
         // A failed caption/attachment must not let the rest of that batch
         // overtake it, nor leave descendants pending forever without a reason.
-        this.ctx.db.run(
-          `WITH RECURSIVE successors AS (
-             SELECT id FROM multiremi_feishu_bot_outbound_deliveries
-             WHERE previous_delivery_id = ? AND workspace_id = ? AND cascade_failure = 1
-             UNION
-             SELECT o.id FROM multiremi_feishu_bot_outbound_deliveries o
-             JOIN successors previous ON o.previous_delivery_id = previous.id
-             WHERE o.workspace_id = ? AND o.cascade_failure = 1
-           )
-           UPDATE multiremi_feishu_bot_outbound_deliveries
-           SET status = 'failed', last_error = ?, updated_at = ?
-           WHERE id IN (SELECT id FROM successors) AND status = 'pending'`,
-          [deliveryId, workspaceId, workspaceId,
-            `Not sent because earlier batch delivery ${deliveryId} failed: ${error}`.slice(0, 2_000), now.toISOString()],
-        );
+        this.failOutboundSuccessorsWithinTransaction(workspaceId, deliveryId, error, now.toISOString());
       }
       return true;
     })();
     if (failed) this.publishDownlinkChange(workspaceId, runtimeId, true);
     return failed;
+  }
+
+  private failOutboundSuccessorsWithinTransaction(workspaceId: string, deliveryId: string, error: string, at: string): void {
+    this.ctx.db.run(`WITH RECURSIVE successors AS (
+      SELECT id FROM multiremi_feishu_bot_outbound_deliveries
+      WHERE previous_delivery_id = ? AND workspace_id = ? AND cascade_failure = 1
+      UNION SELECT o.id FROM multiremi_feishu_bot_outbound_deliveries o
+      JOIN successors previous ON o.previous_delivery_id = previous.id
+      WHERE o.workspace_id = ? AND o.cascade_failure = 1)
+      UPDATE multiremi_feishu_bot_outbound_deliveries SET status = 'failed', last_error = ?, updated_at = ?
+      WHERE id IN (SELECT id FROM successors) AND status = 'pending'`,
+    [deliveryId, workspaceId, workspaceId,
+      `Not sent because earlier batch delivery ${deliveryId} failed: ${error}`.slice(0, 2_000), at]);
   }
 
   private recordReceiptFailure(workspaceId: string, runtimeId: string, deliveryId: string, attempts: number): void {

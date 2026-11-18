@@ -123,7 +123,7 @@ export class FeishuChannel {
       this._config,
       async (msg) => {
         for (const handler of this._messageHandlers) {
-          await handler(msg).catch((err) => log.error(`message handler error: ${String(err)}`));
+          await handler(msg);
         }
       },
       this._senderAuthorizer,

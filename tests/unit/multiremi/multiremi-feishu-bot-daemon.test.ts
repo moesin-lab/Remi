@@ -1,3 +1,5 @@
+import { sendMessageFeishu } from "@connectors/feishu/send.js";
+import { FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS } from "@multiremi/store/repos/feishu-bot-repo.js";
 import { reportFrame, reportTraceSink } from "../../fixtures/report-session.js";
 /**
  * Control-plane delivery of the Feishu concierge assignment (MUL-206).
@@ -164,6 +166,61 @@ function queuedClient(test: Scaffold, canSend = () => true, timeoutMs = 30_000) 
 }
 
 describe("Feishu bot control-plane delivery", () => {
+  it("reuses a stable Feishu UUID after the daemon loses its send acknowledgement", async () => {
+    const test = await scaffold();
+    await report(test, "rt_a", { applied_revision: 1, state: "online" });
+    const submitted = test.store.submitFeishuBotMessage("local", "rt_a", { revision: 1,
+      externalSessionKey: "oc_uuid", externalMessageId: "om_uuid", chatId: "oc_uuid", text: "start", deliveryMode: "native_cot_v1" });
+    test.store.claimFeishuBotOutbound("local", "rt_a", undefined, true, true); // Materialize the server outbox.
+    db!.run("UPDATE multiremi_feishu_bot_deliveries SET outbound_requested=0 WHERE task_id=?", [submitted.taskId]);
+    db!.run("UPDATE multiremi_feishu_bot_outbound_deliveries SET task_id=NULL, body='reply', kind=NULL, status='pending', attempt_count=0, claim_token=NULL, leased_until=NULL WHERE task_id=?", [submitted.taskId]);
+    const now = new Date();
+    const first = test.store.claimFeishuBotOutbound("local", "rt_a", now, true, true)!;
+    const messages = new Map<string, string>(), requests: string[] = [];
+    const client = { im: { message: { create: async ({ data }: any) => {
+      requests.push(data.uuid);
+      if (!messages.has(data.uuid)) messages.set(data.uuid, `om_sent_${messages.size}`);
+      return { code: 0, data: { message_id: messages.get(data.uuid) } };
+    } } } } as any;
+    await sendMessageFeishu(client, first.chatId, first.body, { idempotencyKey: first.idempotencyKey });
+    // The process exits before the server gets the success receipt.
+    const recoveredAt = new Date(now.getTime() + 121_000);
+    expect(recoveredAt.getTime() - now.getTime()).toBeLessThan(FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS);
+    const second = test.store.claimFeishuBotOutbound("local", "rt_a", recoveredAt, true, true)!;
+    expect(second.claimToken).not.toBe(first.claimToken);
+    expect(second.idempotencyKey).toBe(first.idempotencyKey);
+    await sendMessageFeishu(client, second.chatId, second.body, { idempotencyKey: second.idempotencyKey });
+    expect(requests).toEqual([first.id, first.id]);
+    expect(messages.size).toBe(1);
+  });
+
+  it("fails only uncertain sends outside the dedup window and preserves old pending work", async () => {
+    const test = await scaffold();
+    await report(test, "rt_a", { applied_revision: 1, state: "online" });
+    const submitted = test.store.submitFeishuBotMessage("local", "rt_a", { revision: 1,
+      externalSessionKey: "oc_window", externalMessageId: "om_window", chatId: "oc_window", text: "start", deliveryMode: "native_cot_v1" });
+    test.store.claimFeishuBotOutbound("local", "rt_a", undefined, true, true); // Materialize the server outbox.
+    db!.run("UPDATE multiremi_feishu_bot_deliveries SET outbound_requested=0 WHERE task_id=?", [submitted.taskId]);
+    db!.run("UPDATE multiremi_feishu_bot_outbound_deliveries SET task_id=NULL, body='reply', kind=NULL, status='pending', attempt_count=0, claim_token=NULL, leased_until=NULL WHERE task_id=?", [submitted.taskId]);
+    const first = test.store.claimFeishuBotOutbound("local", "rt_a", undefined, true, true)!;
+    const old = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    db!.run("UPDATE multiremi_feishu_bot_outbound_deliveries SET created_at=?, leased_until=? WHERE id=?", [old, old, first.id]);
+    // No delivery returned, so the daemon cannot call the sending API.
+    expect(test.store.claimFeishuBotOutbound("local", "rt_a", undefined, true, true)).toBeNull();
+    expect(db!.query("SELECT status,last_error FROM multiremi_feishu_bot_outbound_deliveries WHERE id=?").get(first.id))
+      .toEqual({ status: "failed", last_error: "dedupe_window_expired" });
+    db!.run("UPDATE multiremi_feishu_bot_outbound_deliveries SET status='pending', available_at=?, attempt_count=0 WHERE id=?", [old, first.id]);
+    const pending = test.store.claimFeishuBotOutbound("local", "rt_a", undefined, true, true)!;
+    expect(pending.id).toBe(first.id); // Old never-sent work is admitted.
+    const repository = test.store.feishuBotFor("default");
+    expect(repository.reportOutbound("local", "rt_a", pending.id, { claimToken: pending.claimToken,
+      status: "failed", retryable: true, error: "explicit Feishu refusal" })).toBe(true);
+    expect(db!.query("SELECT status FROM multiremi_feishu_bot_outbound_deliveries WHERE id=?").get(first.id)).toEqual({ status: "pending" });
+    const retry = test.store.claimFeishuBotOutbound("local", "rt_a", new Date(Date.now() + 10_000), true, true)!;
+    expect(retry.id).toBe(first.id); // A real refusal transition also stays retryable.
+    expect(retry.idempotencyKey).toBe(first.idempotencyKey);
+  });
+
   it("falls back to the legacy status frame only when an older API rejects the new RPC", async () => {
     const client = new MultiremiDaemonClient("http://unused");
     const fallback: Array<{ type: string; payload: Record<string, unknown> }> = [];

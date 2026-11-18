@@ -4960,10 +4960,15 @@ export class MultiremiDaemon {
 
   private async createOrRecoverDecision(taskId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
     const metadata = payload.metadata as Record<string, unknown>;
-    const recovered = this.restartQuestions.get(taskId)?.find(message => {
+    const candidates = this.restartQuestions.get(taskId) ?? [];
+    const recovered = candidates.find(message => {
       const request = message.metadata.human_request as { payload?: Record<string, unknown> } | undefined;
       return request?.payload && restartQuestionKey(request.payload) === restartQuestionKey(metadata);
     });
+    if (!recovered && candidates.some(message => {
+      const request = message.metadata.human_request as { payload?: Record<string, unknown> } | undefined;
+      return request?.payload?.kind === metadata.kind;
+    })) throw new Error("Planned restart request changed; original question retained");
     const messageId = recovered?.id ?? `question_${randomUUID()}`;
     const waitId = randomUUID();
     this.taskDownlinks.beginQuestionWait(taskId, messageId, waitId);

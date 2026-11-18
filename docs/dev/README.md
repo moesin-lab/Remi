@@ -58,6 +58,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 改 IM 平台导航或管理页面 | [IM 平台管理](im-platforms.md) | 平台目录、机器人/采集连接、能力页面、共享操作者和旧地址迁移 |
 | 改飞书消息接入 | [消息接入](../feishu-message-ingestion.md) | Connection、Source、消息处理与凭据 |
 | 配置部署或排障 | [部署](../../deploy/README.md)、[本机 stable/dev](../deploy/local-profiles.md)、[daemon 环境](../deploy/66-8-remi-environment.md) | 服务组成、配置和启动条件 |
+| 运行 Phase A 并发发版/坏版本验收 | [候选验收 runbook](../operations/phase-a-acceptance.md) | 隔离环境、真实 provider lane、两侧 HTTP 失败、attempt 与浏览器补读；明确 supervisor 直接切换和完整 updater 的验证边界 |
 | 改 edge 代理、hold 或后端摘流 | [Edge L7 proxy](edge.md) | 独立监听、进程内/Unix 控制、流式转发与本地验收 |
 | 改 API standby/active 切换、角色锁或优雅停机 | [API slot 生命周期](api-slots.md) | 回环控制鉴权、排空预算、重新激活与 A3 fence 接口 |
 | 改版本管理或安全更新 | [更新部署契约](../../deploy/README.md#internal-compose-updater)、[Drain 与 Outbox](../design/mul-74-platform-drain-and-daemon-outbox.md) | 容器内部应用/运行时更新、Web/CLI 更新源、跨平台驱动、备份、兼容检查、切换恢复 |

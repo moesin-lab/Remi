@@ -4,6 +4,25 @@ import { createInterface } from "node:readline";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+// Dedicated long streaming workload for Phase A; remains a standalone ACP file.
+function streamSeconds(prompt: string): number | null {
+  const match = prompt.match(/MUL-172\/STREAM\/(\d+)(?!\d)/);
+  if (!match) return null;
+  const seconds = Number(match[1]);
+  if (seconds < 60 || seconds > 120) throw new Error("ppe_invalid_stream_duration");
+  return seconds;
+}
+async function streamTrace(seconds: number, emit: (text: string) => void, cancelled: () => boolean): Promise<string> {
+  const start = performance.now();
+  let sequence = 0;
+  while (performance.now() - start < seconds * 1000) {
+    if (cancelled()) throw new Error("ppe_cancelled");
+    emit(`MUL-172 trace ${++sequence} elapsed_ms=${Math.floor(performance.now() - start)}\n`);
+    await new Promise(resolve => setTimeout(resolve, Math.min(1000, seconds * 1000 - (performance.now() - start))));
+  }
+  if (cancelled()) throw new Error("ppe_cancelled");
+  return `MUL-172 stream completed: ${sequence} chunks over ${Math.floor(performance.now() - start)} ms.`;
+}
 const responsibilityMarker = (prompt: string): boolean => /PR404\/RESP\/(ASK|PRESENTER)(?:\b|\/)/.test(prompt);
 type Dependencies = {
   cli(args: string[]): Promise<any>;
@@ -309,7 +328,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Reading the task input." } } } });
       void (async () => {
         try {
-          const text = responsibilityMarker(prompt) ? await responsibilityProbe(prompt, { cli,
+          const duration = streamSeconds(prompt);
+          if (duration !== null) await probeInput(request, prompt, probe);
+          const text = duration !== null ? await streamTrace(duration, (text: string) => {
+            send({ jsonrpc: "2.0", method: "session/update", params: { sessionId,
+              update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text } } } });
+          }, () => probe.cancelled) : responsibilityMarker(prompt) ? await responsibilityProbe(prompt, { cli,
             request: (method, params) => providerRequest(probe, method, params), cancelled: () => probe.cancelled,
             evidenceDir, providerSessionId: sessionId })
             : markers(prompt).length ? await probeInput(request, prompt, probe) : "PPE daemon ACP smoke test completed.";

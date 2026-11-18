@@ -462,7 +462,7 @@ export class IssueSessionsRepo {
   /** Identity-only, fixed two-statement read, including audited retirement after Issue moves. */
   getIssueSessionOwnerFacts(ids: readonly string[]) {
     const selected = this.ctx.db.dialect === 'postgres'
-      ? 'SELECT json_array_elements_text(CAST(? AS JSON)) AS id'
+      ? 'SELECT json_array_elements_text(CAST(CAST(? AS TEXT) AS JSON)) AS id'
       : 'SELECT value AS id FROM json_each(?)';
     const rows = this.ctx.db.query(`SELECT s.*, 0 AS inherited_event_count,
         CASE WHEN s.chat_id IS NOT NULL THEN chat.workspace_id ELSE issue.workspace_id END AS owner_workspace_id,

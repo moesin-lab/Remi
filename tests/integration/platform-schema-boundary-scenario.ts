@@ -2,10 +2,10 @@
 import { expect } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { ContainerApplicationDriver } from '@remi-platform/updater/application-driver.js';
+import { ContainerApplicationDriver, writeApplicationBootstrap } from '@remi-platform/updater/application-driver.js';
 import { assertSchemaContract, SchemaContractRefusedError } from '@remi-platform/updater/schema-contract.js';
 import { BunCommandRunner, type CommandOptions } from '@remi-platform/updater/types.js';
 import type { MultiremiPlatformRelease, PlatformSchemaContractFailure } from '@multiremi/contracts';
@@ -103,9 +103,8 @@ export async function runSchemaBoundaryScenario(): Promise<void> {
       docker(['run', '--rm', '--pull=never', '--label', label, '--network', 'none', '--mount', `type=volume,src=${volume},dst=/program`, 'oven/bun:1.3.14', 'sh', '-c', `mkdir -p /program/releases/${id}/api && tar -C /program/releases/${id}/api -xf -`].toSpliced(1, 0, '-i'), archive);
       docker(['run', '--rm', '--pull=never', '--label', label, '--network', 'none', '--mount', `type=volume,src=${volume},dst=/program`, '--mount', `type=bind,src=${source},dst=/input,readonly`, 'oven/bun:1.3.14', 'cp', '-a', '/input/node_modules', `/program/releases/${id}/api/node_modules`]);
     }
-    const bootstrap = join(scratch, 'bootstrap'); mkdirSync(bootstrap);
-    copyFileSync(join(repository, 'packages/platform-updater/src/container-runtime.mjs'), join(bootstrap, 'runtime.mjs'));
-    copyFileSync(join(repository, 'packages/platform-updater/src/data-schema-inputs.json'), join(bootstrap, 'data-schema-inputs.json'));
+    const bootstrap = join(scratch, 'bootstrap');
+    await writeApplicationBootstrap(bootstrap);
     const runner = new BunCommandRunner();
     const driver = new ContainerApplicationDriver({ kind: 'docker_compose', composeFile: join(scratch, 'compose.yml'), envFile: join(scratch, 'compose.env'), stateDir: scratch, apiHealthUrl: '', webHealthUrl: '' }, {
       run: async (executable: string, args: string[], options?: CommandOptions) => {

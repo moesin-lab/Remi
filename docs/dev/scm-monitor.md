@@ -113,7 +113,11 @@ Built-in names are `monitor_head`, `monitor_checks`, `monitor_review`, `monitor_
 `complete_issue_on_merge` retains its existing activity-only meaning.
 `registerScmMonitorRule` registers a unique `monitor_*` rule with `matches` and `prepare`.
 Preparation reads external evidence and returns a synchronous database commit callback,
-executed in the same lease-fenced transaction. Future S2/S3 rules must use new effect
+executed in the same lease-fenced transaction. An optional `targets` planner can
+select same-workspace Issue anchors and effect payloads for events without a PR
+(such as S3 default-branch events); the registered handler owns its target lifecycle
+and must revalidate its authorization and state in the commit callback.
+Future S2/S3 rules must use new effect
 names, register before dispatch, preserve persisted payload compatibility and independently
 establish any required authorization. External writes need their own idempotency contract;
 read evidence or a preparation callback is not authorization to merge.

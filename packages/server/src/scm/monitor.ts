@@ -15,6 +15,8 @@ export interface ScmMonitorRule {
   /** Stable effect name; additions must not change the meaning of persisted effects. */
   effectType: string;
   matches(event: MultiremiScmCanonicalEvent): boolean;
+  /** Optional explicit targets for rules such as S3 that do not originate from a PR. Runs in the enqueue transaction. */
+  targets?: (event: MultiremiScmCanonicalEvent) => Array<{ issueId: string; payload: Record<string, unknown> }>;
   /** Read external evidence, then return a synchronous, lease-fenced DB commit. */
   prepare?: (input: { event: MultiremiScmCanonicalEvent; effect: Readonly<Row>; now: Date }) =>
     Promise<(events: ReturnType<typeof createCommitEventQueue>) => void>;
@@ -40,6 +42,13 @@ export class ScmMonitor {
   enqueue(event: MultiremiScmCanonicalEvent, now: Date): void {
     if (event.provider !== "github") return;
     if (![...this.rules.values()].some(rule => rule.matches(event)) && !["change.closed", "change.merged"].includes(event.type)) return;
+    for (const rule of this.rules.values()) {
+      if (!rule.targets || !rule.matches(event)) continue;
+      for (const target of rule.targets(event)) {
+        if (this.ctx.issues().getIssue(target.issueId)?.workspaceId !== event.workspaceId) throw new Error("SCM rule target belongs to another workspace");
+        this.insertEffect(event.id, target.issueId, rule.effectType, target.payload, now, `${rule.effectType}:${event.id}:${target.issueId}`);
+      }
+    }
     const changes = this.ctx.db.query(`SELECT * FROM multiremi_scm_change_requests
       WHERE connection_id = ? AND repository_id = ?`).all(event.connectionId, event.repositoryId) as Row[];
     for (const change of changes) {
@@ -57,7 +66,7 @@ export class ScmMonitor {
         UNION SELECT s.issue_id FROM multiremi_scm_watches w JOIN multiremi_issue_sessions s ON s.id = w.session_id
         WHERE w.change_request_id = ? AND w.active = 1 AND s.issue_id IS NOT NULL`).all(change.id, change.id) as Row[];
       for (const rule of this.rules.values()) {
-        if (!rule.matches(event)) continue;
+        if (rule.targets || !rule.matches(event)) continue;
         for (const target of targets) this.insertEffect(event.id, target.issue_id, rule.effectType,
           { changeRequestId: change.id }, now, `${rule.effectType}:${event.id}:${target.issue_id}`);
       }
@@ -102,7 +111,7 @@ export class ScmMonitor {
 
   private async execute(effect: Row, token: string, now: Date): Promise<void> {
     const payload = JSON.parse(effect.payload);
-    const initial = this.scm.getChangeRequest(payload.changeRequestId);
+    const initial = typeof payload.changeRequestId === "string" ? this.scm.getChangeRequest(payload.changeRequestId) : null;
     const event = this.scm.getCanonicalEvent(effect.event_id)!;
     const prepared = await this.rules.get(effect.effect_type)?.prepare?.({ event, effect, now });
     let summary: ScmCheckSummary | null = null;
@@ -123,15 +132,15 @@ export class ScmMonitor {
     const events = createCommitEventQueue();
     this.ctx.db.transaction(() => {
       // Serialize state transitions and delivery with Issue ownership/status writers.
-      if (initial) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
+      this.ctx.lockWorkspaceRuntimeLifecycle(event.workspaceId);
       const owned = this.ctx.db.query(`UPDATE multiremi_scm_effects SET lease_token = lease_token
         WHERE id = ? AND status = 'processing' AND lease_token = ? RETURNING id`).get(effect.id, token);
       if (!owned) return;
-      const change = this.scm.getChangeRequest(payload.changeRequestId);
-      if (!change || liveClosed || ["closed", "merged"].includes(change.state)) {
-        if (change) this.ctx.db.run("UPDATE multiremi_scm_watches SET active = 0 WHERE change_request_id = ?", [change.id]);
-      } else if (prepared) {
+      const change = typeof payload.changeRequestId === "string" ? this.scm.getChangeRequest(payload.changeRequestId) : null;
+      if (prepared) {
         prepared(events);
+      } else if (!change || liveClosed || ["closed", "merged"].includes(change.state)) {
+        if (change) this.ctx.db.run("UPDATE multiremi_scm_watches SET active = 0 WHERE change_request_id = ?", [change.id]);
       } else if (effect.effect_type === "monitor_head") {
         const prior = this.ctx.db.query("SELECT concluded_head FROM multiremi_scm_monitor_heads WHERE change_request_id = ? AND issue_id = ?")
           .get(change.id, effect.issue_id) as Row | null;

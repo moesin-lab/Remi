@@ -376,3 +376,68 @@ it("posts streaming Requests without stalling in every redirect mode", async () 
     expect(proxyHits).toBe(0);
   } finally { direct.stop(true); proxy.stop(true); }
 }, 15000);
+
+for (const field of ["method", "headers", "signal"] as const) {
+  it(`inherits Request ${field} when its override is undefined`, async () => {
+    let proxyHits = 0;
+    let directHits = 0;
+    const direct = Bun.serve({ hostname: "0.0.0.0", port: 0, async fetch(req) {
+      directHits++;
+      return Response.json({ method: req.method, header: req.headers.get("x-original"), body: await req.text() });
+    }});
+    const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+      proxyHits++;
+      return new Response("unexpected proxy", { status: 502 });
+    }});
+    try {
+      expect(await child(`
+        import { proxyFetch } from "./packages/shared/src/proxy-fetch.ts";
+        import { strict as assert } from "node:assert";
+        const request = new Request("http://127.0.0.2:${direct.port}/inherit", {
+          method: "POST", body: "payload", headers: { "x-original": "kept" },
+          signal: ${field === "signal" ? 'AbortSignal.abort()' : 'AbortSignal.timeout(2000)'},
+        });
+        ${field === "signal" ? `
+          await assert.rejects(proxyFetch(request, { signal: undefined }), { name: "AbortError" });
+        ` : `
+          const response = await proxyFetch(request, { ${field}: undefined });
+          assert.equal(response.status, 200);
+          assert.deepEqual(await response.json(), { method: "POST", header: "kept", body: "payload" });
+        `}
+        console.log("ok");
+      `, proxy.url.href)).toBe("ok");
+      expect(directHits).toBe(field === "signal" ? 0 : 1);
+      expect(proxyHits).toBe(0);
+    } finally { direct.stop(true); proxy.stop(true); }
+  }, 15000);
+}
+
+it("coerces URL input before the env window even when toString reenters native fetch", async () => {
+  let proxyHits = 0;
+  const direct = Bun.serve({ hostname: "0.0.0.0", port: 0, fetch: () => new Response("direct") });
+  const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() {
+    proxyHits++;
+    return new Response("proxy");
+  }});
+  try {
+    expect(await child(`
+      import { proxyFetch } from "./packages/shared/src/proxy-fetch.ts";
+      import { strict as assert } from "node:assert";
+      const before = { NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy };
+      const pending = [];
+      const url = new URL("http://127.0.0.2:${direct.port}/outer");
+      let conversions = 0;
+      url.toString = () => {
+        conversions++;
+        pending.push(fetch("http://127.0.0.3:${direct.port}/nested"));
+        return url.href;
+      };
+      assert.equal(await (await proxyFetch(url)).text(), "direct");
+      for (const response of await Promise.all(pending)) assert.equal(await response.text(), "direct");
+      assert.equal(conversions, 1);
+      assert.deepEqual({ NO_PROXY: process.env.NO_PROXY, no_proxy: process.env.no_proxy }, before);
+      console.log("ok");
+    `, proxy.url.href, "127.0.0.0/8,127.0.0.3")).toBe("ok");
+    expect(proxyHits).toBe(0);
+  } finally { direct.stop(true); proxy.stop(true); }
+}, 15000);

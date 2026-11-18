@@ -1,6 +1,8 @@
 import { expect, it, spyOn } from 'bun:test';
 import { pendingTurnBackendTests, type PendingTurnTestFixture } from './pending-turn-test-backends.js';
 import { createNativeTestQuestion } from './fixtures/native-question.js';
+import { StoreContext } from '@multiremi/store/context.js';
+import { resolveIssueResponsibilityInBatch } from '@multiremi/store/issue-responsibility.js';
 import type { SqlDatabase, SqlStatement } from '@multiremi/store/db/postgres.js';
 
 function measure(db: SqlDatabase, count: () => number) {
@@ -83,7 +85,7 @@ pendingTurnBackendTests('MUL-208 pending decision query budget', (fixture, backe
     const before = measure(h.db, h.oracle);
     const small = measure(h.db, () => h.store.countPendingIssueDecisions(h.issue.id));
     expect(small.result).toBe(h.oracle());
-    expect(small.reads).toBeLessThanOrEqual(8);
+    expect(small.reads).toBe(5);
     expect(small.writes).toBe(0);
     for (let i = 0; i < 100; i++) h.clone(historical);
     const large = measure(h.db, () => h.store.countPendingIssueDecisions(h.issue.id));
@@ -92,13 +94,43 @@ pendingTurnBackendTests('MUL-208 pending decision query budget', (fixture, backe
     console.log(`[MUL-208 ${backend}] mixed before(2): ${before.reads} reads/${before.writes} writes; after 2/102: ${small.reads}/${large.reads} reads, ${small.writes}/${large.writes} writes`);
   });
 
+  it('keeps deep historical routes at five reads and shares the responsibility resolver semantics', () => {
+    const h = setup(fixture());
+    const parent = h.store.createIssue({ title: 'Parent', assigneeType: 'agent', assigneeId: h.agent.id });
+    const root = h.store.createIssue({ title: 'Root', assigneeType: 'agent', assigneeId: h.agent.id });
+    h.db.run('UPDATE multiremi_issues SET parent_issue_id=? WHERE id=?', [parent.id, h.issue.id]);
+    h.db.run('UPDATE multiremi_issues SET parent_issue_id=? WHERE id=?', [root.id, parent.id]);
+    h.clone({ decision_record: { source_issue_id: h.issue.id, kind: 'question', status: 'pending' } });
+    const ctx = new StoreContext(h.db, () => h.store);
+    const check = () => {
+      expect(resolveIssueResponsibilityInBatch(ctx, h.issue.id)).toEqual(h.store.resolveIssueResponsibility(h.issue.id));
+      expect(measure(h.db, () => h.store.countPendingIssueDecisions(h.issue.id))).toEqual({ result: h.oracle(), reads: 5, writes: 0 });
+    };
+    check();
+    h.db.run('UPDATE multiremi_issues SET parent_issue_id=? WHERE id=?', [h.issue.id, root.id]); // cycle
+    check();
+    h.db.run('UPDATE multiremi_issues SET parent_issue_id=NULL,workspace_id=? WHERE id=?', ['foreign', root.id]);
+    check();
+    h.db.run('UPDATE multiremi_issues SET workspace_id=?,assignee_id=NULL WHERE id=?', ['local', root.id]);
+    check();
+    const squad = h.store.createSquad({ name: 'Chain squad', leaderId: h.agent.id, memberIds: [h.agent.id] });
+    h.db.run("UPDATE multiremi_issues SET assignee_type='squad',assignee_id=? WHERE id=?", [squad.id, parent.id]);
+    check();
+    h.db.run("UPDATE multiremi_squads SET archived_at='2026-01-01T00:00:00Z' WHERE id=?", [squad.id]);
+    check();
+    h.db.run('UPDATE multiremi_squads SET archived_at=NULL,leader_id=NULL WHERE id=?', [squad.id]);
+    check();
+    h.db.run("UPDATE multiremi_agents SET archived_at='2026-01-01T00:00:00Z' WHERE id=?", [h.agent.id]);
+    check();
+  });
+
   it('keeps the native budget fixed when the number of distinct sessions grows', () => {
     const h = setup(fixture());
     const small = measure(h.db, () => h.store.countPendingIssueDecisions(h.issue.id));
     for (let i = 0; i < 32; i++) {
       const session = h.store.createIssueSession(h.issue.id, { title: `Session ${i}`, holdsWorkspace: false });
       h.store.sendMessage({ session_id: session.id, sender: { type: 'platform', id: null },
-        to: { type: 'none' }, body_md: 'Bind the conversation head', wake_requested: 'inbox_only' });
+        to: { type: 'none' }, message_kind: 'status', body_md: 'Bind the conversation head', wake_requested: 'inbox_only' });
       const metadata = JSON.parse(h.base.metadata);
       metadata.question.source_attempt_id = null;
       h.clone(metadata, { session_id: session.id, task_id: null });

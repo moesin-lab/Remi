@@ -26,15 +26,15 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 `countPendingIssueDecisions` 不再为每条候选调用 `Questions.get()`。空候选为一次读；
 非空原生 Question 使用四次读（候选、会话归属、迁移审计、来源 attempt/head/issue），
 不写库；候选只投影 metadata 和来源身份，不读取正文或卡片字段。
-历史 decision 需要按源 Issue 解析一次责任链，额外读取数取决于该 Issue 的
-祖先/负责人结构，不随 decision 数量、asker 或会话数增长。批量参数使用 JSON rowset，
+历史 decision 额外用一次递归查询读取责任链与负责人事实，复用同一个 resolver；
+总共五次读，不随 decision 数量、asker、会话数或祖先层数增长。批量参数使用 JSON rowset，
 不按 ID 数量拆 SQL，也不依赖 SQLite bind 上限。
 
 计数复用原生记录的 read-time upgrade、来源 integrity 与会话迁移审计，保留无效来源、
 跨工作区、退休会话、非 human stage、普通 choice 和已结束记录的排除规则；只省去
 计数不需要的 wait/answer/action 视图展开。
 [查询预算与等价测试](../../tests/unit/multiremi/pending-issue-decisions-budget.test.ts)
-覆盖 2/1202 条原生 Question（四读、零写）、2/102 条混合历史记录（根 Issue 六读、零写），
+覆盖 2/1202 条原生 Question（四读、零写）、2/102 条混合历史记录（五读、零写），
 并以原逐条 `Questions.get()` 谓词核对结果。测试在 SQLite 和配置了真实服务的 PostgreSQL
 两种后端运行；缺少 PG 时的 skip 不构成 PG 验证。
 

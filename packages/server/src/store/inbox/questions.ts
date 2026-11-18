@@ -13,6 +13,7 @@ import { assertQuestionCardToken, type QuestionCardCredential } from '../questio
 import { deriveIssueStatusWithinTransaction } from './issue-status.js';
 import { createHash } from 'node:crypto';
 import { parseJson } from '../helpers.js';
+import { resolveIssueResponsibilityInBatch } from '../issue-responsibility.js';
 import { questionMetadataText } from './question-indexes.js';
 import { RuntimeWorkspaceError } from '../repos/runtime-workspaces-repo.js';
 
@@ -601,7 +602,7 @@ export class Questions {
         if (!pending) continue;
         let humanStage = !old || old.status === 'escalated' || ['permission', 'merge', 'production_change'].includes(String(old.kind));
         if (!humanStage) {
-          responsibility ??= this.ctx.resolveIssueResponsibility(issueId);
+          responsibility ??= resolveIssueResponsibilityInBatch(this.ctx, issueId);
           humanStage = this.route(issueId, message.sender_id, message.session_id, workspace, responsibility).steps[0]?.stage === 'human';
         }
         if (!humanStage) continue;

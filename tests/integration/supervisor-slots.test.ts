@@ -65,7 +65,7 @@ test('image supervisor keeps heartbeats and a terminal rollback across restart',
   const start = () => Bun.spawn([process.execPath, resolve('packages/platform-updater/src/supervisor.mjs')], {
     env: { ...process.env, REMI_SUPERVISOR_ROLE: 'api', REMI_SUPERVISOR_SOURCE: source,
       REMI_SUPERVISOR_CONTROL: control, REMI_APPLICATION_ROOT: program, REMI_SUPERVISOR_SEED: join(root, 'seed'),
-      REMI_SUPERVISOR_FENCE: join(source, 'empty.ts'), REMI_APPLICATION_BASE_VERSION: 'old',
+      REMI_SUPERVISOR_FENCE: resolve('deploy/docker/host-write-fence.ts'), REMI_APPLICATION_BASE_VERSION: 'old',
       REMI_APPLICATION_BASE_REF: 'test', MULTIREMI_PORT: String(port), MULTIREMI_HOST: '127.0.0.1',
       REMI_SLOT_STANDBY_WAIT_MS: '1600', REMI_SLOT_ACTIVATE_WAIT_MS: '1000', REMI_SLOT_CONFIRM_WAIT_MS: '1000' },
     stdout: 'ignore', stderr: 'inherit',
@@ -99,6 +99,14 @@ test('image supervisor keeps heartbeats and a terminal rollback across restart',
     expect((await readJson(statusPath)).transition.phase).toBe('failed');
     expect((await readJson(statusPath)).releaseId).toBeNull();
     expect(await (await fetch(`http://127.0.0.1:${port}/`)).text()).toBe('old');
+    // The fallback path starts standby/activate while the host fence is held.
+    await writeJson(join(control, 'write-fence.json'), { operationId: 'pop_offline' });
+    await writeJson(join(control, 'api/desired.json'), { revision: 'offline-stop', releaseId: null, mode: 'stop' });
+    await until(async () => (await readJson(statusPath))?.stopped === true);
+    await writeJson(join(control, 'api/desired.json'), { revision: 'offline-run', releaseId: null, mode: 'run' });
+    await until(async () => (await readJson(statusPath))?.revision === 'offline-run' && (await readJson(statusPath))?.transition?.phase === 'succeeded');
+    expect((await fetch(`http://127.0.0.1:${port}/api/issues`, { method: 'POST' })).status).toBe(503);
+    expect((await readJson(join(control, 'write-fence.json'))).operationId).toBe('pop_offline');
   } finally {
     if (child) { child.kill('SIGTERM'); await child.exited; }
     for (const server of reservations) await server.stop(true);

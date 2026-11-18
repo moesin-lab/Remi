@@ -49,9 +49,9 @@ console.log(JSON.stringify({ port: server.port }));
   return { marker, entrypoint };
 }
 
-async function startLegacyApi(fixture: ReturnType<typeof legacyFixture>) {
+async function startLegacyApi(fixture: ReturnType<typeof legacyFixture>, slotToken?: string) {
   const child = Bun.spawn([process.execPath, "run", "--preload", preload, fixture.entrypoint, "serve"], {
-    env: { ...process.env, MULTIREMI_HOST_WRITE_FENCE_FILE: fixture.marker },
+    env: { ...process.env, MULTIREMI_HOST_WRITE_FENCE_FILE: fixture.marker, MULTIREMI_SLOT_CONTROL_TOKEN: slotToken },
     stdout: "pipe", stderr: "pipe",
   });
   children.push(child);
@@ -128,6 +128,21 @@ describe("host-injected legacy API write fence", () => {
     // The test process did not import the preload or replace its own Bun API.
     expect(Bun.serve).toBe(originalServe);
   }, 15_000);
+
+  it("admits only authenticated loopback slot lifecycle posts while fenced", async () => {
+    const fixture = legacyFixture();
+    writeFileSync(fixture.marker, JSON.stringify({ operationId: "pop_offline" }));
+    const running = await startLegacyApi(fixture, "private-slot-token");
+    for (const action of ["activate", "release", "exit"]) {
+      const url = running.url + "/internal/slot/" + action;
+      expect((await fetch(url, { method: "POST" })).status).toBe(503);
+      expect((await fetch(url, { method: "POST", headers: { Authorization: "Bearer wrong", "X-Real-IP": "127.0.0.1" } })).status).toBe(503);
+      expect((await fetch(url, { method: "POST", headers: { Authorization: "Bearer private-slot-token" } })).status).toBe(200);
+    }
+    for (const path of ["/api/issues", "/internal/slot/activate/", "/internal/slot/other"]) {
+      expect((await fetch(running.url + path, { method: "POST", headers: { Authorization: "Bearer private-slot-token" } })).status).toBe(503);
+    }
+  });
 
   it("fails closed on partial and malformed markers without blocking authenticated host recovery", async () => {
     const fixture = legacyFixture();

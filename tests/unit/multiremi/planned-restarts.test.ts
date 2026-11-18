@@ -33,6 +33,29 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     return { f, scope, task, offer, checkpoint, planned, request, suspend };
   }
 
+  it("keeps unread long confirmed steer in the canonical completeness window", () => {
+    const x = setup(), bridge = x.f.store.getDaemonTurnBridge();
+    const long = x.f.store.createTaskSteerMessage({ taskId: x.task.id, kind: "steer", content: "x".repeat(9000) });
+    const pending = x.f.store.createTaskSteerMessage({ taskId: x.task.id, kind: "steer", content: "Still pending" });
+    const before = bridge.offerInput(x.f.store.getTaskWithAgent(x.task.id)!);
+    const h = x.request();
+    const checkpoint = x.planned().checkpointReferences(x.task.id, x.scope);
+    checkpoint.delivered_message_ids = [long.id];
+    x.planned().suspend(x.task.id, h.handoff_id, 0, checkpoint, x.scope);
+    x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+    x.planned().resume(x.task.id, h.handoff_id, "complete-window-consumer", x.scope, () => {});
+    const resumed = bridge.offerInput(x.f.store.getTaskWithAgent(x.task.id)!);
+    expect(resumed.input_messages.some(message => message.id === long.id)).toBe(false);
+    expect(resumed.input_messages.some(message => message.id === pending.id)).toBe(true);
+    expect(resumed.input_messages[0]!.body_md.split("\n")[0]).not.toContain('"complete":true');
+    const snapshot = bridge.snapshot(x.scope, new Set([x.task.id]));
+    expect(snapshot.messages.some(entry => entry.message.id === long.id)).toBe(false);
+    expect(snapshot.messages.find(entry => entry.message.id === pending.id)!.message.body_md.split("\n")[0]).not.toContain('"complete":true');
+    expect(bridge.rpc("turn.input", { turn_id: resumed.turn_id, attempt_id: x.task.id, generation: 1,
+      input_to_seq: before.input_to_seq, message_ids: resumed.input_messages.map(message => message.id) }, x.scope))
+      .toMatchObject({ ok: false, code: "input_gap" });
+  });
+
   it("requires a persisted admission fence and keeps request replay stable", () => {
     const x = setup();
     expect(() => x.planned().request(x.task.id, x.scope)).toThrow("drain_not_active");

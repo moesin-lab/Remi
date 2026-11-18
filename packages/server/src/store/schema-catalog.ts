@@ -89,7 +89,7 @@ export function snapshotSchemaCatalog(db: SqlDatabase): SchemaCatalog {
       add('type', [nspname, typname], definition, { labels, acl: permissions });
     }
     for (const r of db.query(`SELECT n.nspname,c.relname,t.typname,con.conname,con.contype,
-      pg_catalog.pg_get_constraintdef(con.oid,false) AS definition
+      regexp_replace(pg_catalog.pg_get_constraintdef(con.oid,false), ' NOT VALID$', '') AS definition
       FROM pg_catalog.pg_constraint con JOIN pg_catalog.pg_namespace n ON n.oid=con.connamespace
       LEFT JOIN pg_catalog.pg_class c ON c.oid=con.conrelid LEFT JOIN pg_catalog.pg_type t ON t.oid=con.contypid
       WHERE ${userNamespace}`).all()) add('constraint', [r.nspname,r.relname,r.typname,r.conname], r.definition,

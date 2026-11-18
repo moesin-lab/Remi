@@ -4,6 +4,7 @@ import { startMultiremiServer } from "@multiremi/api.js";
 import { createLocalStore, createResponsibleTestIssue, resetMultiremiTestEnv } from "./helpers.js";
 import { MultiremiScheduler } from "@daemon/scheduler.js";
 import { connect } from "node:net";
+import { databaseTimeoutMs } from "@shared/db/recovery.js";
 
 afterEach(resetMultiremiTestEnv);
 
@@ -76,6 +77,67 @@ describe("API slot lifecycle", () => {
     await slot.release();
     expect(slot.state).toBe("released");
     slot.config.lockTimeoutMs = 1000;
+  });
+
+  for (const stage of ["acquire", "fence", "start"] as const) {
+    test(`checks the absolute deadline after synchronous ${stage} blocks timer delivery`, async () => {
+      const block = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 80);
+      const { slot, events } = fixture({
+        [stage]: stage === "acquire" ? async () => {
+          block();
+          return { close: async () => { events.push("unlock"); } };
+        } : stage === "fence" ? async () => { block(); return 7; }
+          : () => { events.push("start"); block(); },
+      });
+      slot.config.lockTimeoutMs = 30;
+      await expect(slot.activate()).rejects.toThrow("activation_timeout");
+      await Bun.sleep(5);
+      expect(slot.status()).toMatchObject({ state: "failed" });
+      expect(slot.term).toBeNull();
+      expect(events.at(-1)).toBe("unlock");
+      if (stage !== "start") expect(events).not.toContain("start");
+      else expect(events.slice(-3)).toEqual(["start", "stop", "unlock"]);
+    });
+  }
+
+  test("SQL budget shrinks across fence calls and startup descendants regain their own budget", async () => {
+    let descendant!: Promise<number | undefined>;
+    let first = 0;
+    let second = 0;
+    const { slot } = fixture({
+      fence: async () => {
+        first = databaseTimeoutMs()!;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30);
+        second = databaseTimeoutMs()!;
+        return 7;
+      },
+      start: () => {
+        // Preserve the actual inherited async context, as a job timer would.
+        descendant = new Promise(resolve => setTimeout(() => resolve(databaseTimeoutMs()), 150));
+      },
+    });
+    slot.config.lockTimeoutMs = 100;
+    await slot.activate();
+    expect(first - second).toBeGreaterThanOrEqual(20);
+    expect(await descendant).toBeUndefined();
+    expect(databaseTimeoutMs()).toBeUndefined();
+    await slot.release();
+  });
+
+  test("an asynchronous fence uses only the budget left after synchronous acquisition", async () => {
+    const { slot, events } = fixture({
+      acquire: async () => {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        return { close: async () => { events.push("unlock"); } };
+      },
+      fence: async () => { await Bun.sleep(500); return 7; },
+    });
+    slot.config.lockTimeoutMs = 150;
+    const started = performance.now();
+    await expect(slot.activate()).rejects.toThrow("activation_timeout");
+    expect(performance.now() - started).toBeLessThan(220);
+    expect(events).toEqual(["unlock"]);
+    expect(slot.state).toBe("failed");
   });
 
   test("HTTP timeout retains the intact activation even after requests finish until rollback or exit", async () => {

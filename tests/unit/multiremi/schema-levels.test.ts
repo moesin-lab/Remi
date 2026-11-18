@@ -71,7 +71,7 @@ describe('schema compatibility protocol', () => {
     database.exec('DELETE FROM multiremi_schema_meta');
     expect(() => assertSchemaBeforeExpand(database)).toThrow('exactly one');
   });
-  it('preserves native SQLite statement receivers and iterate through the expand wrapper', () => {
+  it('preserves native SQLite receivers through the four-method statement facade', () => {
     const database = db();
     runSchemaExpands(database, [expand(1, guarded => {
       guarded.exec('CREATE TABLE retained(id integer)');
@@ -82,9 +82,91 @@ describe('schema compatibility protocol', () => {
         expect(statement.all()).toEqual([{id:42}]);
         expect(statement.values()).toEqual([[42]]);
         statement.run();
-        const iterable = statement as typeof statement & { iterate(): IterableIterator<{id:number}> };
-        expect([...iterable.iterate()]).toEqual([{id:42}]);
+        expect((statement as any).iterate).toBeUndefined();
       }
+    })], '1.0.0', code);
+    expect(readSchemaLevels(database).expandLevel).toBe(1);
+  });
+  it('sealed facade exposes only frozen null-prototype handles and no raw reachable objects', () => {
+    const database = db();
+    const forbidden = new Set<object>([database]);
+    const wrapStatement = (statement: ReturnType<SqlDatabase['query']>) => {
+      forbidden.add(statement);
+      return statement;
+    };
+    // Instrument real SQLite handles without replacing their execution behavior.
+    const target: SqlDatabase = {
+      dialect: 'sqlite',
+      get inTransaction() { return database.inTransaction; },
+      exec: sql => database.exec(sql),
+      run: (sql, ...params) => database.run(sql, ...params),
+      query: sql => wrapStatement(database.query(sql)),
+      prepare: sql => wrapStatement(database.prepare(sql)),
+      transaction: fn => {
+        const original = database.transaction(function (...args: unknown[]) { return fn.apply(database, args); });
+        forbidden.add(original);
+        return original;
+      },
+      close: () => database.close(),
+    };
+    forbidden.add(target);
+    const visited = new Set<object>();
+    function inspect(value: unknown): void {
+      if ((typeof value !== 'object' || value === null) && typeof value !== 'function') return;
+      const object = value as object;
+      expect(forbidden.has(object)).toBe(false);
+      if (visited.has(object)) return;
+      visited.add(object);
+      inspect(Object.getPrototypeOf(object));
+      for (const key of Reflect.ownKeys(object)) {
+        const descriptor = Object.getOwnPropertyDescriptor(object, key)!;
+        inspect(descriptor.value);
+        inspect(descriptor.get);
+        inspect(descriptor.set);
+        // Function.prototype's intrinsic caller/arguments getters always throw.
+        if (descriptor.get && !(object === Function.prototype && ['caller', 'arguments'].includes(String(key)))) {
+          inspect(descriptor.get.call(object));
+        }
+      }
+    }
+    function sealed(value: object, keys: string[]) {
+      expect(Reflect.ownKeys(value).sort()).toEqual(keys.sort());
+      expect(Object.getPrototypeOf(value)).toBeNull();
+      expect(Object.isFrozen(value)).toBe(true);
+      inspect(value);
+    }
+    runSchemaExpands(target, [expand(1, guarded => {
+      sealed(guarded, ['dialect', 'inTransaction', 'exec', 'run', 'query', 'prepare', 'transaction']);
+      expect(guarded.inTransaction).toBe(true);
+      expect(Object.getOwnPropertyDescriptor(guarded, 'inTransaction')?.get).toBeFunction();
+      for (const key of ['close', 'advisoryLock', 'afterCommit', 'savepoint', 'valueOf', 'execute', 'constructor', 'toString']) {
+        expect((guarded as any)[key]).toBeUndefined();
+        expect(() => (guarded as any)[key]()).toThrow(TypeError);
+      }
+      inspect(guarded.exec('SELECT 1'));
+      inspect(guarded.run('SELECT 1'));
+      for (const factory of ['query', 'prepare'] as const) {
+        const statement = guarded[factory]('SELECT 1 AS n');
+        sealed(statement, ['get', 'all', 'run', 'values']);
+        for (const key of ['valueOf', 'execute', 'constructor', 'toString', 'iterate']) expect((statement as any)[key]).toBeUndefined();
+        expect(statement.get()).toEqual({n:1});
+        expect(statement.all()).toEqual([{n:1}]);
+        expect(statement.values()).toEqual([[1]]);
+        for (const method of ['get', 'all', 'run', 'values'] as const) inspect(statement[method]());
+      }
+      const invoke = guarded.transaction(function (this: unknown, argument: unknown) {
+        expect(this).toBeUndefined();
+        expect(argument).toBe('caller-owned');
+        expect(guarded.inTransaction).toBe(true);
+        return guarded.query('SELECT 1 AS n').get();
+      });
+      expect(invoke.deferred).toBeUndefined();
+      inspect(invoke);
+      const result = invoke.call(database, 'caller-owned');
+      expect(result).toEqual({n:1});
+      inspect(result);
+      expect(() => guarded.transaction(() => { throw new Error('nested rollback'); })()).toThrow('nested rollback');
+      console.info(`SEALED structure: exact database/statement keys; prototypes=null; frozen=true; ${visited.size} reachable objects inspected; raw handles absent; transaction receiver=undefined`);
     })], '1.0.0', code);
     expect(readSchemaLevels(database).expandLevel).toBe(1);
   });

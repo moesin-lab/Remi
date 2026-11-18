@@ -154,8 +154,12 @@ E/B/X/N 前缀字符串；dollar quote；字符串换行续接（包括夹行/�
 冻结 legacy 列表中的历史模块保留原 lint 行为，不扩大历史 allowlist。
 
 PostgreSQL 在执行 expand 前以及每次执行 SQL 前同步读取 `SHOW standard_conforming_strings`，必须为 `on`（PG 默认）。
-`exec` 每段、`run` 和 `query`/`prepare` 返回 statement 的 run/get/all/values/iterate（接口存在时）均复查，
+`exec` 每段、`run` 和 `query`/`prepare` 返回 statement 的 run/get/all/values 均复查，
 不能只在创建 statement 时检查；statement 创建后通过 SET、SET LOCAL 或 set_config 修改设置也会被拒绝。
+expand 只获得冻结、原型为 null 的封闭 facade：dialect（只读值）、inTransaction（getter）、exec、run、query、prepare、transaction。
+statement 同样冻结且原型为 null，只提供 get/all/run/values；不提供 iterate、execute、valueOf、constructor 或其它原始句柄成员。
+transaction 返回独立函数，不转发原函数或 deferred，回调的 this 为 undefined，参数只来自调用方。
+close、advisoryLock、afterCommit、savepoint 等不在清单内，调用会抛错；新增迁移如需这些能力必须先报告，不能自行透传。
 不能依赖关闭该设置后的反斜杠语义。所有 unsupported 形式共用一个拒绝路径，
 错误说明具体形式；执行前整体拒绝，不记账、不推进 level。`exec` 由同一 tokenizer 按顶层分号切分，
 整批检查后逐段通过 `query(...).run()` 执行，不经过 bridge 的 `splitStatements`。

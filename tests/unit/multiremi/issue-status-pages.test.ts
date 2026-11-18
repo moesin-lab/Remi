@@ -98,6 +98,9 @@ describe(`MUL-395 status pages (${process.env.MULTIREMI_TEST_POSTGRES_URL ? "Pos
   });
   it("dbq golden: stays constant across 1/4/7 statuses and 1/60/300 issues per status", async () => {
     await h.request("/api/issues/status-pages?statuses=todo&limit=0");
+    // The warm request can reuse a nearly expired readiness cache from the
+    // previous test. Start a full TTL before measuring the fixed SQL budget.
+    h.store.checkDatabaseReady(true);
     const measurements: number[] = [];
     const profiles: unknown[] = [];
     for (const count of [1, 60, 300]) {

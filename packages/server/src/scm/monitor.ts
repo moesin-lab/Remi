@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createId } from "@multiremi/ids.js";
 import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
 import type { MultiremiScmCanonicalEvent } from "@multiremi/contracts/types.js";
@@ -74,7 +75,7 @@ export class ScmMonitor {
     this.checkHealth(now);
     // Claim one at a time: a large HTTP batch must not exhaust later rows' leases before it starts.
     for (let i = 0; i < limit; i++) {
-      const token = createId("lease");
+      const token = randomUUID();
       const types = [...this.rules.keys(), "monitor_capacity"];
       const effect = this.ctx.db.query(`UPDATE multiremi_scm_effects SET status = 'processing',
         lease_token = ?, lease_until = ?, attempt_count = attempt_count + 1

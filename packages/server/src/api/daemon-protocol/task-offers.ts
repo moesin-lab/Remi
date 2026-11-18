@@ -211,7 +211,12 @@ export class DaemonTaskOffers {
   }
 
   kickWorkspace(workspaceId: string): void {
-    const ids = this.options.layer.registry.listSessions().flatMap(session => session.runtimeIds);
+    // A released slot can unblock work on another host (global agent limits),
+    // but hosts with no queued/offered work cannot claim anything. Preserve
+    // workspace-wide admission for unassigned attempts and the periodic sweep.
+    const pending = new Set(this.options.store.pendingTaskOfferRuntimeIds(workspaceId));
+    const ids = this.options.layer.registry.listSessions().flatMap(session => session.runtimeIds)
+      .filter(id => pending.has(null) || pending.has(id));
     for (const runtime of this.options.store.getRuntimesLite(ids)) {
       if ((runtime.workspaceId ?? "local") === workspaceId) this.kick(runtime.id);
     }

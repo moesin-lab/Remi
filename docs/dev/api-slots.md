@@ -36,7 +36,9 @@ Phase A 用于同一 PostgreSQL 数据库上的两个 `all` API（不配置 peer
 | `POST /internal/slot/release` | draining → 排空 HTTP → 关闭 WS → await 停止任务 → 解锁 → released |
 | `POST /internal/slot/exit` | 响应后执行关停；排空失败时终止进程，以进程死亡隔离旧写入 |
 
-激活锁竞争或 fence 失败返回 503，状态 failed，监听保留，可重试或 release。转换串行执行；重复 activate/release 幂等。released 可重新 activate。激活 deadline 到期时返回 503、状态 failed，不退出进程；尚未启动任务时，锁连接被取消并丢弃，迟到的 fence 不会启动任务。异步启动已开始时则保锁，待启动和停止均结束后回收；期间 release 返回 503。fence 接收 AbortSignal，钩子须尊重取消，避免迟到的外部副作用。停止任务失败时保留角色锁及 draining/failed 状态，须先成功 release，避免后台工作尚未结束就交接所有权。
+激活锁竞争或 fence 失败返回 503，状态 failed，监听保留，可重试或 release。转换串行执行；重复 activate/release 幂等。released 可重新 activate。激活使用单一单调时钟绝对 deadline，在取锁、fence、启动的阶段边界检查，不能依赖事件循环定时器是否已执行；超预算不会进入 active。fence 和启动期间的同步 PG bridge 每次 SQL 都使用此 deadline 的剩余预算，沿用 worker 的查询超时和连接丢弃机制；事务清理语句（ROLLBACK、ROLLBACK TO SAVEPOINT、RELEASE）不受激活 deadline 拒绝，使用独立的最多 5 秒查询预算（若调用者预算更短则沿用），其中最多预留 500 ms 给独立连接终止旧 backend（按 PID、backend_start 和当前用户匹配，避免 PID 复用误杀）；单纯关闭 socket 或 Bun Query.cancel 不能保证处于服务端锁等待的会话及时释放锁。若数据库或取消通道不可达，仍有远端会话未立即终止的风险，不能将客户端超时当成服务端写入 fence。确保事务与 worker 的连接丢失标记不会泄漏到后续请求；新 SQL 和 COMMIT 仍受激活 deadline 约束。钩子结束后，派生后台任务恢复各自的正常查询预算。同步 CPU 或其他未接入超时的原生阻塞不能被 JavaScript 定时器抢占，响应会等阻塞返回后失败；钩子须使用可取消或有界的操作。
+
+激活超时返回 503、状态 failed，不退出进程；尚未启动任务时，锁连接被取消并丢弃，迟到的 fence 不会启动任务。异步启动已开始时则保锁，待启动和停止均结束后回收；期间 release 返回 503。fence 接收 AbortSignal，钩子须尊重取消，避免迟到的外部副作用。停止任务失败时保留角色锁及 draining/failed 状态，须先成功 release，避免后台工作尚未结束就交接所有权。
 
 release 首先停止接收业务请求；普通 HTTP 通过 Bun `pendingRequests` 原生计数到响应结束或取消（排除控制请求和 SSE），不代理普通响应 body，SSE 和 WebSocket 不计入排空预算。预算到期且普通 HTTP 未归零时，release 返回 503 `{error:"drain_timeout",in_flight:N,state:"draining",...}`，保持持锁、后台任务和 daemon 在线，不执行交接。此状态只有两条出路：activate 回滚（复用原锁、term 和任务，恢复服务），或 exit/SIGTERM 退出进程。即使旧请求随后完成，重复 release 仍返回 503，必须由 A4 supervisor 选择回滚或退出。只有进程死亡才能作为旧 HTTP 写入的 fence；不能在存活旧请求时解锁后激活 B，也不能把 HTTP 隔离交给 A3 后台 term fence。daemon 在排空期间保持连接，使在途 RPC 能完成；随后结束 SSE，daemon 收到 4001，浏览器（包括 trace）收到 1012。daemon 的现有重连、active task 恢复与 outbox 协议不变。
 
@@ -50,7 +52,9 @@ Bun 1.3.14 在服务端关闭 WebSocket 后可能保留 `pendingWebSockets` 计�
 
 ## 验证入口
 
-[真实进程 deadline 回归](../../tests/integration/slot-deadlines.test.ts)覆盖慢 PATCH + SQLite 写入 + PG 角色锁、排空失败回滚与退出、TCP/SQL 黑洞、迟到 fence 锁回收、slot/legacy SIGTERM 总预算，以及全部 compose 层与 supervisor 宽限。
+[PG deadline 事务清理回归](../../tests/integration/postgres-deadline-cleanup.test.ts)覆盖 worker 查询超时及语句之间预算过期，检查后续查询、事务状态、未提交写入、锁释放和独立进程接管，并覆盖嵌套事务与 savepoint 清理；测试专用 PG 协议代理把 ROLLBACK / ROLLBACK TO / RELEASE 替换为被观察连接 advisory lock 持续阻塞的真实 SQL，验证 cleanup 超时返回、旧 backend 消失、锁归零和独立进程取得角色锁并写入；需要隔离的 `MULTIREMI_TEST_POSTGRES_URL`。
+
+[真实进程 deadline 回归](../../tests/integration/slot-deadlines.test.ts)覆盖慢 PATCH + SQLite 写入 + PG 角色锁、排空失败回滚与退出、TCP/SQL 黑洞、迟到 fence 锁回收、同步 fence 阻塞、同步 PG 单条/多条 fence 的共同预算与真实角色锁回收、slot/legacy SIGTERM 总预算，以及全部 compose 层与 supervisor 宽限。
 
 [生命周期单测](../../tests/unit/multiremi/slot-lifecycle.test.ts)检查转换顺序、异步停止、失败回收、鉴权、原生 HTTP body 排空、SSE 豁免、后台停止超时保锁，以及子进程中的 pipelined HTTP/socket reset 压力回归。
 [双进程测试](../../tests/integration/slot-lifecycle.test.ts)启动真实 CLI API 和 TCP 测试代理，用注入的惰性 provider 验证 daemon 运行中切换、离线终态 outbox 重放、浏览器关闭码和进程退出。SQLite 总是执行；配置 `MULTIREMI_TEST_POSTGRES_URL` 后额外执行 PostgreSQL，并检查角色锁竞争失败与回滚。测试数据库由既有隔离夹具创建、删除，不使用业务数据库；未配置 PG 时明确跳过其验收。

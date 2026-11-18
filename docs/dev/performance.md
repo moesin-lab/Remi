@@ -17,6 +17,7 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 - **实现事实：** 工作区列表显式请求 `include_archived_total=true`，用响应的 `archived_total` 更新原有归档计数缓存；计数订阅本身不发 HTTP。工作区负责人看板在其活跃的 `/api/issues/grouped` 响应中携带同一可选字段，避免订阅隐藏的状态列表。计数是整个工作区的归档总数，不受列表筛选影响；不传参数时服务端不额外 COUNT。API 返回 404 时，一个 API client 会记住不支持 status-pages，使用旧的逐状态请求；新会话重新探测。
 - **实现事实：** [issues router](../../packages/server/src/api/routers/issues.ts) 的列表响应调用 `listIssues` 和 `countIssues`。[PgBridge.request](../../packages/server/src/store/db/postgres.ts) 使用 `Atomics.wait` 等待 worker，worker 以 [Bun.SQL 的 `max: 1`](../../packages/server/src/store/db/pg-worker.ts) 保证事务语句共用连接。该限制是每个桥实例的连接数，不是整个部署只能有一个连接。
 - **同步回包边界：** 唤醒通知不等于当前查询已完成。桥必须循环检查共享状态离开 `pending` 后才解码回包，避免早到或上一轮延迟的通知让新查询读取旧结果；多次唤醒共用原来的 60 秒截止时间。真实 PostgreSQL 的[回归测试](../../tests/unit/multiremi/multiremi-postgres-store.test.ts)让新查询保持等待并注入提前唤醒，验证返回的是新查询结果，同时覆盖跨连接领取和 Chat 队列顺序。
+- **关闭边界：** PG 同步桥关闭后立即拒绝查询，不再向已终止的 worker 发请求。异步调用仍由调用方 await；测试超时不会取消原 Promise，夹具必须在关闭数据库前等待其结束。[MUL-204 诊断](../../reports/performance/MUL-204/decisions-postgres.md)记录历史决策夹具的平方级查询、真实 PG 前后耗时和强制超时后的清理验证。
 - **风险推断：** 并行 HTTP 请求无法自动消除主线程同步数据库等待；额外 SQL 往返和较大的响应序列化可能放大排队，影响同进程其他请求。吞吐拐点与 PostgreSQL 网络延迟的影响尚未测量。
 - **采集重点：** 冷/热页面请求数量、单请求 SQL 数与响应 bytes、列表可操作时间，以及 API 并发升高时的 p50/p95、错误率和事件循环延迟。
 

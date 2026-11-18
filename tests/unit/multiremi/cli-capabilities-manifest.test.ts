@@ -274,6 +274,7 @@ describe("CLI capabilities manifest", () => {
         category: "platform_updater_internal",
         reason: "Loopback-only slot lifecycle is the supervisor deployment control protocol, authenticated with a dedicated control token.",
       });
+      expect(manifest.routes[route]).toMatchObject({ cli_exempt: true, category: "platform_updater_internal" });
     }
     // ADR 0025: the Chat composer's slash-command menu is Web state; a CLI sender types the command.
     expect(manifest.routes["GET /api/chat/slash-commands"]).toMatchObject({ cli_exempt: true, category: "pure_ui" });

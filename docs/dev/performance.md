@@ -293,7 +293,7 @@ HTTP 名称仅含 method + route pattern，WS 仅用已识别帧类型（未知�
 代码常量；每窗最多 512 个不同名称，另设各 kind 的 `<overflow>` 桶保留计数。没有 SQL 文本、参数、
 原始 URL、凭证、用户或任务 ID。关闭开关时不分配来源上下文或归因表项。
 
-后台入口覆盖 scheduler（sync、failure-monitor、issue-archive、autopilot）、SCM、issue-title、
+后台入口覆盖 scheduler（sync、scm-monitor、failure-monitor、issue-archive、autopilot）、SCM、issue-title、
 messaging、notifications sweep/retry、capability sweep、body-html backfill、repository-wiki storage/lease，
 以及异步 daemon.offer。daemon 端 task-activity / parked-lanes 的周期报告在 API 侧按相应 WS 帧归因，
 不伪装成 API job。未包裹的启动/维护查询仍落在 `db_unattributed`。异步派生工作沿用触发来源，

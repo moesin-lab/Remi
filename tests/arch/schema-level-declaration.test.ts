@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
-import { SCHEMA_MIGRATIONS } from '../../packages/server/src/store/schema-migrations.ts';
-import { validateSchemaMigrations } from '../../packages/server/src/store/schema-migration-runner.ts';
-import { SCHEMA_COMPATIBILITY, SCHEMA_EXPAND_LEVEL, validateSchemaCompatibility } from '../../packages/server/src/store/schema-levels.ts';
+import { SCHEMA_MIGRATIONS } from '../../packages/server/src/store/schema-migrations.js';
+import { validateSchemaMigrations } from '../../packages/server/src/store/schema-migration-runner.js';
+import { SCHEMA_COMPATIBILITY, SCHEMA_EXPAND_LEVEL, validateSchemaCompatibility } from '../../packages/server/src/store/schema-levels.js';
 import declaration from '../../packages/server/src/store/schema-compatibility.json';
 
 test('release schema identity covers every declared startup expansion', () => {

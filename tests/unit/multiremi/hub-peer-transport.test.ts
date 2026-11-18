@@ -98,6 +98,19 @@ const fixtures: ReturnType<typeof pair>[] = [];
 afterEach(() => { for (const fixture of fixtures.splice(0)) fixture.close(); });
 
 describe("Hub peer transport", () => {
+  it.each([undefined, 1, 42])("accepts legacy and future hub versions %s with known fields", async v => {
+    const f = pair(); fixtures.push(f);
+    const heads: number[] = [];
+    f.right.onRemoteHead(async (_key, head) => { heads.push(head); });
+    f.receiver.receive("hub", [{ ...(v === undefined ? {} : { v }), sender_epoch: "future-hub", hub_seq: 1,
+      kind: "head", key: "log:session", head: 3, log_version: null, unknown: true }]);
+    await f.right.settled();
+    expect(heads).toEqual([3]);
+    f.left.publish({ key: "log:session", frames: [{ kind: "entry", seq: 1, payload: {} }] });
+    await waitFor(() => f.posts.length > 0, "versioned hub send");
+    expect(f.posts[0]!.events[0]).toMatchObject({ v: 1 });
+  });
+
   it("wires two apps through the authenticated 462 route", async () => {
     let receiverApp: ReturnType<typeof createMultiremiApp>;
     let senderApp: ReturnType<typeof createMultiremiApp>;

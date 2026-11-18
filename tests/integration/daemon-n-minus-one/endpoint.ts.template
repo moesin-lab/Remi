@@ -1,0 +1,56 @@
+/** Copied into each checkout by run.ts so imports resolve that release's code. */
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import { startMultiremiServer, TestMultiremiDaemon } from "./tests/fixtures/daemon-protocol.js";
+import { disabledSshMeshRuntime } from "./tests/helpers/ssh-mesh-isolation.js";
+
+const [mode, state, configPath] = process.argv.slice(2);
+if (mode === "server") {
+  const db = openSqliteDatabase(":memory:");
+  const store = new MultiremiStore(db);
+  store.ensureLocalWorkspace();
+  const agent = store.createAgent({ name: "N-1 smoke", provider: "claude" });
+  const token = await store.createAccessToken({ name: "N-1 smoke", type: "daemon", workspaceId: "local", daemonId: "dmn_mixed" });
+  const server = startMultiremiServer({ store, scheduler: null, hostname: "127.0.0.1", port: 0, authToken: "mixed-root" });
+  const control = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/runtime") return Response.json(store.listRuntimes());
+    if (url.pathname === "/enqueue") {
+      const chat = store.createChatSession({ agentId: agent.id });
+      return Response.json(store.sendChatMessage(chat.id, { body: url.searchParams.get("body") ?? "complete" }).task);
+    }
+    const id = url.searchParams.get("id")!;
+    if (url.pathname === "/cancel") return Response.json(store.cancelTask(id));
+    return Response.json(store.getTask(id));
+  } });
+  writeFileSync(configPath, JSON.stringify({ serverUrl: `http://127.0.0.1:${server.port}`, token: token.token,
+    control: `http://127.0.0.1:${control.port}` }));
+  process.on("SIGTERM", () => { control.stop(true); server.stop(true); db.close(); process.exit(0); });
+} else {
+  const config = await Bun.file(configPath).json();
+  mkdirSync(state, { recursive: true });
+  const daemon = new TestMultiremiDaemon({
+    ...config, daemonId: "dmn_mixed", runtimeName: "N-1 smoke", provider: "claude", workspaceId: "local",
+    daemonPort: 0, pollIntervalMs: 20, gcEnabled: false, sshMeshManager: disabledSshMeshRuntime(),
+    workspacesRoot: join(state, "workspaces"), repoCacheRoot: join(state, "repos"), outboxPath: join(state, "outbox.sqlite"),
+    providerFactory: () => ({
+      async *sendStream(message, options) {
+        if (message.includes("WAIT_FOR_CANCEL")) {
+          writeFileSync(join(state, "provider-running"), "yes");
+          await new Promise<void>(resolve => {
+            if (options?.signal?.aborted) resolve();
+            else options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+          writeFileSync(join(state, "provider-cancelled"), "yes");
+          throw new Error("Cancelled");
+        }
+        yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "mixed-version completed" }] } as any;
+      },
+      getLastResponse: () => ({ text: "mixed-version completed", sessionId: "mixed-session", requestId: "mixed-request" }),
+    }),
+  });
+  process.on("SIGTERM", async () => { await daemon.stopAndDrainTestWork(); process.exit(0); });
+  await daemon.start();
+}

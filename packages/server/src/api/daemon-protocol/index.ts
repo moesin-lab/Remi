@@ -60,7 +60,8 @@ function runtimeCapabilityOptions(capabilities: DaemonRuntimeCapabilities | unde
     return Number.isSafeInteger(number) && number >= 0 ? number : 0;
   };
   return {
-    plannedRestartProtocol: supportsPlannedRestart && reported.planned_restart === 1 ? 1 : 0,
+    plannedRestartNegotiated: supportsPlannedRestart,
+    plannedRestartProtocol: reported.planned_restart === 1 ? 1 : 0,
     supportsBatchImport: reported.supports_batch_import === true,
     supportsDirectoryScan: reported.supports_directory_scan === true,
     supportsSkillDirectory: reported.supports_skill_directory === true,

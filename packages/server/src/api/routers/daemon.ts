@@ -423,7 +423,10 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       );
     }
     const ack = store.heartbeatRuntime(runtimeId, {
-      plannedRestartProtocol: body.planned_restart === 1 ? 1 : 0,
+      // An HTTP upgrade probe cannot negotiate a socket handler. It may
+      // preserve or revoke support; only a fresh socket hello/hb may grant it.
+      plannedRestartProtocol: body.planned_restart === 1
+        && store.getRuntimeLite(runtimeId)?.metadata.planned_restart === 1 ? 1 : 0,
       supportsBatchImport: body.supports_batch_import ?? false,
       supportsDirectoryScan: body.supports_directory_scan ?? false,
       supportsSkillDirectory: body.supports_skill_directory === true,

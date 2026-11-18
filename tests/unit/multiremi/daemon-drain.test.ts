@@ -54,15 +54,19 @@ describe("daemon drain", () => {
     const issue = createResponsibleTestIssue(store, { title: "Legacy drain", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "legacy long work", maxAttempts: 3 });
     store.claimTask("rt_a"); store.startTask(task.id); ack(store, 1);
-    store.beginDaemonDrain("local", "machine-a", reason, 1_000);
+    store.recordDaemonProtocol("rt_a", "machine-a", 2, "0.2.90");
+    const deadlineMs = reason === "manual" ? 1 : 1_000;
+    store.beginDaemonDrain("local", "machine-a", reason, deadlineMs);
     const update = reason === "cli_update" ? store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" }) : null;
-    advance(1_000); store.reconcileDaemonDrain("rt_a");
+    advance(deadlineMs); store.reconcileDaemonDrain("rt_a");
+    // A second reconcile must not strand requested or spend another retry.
+    store.reconcileDaemonDrain("rt_a");
     expect(store.plannedRestarts().get(task.id)).toBeNull();
     expect(store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
     const snapshot = taskInputSnapshot(store, "rt_a", "machine-a", new Set([task.id]), () => {});
     expect(snapshot.some(input => input.type === "turn.restart")).toBe(false);
     expect(snapshot.some(input => input.type === "task.cancelled")).toBe(true);
-    expect(store.listTasks("queued").some(retry => retry.attempt === 2)).toBe(true);
+    expect(store.listTasks("queued").filter(retry => retry.attempt === 2)).toHaveLength(1);
     advance(1_001); ack(store, 0);
     expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "drained_forced", remaining_tasks: 0 });
     if (update) {

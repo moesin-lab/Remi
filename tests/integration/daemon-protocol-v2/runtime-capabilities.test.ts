@@ -67,6 +67,7 @@ function attachHost(h: DaemonProtocolHarness): void {
 function assertHostedCapabilities(h: DaemonProtocolHarness, type: "hello" | "hb"): void {
   const id = runtimeId(h);
   expect(runtimeCapabilitiesInFrame(latestFrame(h, type), id)).toEqual({
+    planned_restart: 1,
     supports_batch_import: true,
     supports_directory_scan: true,
     supports_skill_directory: true,
@@ -80,6 +81,7 @@ function assertHostedCapabilities(h: DaemonProtocolHarness, type: "hello" | "hb"
     feishu_issue_decision_card: FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION,
   });
   expect(h.store.getRuntime(id)!.metadata).toMatchObject({
+    planned_restart: 1,
     supports_batch_import: true,
     supports_directory_scan: true,
     supports_skill_directory: true,

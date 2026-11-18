@@ -13,6 +13,51 @@ afterAll(() => {
   rmSync(dedupTestRoot, { recursive: true, force: true });
 });
 
+it("denies overlapping history without repeated cards while retaining live denial notifications", async () => {
+  const root = mkdtempSync(join(tmpdir(), "feishu-history-denied-"));
+  let now = Date.now(), deniedCards = 0, callbacks = 0, admissions = 0;
+  const client = { im: { message: { reply: async () => {
+    deniedCards++;
+    return { code: 0, data: { message_id: "om_denial_card" } };
+  } } } } as any;
+  try {
+    const journal = new FeishuInboundRecovery(join(root, "journal.json"), () => now);
+    journal.rememberChat("oc_private", "p2p");
+    const deliver = createFeishuInboundDelivery({ client, recovery: journal, appId: "cli_test",
+      authorizeSender: async () => { admissions++; return false; },
+      botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() },
+      onMessage: async () => { callbacks++; } });
+    const items = ["ordinary input", "/stop"].map((text, i) => ({ message_id: `om_denied_${i}`,
+      create_time: String(now - 1000 + i), msg_type: "text", sender: { id_type: "open_id", id: "ou_nonmember", sender_type: "user" },
+      body: { content: JSON.stringify({ text }) } }));
+    for (let scan = 0; scan < 2; scan++) {
+      await recoverFeishuHistory({ journal, now, deliver, warn: () => {},
+        list: async () => ({ code: 0, data: { items } }) });
+      now += 30_000;
+    }
+    expect(admissions).toBe(4);
+    expect(callbacks).toBe(0);
+    expect(deniedCards).toBe(0);
+    const live = feishuHistoryEvent(items[0]!, "oc_private", "p2p")!;
+    await journal.accept({ ...live, recovery_source: undefined }, deliver);
+    await journal.accept({ ...live, recovery_source: undefined }, deliver);
+    expect(admissions).toBe(6);
+    expect(callbacks).toBe(0);
+    expect(deniedCards).toBe(1);
+    expect(JSON.parse(readFileSync(join(root, "journal.json"), "utf8")).pending).toEqual({});
+    const legacy = createFeishuInboundDelivery({ client, recovery: null, appId: "cli_test",
+      authorizeSender: async () => false,
+      botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() },
+      onMessage: async () => { callbacks++; } });
+    const legacyEvent = { ...live, recovery_source: undefined,
+      message: { ...live.message, message_id: `om_legacy_denied_${crypto.randomUUID()}` } };
+    await legacy(legacyEvent);
+    await legacy(legacyEvent);
+    expect(deniedCards).toBe(2);
+    expect(callbacks).toBe(0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 it("skips replayed commands, advances past an offline stop, and preserves ordinary slash requests", async () => {
   const root = mkdtempSync(join(tmpdir(), "feishu-commands-")), path = join(root, "journal.json"), now = Date.now();
   const client = { request: async () => ({ data: { users: [{ name: "Member" }] } }) } as any;

@@ -1,6 +1,7 @@
 import type { RuntimeClaudeProfile } from "@multiremi/contracts/claude-profile";
 import type { RuntimeCodexProfile } from "@multiremi/contracts/codex-profile";
 import type { MultiremiRuntimeModel } from "@multiremi/contracts/types.js";
+import { proxyFetch } from "@shared/proxy-fetch.js";
 import { readCapped } from "@multiremi/relay/http.js";
 import { validCodexNativeCatalog } from "@multiremi/contracts/codex-model-catalog.js";
 import { validateCodexModelCatalog } from "@acp/model-catalog-validation.js";
@@ -46,7 +47,7 @@ async function discoverListedRuntimeModels(
   const models = new Map<string, MultiremiRuntimeModel>();
   const cursors = new Set<string>();
   for (;;) {
-    const response = await fetch(url, { headers, signal: requestSignal, redirect: "error" });
+    const response = await proxyFetch(url, { headers, signal: requestSignal, redirect: "error" });
     if (!response.ok) {
       await response.body?.cancel();
       // Never include a provider response body, which may echo authentication headers.

@@ -26,7 +26,7 @@ import { jsonResponse } from "./helpers.js";
  * handler rather than installing a second stub.
  */
 let currentBody: unknown = {};
-let handler: ((url: string, init?: RequestInit) => Response) | null = null;
+let handler: ((url: string, init?: RequestInit) => Response | Promise<Response>) | null = null;
 let realFetch: typeof globalThis.fetch | null = null;
 
 beforeEach(() => {
@@ -177,8 +177,8 @@ describe("Feishu cancel wire compatibility", () => {
 
   it("sends the optional disambiguation fields only when present", async () => {
     const bodies: Array<Record<string, unknown>> = [];
-    handler = (url, init) => {
-      if (url.endsWith(PATH)) bodies.push(JSON.parse(String(init?.body)));
+    handler = async (url, init) => {
+      if (url.endsWith(PATH)) bodies.push(await new Request(url, init).json());
       return jsonResponse({ outcome: "none" });
     };
     const client = new MultiremiDaemonClient("https://remi.example", "tok_test");

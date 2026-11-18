@@ -1,6 +1,6 @@
 import { foldStoredTrace } from "./trace-pages.js";
 import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution } from "./planned-restart-journal.js";
-import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
+import { restartQuestionKey, type PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
 import { resolveCoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
 import { performUpdate } from "@shared/cli-update.js";
@@ -4444,6 +4444,7 @@ export class MultiremiDaemon {
       }
       stopWatching();
       this.taskDownlinks.release(task.id);
+      this.restartQuestions.delete(task.id);
       if (timeout) clearTimeout(timeout);
     }
   }
@@ -4487,6 +4488,9 @@ export class MultiremiDaemon {
         this.resumedUsageRuns.set(task.id, entry.consumer_id);
         this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
         this.taskDownlinks.bindTurn({ ...task, generation });
+        const questions = (result.recovered_questions ?? []) as UnifiedMessage[];
+        this.restartQuestions.set(task.id, questions);
+        for (const question of questions) this.taskDownlinks.registerDecision(question, task.id);
         // No model may run until transfer.resume has persisted the local receipt.
         this.pendingResumedTasks.set(entry.execution.handoff_id, task);
         return { generation };
@@ -4948,6 +4952,23 @@ export class MultiremiDaemon {
     ].map((value) => value?.trim()).filter((value): value is string => Boolean(value));
   }
 
+  private readonly restartQuestions = new Map<string, UnifiedMessage[]>();
+
+  private async createOrRecoverDecision(taskId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const metadata = payload.metadata as Record<string, unknown>;
+    const recovered = this.restartQuestions.get(taskId)?.find(message => {
+      const request = message.metadata.human_request as { payload?: Record<string, unknown> } | undefined;
+      return request?.payload && restartQuestionKey(request.payload) === restartQuestionKey(metadata);
+    });
+    const messageId = recovered?.id ?? `question_${randomUUID()}`;
+    const waitId = randomUUID();
+    this.taskDownlinks.beginQuestionWait(taskId, messageId, waitId);
+    const result = await this.taskDownlinks.rpc("turn.decision", { ...payload, message_id: messageId, wait_id: waitId,
+      ...(recovered ? { recover_question_id: recovered.id } : {}) });
+    if (recovered) this.restartQuestions.set(taskId, this.restartQuestions.get(taskId)!.filter(message => message.id !== recovered.id));
+    return result;
+  }
+
   private attachHumanInputHandlers(
     provider: MultiremiTaskProvider,
     task: MultiremiTaskWithAgent,
@@ -4977,11 +4998,8 @@ export class MultiremiDaemon {
           // A child session's request names its subagent (PR 5 §1.3); the root's carries no field.
           const subagent = this.subagentRef(task.id, provider, trace, params.sessionId);
           // S2 creates the decision message and sets awaiting_human atomically.
-          const questionId = `question_${randomUUID()}`, waitId = randomUUID();
-          this.taskDownlinks.beginQuestionWait?.(task.id, questionId, waitId);
-          const result = await this.taskDownlinks.rpc("turn.decision", {
+          const result = await this.createOrRecoverDecision(task.id, {
             ...this.taskDownlinks.turnInput(task.id),
-            message_id: questionId, wait_id: waitId,
             dedupe_key: `permission:${task.id}:${randomUUID()}`,
             body_md: `Permission requested: ${toolTitle}`,
             options: params.options.map(option => ({ label: option.name, value: option.optionId, description: option.kind })),
@@ -4999,12 +5017,12 @@ export class MultiremiDaemon {
           const optionId = reply ? readResponseOptionId(reply.metadata)
             ?? readResponseOptionId(decisionReplyObject(reply)) ?? reply.body_md.trim() : null;
           const chosen = optionId ? params.options.find(option => option.optionId === optionId) ?? null : null;
-          if (traceItem) this.recordTrace(task.id, () => trace.permissionResolved(traceItem, {
+          if (traceItem && !this.restartExecutions.has(task.id)) this.recordTrace(task.id, () => trace.permissionResolved(traceItem, {
             option: chosen, outcome: chosen ? "selected" : reply || signal.aborted ? "cancelled" : "timeout",
             respondedBy: reply?.sender_id ?? null, replyMessageId: reply?.id ?? null,
           }));
           if (reply) {
-            if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: waitId });
+            if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: this.taskDownlinks.activeQuestionWaits().find(wait => wait.message_id === decision.id)?.wait_id });
             this.taskDownlinks.confirmDecisionReply(task.id, reply);
           }
           return chosen ? { outcome: "selected", optionId: chosen.optionId } : { outcome: "cancelled" };
@@ -5013,7 +5031,7 @@ export class MultiremiDaemon {
           log.warn(`Permission routing failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
           return { outcome: "cancelled" };
         } finally {
-          this.taskDownlinks.finishDecision(task.id);
+          if (!this.restartExecutions.has(task.id)) this.taskDownlinks.finishDecision(task.id);
         }
       });
     }
@@ -5038,11 +5056,8 @@ export class MultiremiDaemon {
           context = sliced.context;
         }
         const subagent = this.subagentRef(task.id, provider, trace, params.sessionId);
-        const questionId = `question_${randomUUID()}`, waitId = randomUUID();
-        this.taskDownlinks.beginQuestionWait?.(task.id, questionId, waitId);
-        const result = await this.taskDownlinks.rpc("turn.decision", {
+        const result = await this.createOrRecoverDecision(task.id, {
           ...this.taskDownlinks.turnInput(task.id),
-          message_id: questionId, wait_id: waitId,
           dedupe_key: `elicitation:${task.id}:${randomUUID()}`,
           body_md: [params.message, ...questions.map(({ question }) => question.question)].filter(Boolean).join("\n\n"),
           options: questions.flatMap(({ fieldKey, question }) => question.options.map(option => ({
@@ -5070,11 +5085,11 @@ export class MultiremiDaemon {
         }));
         const reply = await this.awaitDecisionReply(task.id, decision.id, signal, humanRequestTimeoutMs);
         const answers = reply && reply.metadata.question_closed !== true ? decisionReplyAnswers(reply, questions) : null;
-        if (traceItem) this.recordTrace(task.id, () => trace.questionResolved(traceItem, {
+        if (traceItem && !this.restartExecutions.has(task.id)) this.recordTrace(task.id, () => trace.questionResolved(traceItem, {
           answers, respondedBy: reply?.sender_id ?? null, replyMessageId: reply?.id ?? null,
         }));
         if (reply) {
-          if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: waitId });
+          if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: this.taskDownlinks.activeQuestionWaits().find(wait => wait.message_id === decision.id)?.wait_id });
           this.taskDownlinks.confirmDecisionReply(task.id, reply);
         }
         if (!answers) return { action: "cancel" };
@@ -5083,7 +5098,7 @@ export class MultiremiDaemon {
         log.warn(`Question routing failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
         return { action: "cancel" };
       } finally {
-        this.taskDownlinks.finishDecision(task.id);
+        if (!this.restartExecutions.has(task.id)) this.taskDownlinks.finishDecision(task.id);
       }
     });
 
@@ -5111,7 +5126,13 @@ export class MultiremiDaemon {
   private async awaitDecisionReply(taskId: string, messageId: string, signal: AbortSignal,
     timeoutMs: number): Promise<UnifiedMessage | null> {
     const waitSignal = AbortSignal.any([signal, this.pollAbort.signal]);
+    // Saved answers may precede this process and its bounded input projection.
+    const saved = await this.taskDownlinks.rpc("turn.decision.get", { ...this.taskDownlinks.turnInput(taskId), message_id: messageId });
+    if (this.restartExecutions.has(taskId)) return null;
+    if (saved.reply) return saved.reply as UnifiedMessage;
     const reply = await this.taskDownlinks.waitForDecisionReply(messageId, waitSignal, timeoutMs);
+    // Planned cancellation releases the callback, while the original Q stays live.
+    if (this.restartExecutions.has(taskId)) return null;
     if (reply) {
       // WS input is a bounded prompt projection. Fetch once after notification;
       // never interpret its unread_range prefix or folded body as an answer.

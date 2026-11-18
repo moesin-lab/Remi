@@ -163,6 +163,7 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
   }
 
   release(taskId: string): void {
+    for (const [id, wait] of this.nativeQuestionWaits) if (wait.attempt_id === taskId) this.nativeQuestionWaits.delete(id);
     this.steers.delete(taskId);
     this.turns.delete(taskId);
     this.inputResyncs.delete(taskId);

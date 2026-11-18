@@ -1,3 +1,4 @@
+import { Questions } from "./inbox/questions.js";
 import { afterCommit } from "./db/postgres.js";
 import { createHash } from "node:crypto";
 import type { StoreContext } from "./context.js";
@@ -155,6 +156,7 @@ export class PlannedRestarts {
       const generation = handoff.generation + 1;
       this.ctx.db.run(`UPDATE multiremi_planned_restarts SET state='resuming',consumer_id=?,generation=?,updated_at=?
         WHERE attempt_id=? AND handoff_id=? AND state='suspended'`, [consumerId, generation, nowIso(), attemptId, handoffId]);
+      new Questions(this.ctx).preparePlannedRestartResume(attemptId, handoff.handoff_id, generation, handoff.checkpoint?.question_ids ?? []);
       authorize(generation, handoff.checkpoint!);
       this.ctx.db.run("UPDATE multiremi_planned_restarts SET state='running',updated_at=? WHERE attempt_id=?", [nowIso(), attemptId]);
       return this.get(attemptId)!;
@@ -191,7 +193,8 @@ export class PlannedRestarts {
       this.assertLive(attempt);
       if (this.get(attemptId)?.state !== "requested") throw new PlannedRestartError("stale_execution");
       return { version: 1 as const, session_id: attempt.session_id ?? null, work_dir: attempt.work_dir ?? null,
-        input_ack_seq: Number(attempt.input_ack_seq ?? 0), trace_head: 0, delivered_message_ids: [] };
+        input_ack_seq: Number(attempt.input_ack_seq ?? 0), trace_head: 0, delivered_message_ids: [],
+        question_ids: new Questions(this.ctx).plannedRestartWaits(attemptId).map(message => message.id) };
     })();
   }
 
@@ -209,7 +212,11 @@ export class PlannedRestarts {
       || !Array.isArray(value.delivered_message_ids) || value.delivered_message_ids.length > 1024
       || value.delivered_message_ids.some(id => typeof id !== "string" || !id || id.length > 256)
       || new Set(value.delivered_message_ids).size !== value.delivered_message_ids.length
-      || Object.keys(value).some(key => !["version", "session_id", "work_dir", "trace_head", "input_ack_seq", "delivered_message_ids"].includes(key))) {
+      || Object.keys(value).some(key => !["version", "session_id", "work_dir", "trace_head", "input_ack_seq", "delivered_message_ids", "question_ids"].includes(key))) {
+      throw new PlannedRestartError("invalid_checkpoint");
+    }
+    const questionIds = value.question_ids ?? [];
+    if (!Array.isArray(questionIds) || JSON.stringify(questionIds) !== JSON.stringify(new Questions(this.ctx).plannedRestartWaits(attempt.id).map(message => message.id))) {
       throw new PlannedRestartError("invalid_checkpoint");
     }
     // Each delivered receipt must belong to this conversation and have been
@@ -220,6 +227,7 @@ export class PlannedRestarts {
       if (!message || Number(message.seq) > Number(attempt.projection_to_seq ?? 0)) throw new PlannedRestartError("invalid_checkpoint");
     }
     return { version: 1, session_id: value.session_id, work_dir: value.work_dir, trace_head: value.trace_head,
-      input_ack_seq: value.input_ack_seq, delivered_message_ids: [...value.delivered_message_ids] };
+      input_ack_seq: value.input_ack_seq, delivered_message_ids: [...value.delivered_message_ids],
+      ...(value.question_ids ? { question_ids: [...value.question_ids] } : {}) };
   }
 }

@@ -23,7 +23,7 @@ export interface ScmMonitorRule {
 }
 export const SCM_MONITOR_RULES: readonly ScmMonitorRule[] = [
   { effectType: "monitor_head", matches: e => e.type === "change.updated" || e.type === "change.opened" },
-  { effectType: "monitor_checks", matches: e => e.type === "pipeline.completed" || e.type === "change.updated" || e.type === "change.opened" },
+  { effectType: "monitor_checks", matches: e => e.type === "pipeline.started" || e.type === "pipeline.completed" || e.type === "change.updated" || e.type === "change.opened" },
   { effectType: "monitor_review", matches: e => e.type === "review.submitted" || e.type === "review.dismissed" },
 ];
 
@@ -67,8 +67,8 @@ export class ScmMonitor {
         WHERE w.change_request_id = ? AND w.active = 1 AND s.issue_id IS NOT NULL`).all(change.id, change.id) as Row[];
       for (const rule of this.rules.values()) {
         if (rule.targets || !rule.matches(event)) continue;
-        for (const target of targets) this.insertEffect(event.id, target.issue_id, rule.effectType,
-          { changeRequestId: change.id }, now, `${rule.effectType}:${event.id}:${target.issue_id}`);
+        for (const target of targets) this.insertEffect(event.id, target.issue_id, `${rule.effectType}:${change.id}`,
+          { changeRequestId: change.id }, now, `${rule.effectType}:${event.id}:${target.issue_id}:${change.id}`);
       }
     }
   }
@@ -86,30 +86,36 @@ export class ScmMonitor {
     for (let i = 0; i < limit; i++) {
       const token = randomUUID();
       const types = [...this.rules.keys(), "monitor_capacity"];
+      // Retain legacy unsuffixed rows; scoped types also satisfy the original
+      // UNIQUE(event_id, issue_id, effect_type) without changing merge-effect identity.
+      const typeFilter = types.map(() => "(effect_type = ? OR substr(effect_type, 1, ?) = ?)").join(" OR ");
+      const typeParams = types.flatMap(type => [type, type.length + 1, type + ":"]);
       const effect = this.ctx.db.query(`UPDATE multiremi_scm_effects SET status = 'processing',
         lease_token = ?, lease_until = ?, attempt_count = attempt_count + 1
-        WHERE id = (SELECT id FROM multiremi_scm_effects WHERE effect_type IN (${types.map(() => "?").join(",")})
+        WHERE id = (SELECT id FROM multiremi_scm_effects WHERE (${typeFilter})
           AND ((status = 'pending' AND available_at <= ?) OR (status = 'processing' AND lease_until <= ?))
           ORDER BY available_at, id LIMIT 1)
         AND ((status = 'pending' AND available_at <= ?) OR (status = 'processing' AND lease_until <= ?)) RETURNING *`).get(
-        token, new Date(Math.max(Date.now(), now.getTime()) + 120_000).toISOString(), ...types, now.toISOString(), now.toISOString(), now.toISOString(), now.toISOString()) as Row | null;
+        token, new Date(Math.max(Date.now(), now.getTime()) + 120_000).toISOString(), ...typeParams, now.toISOString(), now.toISOString(), now.toISOString(), now.toISOString()) as Row | null;
       if (!effect) break;
       try {
         await this.execute(effect, token, now);
       } catch (error) {
         if (isDatabaseConnectionError(error)) throw error;
+        const failedAt = Math.max(Date.now(), now.getTime());
         const delay = error instanceof ScmHttpError && error.rateLimited
-          ? Math.max(60_000, (error.retryAfterSeconds ?? 0) * 1000, (error.rateLimitResetAt ?? 0) * 1000 - now.getTime())
+          ? Math.max(60_000, (error.retryAfterSeconds ?? 0) * 1000, (error.rateLimitResetAt ?? 0) * 1000 - failedAt)
           : Math.min(300_000, 1000 * 2 ** Math.min(effect.attempt_count, 9));
         // Never serialize provider response bodies or credential errors into the outbox.
         this.ctx.db.run(`UPDATE multiremi_scm_effects SET status = 'pending', lease_token = NULL, lease_until = NULL,
           available_at = ?, last_error = ? WHERE id = ? AND lease_token = ?`,
-        [new Date(now.getTime() + delay).toISOString(), error instanceof ScmHttpError ? `SCM HTTP ${error.status}; retry scheduled` : "SCM monitor failed; retry scheduled", effect.id, token]);
+        [new Date(failedAt + delay).toISOString(), error instanceof ScmHttpError ? `SCM HTTP ${error.status}; retry scheduled` : "SCM monitor failed; retry scheduled", effect.id, token]);
       }
     }
   }
 
-  private async execute(effect: Row, token: string, now: Date): Promise<void> {
+  private async execute(storedEffect: Row, token: string, now: Date): Promise<void> {
+    const effect: Row = { ...storedEffect, effect_type: storedEffect.effect_type.split(":")[0] };
     const payload = JSON.parse(effect.payload);
     const initial = typeof payload.changeRequestId === "string" ? this.scm.getChangeRequest(payload.changeRequestId) : null;
     const event = this.scm.getCanonicalEvent(effect.event_id)!;
@@ -182,7 +188,7 @@ export class ScmMonitor {
         } else if (pending || summary.conclusion === "pending") {
           const issue = this.ctx.issues().getIssue(effect.issue_id);
           const config = issue?.projectId ? this.projectConfig(issue.projectId) : { pendingTimeoutSeconds: 2700 };
-          this.insertEffect(event.id, effect.issue_id, "monitor_capacity", { changeRequestId: change.id, headSha: summary.headSha },
+          this.insertEffect(event.id, effect.issue_id, `monitor_capacity:${change.id}`, { changeRequestId: change.id, headSha: summary.headSha },
             new Date(now.getTime() + config.pendingTimeoutSeconds * 1000), `capacity:${change.id}:${effect.issue_id}:${summary.headSha}`);
         } else if (summary.conclusion === "success" || summary.conclusion === "failure") {
           const failed = summary.checks.filter(c => ["failure", "error", "timed_out", "action_required", "stale", "startup_failure"].includes(c.conclusion ?? ""));

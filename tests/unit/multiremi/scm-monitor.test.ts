@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { createLocalStore, createResponsibleTestIssue, db, resetMultiremiTestEnv } from "./helpers.js";
 
@@ -31,7 +31,7 @@ function setup() {
   const cr = db!.query("SELECT id FROM multiremi_scm_change_requests WHERE number = 42").get() as { id: string };
   store.linkScmChangeRequestToIssue(issue.id, cr.id);
   let sequence = 0;
-  function event(sha = head, type: "pipeline.completed" | "change.updated" | "review.submitted" | "review.dismissed" | "change.closed" = "pipeline.completed", extra: Record<string, unknown> = {}) {
+  function event(sha = head, type: "pipeline.started" | "pipeline.completed" | "change.updated" | "review.submitted" | "review.dismissed" | "change.closed" = "pipeline.completed", extra: Record<string, unknown> = {}) {
     sequence++;
     return store.recordScmCanonicalEvent({ workspaceId: "local", connectionId: connection.id, repositoryId: "repo_test", type,
       subjectType: type.startsWith("review") ? "review" : type.startsWith("change") ? "change_request" : "pipeline",
@@ -47,7 +47,7 @@ function setup() {
     if (url.includes("/statuses")) return Response.json([]);
     if (url.includes("/actions/runs")) return Response.json({ workflow_runs: observed.workflows.map(c => ({ ...c, head_sha: observed.sha })) });
     observed.pullReads++;
-    return Response.json({ id: 9001, number: 42, title: "PR", state: "open", head: { sha: observed.moveDuringRead && observed.pullReads % 2 === 0 ? nextHead : observed.sha, ref: "feature" }, base: { sha: "b".repeat(40), ref: "main", repo: { full_name: "acme/widgets" } } });
+    return Response.json({ id: url.includes("/pulls/43") ? 9002 : 9001, number: url.includes("/pulls/43") ? 43 : 42, title: "PR", state: "open", head: { sha: observed.moveDuringRead && observed.pullReads % 2 === 0 ? nextHead : observed.sha, ref: "feature" }, base: { sha: "b".repeat(40), ref: "main", repo: { full_name: "acme/widgets" } } });
   }, { preconnect: originalFetch.preconnect }) as typeof fetch;
   function messages(sessionId = session.id) {
     return (db!.query("SELECT * FROM multiremi_conversation_log WHERE session_id = ? AND sender_type = 'platform' AND dedupe_key LIKE 'checks:%'").all(sessionId) as Record<string, any>[]);
@@ -100,11 +100,11 @@ describe("SCM monitor outbox (real SQLite/Inbox, mock GitHub)", () => {
     f.observed.workflows = [{ id: 9, name: "workflow", status: "queued", conclusion: null }];
     f.observed.jobs = [{ id: 21, name: "linux", status: "queued", runner_id: assigned ? 88 : 0, runner_name: assigned ? "runner" : "", html_url: "https://github.com/acme/widgets/actions/runs/9/job/21" }];
     f.event(); f.event(); await f.dispatch();
-    expect(db!.query("SELECT id FROM multiremi_scm_effects WHERE effect_type = 'monitor_capacity'").all()).toHaveLength(1);
+    expect(db!.query("SELECT id FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_capacity%'").all()).toHaveLength(1);
     expect(db!.query("SELECT id FROM multiremi_conversation_log WHERE dedupe_key LIKE 'capacity:%'").all()).toHaveLength(0);
     await f.store.processScmMonitorEffects(new Date(Date.now() + 46 * 60_000));
     expect(db!.query("SELECT body_md FROM multiremi_conversation_log WHERE dedupe_key LIKE 'capacity:%'").all()).toHaveLength(assigned ? 0 : 1);
-    expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type = 'monitor_capacity'").get()).toEqual({ status: "applied" });
+    expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_capacity%'").get()).toEqual({ status: "applied" });
   });
 
   it("ignores the old head's delayed capacity check", async () => {
@@ -124,16 +124,84 @@ describe("SCM monitor outbox (real SQLite/Inbox, mock GitHub)", () => {
 
   it("retains rate-limited effects until provider retry-after and delivers after recovery", async () => {
     const f = setup(); f.observed.limited = true; f.event(); const now = new Date(Date.now() + 10_000); await f.dispatch(now);
-    const effect = db!.query("SELECT * FROM multiremi_scm_effects WHERE effect_type = 'monitor_checks'").get() as any;
+    const effect = db!.query("SELECT * FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_checks%'").get() as any;
     expect(effect.status).toBe("pending"); expect(Date.parse(effect.available_at)).toBe(now.getTime() + 120_000);
     expect(effect.last_error).not.toContain("private"); expect(f.messages()).toHaveLength(0);
     f.observed.limited = false; await f.store.processScmMonitorEffects(new Date(now.getTime() + 120_000)); expect(f.messages()).toHaveLength(1);
   });
 
+  it("calculates relative Retry-After from failure time after earlier work advances the clock", async () => {
+    const f = setup();
+    const start = Date.now() + 10_000;
+    const clock = spyOn(Date, "now").mockReturnValue(start);
+    try {
+      f.event(); f.event();
+      f.store.dispatchPendingScmEvents(new Date(start));
+      const provider = globalThis.fetch;
+      let reads = 0;
+      globalThis.fetch = Object.assign(async (...args: Parameters<typeof fetch>) => {
+        if (++reads === 1) clock.mockReturnValue(start + 180_000);
+        // First effect finishes normally; the next encounters provider throttling.
+        if (f.messages().length) f.observed.limited = true;
+        return provider(...args);
+      }, { preconnect: originalFetch.preconnect }) as typeof fetch;
+      await f.store.processScmMonitorEffects(new Date(start));
+      const rows = db!.query("SELECT available_at FROM multiremi_scm_effects WHERE status = 'pending' AND effect_type LIKE 'monitor_checks%'").all() as any[];
+      expect(rows).toHaveLength(1);
+      expect(Date.parse(rows[0].available_at)).toBe(start + 300_000);
+    } finally { clock.mockRestore(); }
+  });
+
+  it("registers capacity from pipeline.started after an earlier missing-check observation", async () => {
+    const f = setup(); f.observed.checks = [];
+    f.event(head, "change.updated"); await f.dispatch();
+    expect(f.messages()).toHaveLength(0);
+    expect(db!.query("SELECT id FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_capacity%'").all()).toHaveLength(0);
+    f.observed.workflows = [{ id: 9, name: "workflow", status: "queued", conclusion: null }];
+    f.observed.jobs = [{ id: 21, name: "linux", status: "queued", runner_id: 0, runner_name: "" }];
+    f.event(head, "pipeline.started"); f.event(head, "pipeline.started"); await f.dispatch();
+    expect(db!.query("SELECT id FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_capacity%'").all()).toHaveLength(1);
+    await f.store.processScmMonitorEffects(new Date(Date.now() + 46 * 60_000));
+    expect(db!.query("SELECT body_md FROM multiremi_conversation_log WHERE dedupe_key LIKE 'capacity:%'").all()).toHaveLength(1);
+    expect(f.messages()).toHaveLength(0);
+  });
+
+  it("delivers both PRs sharing an event/head/Issue and expires both settled watches", async () => {
+    const f = setup();
+    f.store.advanceScmEntitySnapshot({ connectionId: f.connection.id, repositoryId: "repo_test",
+      entityType: "change_request", externalId: "9002", revisionAt: new Date().toISOString(), revision: "1", contentHash: "second",
+      payload: { id: "9002", number: 43, title: "Same head, other base", state: "open", head_sha: head,
+        base_sha: "b".repeat(40), url: "https://github.com/acme/widgets/pull/43" } });
+    const second = db!.query("SELECT id FROM multiremi_scm_change_requests WHERE number = 43").get() as any;
+    f.store.linkScmChangeRequestToIssue(f.issue.id, second.id);
+    f.observed.checks[0]!.status = "queued"; f.observed.checks[0]!.conclusion = null;
+    f.event(head, "pipeline.started"); await f.dispatch();
+    expect(db!.query("SELECT id FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_capacity%'").all()).toHaveLength(2);
+    f.observed.checks[0]!.status = "completed"; f.observed.checks[0]!.conclusion = "success";
+    for (const number of [42, 43]) f.store.setScmWatch("local", "repo_test", number, f.session.id, "settled", true);
+    f.event(); await f.dispatch();
+    expect(f.messages()).toHaveLength(2);
+    expect(f.messages().map(m => m.dedupe_key).sort()).toEqual([
+      `checks:repo_test#42@${head}:success`, `checks:repo_test#43@${head}:success`,
+    ]);
+    expect(db!.query("SELECT concluded_head FROM multiremi_scm_monitor_heads").all()).toHaveLength(2);
+    for (const number of [42, 43]) expect(f.store.listScmWatches("local", "repo_test", number)).toHaveLength(0);
+  });
+
+  it("continues draining legacy unsuffixed monitor rows", async () => {
+    const f = setup(); f.event();
+    const now = new Date(Date.now() + 10_000);
+    f.store.dispatchPendingScmEvents(now);
+    db!.run("UPDATE multiremi_scm_effects SET effect_type = 'monitor_checks' WHERE effect_type LIKE 'monitor_checks:%'");
+    await f.store.processScmMonitorEffects(now);
+    expect(f.messages()).toHaveLength(1);
+    expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type = 'monitor_checks'").get()).toEqual({ status: "applied" });
+  });
+
   it("retries a changing live head and reclaims an expired effect lease", async () => {
     const f = setup(); f.observed.moveDuringRead = true; f.event(); await f.dispatch();
     expect(f.messages()).toHaveLength(0);
-    expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type = 'monitor_checks'").get()).toEqual({ status: "pending" });
+    expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_checks%'").get()).toEqual({ status: "pending" });
     f.observed.moveDuringRead = false;
     db!.run("UPDATE multiremi_scm_effects SET status = 'processing', lease_token = 'old-worker', lease_until = ?", [new Date(Date.now() - 1000).toISOString()]);
     await f.store.processScmMonitorEffects(new Date(Date.now() + 60_000)); expect(f.messages()).toHaveLength(1);
@@ -200,7 +268,7 @@ describe("SCM monitor outbox (real SQLite/Inbox, mock GitHub)", () => {
     expect(f.messages()).toHaveLength(1);
     unblock(); await oldWorker;
     expect(f.messages()).toHaveLength(1);
-    expect(db!.query("SELECT status, lease_token FROM multiremi_scm_effects WHERE effect_type = 'monitor_checks'").get()).toEqual({ status: "applied", lease_token: null });
+    expect(db!.query("SELECT status, lease_token FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_checks%'").get()).toEqual({ status: "applied", lease_token: null });
   });
 
   it("lets later rules register effects with a fenced transactional commit", async () => {
@@ -209,7 +277,7 @@ describe("SCM monitor outbox (real SQLite/Inbox, mock GitHub)", () => {
       prepare: async () => () => { db!.run("UPDATE multiremi_issues SET title = ? WHERE id = ?", ["Extension committed", f.issue.id]); } });
     f.event(head, "review.dismissed", { commit_sha: head }); await f.dispatch();
     expect(f.store.getIssue(f.issue.id)?.title).toBe("Extension committed");
-    expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type = 'monitor_extension'").get()).toEqual({ status: "applied" });
+    expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_extension%'").get()).toEqual({ status: "applied" });
   });
 
   it("supports explicit targets for rules on events without a PR", async () => {
@@ -222,7 +290,7 @@ describe("SCM monitor outbox (real SQLite/Inbox, mock GitHub)", () => {
       payload: { head_sha: head }, evidence: { source: "webhook", dedupeKey: "branch-extension" } });
     await f.dispatch();
     expect(f.store.getIssue(f.issue.id)?.title).toBe("Branch extension committed");
-    expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type = 'monitor_branch_extension'").get()).toEqual({ status: "applied" });
+    expect(db!.query("SELECT status FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_branch_extension%'").get()).toEqual({ status: "applied" });
   });
 
   it("uses the project timeout for the first pending effect", async () => {
@@ -233,7 +301,7 @@ describe("SCM monitor outbox (real SQLite/Inbox, mock GitHub)", () => {
     expect(() => f.store.scmMonitorProjectConfig(project.id, 1)).toThrow();
     f.observed.checks[0]!.status = "queued"; f.observed.checks[0]!.conclusion = null;
     const now = new Date(Date.now() + 10_000); f.event(); await f.dispatch(now);
-    expect((db!.query("SELECT available_at FROM multiremi_scm_effects WHERE effect_type = 'monitor_capacity'").get() as any).available_at).toBe(new Date(now.getTime() + 60_000).toISOString());
+    expect((db!.query("SELECT available_at FROM multiremi_scm_effects WHERE effect_type LIKE 'monitor_capacity%'").get() as any).available_at).toBe(new Date(now.getTime() + 60_000).toISOString());
   });
 
   it("offers authenticated watch and health HTTP APIs", async () => {

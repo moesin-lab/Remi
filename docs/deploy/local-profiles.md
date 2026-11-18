@@ -364,8 +364,9 @@ node scripts/local-profile.mjs stable prune-releases --dry-run
 node scripts/local-profile.mjs stable prune-releases
 ```
 
-只删除完整小写 40 位 SHA 命名的目录或 `<sha>.tar`，真实路径必须仍在
-`releases/` 内。手工命名目录始终保留。保留 active、deployment、compose.env
+只删除完整小写 40 位 SHA 命名的真实目录或 `<sha>.tar` 普通文件，真实路径必须仍在
+`releases/` 内。符号链接（包括指向 releases 内部的链接）不进入 dry-run 或实际删除计划；
+手工命名目录始终保留。保留 active、deployment、compose.env
 引用的源码，以及 running / recovery_required 宿主操作 previous / candidate
 快照引用的源码。另按备份目录时间名倒序保留最新 3 个不同 ref 的源码；
 `REMI_RELEASES_KEEP` 可设为非负整数覆盖此数量（0 表示不额外保留备份 ref）。

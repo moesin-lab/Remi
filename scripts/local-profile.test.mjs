@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { redactor } from './proxy-command.mjs';
 import { createHash, createHmac } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, lstatSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import test from 'node:test';
@@ -1349,12 +1349,42 @@ test('prune protects active, both candidates, in-flight snapshots and latest dis
   assert.ok(existsSync(source('manual-release')));
 });
 
+test('prune excludes internal SHA and tar symlinks and mismatched entry types from its plan', (t) => {
+  const f = fixture(t); f.activate();
+  const releases = join(f.profileRoot(), 'releases');
+  const manual = join(releases, 'manual-release'); mkdirSync(manual);
+  const archive = join(releases, 'manual.tar'); writeFileSync(archive, 'keep');
+  const directoryLink = join(releases, 'f'.repeat(40));
+  const archiveLink = join(releases, `${'e'.repeat(40)}.tar`);
+  symlinkSync(manual, directoryLink, 'dir');
+  symlinkSync(archive, archiveLink, 'file');
+  const shaFile = join(releases, 'd'.repeat(40)); writeFileSync(shaFile, 'keep');
+  const tarDirectory = join(releases, `${'c'.repeat(40)}.tar`); mkdirSync(tarDirectory);
+  // Include eligible garbage so preservation cannot pass by skipping all cleanup.
+  const obsolete = join(releases, NEW_REF); mkdirSync(obsolete);
+  const dry = f.run('stable', 'prune-releases', { args: ['--dry-run'] }); succeeds(dry);
+  assert.ok(dry.stdout.includes(`Would remove release: ${obsolete}`));
+  for (const path of [directoryLink, archiveLink, shaFile, tarDirectory]) assert.ok(!dry.stdout.includes(path));
+  assert.ok(existsSync(obsolete));
+  succeeds(f.run('stable', 'prune-releases'));
+  assert.ok(!existsSync(obsolete));
+  assert.ok(lstatSync(directoryLink).isSymbolicLink());
+  assert.ok(lstatSync(archiveLink).isSymbolicLink());
+  assert.equal(readFileSync(shaFile, 'utf8'), 'keep');
+  assert.ok(lstatSync(tarDirectory).isDirectory());
+  assert.ok(existsSync(manual));
+  assert.equal(readFileSync(archive, 'utf8'), 'keep');
+});
+
 test('prune refuses escaping release symlinks and preserves outside files', (t) => {
   const f = fixture(t); f.activate();
   const outside = join(f.root, 'outside'); mkdirSync(outside); writeFileSync(join(outside, 'sentinel'), 'keep');
-  symlinkSync(outside, join(f.profileRoot(), 'releases', NEW_REF), 'dir');
+  const link = join(f.profileRoot(), 'releases', NEW_REF);
+  symlinkSync(outside, link, 'dir');
+  const dry = f.run('stable', 'prune-releases', { args: ['--dry-run'] }); succeeds(dry);
+  assert.ok(!dry.stdout.includes(link));
   const result = f.run('stable', 'prune-releases'); succeeds(result);
-  assert.match(result.stderr, /Release pruning failed: Release path escapes/);
+  assert.ok(lstatSync(link).isSymbolicLink());
   assert.equal(readFileSync(join(outside, 'sentinel'), 'utf8'), 'keep');
 });
 

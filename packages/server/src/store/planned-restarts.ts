@@ -168,6 +168,10 @@ export class PlannedRestarts {
     if (!this.ctx.db.inTransaction) throw new Error("Execution generation requires the caller transaction and workspace/lane locks");
     if (generation !== undefined && (!Number.isSafeInteger(generation) || generation < 0)) throw new PlannedRestartError("stale_execution");
     const current = this.get(attemptId);
+    this.assertExecution(current, generation);
+  }
+
+  private assertExecution(current: PlannedRestartHandoff | null, generation: number | undefined): void {
     if (!current) {
       if ((generation ?? 0) !== 0) throw new PlannedRestartError("stale_execution");
       return;
@@ -180,8 +184,17 @@ export class PlannedRestarts {
     return this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(scope.workspaceId);
       if (generation !== undefined && (!Number.isSafeInteger(generation) || Number(generation) < 0)) throw new PlannedRestartError("stale_execution");
-      if (this.get(attemptId)) this.lock(attemptId, scope);
-      this.assertExecutionWithinTransaction(attemptId, generation as number | undefined);
+      const current = this.get(attemptId);
+      if (current) {
+        this.lock(attemptId, scope);
+        // Re-read after the lane lock. A handoff may have advanced while
+        // acquiring it; the earlier observation is not execution authority.
+        this.assertExecutionWithinTransaction(attemptId, generation as number | undefined);
+      } else {
+        // request() needs this same workspace lock to insert the first handoff.
+        // Absence stays valid until commit; avoid an identical second SELECT.
+        this.assertExecution(null, generation as number | undefined);
+      }
       return write();
     })();
   }

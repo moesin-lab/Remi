@@ -65,6 +65,21 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     expect(() => x.f.transaction(() => x.planned().assertExecutionWithinTransaction(x.task.id, 0))).not.toThrow();
   });
 
+  it("fences transport writes before and after the first handoff", () => {
+    const x = setup();
+    let writes = 0;
+    const write = (generation?: number) => x.planned().withExecution(x.task.id, generation, x.scope, () => ++writes);
+    expect(write()).toBe(1);
+    expect(() => write(1)).toThrow("stale_execution");
+    const h = x.suspend();
+    expect(() => write(0)).toThrow("stale_execution");
+    x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+    x.planned().resume(x.task.id, h.handoff_id, "transport-write-consumer", x.scope, () => {});
+    expect(() => write(0)).toThrow("stale_execution");
+    expect(write(1)).toBe(2);
+    expect(writes).toBe(2);
+  });
+
   it("persists the same attempt without spending its last retry or changing visible status", () => {
     const x = setup();
     const before = x.f.db.query("SELECT * FROM multiremi_turn_attempts WHERE id=?").get(x.task.id);

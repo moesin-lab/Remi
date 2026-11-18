@@ -1,3 +1,4 @@
+import { currentBackgroundTerm, StaleLiveTermError } from "@shared/db/live-term.js";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
@@ -133,7 +134,9 @@ export class ControlPlaneSshMeshReconciler implements ControlPlaneSshMeshLifecyc
     if (this.loop) return true;
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
-    this.loop = this.acquireAndRun(signal).finally(() => {
+    this.loop = this.acquireAndRun(signal).catch(error => {
+      if (!(error instanceof StaleLiveTermError)) throw error;
+    }).finally(() => {
       if (this.abortController?.signal === signal) this.abortController = null;
       this.loop = null;
     });
@@ -193,6 +196,7 @@ export class ControlPlaneSshMeshReconciler implements ControlPlaneSshMeshLifecyc
   private async run(signal: AbortSignal): Promise<void> {
     let failures = 0;
     while (!signal.aborted) {
+      currentBackgroundTerm()?.assertCurrent();
       const succeeded = await this.reconcileOnce(signal);
       if (signal.aborted) return;
       failures = succeeded ? 0 : failures + 1;

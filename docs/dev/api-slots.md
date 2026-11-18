@@ -48,9 +48,25 @@ WebSocket 关闭握手最多等待 1 秒，未确认的连接随后断开，避�
 
 Bun 1.3.14 在服务端关闭 WebSocket 后可能保留 `pendingWebSockets` 计数，使原生 `stop(false)` 的 Promise 不结束。监听已停止且所有跟踪的 WebSocket 已关闭时，最终停机改为等待实际 HTTP 响应与 `pendingRequests` 清零；总预算内仍等待 HTTP，超过预算由 CLI 终止整个进程。回归测试同时验证停机后原端口可重新绑定。
 
-`slotFence` 是 A3 注入 live term 的异步钩子；A2 默认 `term:null`，没有实现持久化 term 或后台写入 fencing。supervisor 的顺序、路由切换及回滚由 A4 负责：release A 后 activate B；若 B 失败，可重新 activate A。
+Phase A 的 `all` 角色、无 peer 且开启 backgroundJobs 时，激活持有角色锁后，在 `multiremi_live_terms` 的 `background_jobs` 行递增 BIGINT term 并记录 slot。`slotFence` 可选钩子在递增前运行，用于附加激活检查；状态与 readyz 中的 `term` 是数据库返回的十进制字符串，避免 JavaScript 整数精度损失。同一拓扑不设 slot 时也激活同一张表，holder 为 `single:<pid>`。关闭 backgroundJobs 的只读候选以及 ui/runtime/peer 拆分拓扑沿用原路径，不获取此 singleton term。
+
+[LiveTermFence](../../packages/server/src/store/live-term-fence.ts) 为每次激活生成独立上下文，后台定时器及异步续体继承原 term。daemon offer 的 hello、heartbeat、队列事件、回复及重试/撤回定时器显式绑定 `offers.start()` 捕获的激活代，准备完成后在发送前重查；旧代回调不能借用重新启动后的新代。每次 retry loop/job tick 都查询当前 term；Store 的 SQL 边界还在事务中执行带 term 条件的行锁 UPDATE，并持锁到业务操作提交。新 activate 必须更新同一行，所以它与已经进入事务的后台写入互斥；接管后的旧续体即使越过 tick 检查，也不能写入。事务锁顺序为 fence → workspace → number → domain。该保护覆盖 claim、autopilot run 创建、trigger 推进，以及 capability sweep 和排队 schedule target 推进，手动 HTTP 操作不继承后台上下文。
+
+term 不匹配时将原上下文永久失效、记录错误并停止全部后台任务，slot 进入 failed；需先 release，再 activate 创建新 term。单进程失效后需重启。数据库不可达时当前 tick 不执行副作用，沿用数据库恢复退避，不把连接失败误报为 term 变更。title 模型等外部请求可能已在接管前发出，返回后的 SQL 仍受 fence；外部服务本身不支持数据库 fence，wiki/SSH 等只保证下一次操作入口重新检查，并沿用已有 lease/owner lock。
+
+`recoverLostScheduleTriggers` 在激活后的首次 scheduler tick 执行；同一个串行 tick 在连接失败后退出，下一次重试恢复遗留的整个 claim 批次（跳过丢失的 occurrence，重新计算下次执行时间），不要求重新激活。恢复与后续 SQL 仍携带原 term；接管后旧代无法重新武装新代的在途 claim。后台数据库操作会额外执行 term 校验并短暂持有共享 fence 行的写锁，尚未做生产负载基准。supervisor 的顺序、路由切换及回滚由 A4 负责：release A 后 activate B；若 B 失败，可重新 activate A。
+
+共享行锁负载按「最外层 guarded SQL/事务」计数，事务内嵌套 SQL 复用同一次 fence 锁。Linux/Bun 1.3.14、SQLite 空闲 Store 的 100 tick 探针记录 scheduler 600 次、title 200 次、OpenViking 模式 wiki 200 次 fence UPDATE（总耗时分别约 203/33/24 ms，包含业务 SQL）。按默认 30 s / 900 s / 5 s 周期，这三项空闲基线约为 `6/30 + 2/900 + 2/5 = 0.602` 次 UPDATE/s；SCM、messaging、capability sweep、notification 与事件 offer 需另加，不能把此数当作 stable 全量。业务事件负载按每次事件的最外层 SQL/事务数线性增加；锁占用率近似为 UPDATE/s × 平均持锁秒数，持锁时间包含业务事务。共享行会串行化后台事务并产生 PostgreSQL WAL/死元组；上述本地探针只测调用数量与 SQLite 时间，没有测真实 PG 持锁延迟、WAL 或生产吞吐，不构成容量验收。Phase C 的任务 lease 迁移不在本次范围内。
 
 ## 验证入口
+
+[scheduler 断连恢复回归](../../tests/unit/multiremi/scheduler-claim-recovery.test.ts)覆盖带/不带 term 的单条和批量 trigger/provision，在 dispatch/enqueue 提交前后断连后由同一 scheduler 恢复。
+[offer 代号回归](../../tests/unit/multiremi/daemon-task-offers.test.ts)覆盖 hello 的暂停 prepare、发送期间接管后的 SQL 拒写、手动时钟触发的旧代 retry/rescind，以及重新启动后拒绝旧回调。
+[live term 回归](../../tests/unit/multiremi/live-term-fence.test.ts)覆盖 A/B 接管、prepared SQL、暂停的异步续体、Cron/title/wiki 无写入、trigger 单次运行、后台停止及重新激活。
+[PG 双进程回归](../../tests/integration/live-term-fence.test.ts)在配置 `MULTIREMI_TEST_POSTGRES_URL` 后检查接管被旧事务的行锁阻塞、提交后新进程写入，以及旧进程续体被拒绝；没有测试 PG 时明确跳过。
+锁等待观测在每次事务内轮询前调用 `pg_stat_clear_snapshot()`，避免 PostgreSQL 统计快照缓存隐藏后连接的接管进程。
+offer 回归同时覆盖无 term 与已激活 term 的接受/拒绝落库，以及接管后旧 term 的显式 SQL 拒写；默认无 slot 服务另行断言先激活 `single:<pid>` term。
+共享的 [offer 测试传输](../../tests/fixtures/task-offer.ts)须在生产 reply hook 完成后才停止任务，`runtime.ready` 也须在 offers 启动期间处理；停止后的事件会被生命周期守卫忽略。
 
 [PG deadline 事务清理回归](../../tests/integration/postgres-deadline-cleanup.test.ts)覆盖 worker 查询超时及语句之间预算过期，检查后续查询、事务状态、未提交写入、锁释放和独立进程接管，并覆盖嵌套事务与 savepoint 清理；测试专用 PG 协议代理把 ROLLBACK / ROLLBACK TO / RELEASE 替换为被观察连接 advisory lock 持续阻塞的真实 SQL，验证 cleanup 超时返回、旧 backend 消失、锁归零和独立进程取得角色锁并写入；需要隔离的 `MULTIREMI_TEST_POSTGRES_URL`。
 

@@ -1,3 +1,5 @@
+import { withBackgroundTerm } from "@shared/db/live-term.js";
+import type { LiveTermFence } from "../store/live-term-fence.js";
 import { API_SHUTDOWN_TIMEOUT_MS, DrainTimeoutError, SlotLifecycle, resolveSlotConfiguration, type SlotConfiguration } from "./slot-lifecycle.js";
 import { startHubRoleGuard, locksForRole } from "./hub/hub-role-guard.js";
 import { reconcileCurrentDaemonBuild } from "../releases/current-daemon-build.js";
@@ -1230,7 +1232,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   });
   const daemonTurnBridge = options.daemonTurnBridge ?? store.getDaemonTurnBridge();
   const offerProjectKnowledge = options.projectKnowledge ?? createProjectKnowledgeServiceFromEnv(store);
-  const offers = new DaemonTaskOffers({ store, layer: daemonProtocol, autostart: !slotConfiguration, sweepMs: options.daemonOfferSweepMs, clock: options.daemonWorkClock,
+  const offers = new DaemonTaskOffers({ store, layer: daemonProtocol, autostart: false, sweepMs: options.daemonOfferSweepMs, clock: options.daemonWorkClock,
     prepare: (task, supportsWikiFetch) => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki,
       supportsWikiFetch, daemonTurnBridge.offerInput(task)),
     onRuntimeReady: (rt, ids) => downlinks.runtimeReady(rt, ids) });
@@ -1323,7 +1325,23 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       runtimeWorkspace: runtimeWorkspaceLookup() }),
   });
   const transportSockets = new Set<Bun.ServerWebSocket<MultiremiWebSocketData>>();
-  const startJobs = () => {
+  let liveTerm: LiveTermFence | undefined;
+  const activateTerm = () => {
+    // Phase A covers the unsplit all-role topology. Read-only candidates and
+    // existing peer/ui/runtime deployments must not steal its singleton term.
+    if (!backgroundJobs || effectiveApiRole !== "all" || peer) return null;
+    const activated = store.activateBackgroundTerm(slotConfiguration?.id ?? `single:${process.pid}`, () => {
+      // A late continuation from a released generation cannot stop its successor.
+      if (liveTerm !== activated) return;
+      log.error("Background live term lost; stopping all jobs until next activation");
+      if (slot && (slot.state === "active" || slot.state === "draining")) slot.state = "failed";
+      queueMicrotask(() => { void stopJobs().catch(error => log.error("Failed to stop fenced jobs", error)); });
+    });
+    liveTerm = activated;
+    return activated.term;
+  };
+  const startJobs = () => withBackgroundTerm(liveTerm, () => {
+    liveTerm?.assertCurrent();
     offers.start();
     scheduler?.start();
     scmPolling?.start();
@@ -1338,7 +1356,8 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       try { reconcileCurrentDaemonBuild(store); }
       catch { log.warn("startup daemon build reconciliation failed; updater heartbeat may retry"); }
     }
-  };
+    liveTerm?.assertCurrent();
+  });
   const stopJobs = async () => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -1378,7 +1397,11 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       if (!guard) throw new Error("hub role lock could not be acquired");
       return guard;
     },
-    pendingRequests, fence: options.slotFence, start: startJobs, stop: stopJobs, disconnect,
+    pendingRequests, fence: async signal => {
+      const injected = await options.slotFence?.(signal);
+      signal.throwIfAborted();
+      return activateTerm() ?? injected ?? null;
+    }, start: startJobs, stop: stopJobs, disconnect,
   }) : null;
   const requestLifecycle = slot ?? new SlotLifecycle({ id: "", start: "active", controlToken: "", lockTimeoutMs: 0, drainTimeoutMs: 20_000 }, multiremiVersion, {
     pendingRequests, acquire: async () => ({ close: async () => {} }), start: () => {}, stop: stopJobs, disconnect,
@@ -1661,7 +1684,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   serverWithResync.slotStartup = slot
     ? (slotConfiguration!.start === "active" ? slot.activate().catch(() => { log.error("slot activation failed; control listener remains available"); }) : Promise.resolve())
     : Promise.resolve();
-  if (!slot) startJobs();
+  if (!slot) { activateTerm(); startJobs(); }
   let shutdown: Promise<void> | undefined;
   serverWithResync.shutdown = () => shutdown ??= (async () => {
     let timer: ReturnType<typeof setTimeout> | undefined;

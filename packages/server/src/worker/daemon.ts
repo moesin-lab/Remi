@@ -1,3 +1,5 @@
+import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution } from "./planned-restart-journal.js";
+import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
 import { resolveCoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
 import { performUpdate } from "@shared/cli-update.js";
@@ -1280,6 +1282,10 @@ export class MultiremiDaemon {
   private inflight = new Set<Promise<void>>();
   private activeTaskIds = new Set<string>();
   private activeTaskAborts = new Set<AbortController>();
+  private readonly taskAbortsById = new Map<string, AbortController>();
+  private readonly restartExecutions = new Map<string, RestartExecution>();
+  private restartJournal: PlannedRestartJournal | null = null;
+  private restartTransfer: PlannedRestartTransfer | null = null;
   private claimsPaused = false;
   /**
    * Server-driven platform drain. Like a local update claim pause, a drain
@@ -1726,6 +1732,22 @@ export class MultiremiDaemon {
         }
       },
     };
+    // Requests are derived from persisted server handoffs, never a local timer.
+    this.protocolClient.registerFrameHandler("turn.restart", frame => {
+      const p = frame.payload;
+      if (!frame.rt || frame.rt !== this.options.runtimeId || typeof p.attempt_id !== "string"
+        || typeof p.turn_id !== "string" || typeof p.handoff_id !== "string"
+        || !Number.isSafeInteger(p.generation) || Number(p.generation) < 0) return;
+      const abort = this.taskAbortsById.get(p.attempt_id);
+      if (!abort || this.restartExecutions.has(p.attempt_id)) return;
+      this.restartExecutions.set(p.attempt_id, { workspace_id: this.options.workspaceId ?? "local",
+        daemon_id: this.options.daemonId ?? this.options.runtimeName, runtime_id: frame.rt,
+        turn_id: p.turn_id, attempt_id: p.attempt_id, handoff_id: p.handoff_id, generation: Number(p.generation) });
+      // At the deadline a currently running tool may be cancelled and replayed.
+      // runAgent's finally awaits provider.close(), flushes trace and ends reports
+      // before handleTask can create the prepared journal record.
+      abort.abort();
+    });
     this.protocolClient.addLane(this.protocolLane);
     registerDaemonOfferHandler(this.protocolClient, {
       runtimeId: () => this.options.runtimeId,
@@ -2114,6 +2136,9 @@ export class MultiremiDaemon {
         this.traceTransport = null;
         await releaseDaemonTrace(this.protocolClient);
       }
+      this.restartJournal?.close();
+      this.restartJournal = null;
+      this.restartTransfer = null;
       this.stopRepoCheckoutServer();
       // Every task has drained, so no Antigravity server still needs the gateway.
       if (this.ownsAntigravityShim) {
@@ -3976,6 +4001,8 @@ export class MultiremiDaemon {
     log.info(`Claimed task ${task.id}`);
     const abort = new AbortController();
     this.activeTaskAborts.add(abort);
+    this.taskAbortsById.set(task.id, abort);
+    let checkpointRestart: RestartExecution | null = null;
     let serverTerminalStatus: Extract<MultiremiTaskStatus, "completed" | "failed" | "cancelled"> | null = null;
     const stopWatching = this.taskDownlinks.observeCancellation(task.id, (status) => {
       serverTerminalStatus = status;
@@ -4298,6 +4325,19 @@ export class MultiremiDaemon {
         this.finalizeTaskProgress(progressSummarizer, serverTerminalStatus, undefined, task.id);
         return;
       }
+      const restart = this.restartExecutions.get(task.id);
+      if (restart && !timedOut) {
+        checkpointRestart = restart;
+        // runAgent has joined provider shutdown. Preserve the same visible
+        // attempt; a checkpoint failure leaves ordinary crash recovery intact.
+        this.enqueueTaskReport(task.id, "session_pin", {
+          sessionId: err instanceof RunAgentError ? err.sessionId : task.sessionId,
+          workDir: err instanceof RunAgentError ? err.workDir : resolvedWorkDir?.workDir ?? task.workDir,
+        });
+        await progressSummarizer?.closeWithoutSummary();
+        progressSummarizer = null;
+        return;
+      }
       // stop() closes the lane before draining providers. SIGTERM may also
       // terminate ACP children, so Cancelled/EOF here is runtime interruption,
       // not an Agent failure. Keep the report durable: replay must create the
@@ -4340,6 +4380,23 @@ export class MultiremiDaemon {
         finishTracking();
       }
       releaseIssueWorkspaceLifecycle?.();
+      if (checkpointRestart) {
+        try {
+          await this.plannedRestartTransfer().suspend(checkpointRestart, async () => {
+            const drained = await this.ensureOutbox().waitForTaskDrain(task.id, AbortSignal.timeout(this.options.requestTimeoutMs));
+            if (drained !== "delivered") throw new Error(`Planned restart reports not acknowledged: ${drained}`);
+            await this.ensureTrace().streamer.flushTask(task.id, AbortSignal.timeout(this.options.requestTimeoutMs));
+            const result = await this.taskDownlinks.rpc("turn.restart.checkpoint", checkpointRestart! as unknown as Record<string, unknown>, this.options.requestTimeoutMs);
+            const checkpoint = result.checkpoint as PlannedRestartCheckpoint;
+            return { ...checkpoint, trace_head: this.ensureTrace().store.head(task.id)?.head ?? 0 };
+          });
+          log.info(`Task ${task.id} planned restart checkpoint acknowledged`);
+        } catch (error) {
+          log.error(`Task ${task.id} planned restart checkpoint deferred: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      this.taskAbortsById.delete(task.id);
+      this.restartExecutions.delete(task.id);
       this.activeTaskAborts.delete(abort);
       this.activeTaskIds.delete(task.id);
       if (!activeExecutionReleased) {
@@ -4349,6 +4406,20 @@ export class MultiremiDaemon {
       this.taskDownlinks.release(task.id);
       if (timeout) clearTimeout(timeout);
     }
+  }
+
+  private plannedRestartTransfer(): PlannedRestartTransfer {
+    if (this.restartTransfer) return this.restartTransfer;
+    this.restartJournal ??= new PlannedRestartJournal(this.outboxPath === ":memory:" ? ":memory:"
+      : join(dirname(this.legacyOutboxPath), `restart-${this.options.provider}-${createHash("sha256").update(this.legacyOutboxPath).digest("hex").slice(0, 16)}.db`));
+    return this.restartTransfer = new PlannedRestartTransfer(this.restartJournal, {
+      suspend: async entry => {
+        await this.taskDownlinks.rpc("turn.restart.suspend", { ...entry.execution, checkpoint: entry.checkpoint }, this.options.requestTimeoutMs);
+      },
+      // Activation is deliberately fenced until fresh-run authorization and
+      // startup dispatch are wired; a local receipt cannot authorize execution.
+      resume: async () => { throw new Error("Planned restart activation is not enabled"); },
+    });
   }
 
   private async prepareTaskPluginRuntime(

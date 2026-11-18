@@ -12,6 +12,7 @@ export function taskInputSnapshot(store: MultiremiStore, runtimeId: string, daem
   const entities: DaemonDownlinkEntity[] = [];
   const tasks = new Map(store.getTaskIdentities([...ids]).map(task => [task.id, task]));
   const running = new Set<string>();
+  const restarts = store.plannedRestarts().pendingForRuntime(runtimeId);
   for (const id of ids) {
     const task = tasks.get(id);
     if (!task || task.runtimeId !== runtimeId) { forget(id); continue; }
@@ -20,6 +21,12 @@ export function taskInputSnapshot(store: MultiremiStore, runtimeId: string, daem
         payload: { task_id: id, status: task.status }, claimed: () => forget(id), discard: () => forget(id) });
       continue;
     }
+    const restart = restarts.get(id);
+    if (restart?.state === "requested") entities.push({
+      key: `turn.restart:${restart.handoff_id}`, type: "turn.restart",
+      payload: { turn_id: restart.turn_id, attempt_id: id, handoff_id: restart.handoff_id, generation: restart.generation },
+    });
+    if (restart?.state === "suspended" || restart?.state === "resuming") continue;
     running.add(id);
   }
   if (host) {

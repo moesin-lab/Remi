@@ -169,7 +169,7 @@ daemon 会把不可重试 WS 错误持久化为分区 blocked；平台升级后�
 `tests/unit/daemon/cli-update-coordinator.test.ts`、`tests/unit/daemon/cli-update-lifecycle.test.ts`、
 `tests/unit/daemon/update-admission.test.ts`（真实 HTTP result、协议 report handler 和磁盘 outbox）。
 
-## MUL-31：持久化交接存储原语（执行路径尚未接入）
+## MUL-31：同 attempt 交接与 daemon 挂起路径（恢复派发尚未启用）
 
 [planned-restarts.ts](../../packages/server/src/store/planned-restarts.ts) 提供独立于
 Turn/attempt 状态的计划内交接记录。[共享 schema](../../packages/server/src/store/planned-restart-schema.ts)
@@ -187,9 +187,9 @@ trace head 与输入 receipt 引用，不保存凭据、消息正文或 translat
 另一消费者被拒绝。manual/deploy drain 需要先 undrain，CLI owner 的 fence 与平台维护 fence
 同样阻止恢复。generation 检查必须在执行写入的同一事务、持有上述锁时调用。
 
-这些是**尚未接入 daemon 的内部存储原语**，没有新增用户 API/CLI，也没有启用孤儿豁免。
+这些原语已接入下述 daemon 挂起路径，没有新增用户 API/CLI，也没有启用孤儿豁免。
 `reconcileDaemonDrain` 的现有超时行为、`reconcileRuntimeWaits` 的原回调丢失处理仍按上文执行。
-完成续接还需接入 daemon 安全点与本地 journal、服务端报告/输入/trace 的分代授权、恢复派发、
+完成续接还需启动 journal 对账、恢复派发、新执行段用量授权和 daemon 出站 generation、
 Q 重绑定、steer 对账与 translator 状态恢复；飞书补收另需真实入站游标。
 不能仅根据存在 `suspended` 记录改变排空计数或允许更新。
 
@@ -197,7 +197,7 @@ Q 重绑定、steer 对账与 translator 状态恢复；飞书补收另需真实
 （PG 需显式配置）、SQLite 真正 close/open 和双连接消费者、重放、陈旧 generation/fence、
 取消竞争、摘要损坏与事务回滚。它不替代假 provider 的真正进程替换验收。
 
-### daemon 本地交接 journal（运行适配器尚未接入）
+### daemon 挂起：provider 关闭、报告/trace 确认与 journal
 
 [planned-restart-journal.ts](../../packages/server/src/worker/planned-restart-journal.ts) 提供
 `PlannedRestartJournal` 与 `PlannedRestartTransfer`，checkpoint 类型共用于
@@ -213,7 +213,21 @@ resume CAS；丢失恢复响应后仍重用该 consumer，避免重复授权。�
 由子进程测试覆盖。本地 `resumed` receipt 不能代替服务端权威，恢复仍调用服务端 CAS，
 不能据本地文件复活已取消的执行。
 
-该模块尚未被 `daemon.ts` 调用，remote 接口也尚未接入真实协议 RPC。它没有实现 provider
-安全点、恢复派发、报告/输入/trace generation 守卫，因此本节不改变前述排空/orphan 行为。
-验证入口另含 `bun run test tests/unit/daemon/planned-restart-journal.test.ts`；这些是交接组件
-测试，不能代替 MUL-27 隔离候选实例的假 provider 更新验收。
+`taskInputSnapshot` 为已经持久化的 requested handoff 下发 `turn.restart`。daemon 在期限中断点
+abort 当前执行，等待 `runAgent` 的 provider close/trace flush 与工作目录收尾，然后等待 outbox
+和 trace 上传 ACK。`turn.restart.checkpoint` 在服务端锁下返回 session/work_dir/input 水位引用；
+daemon 写 prepared journal 后，通过 `turn.restart.suspend` 提交同一 handoff/generation 的 checkpoint，
+收到提交 ACK 才写 acknowledged。该路径不发送 fail，不关闭轮卡 trace。未确认交接仍遵循普通
+crash 恢复，不能根据本地文件降低 drain 计数。provider 必须服从取消并结束 close；尚未实现
+不响应取消时的期限兜底，所以这里不保证有界重启。
+
+服务端任务报告（用量除外）、turn input/decision/completion 与 trace.append 在执行写入同一事务内
+校验 generation，并与恢复 CAS 共用 workspace→lane 锁。suspended 拒绝执行写入；恢复后旧代与
+遗漏 generation 的帧拒绝。已绑定 usage run 的迟到实际用量保留原会计授权。普通未交接执行继续
+兼容缺省 generation=0。没有启用 daemon 新进程 journal 对账、resume RPC 或新执行段授权；三条
+默认到期路径仍保持原行为，不能将这个切片视为可用的重启续接功能。
+
+验证入口含 `bun run test tests/unit/daemon/planned-restart-journal.test.ts` 与
+`bun run test tests/integration/daemon-protocol-v2/planned-restart.test.ts`。后者运行真实 daemon、
+Bun socket、磁盘 outbox/journal 和假 provider，验证 provider 关闭前没有 checkpoint、真实 RPC 提交
+和 ACK 后 journal，以及旧代报告/输入/trace 拒绝。它不替代 MUL-27 的候选二进制更新验收。

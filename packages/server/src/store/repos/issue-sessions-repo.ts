@@ -17,7 +17,7 @@ import { buildSessionProjection } from "@multiremi/store/session-projection.js";
 import { conversationLogProjectionEvents } from "@multiremi/store/conversation-log-projection.js";
 import { resolveFollowDeltaRatio, resolveFollowTokenLimit, resolveProjectionTokenBudget } from "@multiremi/store/session-projection-budget.js";
 import { createLogger } from "@shared/logger.js";
-import { readAuditedIssueSessionHistory } from "@multiremi/store/issue-session-owner-scope.js";
+import { auditedIssueSessionHistory, issueSessionHistoryFactsSql, type IssueSessionHistoryFact, readAuditedIssueSessionHistory } from "@multiremi/store/issue-session-owner-scope.js";
 import type {
   AddSessionParticipantInput,
   CreateIssueSessionInput,
@@ -453,9 +453,50 @@ export class IssueSessionsRepo {
       LEFT JOIN multiremi_issues issue ON issue.id = scoped.issue_id
       LEFT JOIN multiremi_issue_sessions parent ON parent.id = scoped.parent_session_id
       LEFT JOIN multiremi_conversation_heads head ON head.session_id = scoped.id`).get(id) as Row | null);
+    if (row && (row.chat_id != null || row.issue_id != null)) {
+      seedRequestRead(this.ctx.db, ['multiremi_issue_sessions', 'multiremi_conversation_log'], `session:${id}`, row);
+    }
+    return this.sessionOwnerScope(row);
+  }
+
+  /** Identity-only, fixed two-statement read, including audited retirement after Issue moves. */
+  getIssueSessionOwnerFacts(ids: readonly string[]) {
+    const selected = this.ctx.db.dialect === 'postgres'
+      ? 'SELECT json_array_elements_text(CAST(? AS JSON)) AS id'
+      : 'SELECT value AS id FROM json_each(?)';
+    const rows = this.ctx.db.query(`SELECT s.*, 0 AS inherited_event_count,
+        CASE WHEN s.chat_id IS NOT NULL THEN chat.workspace_id ELSE issue.workspace_id END AS owner_workspace_id,
+        head.workspace_id AS head_workspace_id,
+        CASE WHEN s.parent_session_id IS NULL OR (parent.id IS NOT NULL
+          AND parent.workspace_id = s.workspace_id AND COALESCE(parent.chat_id, '') = COALESCE(s.chat_id, '')
+          AND (s.chat_id IS NOT NULL OR parent.issue_id = s.issue_id)) THEN 1 ELSE 0 END AS parent_owner_valid,
+        CASE WHEN s.chat_id IS NULL AND EXISTS (SELECT 1 FROM multiremi_issue_activity activity
+          WHERE activity.issue_id = s.issue_id AND activity.type = 'issue_main_session_rotated') THEN 1 ELSE 0 END AS has_rotation
+      FROM multiremi_issue_sessions s
+      LEFT JOIN multiremi_chat_sessions chat ON chat.id = s.chat_id
+      LEFT JOIN multiremi_issues issue ON issue.id = s.issue_id
+      LEFT JOIN multiremi_issue_sessions parent ON parent.id = s.parent_session_id
+      LEFT JOIN multiremi_conversation_heads head ON head.session_id = s.id
+      WHERE s.id IN (${selected})`).all(JSON.stringify([...new Set(ids)])) as Row[];
+    const issueIds = [...new Set(rows.filter(row => Number(row.has_rotation) === 1).map(row => String(row.issue_id)))];
+    const factsSql = issueSessionHistoryFactsSql().replaceAll('= ?', `IN (${selected})`);
+    const facts = this.ctx.db.query(factsSql).all(JSON.stringify(issueIds), JSON.stringify(issueIds)) as IssueSessionHistoryFact[];
+    const histories = new Map(issueIds.map(id => [id, auditedIssueSessionHistory(facts.filter(fact => fact.issue_id === id))]));
+    return new Map(rows.map(row => {
+      const scoped = this.sessionOwnerScope(row, id => histories.get(id)!);
+      // Keep unowned rows distinguishable from missing sessions for integrity().
+      return [String(row.id), {
+        session: { workspaceId: String(row.workspace_id), issueId: nullableString(row.issue_id) },
+        scoped: scoped ? { ownerWorkspaceId: scoped.ownerWorkspaceId, session: { workspaceId: scoped.session.workspaceId } } : null,
+      }];
+    }));
+  }
+
+  private sessionOwnerScope(row: Row | null,
+    historyForIssue = (id: string) => readAuditedIssueSessionHistory(this.ctx.db, id),
+  ): { session: MultiremiIssueSession; ownerWorkspaceId: string | null; historicalWorkspaceId: string | null } | null {
     if (!row || row.chat_id == null && row.issue_id == null) return null;
 
-    seedRequestRead(this.ctx.db, ['multiremi_issue_sessions', 'multiremi_conversation_log'], `session:${id}`, row);
     const session = toIssueSession(row);
     const actualOwnerWorkspaceId = nullableString(row.owner_workspace_id);
     // Canonical creation leaves the head unbound until its first message.
@@ -465,7 +506,7 @@ export class IssueSessionsRepo {
     let ownerWorkspaceId = structureValid && actualOwnerWorkspaceId === session.workspaceId ? actualOwnerWorkspaceId : null;
     let historicalWorkspaceId: string | null = null;
     if (!session.chatId && actualOwnerWorkspaceId && structureValid && Number(row.has_rotation) === 1) {
-      const history = readAuditedIssueSessionHistory(this.ctx.db, session.issueId!);
+      const history = historyForIssue(session.issueId!);
       historicalWorkspaceId = history.historicalWorkspaceIds.get(session.id) ?? null;
       if (history.retiredSessionIds.has(session.id) || session.parentSessionId && history.retiredSessionIds.has(session.parentSessionId)) {
         ownerWorkspaceId = null;

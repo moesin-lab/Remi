@@ -64,7 +64,7 @@ test(`image supervisor restores previous release after ${interruptedPhase} resta
     throw new Error('Supervisor state wait timed out');
   }
   const start = () => Bun.spawn([process.execPath, resolve('packages/platform-updater/src/supervisor.mjs')], {
-    env: { ...process.env, REMI_SUPERVISOR_ROLE: 'api', REMI_SLOT_SWITCH: '1', REMI_SUPERVISOR_SOURCE: source,
+    env: { ...process.env, REMI_SUPERVISOR_ROLE: 'api', REMI_SUPERVISOR_SOURCE: source,
       REMI_SUPERVISOR_CONTROL: control, REMI_APPLICATION_ROOT: program, REMI_SUPERVISOR_SEED: join(root, 'seed'),
       REMI_SUPERVISOR_FENCE: resolve('deploy/docker/host-write-fence.ts'), REMI_APPLICATION_BASE_VERSION: 'old',
       REMI_APPLICATION_BASE_REF: 'test', REMI_SLOT_SWITCH: interruptedPhase === 'disabled' ? undefined : '1', MULTIREMI_PORT: String(port), MULTIREMI_HOST: '127.0.0.1',

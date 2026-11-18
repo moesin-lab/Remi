@@ -1,4 +1,3 @@
-import { currentBackgroundTerm } from "@shared/db/live-term.js";
 import { DatabaseRetryLoop, isDatabaseConnectionError } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 import { Cron } from "croner";
@@ -83,9 +82,9 @@ export class MultiremiScheduler {
         this.sync();
       } catch (error) {
         // A failed tick can leave its whole claimed batch at next_run_at=NULL.
-        // Legacy callers recover on retry. A fenced activation only recovers
-        // once: a replacement activation owns recovery of abandoned claims.
-        if (isDatabaseConnectionError(error) && !currentBackgroundTerm()) recovered = false;
+        // The next serialized tick recovers only while its immutable term is
+        // still current. Store SQL fences recovery against a replacement slot.
+        if (isDatabaseConnectionError(error)) recovered = false;
         throw error;
       }
     }), this.pollIntervalMs);

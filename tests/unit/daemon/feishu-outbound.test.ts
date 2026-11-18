@@ -26,6 +26,20 @@ describe("proactive delivery execution", () => {
     expect(reports).toHaveLength(2);
   });
 
+  it("keeps the lease after a successful create loses its sent report", async () => {
+    const daemon = Object.create(MultiremiDaemon.prototype) as any;
+    const reports: any[] = [];
+    Object.assign(daemon, { options: { serverUrl: "https://remi.example.test" },
+      feishuConcierge: { sendOutbound: async () => ({ messageId: "om_created" }) },
+      client: { reportFeishuBotOutboundResult: async (_runtime: string, _id: string, report: any) => {
+        reports.push(report); throw new Error("sent report acknowledgement lost");
+      } },
+    });
+    await expect(daemon.handleFeishuBotOutbound("rt_1", { ...delivery, taskId: undefined, body: "reply" }, new AbortController().signal))
+      .rejects.toMatchObject({ ambiguous: true });
+    expect(reports).toEqual([expect.objectContaining({ status: "sent", externalMessageId: "om_created" })]);
+  });
+
   it("renews a binary delivery lease while upload is pending without a task ID", async () => {
     const reports: any[] = [];
     let unblock!: () => void;

@@ -5,7 +5,7 @@ import { describe, expect, it } from "bun:test";
 import type { MultiremiTaskSteerMessage } from "@multiremi/contracts/types.js";
 import type { SteerResult } from "@shared/contracts/provider-types.js";
 import { SteerPump, STEER_PUMP_MAX_CONSECUTIVE_FAILURES, steerResultGroups } from "@multiremi/worker/steer-pump.js";
-import { TaskSteerFeed, type TaskSteerSource } from "@multiremi/worker/steer.js";
+import { TaskSteerFeed, withSteerIdentity, type TaskSteerSource } from "@multiremi/worker/steer.js";
 
 function message(id: string, kind: "steer" | "force_answer" = "steer"): MultiremiTaskSteerMessage {
   return { id, taskId: "tsk_1", kind, content: `body ${id}`, authorType: "user", authorId: "mem_1",
@@ -357,4 +357,10 @@ describe("steerResultGroups", () => {
     expect(steerResultGroups([message("s4")], "native", () => null)[0]![0]).toEqual({ via: "native", native_outcome: "injected", error: null });
     expect(steerResultGroups([message("s1")], "none", take)[0]![0]).toEqual({ via: "none", native_outcome: "failed", error: "boom" });
   });
+});
+
+it("keeps wrap-up control text outside steer consumption identities", () => {
+  const text = "[Deliver now] Finish the current turn.";
+  expect(withSteerIdentity(text, "wrap_up:2026-11-18T12:00:00.000Z")).toBe(text);
+  expect(withSteerIdentity("Directive", "msg_original")).toBe("[Remi steer id: msg_original]\nDirective");
 });

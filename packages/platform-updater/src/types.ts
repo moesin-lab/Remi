@@ -24,6 +24,8 @@ export interface PlatformDeploymentDriver {
   recoverInterrupted?(): Promise<void>;
   inspect(): Promise<PlatformInspection>;
   preflight(): Promise<MultiremiPlatformPreflight>;
+  /** Refine preparation requirements after resolving the actual target manifest. */
+  preflightForRelease?(manifest: unknown): Promise<MultiremiPlatformPreflight>;
   /** Validate a target's artifacts and runtime/migration contract, if applicable. */
   validateRelease?(manifest: unknown): Promise<void>;
   /** Release a host-owned write fence only after reporting and drain release. */
@@ -35,7 +37,8 @@ export interface PlatformDeploymentDriver {
     report: (input: ReportPlatformOperationInput) => Promise<void>,
     /**
      * Required for every service mutation (update/rollback/restart). Wait here
-     * between preparing artifacts (image pull / build) and the service switch,
+     * between preparing artifacts (image pull / build) and an offline switch.
+     * Compatible internal API slot handovers skip waiting on this gate,
      * and the caller releases it after the operation finishes.
      */
     drain?: PlatformDrainGate,

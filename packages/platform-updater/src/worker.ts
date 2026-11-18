@@ -52,6 +52,9 @@ export class PlatformUpdateWorker {
       if (manifest.ref !== this.latest.ref || String(manifest.version).replace(/^v/, '') !== this.latest.version.replace(/^v/, '')) {
         throw new Error('Release feed and manifest identities differ; check updates again');
       }
+      if (this.driver.preflightForRelease) {
+        preflight.checks = (await this.driver.preflightForRelease(manifest)).checks;
+      }
       preflight.source = { url: this.feedUrl, manifestUrl, modes: releaseCapabilities(manifest, preflight.arch, this.driver.kind), error: null };
       preflight.checks.push({ code: "release_feed", ok: true, message: "Release feed is reachable" });
       const artifacts = preflight.source.modes.find(item => item.mode === this.driver.updateMode);

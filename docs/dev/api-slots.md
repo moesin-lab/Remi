@@ -54,7 +54,7 @@ Phase A 的 `all` 角色、无 peer 且开启 backgroundJobs 时，激活持有�
 
 term 不匹配时将原上下文永久失效、记录错误并停止全部后台任务，slot 进入 failed；需先 release，再 activate 创建新 term。单进程失效后需重启。数据库不可达时当前 tick 不执行副作用，沿用数据库恢复退避，不把连接失败误报为 term 变更。title 模型等外部请求可能已在接管前发出，返回后的 SQL 仍受 fence；外部服务本身不支持数据库 fence，wiki/SSH 等只保证下一次操作入口重新检查，并沿用已有 lease/owner lock。
 
-`recoverLostScheduleTriggers` 在激活后的首次 scheduler tick 执行；同一个串行 tick 在连接失败后退出，下一次重试恢复遗留的整个 claim 批次（跳过丢失的 occurrence，重新计算下次执行时间），不要求重新激活。恢复与后续 SQL 仍携带原 term；接管后旧代无法重新武装新代的在途 claim。后台数据库操作会额外执行 term 校验并短暂持有共享 fence 行的写锁，尚未做生产负载基准。supervisor 的顺序、路由切换及回滚由 A4 负责：release A 后 activate B；若 B 失败，可重新 activate A。
+`recoverLostScheduleTriggers` 在激活后的首次 scheduler tick 执行；同一个串行 tick 在连接失败后退出，下一次重试恢复遗留的整个 claim 批次（跳过丢失的 occurrence，重新计算下次执行时间），不要求重新激活。恢复与后续 SQL 仍携带原 term；接管后旧代无法重新武装新代的在途 claim。后台数据库操作会额外执行 term 校验并短暂持有共享 fence 行的写锁，尚未做生产负载基准。supervisor 的顺序、路由切换及回滚见[双 slot 运维](../deploy/internal-slot-switch.md)：release A 后 activate B；若 B 失败，可重新 activate A。
 
 共享行锁负载按「最外层 guarded SQL/事务」计数，事务内嵌套 SQL 复用同一次 fence 锁。Linux/Bun 1.3.14、SQLite 空闲 Store 的 100 tick 探针记录 scheduler 600 次、title 200 次、OpenViking 模式 wiki 200 次 fence UPDATE（总耗时分别约 203/33/24 ms，包含业务 SQL）。按默认 30 s / 900 s / 5 s 周期，这三项空闲基线约为 `6/30 + 2/900 + 2/5 = 0.602` 次 UPDATE/s；SCM、messaging、capability sweep、notification 与事件 offer 需另加，不能把此数当作 stable 全量。业务事件负载按每次事件的最外层 SQL/事务数线性增加；锁占用率近似为 UPDATE/s × 平均持锁秒数，持锁时间包含业务事务。共享行会串行化后台事务并产生 PostgreSQL WAL/死元组；上述本地探针只测调用数量与 SQLite 时间，没有测真实 PG 持锁延迟、WAL 或生产吞吐，不构成容量验收。Phase C 的任务 lease 迁移不在本次范围内。
 

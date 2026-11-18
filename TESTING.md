@@ -34,6 +34,9 @@ ERROR 的 JSONL 保留异常 name、message 和 stack。
 查询预算测试在每次测量前显式预热 readiness 缓存，继续限制业务 SQL 的原有预算，避免一秒 TTL
 使同一路由的冷、热请求混为一谈。[readiness 成本回归](tests/unit/multiremi/database-readiness-query-count.test.ts)
 单独断言冷请求、TTL 到期、强制 readiness 与已知断连各增加一次 `SELECT 1 AS ready`，缓存命中不增加。
+[status pages 回归](tests/unit/multiremi/issue-status-pages.test.ts)用受控时钟复现预热请求命中即将到期的缓存、
+随后仅基准请求承担 readiness SQL 的计数错位；归档增量和规模预算在每个样本计数重置前强制刷新 readiness，
+继续严格断言归档增加一次查询及各规模查询数相等。该回归沿用同一夹具运行 SQLite 和配置的真实 PostgreSQL。
 
 ## 后端测试入口
 

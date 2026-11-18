@@ -61,6 +61,7 @@ function runtimeCapabilityOptions(capabilities: DaemonRuntimeCapabilities | unde
     return Number.isSafeInteger(number) && number >= 0 ? number : 0;
   };
   return {
+    plannedRestartProtocol: reported.planned_restart === 1 ? 1 : 0,
     supportsBatchImport: reported.supports_batch_import === true,
     supportsDirectoryScan: reported.supports_directory_scan === true,
     supportsSkillDirectory: reported.supports_skill_directory === true,
@@ -532,10 +533,10 @@ export class DaemonProtocolLayer {
       // `claimPending: false` because the v2 server does not sweep the pending
       // families on a heartbeat (MUL-389's merged poll): those become pushes in A-4.
       const reported = reportedRuntimes.find(entry => entry.runtime_id === runtimeId);
-      this.store.reconcileDaemonDrain(runtimeId);
       const ack = this.store.heartbeatRuntime(runtimeId, { claimPending: false,
         health: parseDaemonHealth(reported?.health ?? heartbeat.payload.health),
         ...runtimeCapabilityOptions(readPayload(reported?.capabilities) as DaemonRuntimeCapabilities) });
+      this.store.reconcileDaemonDrain(runtimeId);
       if (ack.status !== "runtime_gone") this.recordExternalChatCapabilities(runtimeId, readPayload(reported?.capabilities) as DaemonRuntimeCapabilities);
       if (ack.status === "runtime_gone") {
         // The row vanished between the handshake and now. Same report as a

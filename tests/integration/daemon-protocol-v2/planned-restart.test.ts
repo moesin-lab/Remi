@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { DaemonProtocolHarness, waitFor } from "./harness.js";
@@ -164,4 +165,66 @@ for (const unresponsive of ["cancel", "close"] as const) test(`planned restart b
     expect(h.store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
     expect(h.store.listTasks().filter(next => next.parentTaskId === task.id)).toHaveLength(1);
   } finally { release(); await h.dispose(); }
+}, 20_000);
+
+
+test("old capability fixture cancels through the real socket and admits CLI update after the deadline", async () => {
+  let entered = false;
+  const h = await DaemonProtocolHarness.create({
+    onReady: daemon => {
+      const capabilities = (daemon as any).runtimeCapabilities.bind(daemon);
+      (daemon as any).runtimeCapabilities = () => {
+        const { planned_restart: _unsupported, ...legacy } = capabilities();
+        return legacy;
+      };
+    },
+    providerFactory: () => ({
+      async *sendStream(_message, options) {
+        entered = true;
+        await new Promise<never>((_resolve, reject) => {
+          const stop = () => reject(new Error("Cancelled"));
+          if (options?.signal?.aborted) stop();
+          else options?.signal?.addEventListener("abort", stop, { once: true });
+        });
+      },
+      getLastResponse: () => ({ text: "", sessionId: "legacy-session", usage: [], toolCalls: [] } as any),
+      close: async () => {},
+    }),
+  });
+  try {
+    await h.startDaemon(); await h.settleHeartbeat();
+    const runtime = h.store.listRuntimes()[0]!;
+    const runtimeId = runtime.id, daemonId = runtime.daemonId!;
+    expect(h.store.getRuntimeLite(runtimeId)?.metadata.planned_restart).toBe(0);
+    // A legacy reconnect must clear previously stored support too.
+    h.store.heartbeatRuntime(runtimeId, { claimPending: false, plannedRestartProtocol: 1 });
+    await h.disconnect(); await h.reconnect(); await h.settleHeartbeat();
+    expect(h.store.getRuntimeLite(runtimeId)?.metadata.planned_restart).toBe(0);
+    const agent = h.store.createAgent({ name: "Legacy capability", provider: "claude", runtimeId });
+    const issue = createResponsibleTestIssue(h.store, { title: "Legacy update", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
+    const task = h.store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Legacy long work", maxAttempts: 3 });
+    await waitFor(() => entered, "legacy provider running");
+    h.store.beginDaemonDrain("local", daemonId, "cli_update", 100);
+    // This test checks installation admission, so prevent the real update pump
+    // from consuming the update; installer/watchdog acceptance is separate.
+    (h.daemon as any).claimsPaused = true;
+    const began = performance.now();
+    await Bun.sleep(110); h.store.reconcileDaemonDrain(runtimeId);
+    await waitFor(() => (h.daemon as any).activeTaskCount === 0, "legacy cancellation reaches provider", 5_000);
+    await h.settleHeartbeat();
+    expect(h.store.plannedRestarts().get(task.id)).toBeNull();
+    expect(h.received.some(frame => frame.t === "turn.restart")).toBe(false);
+    expect(h.received.some(frame => frame.t === "task.cancelled")).toBe(true);
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery", attempt: 1 });
+    expect(h.store.listTasksForIssue(issue.id).some(retry => retry.attempt === 2 && retry.status === "queued")).toBe(true);
+    expect(h.store.getDaemonDrainStatus("local", daemonId)).toMatchObject({ remaining_tasks: 0, awaiting_daemon_ack: false });
+    const update = h.store.createRuntimeUpdateRequest(runtimeId, { scope: "cli", targetVersion: "0.2.96" });
+    expect(h.store.claimRuntimeUpdateRequest(runtimeId)?.id).toBe(update.id);
+    h.store.reportRuntimeUpdateResult(runtimeId, update.id, { status: "restarting" });
+    h.store.recordDaemonProtocol(runtimeId, daemonId, 2, "0.2.96");
+    h.store.reportRuntimeUpdateResult(runtimeId, update.id, { status: "completed", self_check: true });
+    expect(h.store.getRuntimeUpdateRequest(runtimeId, update.id)?.status).toBe("completed");
+    expect(performance.now() - began).toBeLessThan(5_000);
+    console.log(`legacy fixture: drain 100ms, cancellation/ACK/update admission ${Math.round(performance.now() - began)}ms`);
+  } finally { await h.dispose(); }
 }, 20_000);

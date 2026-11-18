@@ -3749,6 +3749,7 @@ runMigrations(this.db);
     supportsDirectoryScan?: boolean;
     supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
+    plannedRestartProtocol?: number;
     supportsBotMenu?: boolean;
     botMenuProtocol?: number;
     supportsFeishuBotConfig?: boolean;

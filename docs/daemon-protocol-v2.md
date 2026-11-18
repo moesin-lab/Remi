@@ -1291,3 +1291,12 @@ publish. Unscoped legacy requests cannot execute on the new host.
 the shared menu. Missing legacy identity mappings are reported as
 `unresolvedLegacyTargetCount` without preventing shared menu publication.
 See [IM platform management](dev/im-platforms.md#机器人菜单) for persistence and UI scope.
+
+### 计划内重启的混合版本门槛
+
+`hello.runtimes[].capabilities.planned_restart` 与心跳能力中的 `planned_restart: 1`
+表示 daemon 已实现 `turn.restart`、磁盘 journal 与同 attempt 恢复协议。缺失或未知版本按不支持处理，
+每次 socket hello/heartbeat 均覆盖旧能力，防止降级后遗留支持标记。
+manual、deploy、CLI update 的 drain 到期时，只有支持的 runtime 请求安全点 checkpoint；
+旧 daemon 回退到 MUL-45 的中断与自动重试，消耗原有重试预算，不创建 requested checkpoint。
+更新仍等待旧进程的零活跃 ACK，再进入安装；不会因无法确认新帧而永久停留在 requested。

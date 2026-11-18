@@ -232,3 +232,31 @@ Daemon 测试和独立 harness 必须注入 [disabledSshMeshRuntime()](tests/hel
 [包装信号回归](tests/unit/scripts/run-tests-signals.test.ts)实际转发 SIGINT/SIGTERM；中断后子进程退出 0 时包装仍返回失败，原非零退出码继续保留，并检查 HOME 清理；[包装环境回归](tests/unit/scripts/run-tests.test.ts)核对 CI 的测试数据库 URL 与 lock sentinel 输入；[多文件 preload 回归](tests/unit/scripts/hermetic-preload-process.test.ts)验证多个文件及其 awaited afterAll 子进程结束前共享运行根仍在，整个套件结束才清理。
 
 [Remi core 测试](tests/unit/remi/core.test.ts)通过构造参数把旧 sessions.json 迁移和 metrics 写入临时 home；shared/config 的生产常量仍按原 HOME 解析，不读取 REMI_HOME 环境变量。[Claude wrapper 测试](tests/unit/acp/claude-runtime-wrapper.test.ts)为子进程设置 npm_config_logs_dir 与 npm_config_cache。[Lark CLI 集成测试](tests/integration/lark-cli-message-provider.test.ts)保留真实健康探测；无配置文件时将 CLI 配置、数据、日志目录放入测试运行根，避免未登录探测生成 HOME 缓存。直接 bun test 且存在 CLI 配置时保留原登录环境，继续运行真实 CLI 用例。
+
+## 隔离候选实例与升级基线（MUL-27）
+
+Linux 上从仓库根目录运行（Bun 1.3.14、Git、Docker Engine + Compose v2、可拉取公共镜像，首次运行需要网络与足够构建空间）：
+
+```bash
+bun run tests/integration/upgrade-harness.ts --release-ref=v0.2.90 --output=/tmp/remi-upgrade-evidence
+bun run tests/integration/upgrade-harness/daemon-upgrade.ts --release-ref=v0.2.90 --output=/tmp/remi-daemon-evidence
+bun run tests/integration/upgrade-harness.ts --self-check-only --output=/tmp/remi-isolation-evidence
+```
+
+`--release-ref` 必须显式提供；release 与 candidate 必须是不同提交，candidate 必须已提交。脚本从这两个 SHA 的 Git archive 分别安装锁定依赖，构建实际 API/store/daemon 源码与 Next standalone Web。API 和 daemon 使用 `tests/integration/upgrade-harness/` 中的测试入口；假 ACP 复用 `tests/fixtures/acp/fake-steering-agent.ts`，只通过 `providerFactory` 注入，并要求 `NODE_ENV=test` 与 `MULTIREMI_UPGRADE_HARNESS=1`。这些是测试构建，不能作为发布二进制或生产 Dockerfile 的验证证据。`tests/arch/upgrade-harness-boundary.test.ts` 检查生产源码不引用这些入口或假 provider。
+
+每次运行创建临时 HOME、REMI_HOME、MULTIREMI_STATE_DIR、MULTIREMI_TEST_RUN_ROOT、随机 Compose project 和命名卷。API/Web 的宿主端口仅绑定 loopback、动态分配并拒绝 6131–6134；daemon 在专属容器网络内显式使用 19131，不暴露宿主端口。子进程环境使用允许列表，清除模型凭据、SSH agent 和 systemd/会话环境；不挂载真实 HOME、SSH 或线上状态。真实 updater 只接收该 project 的 Compose 路径，迁移演练另起无外网临时 PostgreSQL。
+
+`isolation.json` 包含线上 daemon PID + kernel starttime、6131–6134 socket inode 与所属进程、状态目录身份、静态配置 SHA-256、supervisor owner 租约指纹的前后比较。不会比较线上活动目录内容。`production_instance=absent` 与检测到线上实例的结果分别记录。没有受保护监听端口时不扫描进程 fd；cmdline 不可读时用内核 comm 排除无关 helper，Bun/Node/Remi 等可能承载 daemon 的进程仍要求可观测。受保护监听者未识别或相关进程权限不足时 `fully_observed=false` 并非零退出，不把“看不到”写成“未变化”。Docker 缺失/无权限也必须失败退出，并保留前后快照；`--self-check-only` 只观测不启动容器。JSON 中的 `ok` 表示本次选定模式通过，不能把 self-check 当成全流程通过。
+
+假 ACP 的 `hold: "control"` 在工具运行中输出 `control_waiting`，直到 `FAKE_STEER_CONTROL` 文件存在才完成，不用固定 sleep 猜测切换时机。既有脚本计划继续支持权限请求、后台帧和 `session/load`/`session/resume`。
+
+两条演练固化不同的当前行为：daemon 容器内进程被强制替换时，直接检查数据库 attempt 为 `lost(runtime_recovery)`，随后出现新的 `completed` attempt；升级和回滚均断言结果与源码版本。平台使用真实 `PlatformUpdateWorker` / `ContainerApplicationDriver`，观测在途 ACP 的 drain，完成任务后切到候选应用并执行代码回滚，daemon 容器保持原身份。平台正常 drain 不应制造 lost。daemon 的基线断言集中在 `assertLostThenCompleted`，供 MUL-28/31 显式调整；当前不覆盖 systemd 重启、CLI 自更新安装器或生产发布制品。测试应用跨 ref 使用相同的测试镜像基础配方，迁移与代码回滚兼容性仍由真实 updater 的隔离迁移演练校验，不能代替正式发布的兼容性审阅。
+
+平台 API 的 HOME 是 api-home 卷根目录，原始迁移报告位于 `$HOME/reports/migrations`。显式备份该卷，供真实 updater 从本次备份恢复报告到隔离演练容器；演练结束检查升级与回滚没有改写原始 before/after 报告，并记录 SHA-256。不会生成替代报告或跳过迁移门禁。
+
+已知跨版本边界（MUL-52）：`v0.2.90` → 当前候选的真实平台演练会被 schema 收缩保护拒绝，以上命令目前不能作为全流程通过的示例。CI [43918836310](https://github.com/moesin-lab/Remi/actions/runs/43918836310) 的 `upgrade-harness-evidence/isolation.json` 记录 `migration_shapes` 和 `migration_columns_removed`：2281 → 2369 个列签名，50 个旧签名消失，分别来自 `multiremi_session_archives`（24，表重命名）、`multiremi_session_archive_requests`（8，删表）、`multiremi_trace_backfill_progress`（8，删表）、`multiremi_task_traces`（7，删列）和 `multiremi_issue_workspaces`（3，删列）。产品 `migrateLocalRecords()` 执行这些收缩，真实 updater 按设计拒绝自动更新；不是 harness 的比较规则。列签名只比较 schema、表名、列名、data_type、udt_name、is_nullable，不含默认值，因此 Feishu `sender_access_policy` 默认值改变不是本次拒绝的原因。平台升级成功及回滚断言仍保持严格，该已知失败不计为成功；手动升级契约与兼容基线由 MUL-52 跟进。
+
+Docker-free daemon 路径只需 Linux、Bun 1.3.14、Git 与公共依赖源：显式 release ref 和候选 HEAD 分别导出源码、安装锁定依赖，以相同的测试专属入口启动两个版本的独立 daemon。API 使用临时 SQLite；升级和回滚都在长工具 gate 进行中强制替换 daemon，断言原 attempt `lost(runtime_recovery)`、新 attempt `completed`、结果与 runtime 上报版本。输出 `daemon-upgrade.json`（双方 SHA、版本、端口、attempt）与 `daemon-upgrade.log`，不修改生产 schema 或添加跨版本兼容层。该路径也由全栈入口首先运行，纳入同一个 CI job。
+
+`.github/workflows/upgrade-harness.yml` 的 Linux job 跑全流程，始终上传 `isolation.json`、`run.log` 与容器日志。脚本退出时清理自己的容器/卷/镜像并检查 project label 下没有残留容器。任务沙箱不开放 Docker：平台全流程只在 Linux CI 跑，本机跑 Docker-free daemon 演练与隔离自检。沙箱无法读取所保护进程的 `/proc` 时，保留 `fully_observed=false`，只作为部分证据；CI 上没有线上实例的成功不能替代同机完整观测。

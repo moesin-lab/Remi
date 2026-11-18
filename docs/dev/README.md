@@ -46,6 +46,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 改 issue 依赖、`blocked_by` 语义、依赖闸门或自动开工 | [ADR 0004](../adr/0004-issue-dependency-semantics.md) | 单向存储、满足判定、闸门位置、自动开工与失败报告的取舍 |
 | 改 agent 派活、来回上限、委派回叫或 `wake_source` | [ADR 0014](../adr/0014-every-agent-dispatch-is-a-delegation.md)、[ADR 0005](../adr/0005-cross-issue-delegation-return.md) | 通用派活入口、来源会话、谱系计数降级、D4 去重和回程血缘 |
 | 改任务结果、门铃正文、未读输入或 Wiki 下载 | [ADR 0013](../adr/0013-deliverable-is-comment-wakeup-is-doorbell.md)、[daemon 协议](../daemon-protocol-v2.md) | 最后顶层消息、事务内结论评论、完整范围读取、Wiki 缓存与派单预算 |
+| 改 schema level、expand/contract 或启动兼容守卫 | [Schema 迁移纪律](schema-migrations.md) | 兼容区间、版本化步骤、显式维护与历史 DDL 例外 |
 | 改消息头、轮/尝试存储、统一 lane 或启动迁移 | [ADR 0016](../adr/0016-unified-message-inbox-and-turn.md)、[切换手册](../deploy/unified-model-cutover.md) | 存储投影、三项启动预检、lane 迁移、消息状态机、只读对账与删表边界；传输和用户接口由消费者集成 |
 | 改会话日志表、轮次卡或 trace 归属 | [ADR 0006](../adr/0006-conversation-log-and-daemon-owned-traces.md)（决策 1–4） | 契约类型、被否决的替代方案和回到源码的位置；归档相关决策已被 ADR 0018 取代，trace 格式已被 ADR 0019 取代 |
 | 改执行 trace 的条目模型、读取视图、最终回复规则或轮卡 trace 摘要 | [ADR 0019](../adr/0019-turn-and-item-traces.md)、[daemon 协议 v2](../daemon-protocol-v2.md) §5–6 | 唯一 fold、`view=turn` / `view=events`、`settle()`、计费不进 trace、`context_usage` / `worked_ms` / `process_item_count` 与版本门槛 |

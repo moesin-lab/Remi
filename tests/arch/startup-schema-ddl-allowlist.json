@@ -1,0 +1,332 @@
+[
+  {
+    "file": "packages/server/src/store/inbox/attempt-counters.ts",
+    "sql": "ALTER TABLE multiremi_turn_attempts\n      ALTER COLUMN event_count TYPE BIGINT, ALTER COLUMN tool_call_count TYPE BIGINT",
+    "fingerprint": "06c47fdaeca726583b1c098902c385328bc1f3db2639c6b164e474ca67c4e442"
+  },
+  {
+    "file": "packages/server/src/store/inbox/member-records.ts",
+    "sql": "DROP VIEW IF EXISTS multiremi_member_inbox_records",
+    "fingerprint": "e7edb3fff0a6fde88f5e4222d33cc0ebfb81c4aa37688c456595388679543993"
+  },
+  {
+    "file": "packages/server/src/store/inbox/question-indexes.ts",
+    "sql": "DROP INDEX IF EXISTS idx_questions_session_notification;\n    DROP INDEX IF EXISTS idx_questions_runtime_wait;\n    CREATE INDEX IF NOT EXISTS idx_questions_session_notification_v2 ON multiremi_conversation_log(session_id,${…}) WHERE kind='message' AND deleted_at IS NULL;\n    CREATE INDEX IF NOT EXISTS idx_questions_runtime_wait_v2 ON multiremi_conversation_log(${…}) WHERE message_kind='decision' AND deleted_at IS NULL;",
+    "fingerprint": "1d6c74a3de77da133f58870e3ebcbb4d401e041310fea667848265da846fcee8"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "dropColumnIfExists(db, \"multiremi_agents\", \"cwd\")",
+    "fingerprint": "57c0fd82dd0d74b2bfd261839c6781b8c8e1584a24742e3881610817b28a4b4a"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "dropColumnIfExists(db, \"multiremi_feishu_bot_configs\", \"verification_token_encrypted\")",
+    "fingerprint": "0376c417576fe43087d23b538a0d456d8cb34f79554efe9846621c7bea0cef4b"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "dropColumnIfExists(db, \"multiremi_feishu_bot_configs\", \"encrypt_key_encrypted\")",
+    "fingerprint": "60a56add6aab9fce64cb58ce5468879386b98f1a589941c9a3737d4e862a30cc"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "dropColumnIfExists(db, \"multiremi_agent_issue_update_state\", \"window_started_at\")",
+    "fingerprint": "4c89a042272986cccccac9dd45fdb176a6cfbfd126b702977e9137244a8640f2"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "dropColumnIfExists(db, \"multiremi_agent_issue_update_state\", \"deliveries_in_window\")",
+    "fingerprint": "cc370a51aff8a2cf29d508622cbadec2d05f1146476a0e14de8f202e5e41bacd"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE multiremi_execution_group_members RENAME TO multiremi_execution_group_members_legacy;\n      CREATE TABLE multiremi_execution_group_members (\n      runtime_id TEXT NOT NULL,provider TEXT NOT NULL,workspace_id TEXT NOT NULL,group_id TEXT NOT NULL,\n      PRIMARY KEY(workspace_id,group_id,runtime_id));\n      INSERT INTO multiremi_execution_group_members SELECT * FROM multiremi_execution_group_members_legacy;\n      DROP TABLE multiremi_execution_group_members_legacy;\n      CREATE INDEX idx_execution_group_members_group ON multiremi_execution_group_members(workspace_id,group_id);",
+    "fingerprint": "37dd6d9637b4ab8d329e59966165529ebfb63cbf16611f418337253fa2ae4a31"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP INDEX IF EXISTS idx_multiremi_lanes_sweep_order",
+    "fingerprint": "3e9393df43325384ad999a820804a9a483d3362ef35949e23803f181498700b2"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "\n        ALTER TABLE multiremi_issue_sessions ALTER COLUMN issue_id DROP NOT NULL;\n        ALTER TABLE multiremi_session_results ALTER COLUMN issue_id DROP NOT NULL;\n        ALTER TABLE multiremi_issue_sessions DROP CONSTRAINT IF EXISTS multiremi_issue_sessions_issue_id_fkey;\n        ALTER TABLE multiremi_issue_sessions ADD CONSTRAINT multiremi_issue_sessions_issue_id_fkey\n          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL;\n        ALTER TABLE multiremi_issue_sessions DROP CONSTRAINT IF EXISTS multiremi_issue_sessions_chat_id_fkey;\n        ALTER TABLE multiremi_issue_sessions ADD CONSTRAINT multiremi_issue_sessions_chat_id_fkey\n          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE;\n        ALTER TABLE multiremi_session_results DROP CONSTRAINT IF EXISTS multiremi_session_results_issue_id_fkey;\n        ALTER TABLE multiremi_session_results ADD CONSTRAINT multiremi_session_results_issue_id_fkey\n          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL;\n        ALTER TABLE multiremi_session_results DROP CONSTRAINT IF EXISTS multiremi_session_results_chat_id_fkey;\n        ALTER TABLE multiremi_session_results ADD CONSTRAINT multiremi_session_results_chat_id_fkey\n          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE;\n        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_default;\n        CREATE UNIQUE INDEX idx_multiremi_issue_sessions_default\n          ON multiremi_issue_sessions(chat_id) WHERE is_default = 1 AND chat_id IS NOT NULL;\n        CREATE INDEX IF NOT EXISTS idx_multiremi_issue_sessions_chat\n          ON multiremi_issue_sessions(chat_id, status, updated_at);\n        CREATE INDEX IF NOT EXISTS idx_multiremi_session_results_chat\n          ON multiremi_session_results(chat_id, created_at);\n      ",
+    "fingerprint": "2022167cce8ad77258f82dab4d34385c36076f98ce37c4db76eb924287c45ac5"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "\n        ALTER TABLE multiremi_issue_sessions RENAME TO multiremi_issue_sessions_issue_owned;\n        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_issue;\n        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_workspace;\n        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_default;\n        DROP INDEX IF EXISTS idx_multiremi_issue_sessions_chat;\n        CREATE TABLE multiremi_issue_sessions (\n          id TEXT PRIMARY KEY,\n          chat_id TEXT,\n          issue_id TEXT,\n          workspace_id TEXT NOT NULL DEFAULT 'local',\n          title TEXT NOT NULL DEFAULT 'Main',\n          status TEXT NOT NULL DEFAULT 'active',\n          is_default INTEGER NOT NULL DEFAULT 0,\n          holds_workspace INTEGER NOT NULL DEFAULT 1,\n          parent_session_id TEXT,\n          inherit_mode TEXT NOT NULL DEFAULT 'none',\n          inherit_cutoff_seq INTEGER,\n          inherited_tokens_total INTEGER NOT NULL DEFAULT 0,\n          follow_frozen_seq INTEGER,\n          with_code INTEGER NOT NULL DEFAULT 0,\n          code_runtime_id TEXT,\n          summary TEXT,\n          created_by_type TEXT NOT NULL DEFAULT 'member',\n          created_by_id TEXT,\n          created_at TEXT NOT NULL,\n          updated_at TEXT NOT NULL,\n          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE,\n          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL\n        );\n        INSERT INTO multiremi_issue_sessions (\n          id, chat_id, issue_id, workspace_id, title, status, is_default,\n          holds_workspace, parent_session_id, inherit_mode, inherit_cutoff_seq,\n          inherited_tokens_total, follow_frozen_seq, with_code, code_runtime_id,\n          summary, created_by_type, created_by_id, created_at, updated_at\n        )\n        SELECT id, ${…}, issue_id, workspace_id, title, status, is_default,\n          holds_workspace, parent_session_id, inherit_mode, inherit_cutoff_seq,\n          inherited_tokens_total, follow_frozen_seq, with_code, code_runtime_id,\n          summary, created_by_type, created_by_id, created_at, updated_at\n        FROM multiremi_issue_sessions_issue_owned;\n        DROP TABLE multiremi_issue_sessions_issue_owned;\n        CREATE INDEX idx_multiremi_issue_sessions_issue\n          ON multiremi_issue_sessions(issue_id, status, updated_at);\n        CREATE INDEX idx_multiremi_issue_sessions_workspace\n          ON multiremi_issue_sessions(workspace_id, updated_at);\n        CREATE INDEX idx_multiremi_issue_sessions_chat\n          ON multiremi_issue_sessions(chat_id, status, updated_at);\n        CREATE UNIQUE INDEX idx_multiremi_issue_sessions_default\n          ON multiremi_issue_sessions(chat_id) WHERE is_default = 1 AND chat_id IS NOT NULL;\n\n        ALTER TABLE multiremi_session_results RENAME TO multiremi_session_results_issue_owned;\n        DROP INDEX IF EXISTS idx_multiremi_session_results_issue;\n        DROP INDEX IF EXISTS idx_multiremi_session_results_source;\n        DROP INDEX IF EXISTS idx_multiremi_session_results_chat;\n        CREATE TABLE multiremi_session_results (\n          id TEXT PRIMARY KEY,\n          chat_id TEXT,\n          issue_id TEXT,\n          source_session_id TEXT NOT NULL,\n          title TEXT NOT NULL DEFAULT '',\n          body TEXT NOT NULL,\n          metadata TEXT NOT NULL DEFAULT '{}',\n          published_by_type TEXT NOT NULL DEFAULT 'agent',\n          published_by_id TEXT,\n          created_at TEXT NOT NULL,\n          FOREIGN KEY(chat_id) REFERENCES multiremi_chat_sessions(id) ON DELETE CASCADE,\n          FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE SET NULL,\n          FOREIGN KEY(source_session_id) REFERENCES multiremi_issue_sessions(id) ON DELETE CASCADE\n        );\n        INSERT INTO multiremi_session_results (\n          id, chat_id, issue_id, source_session_id, title, body, metadata,\n          published_by_type, published_by_id, created_at\n        )\n        SELECT id, ${…}, issue_id, source_session_id, title, body, metadata,\n          published_by_type, published_by_id, created_at\n        FROM multiremi_session_results_issue_owned;\n        DROP TABLE multiremi_session_results_issue_owned;\n        CREATE INDEX idx_multiremi_session_results_issue\n          ON multiremi_session_results(issue_id, created_at);\n        CREATE INDEX idx_multiremi_session_results_chat\n          ON multiremi_session_results(chat_id, created_at);\n        CREATE INDEX idx_multiremi_session_results_source\n          ON multiremi_session_results(source_session_id, created_at);\n      ",
+    "fingerprint": "f8e5620e0acf22f204a16e37fcfc4111cbf1648c6d3dde034c92c86a9a2501ac"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE multiremi_tasks DROP CONSTRAINT IF EXISTS multiremi_tasks_chat_session_id_fkey",
+    "fingerprint": "f85da74fc0c6d40be7acae8719455ba16996eaaa9f859c2d385716d16fb66e19"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE multiremi_issue_sessions\n        DROP CONSTRAINT IF EXISTS multiremi_issue_sessions_owner_check;\n        ALTER TABLE multiremi_issue_sessions ADD CONSTRAINT multiremi_issue_sessions_owner_check\n          CHECK(chat_id IS NOT NULL OR issue_id IS NOT NULL);",
+    "fingerprint": "897e40e56de6fb955b076a7498127aaf7cbf9a94c2a7d6441a346eabfda7c7d6"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "INSERT INTO multiremi_tasks_dual_owned SELECT * FROM multiremi_tasks;\n          DROP TABLE multiremi_tasks;\n          ALTER TABLE multiremi_tasks_dual_owned RENAME TO multiremi_tasks;",
+    "fingerprint": "0c5d57c4311919e59d0424753da41cae5f2c2384c904e06dd4d2b5d83b55ecd3"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "INSERT INTO multiremi_issue_sessions_dual_owned SELECT * FROM multiremi_issue_sessions;\n        DROP TABLE multiremi_issue_sessions;\n        ALTER TABLE multiremi_issue_sessions_dual_owned RENAME TO multiremi_issue_sessions;",
+    "fingerprint": "25c1c115be634444297396bf649828745a38e6c0a0143e419085575f8309ec01"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE \"${…}\" RENAME TO \"${…}\"",
+    "fingerprint": "4919fa7f90b34fb7f563ab772d6eb121452c087793255de991291473347f176c"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP INDEX IF EXISTS \"${…}\"",
+    "fingerprint": "2a76a6860d2e4072a49219ab72d6fb143862670e20ab746206dc44ac4fbd0b92"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE ${…} DROP COLUMN ${…}",
+    "fingerprint": "242d8258b839a3e9ed7da4e1b04019bda26ab9d1b0f7957551e4b7d6b7d95fbb"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "CREATE TABLE multiremi_session_agent_lanes_scoped (\n      session_id TEXT NOT NULL,\n      agent_id TEXT NOT NULL,\n      execution_scope TEXT NOT NULL DEFAULT '',\n      provider_session_id TEXT,\n      runtime_id TEXT,\n      provider TEXT,\n      work_dir TEXT,\n      cursor_seq INTEGER NOT NULL DEFAULT 0,\n      parent_cursor_seq INTEGER NOT NULL DEFAULT 0,\n      generation INTEGER NOT NULL DEFAULT 1,\n      status TEXT NOT NULL DEFAULT 'active',\n      last_task_id TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      execution_fingerprint TEXT,\n      PRIMARY KEY(session_id, agent_id, execution_scope),\n      FOREIGN KEY(session_id) REFERENCES multiremi_issue_sessions(id) ON DELETE CASCADE,\n      FOREIGN KEY(agent_id) REFERENCES multiremi_agents(id) ON DELETE CASCADE\n    );\n    INSERT INTO multiremi_session_agent_lanes_scoped\n      (session_id, agent_id, provider_session_id, runtime_id, provider, work_dir,\n       cursor_seq, generation, status, last_task_id, created_at, updated_at, execution_fingerprint)\n    SELECT session_id, agent_id, NULL, runtime_id, provider, NULL,\n       0, generation + 1, status, last_task_id, created_at, updated_at, execution_fingerprint\n    FROM multiremi_session_agent_lanes;\n    DROP TABLE multiremi_session_agent_lanes;\n    ALTER TABLE multiremi_session_agent_lanes_scoped RENAME TO multiremi_session_agent_lanes;\n    CREATE INDEX idx_multiremi_session_agent_lanes_runtime ON multiremi_session_agent_lanes(runtime_id, status);\n    CREATE INDEX idx_multiremi_session_agent_lanes_agent ON multiremi_session_agent_lanes(agent_id, updated_at);\n    UPDATE multiremi_tasks SET session_id = NULL, work_dir = NULL, issue_session_generation = NULL,\n      projection_from_seq = NULL, projection_to_seq = NULL, projection_mode = NULL,\n      projection_truncated = 0, projection_omitted_events = 0, projection_estimated_tokens = 0\n    WHERE issue_session_id IS NOT NULL AND status = 'queued';",
+    "fingerprint": "47558d808dd25bf5b7c1ac2ecf90042603b9e89e47a05fd517be2e6b9ba94887"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "\n    ALTER TABLE multiremi_feishu_bot_outbound_deliveries\n      RENAME TO multiremi_feishu_bot_outbound_deliveries_legacy;\n    CREATE TABLE multiremi_feishu_bot_outbound_deliveries (\n      id TEXT PRIMARY KEY,\n      workspace_id TEXT NOT NULL,\n      binding_id TEXT NOT NULL,\n      task_id TEXT UNIQUE,\n      chat_id TEXT NOT NULL,\n      thread_id TEXT,\n      reply_to_message_id TEXT,\n      body TEXT NOT NULL,\n      status TEXT NOT NULL DEFAULT 'pending',\n      claim_token TEXT,\n      leased_until TEXT,\n      available_at TEXT NOT NULL,\n      attempt_count INTEGER NOT NULL DEFAULT 0,\n      external_message_id TEXT,\n      last_error TEXT,\n      sent_at TEXT,\n      created_at TEXT NOT NULL,\n      updated_at TEXT NOT NULL,\n      FOREIGN KEY(binding_id) REFERENCES multiremi_feishu_bot_chat_bindings(id) ON DELETE CASCADE,\n      FOREIGN KEY(task_id) REFERENCES multiremi_tasks(id) ON DELETE SET NULL\n    );\n    INSERT INTO multiremi_feishu_bot_outbound_deliveries (\n      id, workspace_id, binding_id, task_id, chat_id, thread_id,\n      reply_to_message_id, body, status, claim_token, leased_until, available_at,\n      attempt_count, external_message_id, last_error, sent_at, created_at, updated_at\n    )\n    SELECT\n      id, workspace_id, binding_id, task_id, chat_id, thread_id,\n      reply_to_message_id, body, status, claim_token, leased_until, available_at,\n      attempt_count, external_message_id, last_error, sent_at, created_at, updated_at\n    FROM multiremi_feishu_bot_outbound_deliveries_legacy;\n    DROP TABLE multiremi_feishu_bot_outbound_deliveries_legacy;\n    CREATE INDEX IF NOT EXISTS idx_multiremi_feishu_bot_outbound_pending\n      ON multiremi_feishu_bot_outbound_deliveries(status, available_at, leased_until, created_at);\n  ",
+    "fingerprint": "1e54c6270b10a929e237552eddc19d886849be87b7e83c86c2cda4a22706859a"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE ${…} DROP CONSTRAINT \"${…}\"",
+    "fingerprint": "a780892263c303fc7b4c69a981c2d0bbb6639dc4febf2472d60ea209848f6929"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE ${…} RENAME TO ${…}",
+    "fingerprint": "b1ac62a7a262a6ddefc9c599890a31281775ca90038af0863669e2540860fa99"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP TABLE IF EXISTS ${…}",
+    "fingerprint": "14570c55e7579d1dfecbdd83ffd09310484f1b5e8a01ab4b2d63bc39ad29de12"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP TABLE IF EXISTS ${…}",
+    "fingerprint": "ac9019bee22b6409b84100a52eaed04d77318b361968092ae5e3bbdbf42365cd"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "\n    ALTER TABLE multiremi_issue_subscribers RENAME TO multiremi_issue_subscribers_legacy;\n    DROP INDEX IF EXISTS idx_multiremi_issue_subscribers_issue;\n    DROP INDEX IF EXISTS idx_multiremi_issue_subscribers_member;\n    DROP INDEX IF EXISTS idx_multiremi_issue_subscribers_user;\n    CREATE TABLE multiremi_issue_subscribers (\n      id TEXT PRIMARY KEY,\n      issue_id TEXT NOT NULL,\n      member_id TEXT NOT NULL,\n      user_type TEXT NOT NULL DEFAULT 'member',\n      user_id TEXT NOT NULL,\n      reason TEXT NOT NULL DEFAULT 'manual',\n      created_at TEXT NOT NULL,\n      UNIQUE(issue_id, user_type, user_id),\n      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE\n    );\n    INSERT INTO multiremi_issue_subscribers (id, issue_id, member_id, user_type, user_id, reason, created_at)\n    SELECT id, issue_id, member_id, 'member', member_id, reason, created_at\n    FROM multiremi_issue_subscribers_legacy;\n    DROP TABLE multiremi_issue_subscribers_legacy;\n    CREATE INDEX IF NOT EXISTS idx_multiremi_issue_subscribers_issue ON multiremi_issue_subscribers(issue_id);\n    CREATE INDEX IF NOT EXISTS idx_multiremi_issue_subscribers_member ON multiremi_issue_subscribers(member_id);\n    CREATE INDEX IF NOT EXISTS idx_multiremi_issue_subscribers_user ON multiremi_issue_subscribers(user_type, user_id);\n  ",
+    "fingerprint": "a08c23dce20f7e25bb5a6deb2be5fa381b78ab92fe34ff163cae56b8e1571d2d"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "\n    ALTER TABLE multiremi_inbox_items RENAME TO multiremi_inbox_items_legacy;\n    DROP INDEX IF EXISTS idx_multiremi_inbox_member;\n    DROP INDEX IF EXISTS idx_multiremi_inbox_recipient;\n    CREATE TABLE multiremi_inbox_items (\n      id TEXT PRIMARY KEY,\n      workspace_id TEXT NOT NULL DEFAULT 'local',\n      issue_id TEXT,\n      member_id TEXT NOT NULL,\n      recipient_type TEXT NOT NULL DEFAULT 'member',\n      recipient_id TEXT,\n      severity TEXT NOT NULL DEFAULT 'info',\n      actor_type TEXT NOT NULL DEFAULT 'system',\n      actor_id TEXT,\n      type TEXT NOT NULL,\n      title TEXT NOT NULL,\n      body TEXT,\n      details TEXT,\n      read INTEGER NOT NULL DEFAULT 0,\n      archived INTEGER NOT NULL DEFAULT 0,\n      created_at TEXT NOT NULL,\n      FOREIGN KEY(issue_id) REFERENCES multiremi_issues(id) ON DELETE CASCADE,\n      FOREIGN KEY(member_id) REFERENCES multiremi_workspace_members(id) ON DELETE CASCADE\n    );\n    INSERT INTO multiremi_inbox_items (\n      id, workspace_id, issue_id, member_id, recipient_type, recipient_id, severity,\n      actor_type, actor_id, type, title, body, details, read, archived, created_at\n    )\n    SELECT\n      id, workspace_id, issue_id, member_id,\n      COALESCE(NULLIF(recipient_type, ''), 'member'),\n      COALESCE(NULLIF(recipient_id, ''), member_id),\n      COALESCE(NULLIF(severity, ''), 'info'),\n      actor_type, actor_id, type, title, body, details, read, archived, created_at\n    FROM multiremi_inbox_items_legacy;\n    DROP TABLE multiremi_inbox_items_legacy;\n    CREATE INDEX IF NOT EXISTS idx_multiremi_inbox_member\n      ON multiremi_inbox_items(member_id, archived, read, created_at);\n    CREATE INDEX IF NOT EXISTS idx_multiremi_inbox_page\n      ON multiremi_inbox_items(member_id, archived, created_at DESC, id DESC);\n    CREATE INDEX IF NOT EXISTS idx_multiremi_inbox_recipient\n      ON multiremi_inbox_items(workspace_id, recipient_type, recipient_id, archived, read, created_at);\n  ",
+    "fingerprint": "eed25ecd002d3a247fd947e554890085657ebadcf933728a636e5727431b7da5"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP TABLE multiremi_chat_sessions",
+    "fingerprint": "3552b004660270436922bb693d8af015383d51f64f3758884796508361f03ac4"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE multiremi_chat_sessions_without_issue RENAME TO multiremi_chat_sessions",
+    "fingerprint": "09c999d3666455f6074e43950715cffeebf36680f61af604bcd278bcf61e2e33"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "dropColumnIfExists(db, \"multiremi_chat_sessions\", \"issue_id\")",
+    "fingerprint": "17823b8bf56b4f14a66f1661a2e00e608b7c022952a751053ffb83c367a8cbcf"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE multiremi_session_archives RENAME TO multiremi_legacy_session_archives",
+    "fingerprint": "18487a81398e427c1f295226842afab0f483d67d8c71600dd75b1c90451dba1c"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP INDEX IF EXISTS ${…}",
+    "fingerprint": "6d94d601b9b30e0dfaacadb38674f564fd481436cffd5e1d8aa95cf75b877335"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP INDEX IF EXISTS idx_multiremi_task_traces_archive",
+    "fingerprint": "d2752ebf124edf92e7b6069b6f660208f8ae8b2a5add050f40b53090def9b25f"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "dropColumnIfExists(db, \"multiremi_task_traces\", column)",
+    "fingerprint": "523761986318fe6dfd0514c9f71837185ae5761c282ca1fa4c7398d2198d57e1"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP TABLE IF EXISTS multiremi_session_archive_requests",
+    "fingerprint": "24f3835bfa78fb4829186cac596139a035b25665daca9beb64e41d3d069f9ab7"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP TABLE IF EXISTS multiremi_trace_backfill_progress",
+    "fingerprint": "966184b248c111c9707f67e4f01db02f750d8f02f0de3343dd535872a002cff1"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "dropColumnIfExists(db, \"multiremi_issue_workspaces\", column)",
+    "fingerprint": "dbaeea29b30cce9d728566a4833343465289e72f6d4872eb919f303a28072597"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP VIEW IF EXISTS multiremi_autopilot_run_records",
+    "fingerprint": "61cac3bcef9d3fd7c1ba25c826fb323d02447f7525364f0174cbe8b6e7b2d482"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE ${…} DROP CONSTRAINT ${…}_pkey",
+    "fingerprint": "797d7c216291b179c6c97f7f9ab820d29a37e2efea75910efbdcf74e28908619"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE ${…} DROP CONSTRAINT \"${…}\"",
+    "fingerprint": "a780892263c303fc7b4c69a981c2d0bbb6639dc4febf2472d60ea209848f6929"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP TABLE ${…}",
+    "fingerprint": "65a5f938bb22bc6c0350dc5169307ca0e1fc62a4ff03337b72b5dfe099c1ac7c"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "ALTER TABLE ${…}_multi RENAME TO ${…}",
+    "fingerprint": "36509873caf665cf058c389d3a6fcc2a5e9697a6e80e0cbad51b44304d96dd08"
+  },
+  {
+    "file": "packages/server/src/store/migrations.ts",
+    "sql": "DROP INDEX IF EXISTS idx_multiremi_feishu_bot_agent_routes_default_scope;\n        CREATE UNIQUE INDEX idx_multiremi_feishu_bot_agent_routes_default_scope\n          ON multiremi_feishu_bot_agent_routes(workspace_id, bot_id, scope) WHERE chat_id IS NULL;\n        CREATE UNIQUE INDEX idx_multiremi_feishu_bot_configs_app ON multiremi_feishu_bot_configs(workspace_id, app_id);\n        CREATE UNIQUE INDEX idx_multiremi_feishu_bot_configs_runtime ON multiremi_feishu_bot_configs(workspace_id, runtime_id);\n        CREATE INDEX idx_multiremi_feishu_bot_audit_bot ON multiremi_feishu_bot_audit(workspace_id, bot_id, seq);",
+    "fingerprint": "f1d50bab133021d8717ce9245261ff4350bad9c05a83ffce12dc267d60c6a102"
+  },
+  {
+    "file": "packages/server/src/store/turn-execution-records.ts",
+    "sql": "DROP VIEW IF EXISTS ${…}",
+    "fingerprint": "b3fc1218f2b9d8103e9b7ea5856d4220d9f024b9e78cb4e503630a53f2bb99d6"
+  },
+  {
+    "file": "packages/server/src/store/turn-execution-records.ts",
+    "sql": "DROP VIEW IF EXISTS multiremi_chat_message_records",
+    "fingerprint": "0a420d338fe49d131e0e74e587628bb2bddb7ddad6968180d30c0848c55914ca"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE multiremi_conversation_log RENAME COLUMN author_type TO sender_type",
+    "fingerprint": "372ebfe80c23a4d3da285977ccbf0037241c9ad5f24ceb38fc67f85a3a94ac92"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE multiremi_conversation_log RENAME COLUMN author_id TO sender_id",
+    "fingerprint": "de309486cc5d964c9261a6d1c39718d57e16534bb94a3e798418c349079de57e"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE multiremi_conversation_log RENAME COLUMN parent_id TO reply_to_id",
+    "fingerprint": "dcce1296fefab2f4ede6529d8af3f0cc435f6adfd90d934ba45a6973187c8a13"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE multiremi_tasks RENAME TO multiremi_turn_attempts",
+    "fingerprint": "b6fbcb01498667fb9194e19f89f3694d8fab4594e19e2593f6bf7173a7a009d0"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE multiremi_turn_attempts RENAME TO multiremi_unified_attempt_source",
+    "fingerprint": "cc77664c1540776f254b4c57ef93deadd402e09a0602f555b4e6132ea76c0a1b"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE multiremi_unified_attempt_source DROP COLUMN ${…}",
+    "fingerprint": "e3cd21d059a338b48b73195d8a86ef7a8b476fd1cb2e80999cc283635184aadf"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "DROP TABLE multiremi_unified_attempt_copy",
+    "fingerprint": "595d76485c11e5f14edde71db91d7ef2dce6ff812c5068f8e658cdacb6e5da74"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE multiremi_unified_attempt_source RENAME TO multiremi_turn_attempts",
+    "fingerprint": "a710226e22ee263294fa1c853c9e2a5655750ed088f5366c42980f07ed3c02ae"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE multiremi_turn_attempts ALTER COLUMN turn_id SET NOT NULL; ALTER TABLE multiremi_turn_attempts ALTER COLUMN attempt_no SET NOT NULL",
+    "fingerprint": "25ade97fa2806ae231448771cd9748014d413c20da03db6630b842dbf51c0756"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "DROP TABLE multiremi_turn_attempts",
+    "fingerprint": "def07b52da53851cc84f810fa6b9c6d1401460851e11e97d4848899b29476fa0"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE multiremi_unified_attempt_copy RENAME TO multiremi_turn_attempts",
+    "fingerprint": "49196ed724479b9da802c97e275a1c622d1af53ca93a4e054ca60364c81bf9fb"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "DROP TABLE multiremi_session_agent_lanes",
+    "fingerprint": "19a5380826a644847d3c9d965af8e798c8ee225dc55569e4d2f06b3df2776861"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "INSERT INTO multiremi_unified_run_copy SELECT ${…} FROM multiremi_autopilot_runs; DROP TABLE multiremi_autopilot_runs; ALTER TABLE multiremi_unified_run_copy RENAME TO multiremi_autopilot_runs",
+    "fingerprint": "6d2d46c687469d2138e43249819c564c7a96fb438a4e29a9278d5120d1e6b390"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE multiremi_autopilot_runs DROP COLUMN ${…}",
+    "fingerprint": "11a292790384973beaec308874c5c8ceff596d78ebfb89b705a9756260f72f5d"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "ALTER TABLE \"${…}\" DROP CONSTRAINT \"${…}\"; ALTER TABLE \"${…}\" ADD CONSTRAINT \"${…}\" ${…}",
+    "fingerprint": "fcffc9c088af1f559d3977769678f521357f4f874134434dcfb95d48b2b0c7ae"
+  },
+  {
+    "file": "packages/server/src/store/unified-model-migration.ts",
+    "sql": "INSERT INTO ${…} SELECT * FROM ${…}; DROP TABLE ${…}; ALTER TABLE ${…} RENAME TO ${…}",
+    "fingerprint": "0ffdb84b6ab47c491118868e428712536a332ce0730beea071e8118c5a0f297e"
+  },
+  {
+    "file": "packages/shared/src/db/index.ts",
+    "sql": "DROP TABLE group_configs",
+    "fingerprint": "59255c0018501d9ac8504c377d8427bbf7b3b8b74147bb51d85ceb6946e598c6"
+  },
+  {
+    "file": "packages/shared/src/db/index.ts",
+    "sql": "DROP TABLE embeddings",
+    "fingerprint": "ad57f9bc14b4ed90e22118344ec2fdc88bc17189550b726addd58883be841248"
+  },
+  {
+    "file": "packages/shared/src/db/index.ts",
+    "sql": "DROP TABLE projects",
+    "fingerprint": "cd9e28bb63bebd5f7d71c48a35681ed0c4f2715078b5687bbfc3bae77bd02ddd"
+  },
+  {
+    "file": "packages/shared/src/db/index.ts",
+    "sql": "DROP TABLE vec_items",
+    "fingerprint": "8d99c5b42ac8743d6d9079691c09ee29cb80ae5bb9397bbca98ac8362ad13fa0"
+  },
+  {
+    "file": "packages/shared/src/db/index.ts",
+    "sql": "DROP TABLE remi_config",
+    "fingerprint": "71da4f586201f47e2b2469623edaf851adb50715feb5d7ef778c32db1dc3998d"
+  }
+]

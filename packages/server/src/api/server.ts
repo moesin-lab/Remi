@@ -148,7 +148,6 @@ import { TraceReader } from "@multiremi/trace/trace-reader.js";
 import { organizerTurnStats } from "./helpers/organizer.js";
 import {
   createRequestMetricsMiddleware,
-  readProcessDbCounters,
   resolveRequestMetricsOptions,
   startRequestMetricsSummary,
   type RequestMetricsOptions,
@@ -1227,7 +1226,6 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     // Same resolved window as `api_minute_summary`; WS frame attribution overlaps
     // the process DB totals there, so the two lines must not be added together.
     metrics: wsFrameMetricsFromHttp(requestMetricsOptions),
-    dbCounters: () => readProcessDbCounters(),
     welcomeCaps: options.daemonWelcomeCaps,
   });
   const daemonTurnBridge = options.daemonTurnBridge ?? store.getDaemonTurnBridge();

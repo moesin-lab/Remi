@@ -1460,8 +1460,8 @@ describe("native collaboration CLI contracts", () => {
   it("uploads attachments against the requested issue and honors structured output", async () => {
     useCliEnv();
     let uploadedIssue = "";
-    globalThis.fetch = (async (_input, init) => {
-      const form = init?.body as FormData;
+    globalThis.fetch = (async (input, init) => {
+      const form = await new Request(input, init).formData();
       uploadedIssue = String(form.get("issue_id"));
       return Response.json({ attachment: { id: "att_1", issue_id: uploadedIssue, filename: "package.json" } });
     }) as typeof fetch;

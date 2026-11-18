@@ -86,6 +86,9 @@ test('image supervisor keeps heartbeats and a terminal rollback across restart',
     for (const server of reservations.splice(0)) await server.stop(true);
     child = start();
     await until(async () => Boolean((await readJson(statusPath))?.seedReady && (await readJson(statusPath))?.childPid && (await readJson(statusPath))?.transition?.phase === 'succeeded'));
+    const bootPid = (await readJson(statusPath)).childPid;
+    await Bun.sleep(700);
+    expect((await readJson(statusPath)).childPid).toBe(bootPid);
     await writeJson(join(control, 'api/desired.json'), { revision: 'rejected-switch', releaseId: 'rejected', mode: 'run', strategy: 'switch' });
     await until(async () => (await readJson(statusPath))?.transition?.phase === 'standby');
     const heartbeat = (await readJson(statusPath)).heartbeatAt;

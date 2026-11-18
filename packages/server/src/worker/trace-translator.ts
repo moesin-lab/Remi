@@ -623,6 +623,9 @@ export function createTraceTranslator(
   /** Latest version of every item, in first-seen order (for settle / lastItem). */
   const items = new Map<string, TraceItem>((opts.resume?.items ?? []).map(item => [item.id, item]));
   const usedIds = new Set<string>(items.keys());
+  // Only waits restored from the prior process can retain their trace identity.
+  const resumedWaitIds = new Set((opts.resume?.items ?? []).filter(item =>
+    (item.type === "permission" || item.type === "question") && item.status === "in_progress").map(item => item.id));
   const consumedSteers = new Set<string>();
   let steerEcho = "";
   const openText = new Map<string, TextState>(); // key: `${parent}\u0000${kind}`
@@ -1783,8 +1786,15 @@ export function createTraceTranslator(
 
     permissionRequested(request) {
       return emitter.run(() => {
-        const id = uniqueId(`perm:${request.decisionId}`);
         boundary(null);
+        const previous = [...items.values()].find(item => resumedWaitIds.has(item.id) && item.type === "permission"
+          && item.status === "in_progress" && item.message_id === request.decisionId);
+        if (previous?.type === "permission") {
+          resumedWaitIds.delete(previous.id);
+          write("item.updated", { ...previous, tool_item_id: request.toolCallId });
+          return previous.id;
+        }
+        const id = uniqueId(`perm:${request.decisionId}`);
         write("item.started", {
           id, parent_id: null, status: "in_progress", started_at: now(), completed_at: null, type: "permission",
           tool_item_id: request.toolCallId, title: request.title, message_id: request.decisionId,
@@ -1820,8 +1830,15 @@ export function createTraceTranslator(
 
     questionRequested(request) {
       return emitter.run(() => {
-        const id = uniqueId(`q:${request.decisionId}`);
         boundary(null);
+        const previous = [...items.values()].find(item => resumedWaitIds.has(item.id) && item.type === "question"
+          && item.status === "in_progress" && item.message_id === request.decisionId);
+        if (previous?.type === "question") {
+          resumedWaitIds.delete(previous.id);
+          write("item.updated", { ...previous, tool_item_id: request.toolCallId });
+          return previous.id;
+        }
+        const id = uniqueId(`q:${request.decisionId}`);
         write("item.started", {
           id, parent_id: null, status: "in_progress", started_at: now(), completed_at: null, type: "question",
           tool_item_id: request.toolCallId, message: request.message, message_id: request.decisionId,

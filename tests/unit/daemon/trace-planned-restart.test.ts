@@ -60,3 +60,59 @@ it("falls back to canonical native IDs when optional identity state is missing o
     expect(warnings.length).toBe(runtime ? 1 : 0);
   }
 });
+
+for (const kind of ["permission", "question"] as const) {
+  for (const mode of ["live", "live-ended", "resumed-ended"] as const) {
+    it(`keeps fresh IDs for a repeated ${kind} request in ${mode}`, () => {
+      let state = EMPTY_TURN_TRACE, seq = 0;
+      const emit = (batch: TraceEventInput[]) => {
+        state = applyTurnTraceEvents(state, batch.map(event => ({ ...event, seq: ++seq, ts: new Date().toISOString() }) as TraceEvent));
+      };
+      let translator = createTraceTranslator(createAdapter("claude"), emit);
+      translator.start({ attemptId: "attempt", turnId: "turn", agentId: "agent", agentName: null, provider: "claude", requestedModel: null, input: [] });
+      const request = () => kind === "permission"
+        ? translator.permissionRequested({ decisionId: "Q", toolCallId: null, title: "Allow?", options: [] })
+        : translator.questionRequested({ decisionId: "Q", toolCallId: null, message: "Where?", questions: [] });
+      const first = request();
+      if (mode !== "live") {
+        if (kind === "permission") translator.permissionResolved(first, { option: null, outcome: "timeout", respondedBy: null, replyMessageId: null });
+        else translator.questionResolved(first, { answers: { city: "Paris" }, respondedBy: null, replyMessageId: null });
+      }
+      if (mode === "resumed-ended") {
+        translator.plannedRestart();
+        translator = createTraceTranslator(createAdapter("claude"), emit, { resume: { turn: state.turn!, items: state.items } });
+      }
+      expect(request()).toBe(`${first}:2`);
+      translator.flush();
+      expect(state.items.filter(item => item.type === kind && item.message_id === "Q")).toHaveLength(2);
+    });
+  }
+}
+
+it("rebinds a restored permission decline to the replacement tool without changing the old trace item", () => {
+  let state = EMPTY_TURN_TRACE, seq = 0;
+  const events: TraceEvent[] = [];
+  const emit = (batch: TraceEventInput[]) => {
+    const stored = batch.map(event => ({ ...event, seq: ++seq, ts: new Date().toISOString() }) as TraceEvent);
+    events.push(...stored); state = applyTurnTraceEvents(state, stored);
+  };
+  const first = createTraceTranslator(createAdapter("claude"), emit);
+  first.start({ attemptId: "attempt", turnId: "turn", agentId: "agent", agentName: null, provider: "claude", requestedModel: null, input: [] });
+  const tool = (id: string) => ({ sessionUpdate: "tool_call", toolCallId: id, name: "Bash", kind: "execute", status: "in_progress",
+    rawInput: { command: "echo approved" }, _meta: { claudeCode: { toolName: "Bash" } } } as any);
+  first.acp(tool("old-tool"));
+  const id = first.permissionRequested({ decisionId: "Q", toolCallId: "old-tool", title: "Allow?", options: [] });
+  first.plannedRestart();
+  const before = state.items.find(item => item.id === id)!;
+  const resumed = createTraceTranslator(createAdapter("claude"), emit, { resume: { turn: state.turn!, items: state.items } });
+  resumed.acp(tool("new-tool"));
+  expect(resumed.permissionRequested({ decisionId: "Q", toolCallId: "new-tool", title: "Allow?", options: [] })).toBe(id);
+  resumed.permissionResolved(id, { option: { optionId: "reject", name: "Reject", kind: "reject_once" }, outcome: "selected", respondedBy: "member", replyMessageId: "answer" });
+  resumed.acp({ sessionUpdate: "tool_call_update", toolCallId: "new-tool", status: "failed" } as any);
+  resumed.flush();
+  expect(state.items.filter(item => item.type === "permission" && item.message_id === "Q")).toHaveLength(1);
+  expect(state.items.find(item => item.id === id)).toMatchObject({ id, started_at: before.started_at, status: "declined", tool_item_id: "new-tool", decision: { option_id: "reject" }, reply_message_id: "answer" });
+  expect(state.items.find(item => item.id === "old-tool")).toMatchObject({ status: "stopped" });
+  expect(state.items.find(item => item.id === "new-tool")).toMatchObject({ status: "declined" });
+  expect(events.filter(event => event.type === "item.started" && event.item.id === id)).toHaveLength(1);
+});

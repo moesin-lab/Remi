@@ -7,8 +7,8 @@
  * POST; the receiver only delivers them locally and never forwards them
  * again, so the two sides cannot ping-pong an event forever.
  *
- * The envelope is deliberately small and versioned: `v` is the only field a
- * receiver may branch on before it trusts the rest, and `origin` exists so a
+ * The envelope is deliberately small and versioned: positive `v` permits additive
+ * evolution while known fields are parsed, and `origin` exists so a
  * process can drop a message it somehow receives back from itself.
  *
  * Task messages carry a six-field routing subject or a persisted seq reference;
@@ -126,8 +126,8 @@ export type PeerEventPayload = {
 };
 
 export interface PeerEventEnvelopeOf<K extends PeerEventKind = PeerEventKind> {
-  /** Protocol version. Receivers reject anything they do not understand. */
-  v: typeof PEER_EVENT_PROTOCOL_VERSION;
+  /** Positive envelope version; unknown additive fields are ignored. */
+  v: number;
   /** Process that produced the event; a receiver drops its own origin back. */
   origin: string;
   kind: K;
@@ -178,7 +178,7 @@ export interface PeerEventBatch {
 export interface PeerEventAck {
   ok: true;
   accepted: number;
-  /** Envelopes refused: malformed, wrong version, or this process's own origin. */
+  /** Envelopes refused: malformed, unknown kind, or this process's own origin. */
   rejected: number;
   /**
    * The batch was already handled under this epoch and `batch_seq`, so nothing
@@ -239,7 +239,7 @@ export interface PeerHealth {
 export function parsePeerEventEnvelope(value: unknown): PeerEventEnvelope | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  if (record.v !== PEER_EVENT_PROTOCOL_VERSION) return null;
+  if (!Number.isSafeInteger(record.v) || (record.v as number) < 1) return null;
   if (typeof record.origin !== "string" || !record.origin) return null;
   if (typeof record.kind !== "string" || !PEER_EVENT_KINDS.includes(record.kind as PeerEventKind)) {
     return null;

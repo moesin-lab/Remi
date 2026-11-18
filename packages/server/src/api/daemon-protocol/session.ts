@@ -1,3 +1,4 @@
+import { hasDaemonCapability } from "@multiremi/contracts/daemon-compatibility.js";
 import { withDbSource } from "@shared/observability/db-sources.js";
 /**
  * One daemon's v2 connection (MUL-417, spec §1-§2, §8).
@@ -748,10 +749,10 @@ export class DaemonProtocolSession {
     }
 
     this.daemonId = parsed.hello.daemon_id;
-    this.supportsWikiFetch = parsed.hello.caps.includes("wiki.fetch");
+    this.supportsWikiFetch = hasDaemonCapability(parsed.hello.caps, "wiki.fetch");
     const welcomeCaps = negotiateWelcomeCaps(parsed.hello.caps, this.options.welcomeCaps);
-    this.supportsLaneBackground = welcomeCaps.includes("lane.background");
-    this.supportsInputUnread = welcomeCaps.includes("input_unread");
+    this.supportsLaneBackground = hasDaemonCapability(welcomeCaps, "lane.background");
+    this.supportsInputUnread = hasDaemonCapability(welcomeCaps, "input_unread");
     this.advertisedRuntimeIdList = parsed.hello.runtimes.map((runtime) => runtime.runtime_id);
     this.runtimeIdList = serving;
     this.unavailableRuntimeIdList = unavailable;

@@ -7,13 +7,14 @@ import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { historicalWriters } from "./unified-model-test-backends.js";
 import { readOfferedTurnInput } from "../../fixtures/turn-report.js";
+import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js";
 
 afterEach(resetMultiremiTestEnv);
 
 function fixture(owner: "chat" | "issue" = "chat") {
   const store = createStore();
   const runtime = store.registerRuntime({ id: "parallel", name: "parallel", provider: "claude", maxConcurrency: 6,
-    metadata: { parallel_agent_execution: 1, cli_version: "0.2.66" } });
+    metadata: { cli_version: DAEMON_MIN_CLI_VERSION } });
   const leader = store.createAgent({ name: "Leader", provider: "claude" });
   const worker = store.createAgent({ name: "Worker", provider: "claude" });
   const qa = store.createAgent({ name: "QA", provider: "claude" });
@@ -235,10 +236,14 @@ describe("parallel agent execution", () => {
     expect(store.claimTask(runtime.id)).toBeNull();
   });
 
-  it("does not give Issue tasks to an old daemon that cannot isolate execution state", () => {
+  it("gives Issue tasks to a baseline daemon without a redundant parallel capability flag", () => {
     const f = fixture();
-    const old = f.store.registerRuntime({ id: "old", name: "old", provider: "claude", metadata: { cli_version: "0.2.66" } });
-    f.delegate(f.worker.id, "dlg_new");
-    expect(f.store.claimTask(old.id)).toBeNull();
+    // Pre-contract daemons are rejected at hello, before reaching task placement.
+    // Every admitted daemon already supports isolated parallel execution.
+    const baseline = f.store.registerRuntime({ id: "baseline", name: "baseline", provider: "claude",
+      metadata: { cli_version: DAEMON_MIN_CLI_VERSION } });
+    const task = f.delegate(f.worker.id, "dlg_new");
+    expect(f.store.claimTask(baseline.id)?.id).toBe(task.id);
+    expect(daemonTaskClaimResponse(f.store, f.store.getTaskWithAgent(task.id)!).execution_scope).toBe("dlg_new");
   });
 });

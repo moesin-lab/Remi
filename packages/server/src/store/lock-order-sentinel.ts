@@ -1,5 +1,6 @@
 /**
- * Whole-suite enforcement of the MUL-405 lock order (W -> N -> D).
+ * Whole-suite enforcement of the lock order (F -> W -> N -> D).
+ * F is the MUL-169 background live-term row, always acquired before domain work.
  *
  * The contract lives in `./advisory-locks.ts`: a transaction takes the
  * workspace lifecycle row lock (W), then any number-allocation advisory lock
@@ -47,9 +48,9 @@
  * cached boolean read when off, so production pays nothing.
  */
 
-export type LockOrderClass = "W" | "N" | "D";
+export type LockOrderClass = "F" | "W" | "N" | "D";
 
-const RANK: Record<LockOrderClass, number> = { W: 0, N: 1, D: 2 };
+const RANK: Record<LockOrderClass, number> = { F: -1, W: 0, N: 1, D: 2 };
 
 /** The workspace lifecycle row lock (`StoreContext.lockWorkspaceRuntimeLifecycle`). */
 const WORKSPACE_ROW_LOCK = /UPDATE\s+multiremi_workspaces\s+SET\s+updated_at\s*=\s*updated_at/i;
@@ -164,6 +165,7 @@ const FROM_END = new Set(["where", "group", "having", "window", "order", "limit"
 const ALIAS_END = new Set([...FROM_END, "join", "inner", "left", "right", "full", "cross", "natural", "outer", "on", "using", "tablesample", "set"]);
 
 function rowLockClass(table: string): LockOrderClass {
+  if (table === "multiremi_live_terms") return "F";
   return table === "multiremi_workspaces" ? "W" : "D";
 }
 
@@ -341,6 +343,7 @@ function classifyStatementNodes(nodes: SqlNode[]): LockOrderClass[] {
     return [...new Set(selectLocks(nodes).classes)];
   }
   const text = nodes.map((node) => "text" in node ? node.text : "()").join(" ");
+  if (/^(?:update|insert into|delete from) multiremi_live_terms\b/i.test(text)) return ["F"];
   return [WORKSPACE_ROW_LOCK.test(text) ? rowLockClass("multiremi_workspaces") : "D"];
 }
 
@@ -385,7 +388,7 @@ export function resetLockOrderSentinelEnabledCache(): void {
 /** Outermost transaction opened. Nested `transaction()` calls do not start a frame. */
 export function lockOrderSentinelTransactionBegin(): void {
   if (!lockOrderSentinelEnabled()) return;
-  frames.push({ acquired: new Set(), highest: -1, trace: [] });
+  frames.push({ acquired: new Set(), highest: -2, trace: [] });
 }
 
 /** Outermost transaction closed (commit or rollback). */
@@ -422,7 +425,7 @@ function record(frame: Frame, cls: LockOrderClass, detail: string): void {
     const order = [...frame.trace, `${cls} ${trimmed}`].join("\n  ");
     throw new Error(
       `MUL-405 lock order violated: first ${cls} acquisition comes after a higher class ` +
-        `(W -> N -> D required).\nTrace:\n  ${order}\nStack:\n${new Error().stack ?? "(no stack)"}`,
+        `(F -> W -> N -> D required).\nTrace:\n  ${order}\nStack:\n${new Error().stack ?? "(no stack)"}`,
     );
   }
   frame.acquired.add(cls);

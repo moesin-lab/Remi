@@ -16,7 +16,7 @@ its current ingestion capability boundaries.
 
 ## Rules and delivery
 
-- `pipeline.completed`, `change.opened`, and `change.updated` read current PR checks
+- `pipeline.started`, `pipeline.completed`, `change.opened`, and `change.updated` read current PR checks
   through the same `GitHubScmOperations.liveChecks` implementation as the checks CLI.
   The read fetches PR/checks/PR and rejects changes to head/base/target/base repository.
   It also requires agreement with the collected PR head before delivering.
@@ -111,10 +111,17 @@ A claimed monitor effect has a two-minute lease and a 90-second provider-read ti
 Message delivery, conclusion state and the applied marker commit together after a
 lease-token fence. Crashed workers are reclaimed; stale workers cannot commit.
 Provider errors remain retryable with bounded exponential backoff. Rate limits honor
-Retry-After/reset time (at least 60 seconds). Stored errors contain no provider body.
+Retry-After/reset time (at least 60 seconds), measured from the actual failure time
+rather than the drain start time. Stored errors contain no provider body.
 Delayed monitor effects do not keep canonical events pending or repeat automation delivery.
 
-Built-in names are `monitor_head`, `monitor_checks`, `monitor_review`, `monitor_capacity`;
+PR-targeted rows persist `<rule-name>:<changeRequestId>` as their effect type and
+include the PR ID in their dedupe key. This distinguishes multiple PRs sharing one
+pipeline event and Issue under the original unique event/Issue/type constraint.
+Legacy unsuffixed rows remain consumable. Capacity effects use the same PR scope,
+with deduplication per PR/head/Issue. No existing merge-effect constraint is removed.
+
+Built-in rule names are `monitor_head`, `monitor_checks`, `monitor_review`, `monitor_capacity`;
 `complete_issue_on_merge` retains its existing activity-only meaning.
 `registerScmMonitorRule` registers a unique `monitor_*` rule with `matches` and `prepare`.
 Preparation reads external evidence and returns a synchronous database commit callback,

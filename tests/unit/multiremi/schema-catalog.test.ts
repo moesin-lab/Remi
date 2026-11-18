@@ -25,6 +25,7 @@ describe('SQLite expand catalog authority', () => {
   for (const [label, definition] of [
     ['type change', 'c bigint, d text, CONSTRAINT named_check CHECK (c > 0)'],
     ['not null', 'c integer NOT NULL, d text, CONSTRAINT named_check CHECK (c > 0)'],
+    ['named constraint replacement', 'c integer, d text, CONSTRAINT named_check CHECK (c > 1)'],
     ['named constraint removal', 'c integer, d text'],
   ]) it(`rejects opaque table reconstruction with ${label}`, () => {
     const db = new Database(':memory:');
@@ -54,6 +55,24 @@ describe('SQLite expand catalog authority', () => {
         },
       }], '1.0.0', { minLevel: 1, maxLevel: 1 });
       expect(readSchemaLevels(db)).toEqual({ expandLevel: 1, contractLevel: 0 });
+    } finally { db.close(); }
+  });
+
+  for (const sql of [
+    'CREATE UNIQUE INDEX extra_unique ON retained(c)',
+    'DROP VIEW retained_view; CREATE VIEW retained_view AS SELECT d FROM retained',
+    'DROP TRIGGER retained_trigger; CREATE TRIGGER retained_trigger AFTER INSERT ON retained BEGIN SELECT 2; END',
+  ]) it(`rejects opaque definition/restriction change ${sql}`, () => {
+    const db = new Database(':memory:');
+    try {
+      ensureSchemaMeta(db);
+      db.exec('CREATE TABLE retained(c integer,d text); CREATE VIEW retained_view AS SELECT c FROM retained; CREATE TRIGGER retained_trigger AFTER INSERT ON retained BEGIN SELECT 1; END');
+      const before = snapshotSchemaCatalog(db);
+      expect(() => runSchemaExpands(db,[{id:'opaque',phase:'expand',level:1,release:'1.0.0',expandRelease:'1.0.0',run:()=>db.exec(sql)}],
+        '1.0.0',{minLevel:0,maxLevel:1})).toThrow('Destructive schema catalog change');
+      expect(snapshotSchemaCatalog(db)).toEqual(before);
+      expect(readSchemaLevels(db)).toEqual({expandLevel:0,contractLevel:0});
+      expect(db.query('SELECT * FROM multiremi_schema_steps').all()).toEqual([]);
     } finally { db.close(); }
   });
 

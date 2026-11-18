@@ -1,3 +1,7 @@
+import { assertSchemaBeforeExpand, SCHEMA_COMPATIBILITY } from "./schema-levels.js";
+import { runSchemaExpands } from "./schema-migration-runner.js";
+import { SCHEMA_MIGRATIONS } from "./schema-migrations.js";
+import { version as SCHEMA_RELEASE } from "../../../../package.json";
 import { migrateExecutionEndpoints } from "./execution-endpoint-migration.js";
 import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
 import { ensureTurnListIndexes } from './turn-list-indexes.js';
@@ -80,6 +84,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
   // is a no-op). It releases on throw as well as on return, so a failed
   // migration cannot strand it.
   const migrate = () => withModernSqliteAlterTable(db, resolveSqlDialect(db, options.dialect), () => advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () => {
+    assertSchemaBeforeExpand(db);
     // The directory may have become unwritable while waiting for the lock.
     prepareMigrationReportDirectory(reportDir);
     const tables=existingTableNames(db);
@@ -101,7 +106,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
       addColumnIfMissing(db, "multiremi_execution_groups", "connection_mode TEXT NOT NULL DEFAULT 'legacy'");
       addColumnIfMissing(db, "multiremi_execution_groups", "model_policy TEXT NOT NULL DEFAULT '{}'");
     }
-    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);return;}
+    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);runSchemaExpands(db, SCHEMA_MIGRATIONS, SCHEMA_RELEASE, SCHEMA_COMPATIBILITY);return;}
     // Inspect the existing snapshot before bootstrap migrations can touch it.
     const checks=unifiedModelPreflight(db);
     if(checks.some(c=>!c.ok)){
@@ -111,6 +116,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     runMigrationsForDialect(db,resolveSqlDialect(db,options.dialect));
     runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});
     separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);
+    runSchemaExpands(db, SCHEMA_MIGRATIONS, SCHEMA_RELEASE, SCHEMA_COMPATIBILITY);
   }));
   // SQLite schema rebuilds toggle foreign_keys outside their transactions.
   // Hold a separate SQLite writer lock across that entire sequence so another

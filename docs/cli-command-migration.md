@@ -1060,3 +1060,11 @@ a replacement.
 | `remi message question transfer` | Automatic re-routing; `remi message question get <question>` shows the current handler |
 
 端点检查使用 `remi runtime endpoint inspect --file inspection.json --json`（operation 为 `models`、`detect` 或显式单模型 `test`）；缓存读取使用 `remi runtime endpoint catalog <endpoint-id> --json`。模型列表不代表实际调用验证，`test` 可能计费。
+
+## 本机数据库维护
+
+`remi db schema` 读取 PostgreSQL schema level 与代码兼容区间；
+`remi db contract --level <n>` 显式执行已声明、晚于 expand release 的收缩步骤。
+这两个 Registry 命令直接使用 `MULTIREMI_DATABASE_URL`，不使用平台 token；
+contract 当前要求所有其他数据库客户端停止，不支持 SQLite。
+步骤声明与限制见 [Schema 迁移纪律](dev/schema-migrations.md)。

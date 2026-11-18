@@ -1,3 +1,4 @@
+import { databaseCommandSpecs } from "./commands/database.js";
 /**
  * Remi CLI — Command registry and dispatcher.
  *
@@ -23,6 +24,7 @@ import { RETIRED_CLI_COMMANDS, assertNotRetired, replaceRetiredSpecs, retiredSpe
 import { unifiedCommandSpecs } from "./commands/unified.js";
 
 const commandRegistry = new CommandRegistry();
+for (const spec of databaseCommandSpecs()) commandRegistry.register(spec);
 commandRegistry.register(contextCommandSpec());
 commandRegistry.register(runtimePrepareCommandSpec());
 for (const spec of replaceRetiredSpecs([

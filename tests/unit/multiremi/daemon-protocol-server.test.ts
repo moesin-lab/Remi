@@ -9,6 +9,11 @@ import { DAEMON_MIN_CLI_VERSION } from "@multiremi/contracts/daemon-protocol.js"
  * accepted limits are the A-0 constants. A-2 removes A-1's v1 coexistence path.
  */
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
+import { drainDbSources, withDbJob, withDbSource } from "@shared/observability/db-sources.js";
+import { recordDbQuery, resetRequestMetricsForTest } from "@multiremi/observability/request-metrics.js";
+import { WsFrameMetricsRing, resetWsFrameMetricsForTest } from "../../../packages/server/src/api/daemon-protocol/metrics.js";
+import type { DaemonProtocolLayer } from "../../../packages/server/src/api/daemon-protocol/index.js";
 import { watchRuntimeFrames } from "../../fixtures/runtime-downlinks.js";
 import { startMultiremiServer } from "@multiremi/api.js";
 import { handleDaemonProtocolMessage } from "../../../packages/server/src/api/server.js";
@@ -19,6 +24,100 @@ import {
 import { createStore, nextWebSocketMessage, resetMultiremiTestEnv, waitWebSocketOpen } from "./helpers.js";
 
 afterEach(resetMultiremiTestEnv);
+
+for (const summaryDbRoutes of [true, false]) {
+  it(`MUL-209 real WebSockets isolate SQL across await (db_sources=${summaryDbRoutes})`, async () => {
+    const { store } = await daemonFixture();
+    const database = process.env.MULTIREMI_TEST_POSTGRES_URL
+      ? new PostgresSyncDatabase(process.env.MULTIREMI_TEST_POSTGRES_URL) : null;
+    // PG CI exercises the actual SQL completion hook. Local SQLite has no such
+    // hook, so its fallback verifies transport/context only, not PG behavior.
+    const query = () => {
+      if (database) expect(database.query("SELECT 1 AS n").get()?.n).toBe(1);
+      else recordDbQuery(2, 0);
+    };
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let ready!: () => void;
+    const allEntered = new Promise<void>(resolve => { ready = resolve; });
+    let entered = 0;
+    let layer!: DaemonProtocolLayer;
+    resetWsFrameMetricsForTest();
+    const samples = spyOn(WsFrameMetricsRing.prototype, "record"); // call through
+    const output = spyOn(console, "log").mockImplementation(() => {});
+    const sockets: WebSocket[] = [];
+    const inboxes: ReturnType<typeof watchRuntimeFrames>[] = [];
+    const server = startMultiremiServer({
+      store, scheduler: null, port: 0, hostname: "127.0.0.1", authToken: "root-secret",
+      requestMetrics: { enabled: true, summaryDbRoutes, summaryIntervalMs: 60_000,
+        summaryTopRoutes: 20, bufferCapacity: 256, slowRequestMs: 1e9, role: "all" },
+      onDaemonProtocol: protocol => {
+        layer = protocol;
+        protocol.registerRpcHandler("trace.head", async () => {
+          query();
+          if (++entered === 8) ready();
+          await gate;
+          query(); // ALS must survive restoration after all peers interleave.
+          return { ok: true };
+        });
+      },
+    });
+    try {
+      for (let index = 0; index < 8; index++) {
+        const runtimeId = `rt_attribution_${index}`;
+        const daemonId = `dmn_attribution_${index}`;
+        store.registerRuntime({ id: runtimeId, daemonId, workspaceId: "local", name: runtimeId, provider: "codex" });
+        const socket = new WebSocket(`ws://127.0.0.1:${server.port}/api/daemon/ws?protocol=2`,
+          { headers: { Authorization: "Bearer root-secret" } } as never);
+        sockets.push(socket);
+        const inbox = watchRuntimeFrames(socket);
+        inboxes.push(inbox);
+        await waitWebSocketOpen(socket);
+        socket.send(helloFrame({ daemon_id: daemonId,
+          runtimes: [{ runtime_id: runtimeId, provider: "codex", max_concurrency: 1, active_task_ids: [] }] }));
+        await inbox.next("welcome");
+      }
+      layer.flushMetrics();
+      samples.mockClear();
+      output.mockClear();
+      drainDbSources(100);
+      const replies = sockets.map((socket, index) => {
+        const inbox = inboxes[index]!;
+        const reply = inbox.next("res", "sql-probe");
+        socket.send(JSON.stringify({ v: 2, t: "trace.head", id: "sql-probe", p: {} }));
+        return reply;
+      });
+      await allEntered;
+      await withDbSource("http", "GET /fixture", async () => { query(); });
+      await withDbJob("scm.poll", async () => { query(); });
+      query(); // unrelated process activity must not enter any frame
+      release();
+      for (const reply of await Promise.all(replies)) expect(reply.p).toMatchObject({ ok: true });
+      const frames = samples.mock.calls.map(([sample]) => sample).filter(sample => sample.type === "trace.head");
+      expect(frames.map(frame => frame.dbQueries)).toEqual(Array(8).fill(2));
+      layer.flushMetrics();
+      const summaries = output.mock.calls.flatMap(([line]) => {
+        try { const value = JSON.parse(String(line)); return value.event === "ws_minute_summary" ? [value] : []; }
+        catch { return []; }
+      });
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0].types.find((type: { type: string }) => type.type === "trace.head"))
+        .toMatchObject({ count: 8, db_queries: 16 });
+      expect(drainDbSources(100).db_sources.find(source => source.kind === "ws" && source.name === "trace.head")?.db_queries)
+        .toBe(summaryDbRoutes ? 16 : undefined);
+    } finally {
+      release();
+      for (const inbox of inboxes) inbox.close();
+      for (const socket of sockets) socket.close();
+      server.stop(true);
+      database?.close();
+      samples.mockRestore();
+      output.mockRestore();
+      resetRequestMetricsForTest();
+      resetWsFrameMetricsForTest();
+    }
+  }, 20_000);
+}
 
 /** A store with one workspace owner, one daemon and one runtime bound to it. */
 async function daemonFixture(options: { retired?: boolean } = {}) {

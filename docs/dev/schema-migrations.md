@@ -96,7 +96,7 @@ PLATFORM_SCHEMA_ROLLBACK_EVIDENCE=ci-schema/rollback-evidence.json node scripts/
 owner 在本 PR 合入后另开 PR 应用补丁，经 CI 通过再合入；因此该 job 在补丁合入前尚未常态运行。
 补丁可用 `git apply --check docs/deploy/MUL-173-workflow.patch` 检查。
 
-[arch test](../../tests/arch/startup-schema-ddl.test.ts) 跟踪启动运行时 import，禁止新 DROP、RENAME、
+[arch test](../../tests/arch/startup-schema-ddl.test.ts) 扫描所有非测试 `packages/server/src/**`（含自动后台回填和新文件），仅按固定路径排除显式 contract 模块，禁止新 DROP、RENAME、
 改类型、SET NOT NULL 和 TRUNCATE。历史 bootstrap 的 [冻结 allowlist](../../tests/arch/startup-schema-ddl-allowlist.json)
 精确绑定表达式及次数，只减不增；CI 设置 `SCHEMA_DDL_BASE_REF` 校验基线。历史一次性 DDL 仍是显式例外。
 A4 切换接入和 A5 live 验收不由本单实现；本地 PG 混跑不等于已验证 slot 零失败或生产部署。

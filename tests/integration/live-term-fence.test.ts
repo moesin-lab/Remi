@@ -6,7 +6,7 @@ import { openIntegrationDatabase } from "../helpers/integration-database.js";
 // Uses an isolated database and an independent process, never a business DB.
 test.skipIf(!process.env.MULTIREMI_TEST_POSTGRES_URL)("PG takeover waits for the old fenced transaction, then rejects old continuations", async () => {
   const database = await openIntegrationDatabase();
-  let successor: ReturnType<typeof Bun.spawn> | undefined;
+  let successor: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
   try {
     const raw = database.db;
     raw.exec(LIVE_TERM_SCHEMA);

@@ -48,7 +48,7 @@ WebSocket 关闭握手最多等待 1 秒，未确认的连接随后断开，避�
 
 Bun 1.3.14 在服务端关闭 WebSocket 后可能保留 `pendingWebSockets` 计数，使原生 `stop(false)` 的 Promise 不结束。监听已停止且所有跟踪的 WebSocket 已关闭时，最终停机改为等待实际 HTTP 响应与 `pendingRequests` 清零；总预算内仍等待 HTTP，超过预算由 CLI 终止整个进程。回归测试同时验证停机后原端口可重新绑定。
 
-激活持有角色锁后，在 `multiremi_live_terms` 的 `background_jobs` 行递增 BIGINT term 并记录 slot。`slotFence` 可选钩子在递增前运行，用于附加激活检查；状态与 readyz 中的 `term` 是数据库返回的十进制字符串，避免 JavaScript 整数精度损失。不设 slot 时也激活同一张表，holder 为 `single:<pid>`。
+Phase A 的 `all` 角色、无 peer 且开启 backgroundJobs 时，激活持有角色锁后，在 `multiremi_live_terms` 的 `background_jobs` 行递增 BIGINT term 并记录 slot。`slotFence` 可选钩子在递增前运行，用于附加激活检查；状态与 readyz 中的 `term` 是数据库返回的十进制字符串，避免 JavaScript 整数精度损失。同一拓扑不设 slot 时也激活同一张表，holder 为 `single:<pid>`。关闭 backgroundJobs 的只读候选以及 ui/runtime/peer 拆分拓扑沿用原路径，不获取此 singleton term。
 
 [LiveTermFence](../../packages/server/src/store/live-term-fence.ts) 为每次激活生成独立上下文，后台定时器及异步续体继承原 term。每次 retry loop/job tick 都查询当前 term；Store 的 SQL 边界还在事务中执行带 term 条件的行锁 UPDATE，并持锁到业务操作提交。新 activate 必须更新同一行，所以它与已经进入事务的后台写入互斥；接管后的旧续体即使越过 tick 检查，也不能写入。事务锁顺序为 fence → workspace → number → domain。该保护覆盖 claim、autopilot run 创建、trigger 推进，以及 capability sweep 和排队 schedule target 推进，手动 HTTP 操作不继承后台上下文。
 

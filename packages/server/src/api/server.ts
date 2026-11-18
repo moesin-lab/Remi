@@ -1329,6 +1329,9 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   const transportSockets = new Set<Bun.ServerWebSocket<MultiremiWebSocketData>>();
   let liveTerm: LiveTermFence | undefined;
   const activateTerm = () => {
+    // Phase A covers the unsplit all-role topology. Read-only candidates and
+    // existing peer/ui/runtime deployments must not steal its singleton term.
+    if (!backgroundJobs || effectiveApiRole !== "all" || peer) return null;
     const activated = store.activateBackgroundTerm(slotConfiguration?.id ?? `single:${process.pid}`, () => {
       // A late continuation from a released generation cannot stop its successor.
       if (liveTerm !== activated) return;
@@ -1397,9 +1400,9 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       return guard;
     },
     pendingRequests, fence: async signal => {
-      await options.slotFence?.(signal);
+      const injected = await options.slotFence?.(signal);
       signal.throwIfAborted();
-      return activateTerm();
+      return activateTerm() ?? injected ?? null;
     }, start: startJobs, stop: stopJobs, disconnect,
   }) : null;
   const requestLifecycle = slot ?? new SlotLifecycle({ id: "", start: "active", controlToken: "", lockTimeoutMs: 0, drainTimeoutMs: 20_000 }, multiremiVersion, {

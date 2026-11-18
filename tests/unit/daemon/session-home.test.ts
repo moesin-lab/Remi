@@ -532,6 +532,7 @@ describe("Issue Session provider home", () => {
 
     expect(existsSync(join(resolved.home, ".multiremi-session-home.json"))).toBe(true);
     const taskConfig = readFileSync(join(resolved.home, "config.toml"), "utf8");
+    expect((parseToml(taskConfig).features as Record<string, unknown>).plugins).toBe(false);
     expect(taskConfig).toContain('model = "gpt-test"');
     expect(taskConfig).not.toContain("must-never-enter-task-home");
     expect(existsSync(join(resolved.home, "auth.json"))).toBe(false);
@@ -788,6 +789,7 @@ describe("Issue Session provider home", () => {
     });
 
     const configText = readFileSync(join(resolved.home, "config.toml"), "utf8");
+    expect((parseToml(configText).features as Record<string, unknown>).plugins).toBeUndefined();
     expect(configText).toContain('env_key = "OPENAI_API_KEY"');
     expect(configText).toContain("requires_openai_auth = false");
     expect(configText).toContain('model = "gpt-test"');

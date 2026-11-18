@@ -73,8 +73,9 @@ export const DAEMON_PROTOCOL_MIN = 2;
  *
  * First turn + items trace release: v0.2.90 (PR 2, ADR 0019). Released v0.2.89
  * and earlier daemons write fragment traces and answer `trace.read` without a
- * view, so they must upgrade; a v0.2.90 daemon refuses a server that still
- * advertises an older gate. Before publishing, the release owner must verify the
+ * view, so they must upgrade. Additive releases keep this floor fixed; only an
+ * explicit contract release may raise it (see daemon-compatibility.ts).
+ * Before publishing, the release owner must verify the
  * v0.2.90 tag, package.json, prepared dependency snapshot and target main SHA.
  * The version gate does not mean the fleet has upgraded.
  */
@@ -1079,7 +1080,7 @@ export const DAEMON_PROTOCOL_CAPS = [
   "lane.background",
 ] as const;
 
-export type DaemonProtocolCap = (typeof DAEMON_PROTOCOL_CAPS)[number];
+export type DaemonProtocolCap = (typeof DAEMON_PROTOCOL_CAPS)[number] | import("./daemon-compatibility.js").DaemonCapabilityName;
 
 // ── Limits and timings ──────────────────────────────────────────────────────
 
@@ -1153,8 +1154,8 @@ export const DAEMON_LANE_BACKGROUND_CLOSED_REPEAT_MS = 10_000;
  * `-pre`/`+build` suffix. Returns a negative number when `left < right`.
  *
  * Kept here rather than imported from the CLI so the server can make the
- * accept/reject decision without reaching into another package; the shape
- * matches `runtimeSupportsIssueWorkspaces` in `store/repos/tasks-repo.ts`.
+ * contract admission decision without reaching into another package.
+ * Never use this comparison to infer a named capability.
  */
 export function compareDaemonCliVersion(left: string, right: string): number {
   const parse = (value: string): number[] | null => {

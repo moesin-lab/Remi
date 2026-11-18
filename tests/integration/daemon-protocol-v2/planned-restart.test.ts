@@ -49,8 +49,13 @@ for (const kind of ["task", "autopilot"] as const) test(`${kind} joins provider 
     const task = run ? h.store.getTask(run.taskId!)! : h.store.createTask({ agentId: agent.id, runtimeId, prompt: "Long synthetic round", maxAttempts: 1 });
     const maxAttempts = task.maxAttempts;
     await waitFor(() => entered, "provider entered", 5_000);
-    h.store.beginDaemonDrain("local", daemonId, "manual", 60_000);
-    const handoff = h.store.plannedRestarts().request(task.id, { workspaceId: "local", runtimeId, daemonId });
+    expect(h.client.sharesCap("turn.restart")).toBe(true);
+    expect(h.store.getRuntimeLite(runtimeId)?.metadata).toMatchObject({ planned_restart: 1, planned_restart_negotiated: true });
+    h.store.beginDaemonDrain("local", daemonId, "manual", 1);
+    await Bun.sleep(2);
+    h.store.reconcileDaemonDrain(runtimeId);
+    const handoff = h.store.plannedRestarts().get(task.id)!;
+    expect(handoff).not.toBeNull();
     await waitFor(() => h.received.some(f => f.t === "turn.restart"), "restart request delivered");
     expect(h.client.sharesCap("turn.restart")).toBe(true);
     expect(providerClosed).toBe(false);
@@ -182,6 +187,7 @@ for (const unresponsive of ["cancel", "close"] as const) test(`planned restart b
 for (const httpProbe of [false, true]) test(`${httpProbe ? "version 1 HTTP probe without named capability" : "old capability fixture"} cancels through the real socket and admits CLI update after the deadline`, async () => {
   let entered = false;
   const h = await DaemonProtocolHarness.create({
+    cliVersion: "0.2.95", // N-1 fixture: admission succeeds, named restart capability is absent.
     onReady: daemon => {
       (daemon.daemonProtocolClient() as any).extraCaps.delete("turn.restart");
       const capabilities = (daemon as any).runtimeCapabilities.bind(daemon);
@@ -239,7 +245,8 @@ for (const httpProbe of [false, true]) test(`${httpProbe ? "version 1 HTTP probe
     expect(h.received.some(frame => frame.t === "turn.restart")).toBe(false);
     expect(h.received.some(frame => frame.t === "task.cancelled")).toBe(true);
     expect(h.store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery", attempt: 1 });
-    expect(h.store.listTasksForIssue(issue.id).some(retry => retry.attempt === 2 && retry.status === "queued")).toBe(true);
+    expect(h.store.listTasksForIssue(issue.id).filter(retry => retry.attempt === 2 && retry.status === "queued")).toHaveLength(1);
+    expect(h.store.listTasksForIssue(issue.id).some(retry => retry.attempt > 2)).toBe(false);
     expect(h.store.getDaemonDrainStatus("local", daemonId)).toMatchObject({ status: "drained_forced", remaining_tasks: 0, awaiting_daemon_ack: false });
     const update = h.store.createRuntimeUpdateRequest(runtimeId, { scope: "cli", targetVersion: "0.2.96" });
     expect(h.store.claimRuntimeUpdateRequest(runtimeId)?.id).toBe(update.id);

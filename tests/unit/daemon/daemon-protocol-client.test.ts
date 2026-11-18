@@ -54,7 +54,7 @@ function bed(options: Partial<DaemonProtocolClientOptions> = {}) {
     onTerminal: async code => { terminal.push(code); },
   };
   const client = new DaemonProtocolClient({
-    serverUrl: "https://api.example", daemonId: "dmn_unit", cliVersion: "0.2.83", clock,
+    serverUrl: "https://api.example", daemonId: "dmn_unit", cliVersion: DAEMON_MIN_CLI_VERSION, clock,
     random: () => 0.5, log: { warn: line => logs.push(line) }, onError: error => errors.push(error),
     connect: (url, init) => { urls.push(url); headers.push(init.headers); const socket = new Socket(); sockets.push(socket); return socket; },
     ...options,
@@ -80,15 +80,30 @@ describe("daemon protocol v2 client", () => {
     busy = 0;
     expect(b.client.processActiveTaskCount()).toBe(1);
   });
-  it("keeps a new daemon out of an old v2 server and retains the 60-second upgrade probe", async () => {
+  it.each(["0.2.83", undefined])("accepts an older server floor %s and treats missing caps as legacy", async floor => {
+    const b = bed({ cliVersion: DAEMON_MIN_CLI_VERSION, caps: ["input.unread"] });
+    b.sockets[0]!.emit("open");
+    b.sockets[0]!.frame({ t: "welcome", p: { protocol: 2, session_id: "old-server", min_cli_version: floor } });
+    expect(b.client.connectionState()).toBe("connected");
+    expect(b.client.allowsClaims()).toBe(true);
+    expect(b.client.sharesCap("input.unread")).toBe(false);
+  });
+
+  it("waits for upgrade only when the server contract floor exceeds this CLI", () => {
     const b = bed({ cliVersion: DAEMON_MIN_CLI_VERSION });
     b.sockets[0]!.emit("open");
-    b.sockets[0]!.frame({ t: "welcome", p: { protocol: 2, session_id: "old-server", min_cli_version: "0.2.83" } });
+    b.sockets[0]!.frame({ t: "welcome", p: { protocol: 2, session_id: "future-server", min_cli_version: "99.0.0" } });
     expect(b.client.connectionState()).toBe("upgrade_wait");
     expect(b.client.allowsClaims()).toBe(false);
-    expect(b.sockets[0]!.sent.some(frame => frame.t === "runtime.ready" || frame.t === "hb")).toBe(false);
-    b.clock.advance(60_000); await b.client.drain();
-    expect(b.probes()).toBe(1);
+  });
+
+  it("advertises the old spelling and accepts either welcome spelling", () => {
+    const b = bed({ caps: ["input.unread"] });
+    b.sockets[0]!.emit("open");
+    expect(b.sockets[0]!.sent[0]!.p.caps).toContain("input_unread");
+    b.sockets[0]!.frame({ t: "welcome", p: { protocol: 2, session_id: "alias-server", caps: ["input.unread"] } });
+    expect(b.client.sharesCap("input_unread")).toBe(true);
+    expect(b.client.sharesCap("input.unread")).toBe(true);
   });
 
   it.each(["0.2.85", "0.2.86", "0.2.87", "0.2.88", "0.2.89"])("logs CLI %s on a payload-release rejection without claiming work", async cliVersion => {
@@ -319,7 +334,7 @@ describe("daemon protocol v2 client", () => {
     expect(b.client.diagnostics().pending_rpcs).toBe(1);
     socket.emit("close", { code: 4426 });
     await b.client.drain();
-    expect(b.logs).toEqual([`daemon protocol rejected by server (min ${DAEMON_MIN_CLI_VERSION}, self 0.2.83); waiting for pending_update, no tasks will be claimed`]);
+    expect(b.logs).toEqual([`daemon protocol rejected by server (min ${DAEMON_MIN_CLI_VERSION}, self ${DAEMON_MIN_CLI_VERSION}); waiting for pending_update, no tasks will be claimed`]);
     expect(b.errors).toEqual([]);
     expect(b.client.diagnostics().pending_rpcs).toBe(0);
   });

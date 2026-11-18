@@ -125,7 +125,7 @@ jobs:
       - name: Install dependencies from the public registry
         run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
       # Keep configuration, credentials, model selection and real daemon
-      # dispatch covered on PRs too, where the full backend shards are skipped.
+      # dispatch covered early on PRs as well as in the full backend shards.
       - name: Capability group contracts and daemon execution
         run: >-
           bun run test
@@ -155,6 +155,7 @@ jobs:
 
   platform-updater:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -212,6 +213,7 @@ jobs:
 
   runtime-platform:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -312,7 +314,7 @@ jobs:
           CI: "true"
           GITHUB_ACTIONS: "true"
         run: >-
-          bun run test tests/unit/scripts/ci-backend.test.ts
+          bun run test tests/unit/scripts/ci-backend.test.ts tests/unit/scripts/ci-backend-required.test.ts
           tests/unit/scripts/run-tests.test.ts tests/unit/scripts/run-tests-signals.test.ts
           tests/unit/scripts/retry-failed-backend-tests.test.ts tests/unit/scripts/release-candidate.test.ts
       # Intentionally repeated in full backend discovery: early structural feedback.
@@ -509,11 +511,78 @@ jobs:
           compression-level: 0
           retention-days: 30
 
+  daemon-n-minus-one:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        direction: [previous-daemon, previous-server]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Select latest stable CLI release
+        id: previous
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner, repo: context.repo.repo, per_page: 100
+            });
+            const stable = releases.filter(r => !r.draft && !r.prerelease && /^v\d+\.\d+\.\d+$/.test(r.tag_name))
+              .sort((a, b) => Date.parse(b.published_at) - Date.parse(a.published_at));
+            if (!stable.length) throw new Error('No stable CLI release available for N-1 smoke');
+            core.setOutput('tag', stable[0].tag_name);
+      - name: Restore Bun package downloads
+        id: bun-download-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-downloads-${{ runner.os }}-1.3.14-${{ hashFiles('bun.lock') }}
+      - name: Prepare release checkout and dependencies
+        env:
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/previous" "$PREVIOUS_TAG"
+          bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
+          (cd "$RUNNER_TEMP/previous" && bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts)
+      - name: Enforce contract-only minimum CLI changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            BASE_SHA="$PREVIOUS_TAG"
+          fi
+          bun run scripts/check-daemon-contract.ts "$BASE_SHA"
+      - name: Named capability and peer compatibility guards
+        run: bun run test tests/arch/daemon-n-minus-one.test.ts tests/unit/daemon/daemon-compatibility.test.ts tests/unit/daemon/daemon-protocol-client.test.ts tests/unit/multiremi/peer-channel.test.ts tests/unit/multiremi/hub-peer-transport.test.ts
+      - name: Real mixed release smoke
+        env:
+          DIRECTION: ${{ matrix.direction }}
+        run: |
+          set -o pipefail
+          if [ "$DIRECTION" = previous-daemon ]; then
+            bun run tests/integration/daemon-n-minus-one/run.ts "$PWD" "$RUNNER_TEMP/previous" 2>&1 | tee mixed-version.log
+          else
+            bun run tests/integration/daemon-n-minus-one/run.ts "$RUNNER_TEMP/previous" "$PWD" 2>&1 | tee mixed-version.log
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daemon-n-minus-one-${{ matrix.direction }}
+          path: mixed-version.log
+          if-no-files-found: warn
+
   backend-plan:
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
+      required: ${{ steps.scope.outputs.required }}
     env:
       # The only place the backend shard count is set. The `backend` matrix is
       # read back from the plan's own shard indices, and `verify` requires one
@@ -521,16 +590,27 @@ jobs:
       BACKEND_SHARDS: 8
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
+      - name: Detect backend inputs
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: bun run scripts/ci-backend-required.ts >> "$GITHUB_OUTPUT"
       - name: Plan backend shards
+        if: steps.scope.outputs.required == 'true'
         id: plan
         run: |
           bun run scripts/ci-backend.ts plan --sha "$GITHUB_SHA" --shards "$BACKEND_SHARDS" --out ci-backend/plan.json
           shards="$(jq -c '[.shards[].index]' ci-backend/plan.json)"
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
+        if: steps.scope.outputs.required == 'true'
         with:
           name: backend-plan
           path: ci-backend/plan.json
@@ -538,6 +618,7 @@ jobs:
 
   backend:
     needs: backend-plan
+    if: needs.backend-plan.outputs.required == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -667,12 +748,13 @@ jobs:
   # dependency can become a green full-run release gate.
   build:
     if: always()
-    needs: [im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, runtime-platform, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
+    needs: [daemon-n-minus-one, im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, runtime-platform, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
     runs-on: ubuntu-latest
     steps:
       - name: Require every applicable check
         env:
           RESULTS: ${{ toJSON(needs) }}
+          BACKEND_REQUIRED: ${{ needs.backend-plan.outputs.required }}
           EVENT: ${{ github.event_name }}
           RETRY: ${{ inputs.retry_backend_run_id }}
           REF: ${{ github.ref }}
@@ -680,9 +762,12 @@ jobs:
           python3 - <<'PYCODE'
           import json, os
           results = {k: v['result'] for k,v in json.loads(os.environ['RESULTS']).items()}
-          skipped = {'backend-plan', 'backend', 'backend-evidence', 'backend-retry'}
-          if os.environ['EVENT'] == 'pull_request':
+          required = os.environ['BACKEND_REQUIRED']
+          assert required in ('true', 'false'), 'missing backend scope'
+          skipped = {'backend-retry'}
+          if os.environ['EVENT'] == 'pull_request' and required == 'false':
               mode = 'pr-fast'
+              skipped |= {'backend', 'backend-evidence'}
           else:
               mode = 'full'
               skipped = {'backend-retry'}

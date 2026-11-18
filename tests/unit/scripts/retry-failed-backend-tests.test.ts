@@ -1,6 +1,7 @@
 import { createPlan, type Report } from "../../../scripts/ci-backend.js";
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { parse } from "yaml";
 import { backendBaselineJobs, failedBackendFiles, verifyRetryChanges, verifyShardedJobs } from "../../../scripts/retry-failed-backend-tests.js";
 
@@ -103,9 +104,51 @@ describe("verified backend retry", () => {
     expect(backendBaselineJobs(unshardedWorkflow, jobs).map(item => item.shard)).toEqual([1]);
     expect(() => backendBaselineJobs(unshardedWorkflow, shardedJobs())).toThrow();
   });
+  it("executes the gate for full PRs, docs PRs and manual diagnostics without accepting missing evidence", () => {
+    const workflow = parse(readFileSync(new URL("../../../.github/workflows/release-build-check.yml", import.meta.url), "utf8"));
+    const run = (event: string, required: string, retry: string, changes: Record<string, string> = {}, ref = "refs/heads/main") => {
+      const skipped = new Set(["backend-retry"]);
+      if (event === "pull_request" && required === "false") {
+        skipped.add("backend"); skipped.add("backend-evidence");
+      } else if (retry) skipped.delete("backend-retry");
+      const results = Object.fromEntries(workflow.jobs.build.needs.map((job: string) =>
+        [job, { result: changes[job] ?? (skipped.has(job) ? "skipped" : "success") }]));
+      return spawnSync("bash", ["--noprofile", "--norc", "-e", "-c", workflow.jobs.build.steps[0].run], {
+        encoding: "utf8", env: { ...process.env, RESULTS: JSON.stringify(results), BACKEND_REQUIRED: required,
+          EVENT: event, RETRY: retry, REF: ref, GITHUB_SHA: "a".repeat(40) },
+      });
+    };
+    for (const [event, required, retry, mode] of [
+      ["pull_request", "true", "", "full"], ["pull_request", "false", "", "pr-fast"],
+      ["push", "true", "", "full"], ["workflow_dispatch", "true", "123", "full-with-retry"],
+    ]) {
+      const result = run(event!, required!, retry!);
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).mode).toBe(mode);
+      for (const job of ["backend-plan", ...(required === "true" ? ["backend", "backend-evidence"] : [])]) {
+        for (const failure of ["failure", "cancelled", "skipped"]) {
+          expect(run(event!, required!, retry!, { [job]: failure }).status).not.toBe(0);
+        }
+      }
+    }
+    for (const required of ["", "unknown"]) expect(run("pull_request", required, "").status).not.toBe(0);
+    // Even a successful diagnostic cannot replace the full shards or evidence.
+    for (const job of ["backend-retry", "backend", "backend-evidence"]) {
+      expect(run("workflow_dispatch", "true", "123", { [job]: "skipped" }).status).not.toBe(0);
+    }
+    expect(run("workflow_dispatch", "true", "123", {}, "refs/heads/topic").status).not.toBe(0);
+    expect(run("pull_request", "true", "123").status).not.toBe(0);
+    expect(run("pull_request", "true", "", { "backend-retry": "success" }).status).not.toBe(0);
+    expect(run("pull_request", "false", "", { backend: "success" }).status).not.toBe(0);
+  });
   it("keeps complete evidence mandatory when diagnostic retry is requested", () => {
     const workflow = parse(readFileSync(new URL("../../../.github/workflows/release-build-check.yml", import.meta.url), "utf8"));
-    expect(workflow.jobs["backend-plan"].if).toBe("github.event_name != 'pull_request'");
+    expect(workflow.jobs["backend-plan"].if).toBeUndefined();
+    expect(workflow.jobs["backend-plan"].outputs.required).toBe("${{ steps.scope.outputs.required }}");
+    expect(workflow.jobs.backend.if).toBe("needs.backend-plan.outputs.required == 'true'");
+    expect(workflow.jobs["backend-evidence"].needs).toEqual(["backend-plan", "backend"]);
+    expect(workflow.jobs["backend-retry"].if).toBe("github.event_name == 'workflow_dispatch' && inputs.retry_backend_run_id != ''");
+    expect(JSON.stringify(workflow.jobs["backend-plan"])).not.toContain("retry_backend_run_id");
     expect(JSON.stringify(workflow.jobs.backend)).not.toContain("retry_backend_run_id");
     expect(workflow.jobs["backend-plan"].env.BACKEND_SHARDS).toBe(8);
     expect(workflow.jobs.backend.strategy.matrix.shard).toBe("${{ fromJSON(needs.backend-plan.outputs.shards) }}");

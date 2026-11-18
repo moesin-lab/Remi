@@ -30,6 +30,8 @@ it("rejects version inference including review counterexamples and future files"
     ["packages/server/src/store/repos/new-task.ts", "runtime.metadata['build'] > 12345"],
     ["packages/server/src/scheduler.ts", 'runtime.metadata.cli_version < "0.2.95"'],
     ["packages/server/src/worker/new-capability.ts", 'runtime.metadata["version"] === "0.2.95"'],
+    ["packages/server/src/worker/future.ts", 'runtime?.metadata?.["cli_version"] >= "0.2.95"'],
+    ["packages/server/src/worker/future.ts", '`${runtime.metadata.build}` >= "12345"'],
     // A valid admission expression copied into another file is not exempt.
     ["packages/server/src/worker/new-capability.ts", 'compareDaemonCliVersion(this.options.cliVersion, this.serverMinCli) < 0'],
   ];
@@ -39,6 +41,43 @@ it("rejects version inference including review counterexamples and future files"
     expect(capabilityDecisionGlobs.some(pattern => new Bun.Glob(pattern).match(file!))).toBe(true);
     expect(findVersionDecisions(file!, `if (${expression}) enableFeature();`).length).toBeGreaterThan(0);
   }
+});
+
+it.each([
+  ["destructuring rename", 'const {cli_version: v} = runtime.metadata; if (v >= "0.2.95") feature();'],
+  ["local initializer", 'const v = runtime.metadata.build; if (v >= 12345) feature();'],
+  ["renamed comparison import", 'import { compareDaemonCliVersion as cmp } from "@multiremi/contracts/daemon-protocol.js"; if (cmp(current, "0.2.95") >= 0) feature();'],
+  ["nested destructuring with default", 'const {metadata: {cli_version: v = "0.0.0"} = {}} = runtime; if (v >= "0.2.95") feature();'],
+  ["namespace comparison import", 'import * as protocol from "@multiremi/contracts/daemon-protocol.js"; if (protocol.compareDaemonCliVersion(current, "0.2.95") >= 0) feature();'],
+  ["let reassignment chain", 'let v; let next; v = runtime.metadata.build; next = v; if (12345 <= next) feature();'],
+])("rejects bound version inference: %s", (_name, source) => {
+  expect(findVersionDecisions("packages/server/src/worker/future.ts", source).length).toBeGreaterThan(0);
+});
+
+it.each([
+  'var v = runtime.metadata.cli_version; const copy = v; if (copy >= "0.2.95") feature();',
+  'const {metadata: {build: b}} = runtime; if (b > 12345) feature();',
+  'const {value: v = runtime.metadata.build} = input; if (v > 12345) feature();',
+  'let a, b, c; a = b = c = runtime.metadata.build; if (a > 12345) feature();',
+  'let v; ({metadata: {cli_version: v = "0.0.0"}} = runtime); if (v >= "0.2.95") feature();',
+  'const [v = runtime.metadata.build] = input; if (v > 12345) feature();',
+  'import * as sv from "semver"; if (sv.gte(current, "0.2.95")) feature();',
+])("rejects binding and default propagation: %s", source => {
+  expect(findVersionDecisions("packages/server/src/worker/future.ts", source).length).toBeGreaterThan(0);
+});
+
+it("keeps lexical scopes separate and permits type inspection", () => {
+  const file = "packages/server/src/worker/future.ts";
+  expect(findVersionDecisions(file, `
+    const v = runtime.metadata.build;
+    function unrelated(v: number) { return v >= 12345; }
+    function sibling() { const v = 1; return v >= 2; }
+    if (typeof v === "number") display(v);
+  `)).toEqual([]);
+  expect(findVersionDecisions(file, `
+    import { compareDaemonCliVersion as cmp } from "@multiremi/contracts/daemon-protocol.js";
+    function unrelated(cmp: Function) { return cmp(1, 2) >= 0; }
+  `)).toEqual([]);
 });
 
 it("allows only the explicitly reviewed admission and upgrade expressions", () => {

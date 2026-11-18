@@ -85,6 +85,33 @@ export class GitHubScmOperations {
     return { headSha, observedAt: new Date().toISOString(), checks, conclusion: summarize(checks) };
   }
 
+  /** Shared coherent read for the CLI and monitor. */
+  async liveChecks(number: number): Promise<{ summary: ScmCheckSummary; change: ScmEntityObservation }> {
+    const before = await this.get(number);
+    const summary = await this.checks(String(before.payload.head_sha));
+    const after = await this.get(number);
+    if (["head_sha", "base_sha", "target_branch", "base_repository_full_name"].some(key => before.payload[key] !== after.payload[key])) {
+      throw new ScmOperationError("scm_head_changed", "Pull request changed while reading checks");
+    }
+    return { summary, change: after };
+  }
+
+  /** A queued workflow alone does not prove runner starvation. */
+  async queuedJobs(headSha: string): Promise<Array<{ name: string; url: string | null }>> {
+    sha(headSha);
+    const runs = await this.pages(appendQuery("/actions/runs", { head_sha: headSha }), "workflow_runs");
+    const jobs: Array<{ name: string; url: string | null }> = [];
+    for (const run of runs) {
+      if (run.head_sha !== headSha) throw new ScmOperationError("scm_evidence_mismatch", "Workflow head mismatch");
+      if (!["queued", "in_progress", "waiting", "pending"].includes(String(run.status))) continue;
+      for (const job of await this.pages(`/actions/runs/${encodeURIComponent(String(run.id))}/jobs?filter=latest`, "jobs")) {
+        if (job.head_sha != null && job.head_sha !== headSha) throw new ScmOperationError("scm_evidence_mismatch", "Job head mismatch");
+        if (job.status === "queued" && !job.runner_id && !job.runner_name) jobs.push({ name: String(job.name ?? job.id), url: text(job.html_url) });
+      }
+    }
+    return jobs;
+  }
+
   private observe(pull: Record<string, unknown>): ScmEntityObservation {
     if (!pull.id || !Number.isSafeInteger(pull.number) || !record(pull.head).sha || !record(pull.base).sha) {
       throw new ScmOperationError("scm_invalid_response", "Provider returned an incomplete pull request");

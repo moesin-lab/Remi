@@ -58,6 +58,10 @@ export const INBOX_ROUTING: Record<string, InboxRoutingEntry> = {
     severity: "attention",
     why: "A deduplicated ingestion health failure must remain visible until recovery.",
   },
+  scm_collection_alert: {
+    rule: "R3", route: INBOX_ROUTE_BY_TYPE.scm_collection_alert, severity: "attention",
+    why: "SCM collection lag needs workspace operator attention.",
+  },
   autopilot_paused: {
     rule: "R3",
     route: INBOX_ROUTE_BY_TYPE.autopilot_paused,

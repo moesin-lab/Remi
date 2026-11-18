@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 export type DbSourceKind = "http" | "ws" | "job";
 export type DbJobName = "scheduler.sync" | "scheduler.failure-monitor" | "scheduler.issue-archive"
-  | "scheduler.autopilot" | "scm.poll" | "issue-title.poll" | "messaging.sync"
+  | "scheduler.scm-monitor" | "scheduler.autopilot" | "scm.poll" | "issue-title.poll" | "messaging.sync"
   | "notifications.sweep" | "notifications.retry" | "capability.sweep" | "body-html.backfill"
   | "daemon.offer" | "repository-wiki.lease" | "repository-wiki.storage";
 export interface DbSourceSummary {

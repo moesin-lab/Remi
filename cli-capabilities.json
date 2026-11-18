@@ -7334,6 +7334,108 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "scm.monitor.status": {
+      "command": "remi scm monitor status",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.monitor.status",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.monitor.project.get": {
+      "command": "remi scm monitor project get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.monitor.project.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.monitor.project.set": {
+      "command": "remi scm monitor project set",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.monitor.project.set",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.change-request.watch": {
+      "command": "remi scm change-request watch",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.watch",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.change-request.unwatch": {
+      "command": "remi scm change-request unwatch",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.unwatch",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "scm.change-request.watch-list": {
+      "command": "remi scm change-request watch-list",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.watch-list",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "scm.change-request.checks": {
       "command": "remi scm change-request checks",
       "aliases": [],
@@ -11703,6 +11805,9 @@
     "DELETE /api/workspaces/:workspaceId/scm/connections/:connectionId/repositories/:repositoryId": {
       "command": "scm.repository.unbind"
     },
+    "DELETE /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/watch": {
+      "command": "scm.change-request.unwatch"
+    },
     "GET /": {
       "cli_exempt": true,
       "category": "public_bootstrap_asset",
@@ -12489,6 +12594,9 @@
     "GET /api/projects/:id/resources": {
       "command": "project.resource.list"
     },
+    "GET /api/projects/:id/scm-monitor": {
+      "command": "scm.monitor.project.get"
+    },
     "GET /api/projects/search": {
       "command": "project.search"
     },
@@ -12892,8 +13000,14 @@
     "GET /api/workspaces/:workspaceId/scm/events/:eventId": {
       "command": "scm.event.get"
     },
+    "GET /api/workspaces/:workspaceId/scm/monitor/status": {
+      "command": "scm.monitor.status"
+    },
     "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/checks": {
       "command": "scm.change-request.checks"
+    },
+    "GET /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/watch": {
+      "command": "scm.change-request.watch-list"
     },
     "GET /api/workspaces/:workspaceId/system-model-endpoints": {
       "command": "workspace.system-model-endpoints.get"
@@ -14257,6 +14371,9 @@
     "PUT /api/projects/:id/resources/:resourceId": {
       "command": "project.resource.update"
     },
+    "PUT /api/projects/:id/scm-monitor": {
+      "command": "scm.monitor.project.set"
+    },
     "PUT /api/runtimes/:id/claude-profile": {
       "command": "runtime.claude-profile.set"
     },
@@ -14331,6 +14448,9 @@
     },
     "PUT /api/workspaces/:workspaceId/scm/connections/:connectionId/repositories/:repositoryId": {
       "command": "scm.repository.bind"
+    },
+    "PUT /api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/watch": {
+      "command": "scm.change-request.watch"
     },
     "PUT /api/workspaces/:workspaceId/system-model-endpoints": {
       "command": "workspace.system-model-endpoints.set"

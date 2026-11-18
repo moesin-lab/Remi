@@ -49,6 +49,7 @@ export class MultiremiScheduler {
   private issueArchiveSweepStartupDelayMs: number;
   private jobs = new Map<string, ScheduledAutopilotJob>();
   private syncLoop: DatabaseRetryLoop | null = null;
+  private scmMonitorLoop: DatabaseRetryLoop | null = null;
   private failureLoop: DatabaseRetryLoop | null = null;
   private archiveLoop: DatabaseRetryLoop | null = null;
   private running = false;
@@ -89,13 +90,14 @@ export class MultiremiScheduler {
       }
     }), this.pollIntervalMs);
     this.syncLoop.start();
+    this.startScmMonitor();
     this.startFailureMonitor();
     this.startIssueArchiveSweep();
   }
 
   async stop(): Promise<void> {
     this.running = false;
-    const stopped = [this.syncLoop?.stop(), this.failureLoop?.stop(), this.archiveLoop?.stop()];
+    const stopped = [this.syncLoop?.stop(), this.failureLoop?.stop(), this.archiveLoop?.stop(), this.scmMonitorLoop?.stop()];
     for (const entry of this.jobs.values()) { entry.job.stop(); stopped.push(entry.retry.stop()); }
     this.jobs.clear();
     await Promise.all(stopped);
@@ -192,6 +194,13 @@ export class MultiremiScheduler {
     const archived = this.store.archiveEligibleIssues(now);
     if (archived.length) log.info(`Issue archive sweep archived ${archived.length} issue(s)`);
     return archived;
+  }
+
+  private startScmMonitor(): void {
+    if (!this.store.processScmMonitorEffects) return;
+    this.scmMonitorLoop = new DatabaseRetryLoop("scheduler.scm-monitor",
+      () => withDbJob("scheduler.scm-monitor", () => this.store.processScmMonitorEffects!()), this.pollIntervalMs);
+    this.scmMonitorLoop.start();
   }
 
   private startFailureMonitor(): void {

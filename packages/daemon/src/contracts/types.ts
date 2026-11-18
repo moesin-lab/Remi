@@ -533,6 +533,7 @@ export interface AutopilotStore {
   getAutopilot(id: string): Autopilot | null;
   runAutopilot(autopilotId: string, input?: RunAutopilotInput): AutopilotRun;
   dispatchPendingSystemEvents(now?: Date, limit?: number): AutopilotRun[];
+  processScmMonitorEffects?(now?: Date, limit?: number): Promise<void>;
   dispatchPendingScmEvents(now?: Date, limit?: number): AutopilotRun[];
   pauseAutopilotsExceedingFailureThreshold(
     options?: AutopilotFailureThresholdOptions,

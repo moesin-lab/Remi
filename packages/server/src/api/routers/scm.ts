@@ -24,19 +24,57 @@ export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
   const { store } = deps;
   const activeRoot = "/api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests";
 
+  app.get("/api/workspaces/:workspaceId/scm/monitor/status", c => {
+    const workspaceId = c.req.param("workspaceId");
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+    return denied ?? c.json({ streams: store.scmMonitorStatus(workspaceId) });
+  });
+  app.get("/api/projects/:id/scm-monitor", c => {
+    const project = store.getProject(c.req.param("id"));
+    if (!project) return c.json({ error: "Project not found" }, 404);
+    const denied = denyCurrentUserWorkspaceAccess(c, store, project.workspaceId);
+    return denied ?? c.json(store.scmMonitorProjectConfig(project.id));
+  });
+  app.put("/api/projects/:id/scm-monitor", async c => {
+    const project = store.getProject(c.req.param("id"));
+    if (!project) return c.json({ error: "Project not found" }, 404);
+    const denied = denyCurrentUserWorkspaceAccess(c, store, project.workspaceId) ?? requireWorkspaceAdmin(c, store, project.workspaceId);
+    if (denied) return denied;
+    const body = await readJsonStrict<{ pendingTimeoutSeconds: number }>(c);
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    if (typeof body.pendingTimeoutSeconds !== "number") return c.json({ error: "pendingTimeoutSeconds is required" }, 400);
+    try { return c.json(store.scmMonitorProjectConfig(project.id, body.pendingTimeoutSeconds)); }
+    catch (error) { return scmErrorResponse(c, error); }
+  });
+  const handleWatch = async (c: Context) => {
+    const method = c.req.method.toLowerCase();
+    const workspaceId = c.req.param("workspaceId") ?? "";
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+    if (denied) return denied;
+    const bindings = matchScmRepositoryBindings(store.listScmRepositoryBindings({ workspaceId, enabled: true }), c.req.param("repositoryId") ?? "");
+    if (bindings.length !== 1) return c.json({ error: "SCM repository binding missing or ambiguous" }, 404);
+    const number = Number(c.req.param("number"));
+    if (!Number.isSafeInteger(number) || number < 1) return c.json({ error: "Invalid PR number" }, 400);
+    const repositoryId = bindings[0]!.repositoryId;
+    if (method === "get") return c.json({ watches: store.listScmWatches(workspaceId, repositoryId, number) });
+    const body = method === "put" ? await readJsonStrict<{ sessionId: string; until?: string }>(c) : { sessionId: c.req.query("session") ?? "", until: "closed" };
+    if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
+    try {
+      if (typeof body.sessionId !== "string") return c.json({ error: "sessionId is required" }, 400);
+      store.setScmWatch(workspaceId, repositoryId, number, body.sessionId, body.until ?? "closed", method === "put");
+      return c.json({ watches: store.listScmWatches(workspaceId, repositoryId, number) });
+    } catch (error) { return scmErrorResponse(c, error); }
+  };
+  app.get(`${activeRoot}/:number/watch`, handleWatch);
+  app.put(`${activeRoot}/:number/watch`, handleWatch);
+  app.delete(`${activeRoot}/:number/watch`, handleWatch);
+
   app.get(`${activeRoot}/:number/checks`, async (c) => {
     const loaded = loadOperations(c, deps);
     if (loaded instanceof Response) return loaded;
     try {
       const number = Number(c.req.param("number"));
-      const before = await loaded.operations.get(number);
-      const summary = await loaded.operations.checks(String(before.payload.head_sha));
-      const after = await loaded.operations.get(number);
-      if (before.payload.head_sha !== after.payload.head_sha || before.payload.base_sha !== after.payload.base_sha
-        || before.payload.target_branch !== after.payload.target_branch
-        || before.payload.base_repository_full_name !== after.payload.base_repository_full_name) {
-        return c.json({ error: "Pull request changed while reading checks", code: "scm_head_changed" }, 409);
-      }
+      const { summary } = await loaded.operations.liveChecks(number);
       return c.json({ summary });
     } catch (error) { return scmErrorResponse(c, error); }
   });
@@ -318,7 +356,7 @@ function eventPageLimit(value: string | undefined): number {
 function scmErrorResponse(c: Context, error: unknown): Response {
   const message = error instanceof Error ? error.message : String(error);
   if (error instanceof ScmOperationError) {
-    const status = error.code === "scm_capability_unavailable" ? 501
+    const status = error.code === "scm_head_changed" ? 409 : error.code === "scm_capability_unavailable" ? 501
       : /conflict|ambiguous/u.test(error.code) ? 409 : 400;
     return c.json({ error: message, code: error.code }, status);
   }

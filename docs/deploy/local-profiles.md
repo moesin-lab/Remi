@@ -352,3 +352,23 @@ API：`GET /api/daemons/:daemonId/drain` 查询，`POST` 同路径发起
 更新下发还可能等待下一次零在途探测。未安装本功能的旧 daemon 不会消费新增取消字段，
 平台无法仅靠数据库恢复终止其本地进程：这类实例需在维护窗口人工停止旧 daemon 后升级，
 不能把服务端任务归零当作已完成本地排空。
+
+## 发布源码保留
+
+stable 解压源码快照并写入 `.remi-profile-source` 后立即删除对应 SHA tar。
+成功 deploy、up 或宿主激活后，在主机锁内自动修剪 `releases/`。
+手动预览与执行（也可用于旧部署遗留的 tar）：
+
+```bash
+node scripts/local-profile.mjs stable prune-releases --dry-run
+node scripts/local-profile.mjs stable prune-releases
+```
+
+只删除完整小写 40 位 SHA 命名的目录或 `<sha>.tar`，真实路径必须仍在
+`releases/` 内。手工命名目录始终保留。保留 active、deployment、compose.env
+引用的源码，以及 running / recovery_required 宿主操作 previous / candidate
+快照引用的源码。另按备份目录时间名倒序保留最新 3 个不同 ref 的源码；
+`REMI_RELEASES_KEEP` 可设为非负整数覆盖此数量（0 表示不额外保留备份 ref）。
+受保护 ref 对应的 tar 也保留；新解压的 tar 始终立即删除。
+元数据读取或路径校验失败会停止本次修剪并警告，修剪失败不影响部署结果。
+不清理 Docker 镜像、backups 或 ACP bundles。首次真实环境清理需由运维授权。

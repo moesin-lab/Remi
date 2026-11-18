@@ -267,8 +267,11 @@ test("per-runtime restart version cannot grant support without the negotiated he
   } finally { await h.dispose(); }
 }, 10_000);
 
-for (const kind of ["permission", "question"] as const) for (const answerAt of ["suspended", "resumed"] as const) {
-  test(`daemon resumes the original ${kind} callback and consumes an answer saved while ${answerAt}`, async () => {
+const waitResumeCases = (["permission", "question"] as const).flatMap(kind =>
+  (["suspended", "resumed"] as const).map(answerAt => ({ kind, answerAt, snapshot: true })));
+waitResumeCases.push({ kind: "permission", answerAt: "suspended", snapshot: false });
+for (const { kind, answerAt, snapshot } of waitResumeCases) {
+  test(`daemon resumes the original ${kind} callback and consumes an answer saved while ${answerAt}${snapshot ? "" : " with fold-only trace"}`, async () => {
     let replacement = false, replyUsed = false, rebound = false;
     const h = await DaemonProtocolHarness.create({ daemonOptions: { approvalMode: "ask" }, providerFactory: () => {
       let permission: ((params: any) => Promise<any>) | undefined;
@@ -310,7 +313,15 @@ for (const kind of ["permission", "question"] as const) for (const answerAt of [
       await waitFor(() => (h.daemon as any).activeTaskCount === 0, "native wait released");
       expect(h.store.plannedRestarts().get(task.id)?.checkpoint?.question_ids).toEqual([questionId]);
       expect(h.store.getQuestion(questionId)?.wait_status).toBe("waiting");
+      const before = applyTurnTraceEvents(EMPTY_TURN_TRACE, h.daemon.traceStore().read(task.id).events as TraceEvent[]);
+      const originalWait = before.items.find(item => (item.type === kind) && item.message_id === questionId)!;
+      expect(originalWait).toMatchObject({ status: "in_progress" });
       await h.stopDaemon();
+      if (!snapshot) {
+        const path = join(h.root, readdirSync(h.root).find(name => name.startsWith("restart-") && name.endsWith(".db"))!);
+        const db = openSqliteDatabase(path);
+        try { db.run("DELETE FROM planned_restart_trace_identities"); } finally { db.close(); }
+      }
       const answer = () => h.store.answerQuestion(questionId, { expected_route_revision: h.store.getQuestion(questionId)!.route_revision,
         response: kind === "permission" ? { option_id: "allow" } : { answers: { city: "Paris" } } }, { type: "member", id: "mem_local_local" });
       if (answerAt === "suspended") answer();
@@ -322,6 +333,16 @@ for (const kind of ["permission", "question"] as const) for (const answerAt of [
       }
       await waitFor(() => h.store.getTask(task.id)?.status === "completed", "same attempt applied original answer", 10_000);
       expect(replyUsed).toBe(true);
+      const result = await daemonTraceService(h.layer).reader.read({ runtimeId, taskId: task.id, view: "events" });
+      expect(result.ok).toBe(true);
+      if (!result.ok || !("events" in result)) throw new Error("server trace events unavailable");
+      const state = applyTurnTraceEvents(EMPTY_TURN_TRACE, result.events as TraceEvent[]);
+      const waits = state.items.filter(item => item.type === kind && item.message_id === questionId);
+      expect(waits).toHaveLength(1);
+      expect(waits[0]).toMatchObject({ id: originalWait.id, started_at: originalWait.started_at,
+        status: "completed", tool_item_id: kind === "permission" ? "reissued-tool" : null,
+        ...(kind === "permission" ? { decision: { option_id: "allow" }, outcome: "selected" } : { answers: { "Where?": "Paris" } }) });
+      expect((result.events as TraceEvent[]).filter(event => event.type === "item.started" && event.item.id === originalWait.id)).toHaveLength(1);
       expect(h.store.getQuestion(questionId)).toMatchObject({ id: questionId, answer_revision: 1, wait_status: "consumed" });
       expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1, result: "Original answer applied; full final response" });
       expect(h.db.query("SELECT id FROM multiremi_conversation_log WHERE task_id=? AND message_kind='decision'").all(turn.id)).toHaveLength(1);

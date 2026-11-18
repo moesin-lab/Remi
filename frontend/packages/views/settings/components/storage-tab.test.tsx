@@ -96,6 +96,22 @@ describe("StorageTab", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(fixtures.update).toHaveBeenCalledWith({ critical_free_percent: 6 }, expect.any(Object));
   });
+  it.each([
+    ["Critical free percent", "99"],
+    ["Critical free bytes", "30000"],
+    ["Pressure free percent", "4"],
+    ["Pressure free bytes", "1000"],
+  ])("rejects inconsistent %s with a useful error", async (label, value) => {
+    renderTab();
+    fireEvent.change(await field(label), { target: { value } });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Critical thresholds must not exceed pressure thresholds when both are enabled.");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(fixtures.update).not.toHaveBeenCalled();
+    fireEvent.change(await field(label), { target: { value: "0" } });
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
   it("uses the shared operator to manage each machine and policy despite a different login identity", async () => {
     renderTab();
     expect(await screen.findAllByTestId("daemon-card")).toHaveLength(2);

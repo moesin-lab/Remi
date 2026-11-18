@@ -1,3 +1,4 @@
+import { STORAGE_SETTINGS_DEFAULTS, storageThresholdErrors, validateStorageSettingsPatch } from "@multiremi/contracts/storage.js";
 import { MultiremiApiError } from "../helpers.js";
 import { validateCoAuthoredByName, validateCoAuthoredByEmail } from "@multiremi/contracts/co-authored-by";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
@@ -1459,6 +1460,15 @@ function sanitizeWorkspaceSettingsInput<T extends Partial<CreateWorkspaceInput>>
   const settings = body.settings;
   if (!settings || typeof settings !== "object" || Array.isArray(settings)) return body;
   const normalized = { ...settings };
+  if (normalized.storage != null) {
+    const { patch, errors } = validateStorageSettingsPatch(normalized.storage);
+    const effective = { ...STORAGE_SETTINGS_DEFAULTS };
+    for (const key of Object.keys(patch) as (keyof typeof effective)[]) {
+      effective[key] = patch[key] ?? STORAGE_SETTINGS_DEFAULTS[key];
+    }
+    errors.push(...storageThresholdErrors(effective));
+    if (errors.length) throw new MultiremiApiError(`invalid storage settings: ${errors.join("; ")}`, 400);
+  }
   for (const [key, validator] of [["co_authored_by_name", validateCoAuthoredByName], ["co_authored_by_email", validateCoAuthoredByEmail]] as const) {
     if (!Object.prototype.hasOwnProperty.call(normalized, key)) continue;
     const value = normalized[key];

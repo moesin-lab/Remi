@@ -70,7 +70,9 @@ describe("resolveStorageSettings", () => {
     for (const key of STORAGE_SETTINGS_KEYS) {
       const { min, max } = STORAGE_SETTINGS_BOUNDS[key];
       expect(resolveStorageSettings({ [key]: min })[key]).toBe(min);
-      expect(resolveStorageSettings({ [key]: max })[key]).toBe(max);
+      const paired = key === "critical_free_percent" ? { pressure_free_percent: max }
+        : key === "critical_free_bytes" ? { pressure_free_bytes: max } : {};
+      expect(resolveStorageSettings({ ...paired, [key]: max })[key]).toBe(max);
     }
   });
 
@@ -137,4 +139,11 @@ describe("validateStorageSettingsPatch", () => {
     expect(result.patch).toEqual({});
     expect(result.errors).toHaveLength(3);
   });
+});
+
+it("normalizes legacy inconsistent threshold pairs but treats zero as disabled", () => {
+  expect(resolveStorageSettings({ critical_free_percent: 99, critical_free_bytes: 99 * 1024 ** 3 }))
+    .toMatchObject({ critical_free_percent: 15, critical_free_bytes: 20 * 1024 ** 3 });
+  expect(resolveStorageSettings({ pressure_free_percent: 0, pressure_free_bytes: 0, critical_free_percent: 99 }))
+    .toMatchObject({ pressure_free_percent: 0, critical_free_percent: 99, critical_free_bytes: 5 * 1024 ** 3 });
 });

@@ -10,6 +10,7 @@
 import {
   STORAGE_SETTINGS_KEYS,
   resolveStorageSettings,
+  validateStorageSettingsPatch,
   type StorageSettings,
 } from "@multiremi/contracts/storage.js";
 
@@ -57,16 +58,24 @@ export function resolveStoragePolicy(
   workspaceSettings: Record<string, unknown> | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): StorageSettings {
-  const merged: Record<string, unknown> = {
-    ...(isRecord(workspaceSettings?.storage) ? workspaceSettings.storage : {}),
-  };
+  const base = resolveStorageSettings(workspaceSettings?.storage);
+  const merged = { ...base };
   for (const key of STORAGE_SETTINGS_KEYS) {
     const name = ENV_OVERRIDES[key];
     const raw = name ? env[name] : undefined;
     if (raw === undefined || raw.trim() === "") continue;
     const parsed = Number(raw);
     // Validate the override alone: out of range falls back to the workspace value.
-    if (resolveStorageSettings({ [key]: parsed })[key] === parsed) merged[key] = parsed;
+    if (!validateStorageSettingsPatch({ [key]: parsed }).errors.length) merged[key] = parsed;
+  }
+  for (const unit of ["percent", "bytes"] as const) {
+    const critical = `critical_free_${unit}` as const;
+    const pressure = `pressure_free_${unit}` as const;
+    if (merged[critical] > 0 && merged[pressure] > 0 && merged[critical] > merged[pressure]) {
+      // Reject the conflicting critical override first, preserving a valid pressure override.
+      merged[critical] = base[critical];
+      if (merged[critical] > merged[pressure]) merged[pressure] = base[pressure];
+    }
   }
   return resolveStorageSettings(merged);
 }
@@ -79,8 +88,4 @@ function booleanValue(value: string | undefined, fallback: boolean): boolean {
 function integerValue(value: string | undefined, fallback: number): number {
   const parsed = value === undefined || value.trim() === "" ? Number.NaN : Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

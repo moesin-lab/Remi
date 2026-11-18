@@ -794,6 +794,7 @@
     },
     "default_value": "既定: {{value}} {{unit}}",
     "validation": {
+      "threshold_order": "両方が有効な場合、緊急しきい値は圧迫しきい値以下にしてください。",
       "required": "数値を入力してください。",
       "integer": "整数を入力してください。",
       "range": "{{min}} から {{max}} {{unit}}の範囲で入力してください。"

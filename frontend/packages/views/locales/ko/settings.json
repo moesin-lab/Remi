@@ -794,6 +794,7 @@
     },
     "default_value": "기본값: {{value}} {{unit}}",
     "validation": {
+      "threshold_order": "두 조건이 모두 활성화된 경우 위험 임계값은 공간 부족 임계값 이하여야 합니다.",
       "required": "숫자를 입력하세요.",
       "integer": "정수를 입력하세요.",
       "range": "{{min}}~{{max}} {{unit}} 사이여야 합니다."

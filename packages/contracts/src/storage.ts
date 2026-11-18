@@ -104,6 +104,13 @@ export function resolveStorageSettings(raw: unknown): StorageSettings {
     const value = source[key];
     if (storageSettingValid(key, value)) resolved[key] = value;
   }
+  for (const unit of ["percent", "bytes"] as const) {
+    const critical = `critical_free_${unit}` as const;
+    const pressure = `pressure_free_${unit}` as const;
+    if (resolved[critical] > 0 && resolved[pressure] > 0) {
+      resolved[critical] = Math.min(resolved[critical], resolved[pressure]);
+    }
+  }
   return resolved;
 }
 
@@ -192,7 +199,8 @@ export interface StorageDisk extends DiskSpace {
 
 export function storageThresholdErrors(settings: StorageSettings): string[] {
   return (["percent", "bytes"] as const).flatMap(unit =>
-    settings[`critical_free_${unit}`] > settings[`pressure_free_${unit}`]
+    settings[`critical_free_${unit}`] > 0 && settings[`pressure_free_${unit}`] > 0
+      && settings[`critical_free_${unit}`] > settings[`pressure_free_${unit}`]
       ? [`critical_free_${unit} must be <= pressure_free_${unit}`] : []);
 }
 

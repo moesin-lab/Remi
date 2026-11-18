@@ -796,6 +796,7 @@
     },
     "default_value": "Default: {{value}} {{unit}}",
     "validation": {
+      "threshold_order": "Critical thresholds must not exceed pressure thresholds when both are enabled.",
       "required": "Enter a number.",
       "integer": "Enter a whole number.",
       "range": "Must be between {{min}} and {{max}} {{unit}}."

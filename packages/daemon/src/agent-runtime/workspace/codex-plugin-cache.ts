@@ -14,6 +14,8 @@ export interface CodexPluginCacheOptions {
   locker: IssueWorkspaceLifecycleLocker;
   assertRootOwner?: () => void;
   errors: StorageReport["errors"];
+  /** Pressure rounds stop between individual cache entries once enough space is free. */
+  pressureNeeded?: () => Promise<boolean>;
 }
 
 /**
@@ -42,6 +44,7 @@ export async function sweepCodexPluginCaches(options: CodexPluginCacheOptions): 
           homes.push(join(generation.path, "executions", fp, "home"));
         }
         for (const home of homes) {
+          if (options.pressureNeeded && !(await options.pressureNeeded())) return result;
           try {
             if (!realDirectory(home)) continue;
             const tmp = join(home, ".tmp");
@@ -52,6 +55,7 @@ export async function sweepCodexPluginCaches(options: CodexPluginCacheOptions): 
             if (!options.mutate) continue;
             let failed = false;
             for (const name of names) {
+              if (options.pressureNeeded && !(await options.pressureNeeded())) return result;
               try {
                 options.assertRootOwner?.();
                 await removeOwnedPath(options.root, join(tmp, name), options);

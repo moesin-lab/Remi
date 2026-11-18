@@ -60,7 +60,7 @@ export class ScmMonitor {
       if (!related) continue;
       if (["closed", "merged"].includes(change.state)) {
         this.ctx.db.run("UPDATE multiremi_scm_watches SET active = 0 WHERE change_request_id = ?", [change.id]);
-        continue;
+        if (!event.type.startsWith("review.")) continue;
       }
       const targets = this.ctx.db.query(`SELECT issue_id FROM multiremi_scm_issue_links WHERE change_request_id = ? AND active = 1
         UNION SELECT s.issue_id FROM multiremi_scm_watches w JOIN multiremi_issue_sessions s ON s.id = w.session_id
@@ -137,9 +137,11 @@ export class ScmMonitor {
         WHERE id = ? AND status = 'processing' AND lease_token = ? RETURNING id`).get(effect.id, token);
       if (!owned) return;
       const change = typeof payload.changeRequestId === "string" ? this.scm.getChangeRequest(payload.changeRequestId) : null;
+      const closed = Boolean(change && ["closed", "merged"].includes(change.state));
+      if (closed) this.ctx.db.run("UPDATE multiremi_scm_watches SET active = 0 WHERE change_request_id = ?", [change!.id]);
       if (prepared) {
         prepared(events);
-      } else if (!change || liveClosed || ["closed", "merged"].includes(change.state)) {
+      } else if (!change || liveClosed || (closed && effect.effect_type !== "monitor_review")) {
         if (change) this.ctx.db.run("UPDATE multiremi_scm_watches SET active = 0 WHERE change_request_id = ?", [change.id]);
       } else if (effect.effect_type === "monitor_head") {
         const prior = this.ctx.db.query("SELECT concluded_head FROM multiremi_scm_monitor_heads WHERE change_request_id = ? AND issue_id = ?")

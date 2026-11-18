@@ -31,7 +31,9 @@ its current ingestion capability boundaries.
   `capacity_blocked`. Assigned, completed, closed, or superseded work produces no alert.
   Provider failures retry the effect; successful expiry is never periodically rescheduled.
 - `review.submitted` and `review.dismissed` forward the normalized GitHub review,
-  including `review_commit`. They do not interpret approval or authorize merging.
+  including `review_commit`. Linked Issues still receive reviews after the PR closes;
+  expired subscriptions receive no additional copy. The monitor does not interpret approval
+  or authorize merging.
 
 Messages are platform `status` messages, resolved to the associated Issue's execution
 owner through the unified Inbox, with `wake_requested: now`. This supports an owner

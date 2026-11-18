@@ -152,6 +152,15 @@ describe("SCM monitor outbox (real SQLite/Inbox, mock GitHub)", () => {
     expect(() => f.store.setScmWatch("local", "repo_test", 42, extra.id, "closed", true)).toThrow("closed");
   });
 
+  it("forwards a closed PR review to its linked Issue after subscriptions expire", async () => {
+    const f = setup(); const extra = f.store.createIssueSession(f.issue.id, { title: "Closed watch" });
+    f.store.setScmWatch("local", "repo_test", 42, extra.id, "closed", true);
+    f.project(head, "closed"); f.event(head, "review.dismissed", { commit_sha: head }); await f.dispatch();
+    expect(db!.query("SELECT body_md FROM multiremi_conversation_log WHERE session_id = ? AND dedupe_key LIKE 'review:%'").all(f.session.id)).toHaveLength(1);
+    expect(db!.query("SELECT id FROM multiremi_conversation_log WHERE session_id = ? AND dedupe_key LIKE 'review:%'").all(extra.id)).toHaveLength(0);
+    expect(f.store.listScmWatches("local", "repo_test", 42)).toHaveLength(0);
+  });
+
   it("delivers a watch without an Issue link, unwatch removes it, and rejects cross-workspace sessions", async () => {
     const f = setup(); f.store.unlinkScmChangeRequestFromIssue(f.issue.id, f.cr.id);
     f.store.setScmWatch("local", "repo_test", 42, f.session.id, "closed", true);

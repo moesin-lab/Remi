@@ -12,11 +12,14 @@ import { resetMultiremiTestEnv } from "./helpers.js";
 // Every fleet opens its database with this bot key set; warm the migrated
 // template under the same environment (registered first, so it runs first).
 const FLEET_KEY = Buffer.alloc(32, 52).toString("base64");
-beforeAll(() => { process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = FLEET_KEY; });
+let previousEncryptionKey: string | undefined;
+beforeAll(() => {
+  previousEncryptionKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
+  process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = FLEET_KEY;
+});
 useMigratedHotspotDatabases();
 
 const cleanups: Array<() => Promise<void>> = [];
-const previousEncryptionKey = process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY;
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   setSystemTime();

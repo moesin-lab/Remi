@@ -1,3 +1,5 @@
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
+import { memoizeRequestRead } from "../request-read-cache.js";
 import { InboxOperations } from '../inbox/operations.js';
 import { activeRequestReadCache, cacheKey } from '../request-read-cache.js';
 import { IssueResponsibilityError } from '../issue-responsibility.js';
@@ -845,10 +847,10 @@ export class IssuesRepo {
 
   getIssue(id: string): MultiremiIssue | null {
     const cache = activeRequestReadCache();
-    const row = this.ctx.db.query(cache
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_issues', 'multiremi_workspaces'], `issue:${id}`, () => this.ctx.db.query(cache
       ? `SELECT i.*, w.id AS existing_workspace_id FROM multiremi_issues i
          LEFT JOIN multiremi_workspaces w ON w.id = i.workspace_id WHERE i.id = ?`
-      : "SELECT * FROM multiremi_issues WHERE id = ?").get(id) as Row | null;
+      : "SELECT * FROM multiremi_issues WHERE id = ?").get(id) as Row | null);
     // The HTTP guard needs workspace existence, not its full settings. Keep the
     // fact in the table-scoped cache so writes and transaction locks invalidate it.
     if (cache && row) cache.set(cacheKey("multiremi_workspaces", "exists", String(row.workspace_id)), row.existing_workspace_id != null);
@@ -4425,7 +4427,7 @@ export class IssuesRepo {
     // Always the within-transaction flavour: the public entry point, or the
     // caller that runs this half directly, guarantees a frame is open around
     // every write below.
-    const sourceTurn=taskId?this.ctx.db.query('SELECT turn_id FROM multiremi_turn_attempts WHERE id=?').get(taskId):null;
+    const sourceTurn=taskId?readAttemptTurn(this.ctx.db, taskId):null;
     const member=authorType==='member'?this.ctx.workspaces().getWorkspaceMemberByRef(input.authorId??'local',workspaceId):null;
     const written=sendMessageWithinTransaction(this.ctx,{id,session_id:issueSessionId,
       sender:{type:authorType==='system'?'platform':authorType as 'agent'|'member',id:member?.id??input.authorId??null},
@@ -5394,13 +5396,13 @@ export class IssuesRepo {
 
   /** `listLabelsForIssue` for a caller that already proved the issue exists. */
   listLabelsForExistingIssue(issueId: string): MultiremiLabel[] {
-    const rows = this.ctx.db.query(
+    const rows = memoizeRequestRead(this.ctx.db, ['multiremi_issue_labels', 'multiremi_issue_to_labels'], `labels:${issueId}`, () => this.ctx.db.query(
       `SELECT l.*
        FROM multiremi_issue_labels l
        JOIN multiremi_issue_to_labels il ON il.label_id = l.id
        WHERE il.issue_id = ?
        ORDER BY lower(l.name) ASC`,
-    ).all(issueId) as Row[];
+    ).all(issueId) as Row[]);
     return rows.map(toLabel);
   }
 

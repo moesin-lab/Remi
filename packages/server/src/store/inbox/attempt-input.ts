@@ -1,3 +1,4 @@
+import { readAttemptRow } from "../execution-reads.js";
 import type { SqlDatabase } from '../db/postgres.js';
 import type { StoreContext } from '../context.js';
 import { nowIso } from '@multiremi/ids.js';
@@ -24,13 +25,17 @@ export function migrateAttemptInput(db: SqlDatabase): void {
         db.run('INSERT INTO multiremi_schema_migrations(id,applied_at) VALUES(?,?)', [id, nowIso()]);
     })();
 }
+/** Shared raw receipt row; an attempt write or transaction boundary invalidates it. */
+export function readAttemptInputRow(ctx: StoreContext, id: string): any {
+    return readAttemptRow(ctx.db, id);
+}
 /** Caller holds the lane mutex. Preparing a new provider leaves actual reading unchanged. */
 export function attemptInputState(ctx: StoreContext, turn: any): {
     ack: number;
     read: number;
     offset: number;
 } {
-    const attempt = ctx.db.query('SELECT * FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);
+    const attempt = readAttemptInputRow(ctx, turn.current_attempt_id);
     if (!attempt)
         throw new Error('stale_attempt');
     if (attempt.input_ack_seq == null) {

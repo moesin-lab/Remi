@@ -99,14 +99,17 @@ describe(`MUL-395 status pages (${process.env.MULTIREMI_TEST_POSTGRES_URL ? "Pos
   it("dbq golden: stays constant across 1/4/7 statuses and 1/60/300 issues per status", async () => {
     await h.request("/api/issues/status-pages?statuses=todo&limit=0");
     const measurements: number[] = [];
+    const profiles: unknown[] = [];
     for (const count of [1, 60, 300]) {
       for (const width of [1, 4, 7]) {
         const result = await h.request(`/api/issues/status-pages?statuses=${STATUSES.slice(0, width).join(",")}&project_id=prj_status_scale${count}&limit=50&include_archived_total=true`);
         expect(result.status).toBe(200);
         expect(Object.values(result.body.groups).map((group: any) => group.total)).toEqual(Array(width).fill(count));
         measurements.push(result.dbq);
+        profiles.push({ count, width, statements: result.statements });
       }
     }
+    if (new Set(measurements).size !== 1) console.info('STATUS_SQL_DIFF', JSON.stringify(profiles));
     expect(new Set(measurements).size).toBe(1);
     const single = await h.request("/api/issues?status=todo&limit=50&project_id=prj_status_scale300");
     expect(measurements[8]!).toBeLessThanOrEqual(single.dbq * 2);

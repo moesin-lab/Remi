@@ -46,6 +46,23 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 [大文件复现与验证](../../reports/performance/MUL-85-skill-files.md)记录操作者 PostgreSQL
 采样与本地 1,277 文件夹具；本地 SQLite 耗时不能代表生产 PG 同步桥或部署后的性能。
 
+## 终态完成的原子校验
+
+turn.complete 的 turn/attempt、输入范围与宿主校验在完成事务内执行，复用该事务取得的
+workspace 互斥，不再先提交一次独立预检。完成重放仍返回已提交的 reply；失败分类、
+unread-input 拒绝以及自动回复失败后的事务回滚重试保持原入口。任务初始定位读取身份列，
+完整终态与用量投影仍由规范任务变更器读取和生成。
+
+## 活跃轮次下行快照
+
+`DaemonTurnBridge.snapshot` 在同一 workspace 生命周期锁下，按确定顺序批量取得 lane
+互斥，再批量读取当前 attempt、宿主、输入回执、会话 head 与日志窗口。输入回执的首次
+初始化和 projection 水位各用一条集合写入；跨宿主、旧 attempt 和终态 turn 仍不产生输入。
+按 lane 投影时复用已锁定的 read 水位，不逐 task 再读 attempt。查询往返数不随同宿主活跃
+轮次数增长；返回行数和序列化成本仍随实际输入量增长。
+共享规模夹具另有 12 个并发活跃 attempt、8 个未答 AUQ/权限请求、20 条待发送飞书记录和
+12 个 runtime；具体测量与未验证项见 MUL-199 的 performance 报告。
+
 ## Daemon 保活与事件唤醒边界
 
 保活写入与业务变化通知分开：机器人相同状态报告仍更新 `reported_at`，SSH 相同状态心跳
@@ -109,11 +126,23 @@ workspace offer 扇出批量读取 Runtime 和 drain 围栏。会话 messages �
 仍可能扫描多个候选页，不能把直接 Question 通知的大/小夹具当作所有隐藏来源路径的常数证明。
 飞书入站 POST 的 Runtime 身份读取不水合历史 usage；已有会话的追加路径有单独预算。
 
-workspace 报告只唤醒派活条件；飞书结果只刷新已验证 bot host 的 pending 队列。
+workspace 报告只唤醒所属 daemon（含别名对应的 provider）的派活条件；start 派生的 Issue 状态事件定向刷新启动 Runtime，浏览器仍接收状态变化。
+下行批量读取 attempt 身份，终态继续发送取消与保留 ACK/discard 清理，但不再投影轮输入。飞书结果只刷新已验证 bot host 的 pending 队列。
 消息和终态事件刷新活跃任务、bot、后台 lane 与 drain host 的输入，配置和维护事件保留完整扇出。
 同步读取范围退出即关闭，后台异步工作重新读取。
 [预算和复现报告](../../reports/performance/MUL-182-daemon-report-queries.md)区分历史放大消除、
 终态仍有的固定 SQL 成本、隐藏页/Question 权限查询边界与未完成的 stable 现场验收。
+[MUL-199 规模测量](../../reports/performance/MUL-199-daemon-report-scale.md)提供 100 Issue、40 会话各 501 日志等共享夹具、逐语句差异与 SQLite 固定预算；真实 PG、更多活跃轮与现场数据分布、完整 Release 检查尚待验证。
+
+终态事务复用 workspace/lane 首锁，savepoint/嵌套事务回滚恢复入口锁集合；
+终态轮卡通知在事务内累积，最终一次投影并按原次数累计 revision/log_version。
+Session/owner scope、Issue/标签、Agent/Skills 与 usage 的显式原始读缓存登记所有依赖表，
+任一依赖写入、事务首锁或回滚后重读；跨异步范围不复用。
+下行快照只查询既有 UNION 探测命中的队列，platform maintenance 单例存在时无需重复插入。
+[MUL-191 逐语句报告](../../reports/performance/MUL-191-terminal-sql.md)记录共享 stable 规模夹具的 SQLite complete 250（201 读/49 写）、fail 158（137 读/21 写），两档相同；
+派活工作区唤醒只检查 queued/dispatched 的 runtime（未分配任务保留全宿主 admission）；
+Skill 文件按关联 Skill 批量读取；Chat queue 的浏览器失效通知不唤醒 daemon，释放消息仍走正常任务通知。
+这仍未达到 60/40，真实 PG 与完整 Release build check 需单独提供证据。
 
 ## Issue 详情首屏的工作区读取
 
@@ -812,3 +841,5 @@ CHAT_PANEL_TOKEN=<token> CHAT_PANEL_CHAT=<第一个 chat> CHAT_PANEL_ROUNDS=5 bu
 
 本次定位、同规模对照、N/M 敏感性及未完成的生产验收见
 [MUL-85 混合负载报告](../../reports/performance/MUL-85-mixed-load.md)。
+
+MUL-191 的 daemon 终态测量与逐语句边界见[剩余 SQL 审计](../../reports/performance/MUL-191-terminal-remaining.md)。共享执行读取在单个同步帧内复用 turn/attempt 行；事务入口、取得新锁、依赖表写入和回滚仍使缓存失效。异步下行快照每个同步段使用独立缓存，不借用上一帧或 yield 前的行。规模夹具在计数前通过真实 Hub 对齐批量 SQL 历史的 head，避免准备阶段跳过通知产生的日志补洞分页混入当前帧；ACK 后的下行和派活仍计到 layer.drain()。报告中的 SQLite 数字不能作为 PG 或线上 lag 验收。

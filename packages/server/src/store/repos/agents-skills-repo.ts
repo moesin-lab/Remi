@@ -1,3 +1,4 @@
+import { memoizeRequestRead } from "../request-read-cache.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { refreshResponsibilityEntityChange } from '../issue-responsibility-changes.js';
 import { getExecutionGroup, runtimeExecutionGroupId } from "@multiremi/store/execution-groups.js";
@@ -752,7 +753,8 @@ export class AgentsSkillsRepo {
   }
 
   getAgent(id: string, options: { includeFiles?: boolean } = {}): MultiremiAgent | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_agents'], `agent:${id}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null);
     return row ? this.hydrateAgent(toAgent(row), options) : null;
   }
 
@@ -769,7 +771,8 @@ export class AgentsSkillsRepo {
    * decisions.
    */
   getAgentLite(id: string): MultiremiAgent | null {
-    const row = this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_agents'], `agent:${id}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_agents WHERE id = ?").get(id) as Row | null);
     return row ? toAgent(row) : null;
   }
 
@@ -891,14 +894,30 @@ export class AgentsSkillsRepo {
   }
 
   private listAgentSkillsForExistingAgent(agent: MultiremiAgent, options: { includeFiles?: boolean }): MultiremiSkill[] {
-    const rows = this.ctx.db.query(
+    const rows = memoizeRequestRead(this.ctx.db, ['multiremi_skills','multiremi_agent_skills'], `skills:${agent.id}`, () => this.ctx.db.query(
       `SELECT s.*
        FROM multiremi_skills s
        JOIN multiremi_agent_skills aks ON aks.skill_id = s.id
        WHERE aks.agent_id = ? AND s.archived_at IS NULL
        ORDER BY aks.created_at ASC, s.name ASC`,
-    ).all(agent.id) as Row[];
-    const structured = rows.map((row) => toSkill(row, options.includeFiles ? this.listSkillFiles(String(row.id)) : []));
+    ).all(agent.id) as Row[]);
+    // The join already checked active skills; load their files as one batch,
+    // keeping each skill's path order without a per-skill existence/read pair.
+    const files = options.includeFiles && rows.length ? memoizeRequestRead(this.ctx.db,
+      ['multiremi_skill_files'], `skill-files:${JSON.stringify(rows.map(row => row.id))}`, () => {
+        const values = this.ctx.db.dialect === 'postgres'
+          ? 'SELECT jsonb_array_elements_text(CAST(CAST(? AS TEXT) AS JSONB))'
+          : 'SELECT value FROM json_each(?)';
+        return this.ctx.db.query(`SELECT * FROM multiremi_skill_files WHERE skill_id IN (${values})
+          ORDER BY skill_id ASC, path ASC`).all(JSON.stringify(rows.map(row => row.id))) as Row[];
+      }) : [];
+    const bySkill = new Map<string, MultiremiSkillFile[]>();
+    for (const file of files) {
+      const id = String(file.skill_id);
+      const list = bySkill.get(id) ?? [];
+      list.push(toSkillFile(file)); bySkill.set(id, list);
+    }
+    const structured = rows.map(row => toSkill(row, bySkill.get(String(row.id)) ?? []));
     return mergeAgentSkills(agent.skills, structured);
   }
 

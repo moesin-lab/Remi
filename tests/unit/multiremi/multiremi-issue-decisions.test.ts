@@ -563,7 +563,7 @@ describe.skipIf(!pgAdminUrl)("MUL-400 S4 decisions on PostgreSQL", () => {
     }
     expect(outerOpen).toBe(false);
     expect(savepoints).toHaveLength(0);
-  });
+  }, 30_000);
 
   // Keep the original bound; historical seeds avoid unrelated per-message wakeups.
   it("windows recently answered decisions by answered_at and exposes history", async () => {

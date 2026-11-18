@@ -105,3 +105,32 @@ test('image supervisor keeps heartbeats and a terminal rollback across restart',
     await rm(root, { recursive: true, force: true });
   }
 }, 25000);
+
+test('a live child crash holds edge requests until the same release restarts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'remi-slot-restart-'));
+  const reservations = [0, 1].map(() => Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') }));
+  const ports = reservations.map(server => server.port!);
+  const edge = startEdge({ hostname: '127.0.0.1', port: 0, holdMaxMs: 5000, log: () => {} });
+  for (const server of reservations) await server.stop(true);
+  const controller = new SlotSupervisor(edge, async () => ({ cwd: root, executable: process.execPath,
+    args: [resolve('tests/fixtures/supervisor-slot.ts')], version: 'old', env: process.env }),
+    { ports, standbyWait: 2000, activateWait: 2000 });
+  let request: Promise<Response> | undefined;
+  try {
+    await writeFile(join(root, 'behavior.json'), JSON.stringify({ name: 'old' }));
+    const desired = { mode: 'run' as const, releaseId: 'old', revision: 'stable' };
+    await controller.reconcile(desired);
+    const pid = controller.snapshot().childPid!;
+    process.kill(-pid, 'SIGKILL');
+    const deadline = Date.now() + 2000;
+    while (controller.snapshot().childPid && Date.now() < deadline) await Bun.sleep(10);
+    expect(edge.status().held).toBe(true);
+    request = fetch(`http://127.0.0.1:${edge.server.port}/`, { signal: AbortSignal.timeout(5000) });
+    const started = Date.now();
+    await controller.reconcile(desired);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(950);
+    expect(controller.snapshot().childPid).not.toBe(pid);
+    const response = await request;
+    expect(response.status).toBe(200); expect(await response.text()).toBe('old');
+  } finally { await request?.catch(() => {}); await controller.stop(); await rm(root, { recursive: true, force: true }); }
+}, 10000);

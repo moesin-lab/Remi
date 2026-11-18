@@ -117,7 +117,7 @@ import {
   responseToFeishuImage,
 } from "@connectors/feishu/outbound-images.js";
 import {
-  buildSteerInjectionPrompt,
+  buildSteerInjectionPrompt, withSteerIdentity,
   steerMessageText,
   materializeTaskSteerAttachments,
   DEFAULT_FORCE_ANSWER_GRACE_MS,
@@ -4418,7 +4418,9 @@ export class MultiremiDaemon {
             await this.ensureTrace().streamer.flushTask(task.id, AbortSignal.timeout(this.options.requestTimeoutMs));
             const result = await this.taskDownlinks.rpc("turn.restart.checkpoint", checkpointRestart! as unknown as Record<string, unknown>, this.options.requestTimeoutMs);
             const checkpoint = result.checkpoint as PlannedRestartCheckpoint;
-            return { ...checkpoint, trace_head: this.ensureTrace().store.head(task.id)?.head ?? 0 };
+            const consumed = foldStoredTrace(this.ensureTrace().store, task.id).fold.state().items.flatMap(item =>
+              item.type === "user_message" && item.steer?.consumed ? [item.steer.steer_id] : []);
+            return { ...checkpoint, delivered_message_ids: [...new Set(consumed)], trace_head: this.ensureTrace().store.head(task.id)?.head ?? 0 };
           });
           const deadline = this.restartDeadlines.get(task.id);
           if (deadline) clearTimeout(deadline);
@@ -4488,6 +4490,15 @@ export class MultiremiDaemon {
         this.resumedUsageRuns.set(task.id, entry.consumer_id);
         this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
         this.taskDownlinks.bindTurn({ ...task, generation });
+        const prior = foldStoredTrace(this.ensureTrace().store, task.id).fold.state();
+        const replay = new Set(prior.items.flatMap(item => item.type === "user_message" && item.steer && !item.steer.consumed ? [item.steer.steer_id] : []));
+        let firstReplay = true;
+        task.input_messages = task.input_messages.map(message => {
+          if (!replay.has(message.id)) return message;
+          const notice = firstReplay ? "以下消息在 Remi 更新前发出，可能已经收到过，处理过的请忽略。\n" : "";
+          firstReplay = false;
+          return { ...message, body_md: withSteerIdentity(message.body_md, message.id, notice) };
+        });
         const questions = (result.recovered_questions ?? []) as UnifiedMessage[];
         this.restartQuestions.set(task.id, questions);
         for (const question of questions) this.taskDownlinks.registerDecision(question, task.id);
@@ -5668,7 +5679,7 @@ export class MultiremiDaemon {
       let prompt = promptArtifact.prompt;
       // ADR 0023: a steer is the new messages, labelled as the turn input labels them.
       const steerPrompt = (messages: Parameters<typeof buildSteerInjectionPrompt>[0]) =>
-        buildSteerInjectionPrompt(messages, { agentId: agent.id, alwaysLabel: !privateChat, provider: agent.provider });
+        buildSteerInjectionPrompt(messages.map(message => ({ ...message, content: withSteerIdentity(message.content, message.id) })), { agentId: agent.id, alwaysLabel: !privateChat, provider: agent.provider });
 
       // Every steer batch flows through here exactly once: injected into the
       // running prompt (`native`), sent as the next prompt (`reprompt`), or —

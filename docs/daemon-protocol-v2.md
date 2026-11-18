@@ -1212,6 +1212,8 @@ hello 使用的拼写；daemon 的首次 hello 使用旧名以兼容尚未声明
 例如 `input.unread` 与 `input_unread` 等价。未声明能力即按旧端处理，未知能力忽略。
 `lane.background` 和未读输入处理须双方声明；不支持时保留非驻留/旧输入处理路径。
 Issue 工作区与并行执行已包含在 `0.2.90` 基线内，不再额外从 runtime 版本或元数据推断。
+接单测试使用已满足 contract 的 daemon，不要求重复声明 `parallel_agent_execution`；
+低于基线的旧 daemon（包括 `0.2.66`）由 hello 准入回归验证拒绝，不在 Store placement 重复判断。
 
 daemon 仅在自身 CLI 低于服务端声明的 contract 最低版本时进入 `upgrade_wait`；
 旧服务端声明更低的最低版本或缺少 caps 不阻止接单。

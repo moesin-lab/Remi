@@ -125,7 +125,7 @@ jobs:
       - name: Install dependencies from the public registry
         run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
       # Keep configuration, credentials, model selection and real daemon
-      # dispatch covered early on PRs as well as in the full backend shards.
+      # dispatch covered on PRs too, where the full backend shards are skipped.
       - name: Capability group contracts and daemon execution
         run: >-
           bun run test
@@ -155,7 +155,6 @@ jobs:
 
   platform-updater:
     strategy:
-      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -213,7 +212,6 @@ jobs:
 
   runtime-platform:
     strategy:
-      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
@@ -314,7 +312,7 @@ jobs:
           CI: "true"
           GITHUB_ACTIONS: "true"
         run: >-
-          bun run test tests/unit/scripts/ci-backend.test.ts tests/unit/scripts/ci-backend-required.test.ts
+          bun run test tests/unit/scripts/ci-backend.test.ts
           tests/unit/scripts/run-tests.test.ts tests/unit/scripts/run-tests-signals.test.ts
           tests/unit/scripts/retry-failed-backend-tests.test.ts tests/unit/scripts/release-candidate.test.ts
       # Intentionally repeated in full backend discovery: early structural feedback.
@@ -512,10 +510,10 @@ jobs:
           retention-days: 30
 
   backend-plan:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
-      required: ${{ steps.scope.outputs.required }}
     env:
       # The only place the backend shard count is set. The `backend` matrix is
       # read back from the plan's own shard indices, and `verify` requires one
@@ -523,27 +521,16 @@ jobs:
       BACKEND_SHARDS: 8
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      - name: Detect backend inputs
-        id: scope
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.sha }}
-        run: bun run scripts/ci-backend-required.ts >> "$GITHUB_OUTPUT"
       - name: Plan backend shards
-        if: steps.scope.outputs.required == 'true'
         id: plan
         run: |
           bun run scripts/ci-backend.ts plan --sha "$GITHUB_SHA" --shards "$BACKEND_SHARDS" --out ci-backend/plan.json
           shards="$(jq -c '[.shards[].index]' ci-backend/plan.json)"
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
-        if: steps.scope.outputs.required == 'true'
         with:
           name: backend-plan
           path: ci-backend/plan.json
@@ -551,7 +538,6 @@ jobs:
 
   backend:
     needs: backend-plan
-    if: needs.backend-plan.outputs.required == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -687,7 +673,6 @@ jobs:
       - name: Require every applicable check
         env:
           RESULTS: ${{ toJSON(needs) }}
-          BACKEND_REQUIRED: ${{ needs.backend-plan.outputs.required }}
           EVENT: ${{ github.event_name }}
           RETRY: ${{ inputs.retry_backend_run_id }}
           REF: ${{ github.ref }}
@@ -695,12 +680,9 @@ jobs:
           python3 - <<'PYCODE'
           import json, os
           results = {k: v['result'] for k,v in json.loads(os.environ['RESULTS']).items()}
-          required = os.environ['BACKEND_REQUIRED']
-          assert required in ('true', 'false'), 'missing backend scope'
-          skipped = {'backend-retry'}
-          if os.environ['EVENT'] == 'pull_request' and required == 'false':
+          skipped = {'backend-plan', 'backend', 'backend-evidence', 'backend-retry'}
+          if os.environ['EVENT'] == 'pull_request':
               mode = 'pr-fast'
-              skipped |= {'backend', 'backend-evidence'}
           else:
               mode = 'full'
               skipped = {'backend-retry'}

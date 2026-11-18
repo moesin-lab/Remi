@@ -446,7 +446,10 @@ describe("MultiremiTaskReportOutbox", () => {
     let online = false;
     const delivered: MultiremiOutboxRecord[] = [];
     const outbox = track(new MultiremiTaskReportOutbox({
-      path: tempPath(),
+      // Compaction/ordering uses SQLite page allocation, which is identical
+      // in memory. Durable restart replay is covered separately; avoid making
+      // forty cap-pressure commits depend on Windows runner disk latency.
+      path: ":memory:",
       maxBytes: 4096,
       canSend: () => online,
       deliver: async (record) => { delivered.push(record); },

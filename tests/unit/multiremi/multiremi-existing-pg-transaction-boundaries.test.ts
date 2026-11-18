@@ -439,7 +439,8 @@ describe.skipIf(!pgAvailable)("MUL-465 atomic PostgreSQL boundaries", () => {
       return originalRun.call(this, sql, ...params);
     };
     db.query = function query(sql) {
-      if (sql.includes("UPDATE multiremi_conversation_heads") && sql.includes("SET head_seq = head_seq + 1")) {
+      if ((sql.includes("UPDATE multiremi_conversation_heads") && sql.includes("SET head_seq = head_seq + 1"))
+        || (sql.includes("INSERT INTO multiremi_conversation_heads") && sql.includes("head_seq = multiremi_conversation_heads.head_seq + 1"))) {
         locks.push("session");
       }
       return originalQuery.call(this, sql);

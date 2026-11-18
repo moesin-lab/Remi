@@ -1,3 +1,4 @@
+import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { patchDecisionRecord } from "../inbox/decision-records.js";
 import { questionMetadataText } from '../inbox/question-indexes.js';
 /**
@@ -25,7 +26,7 @@ import { chatAttachmentValidationError } from "@multiremi/contracts/attachments.
 import { createId, nowIso } from "@multiremi/ids.js";
 import { advancesFeishuPresentation, parseFeishuPresentation } from "@multiremi/contracts/feishu-presentation.js";
 import { createCommitEventQueue, type StoreContext } from "@multiremi/store/context.js";
-import { activeRequestReadCache, cacheKey } from "@multiremi/store/request-read-cache.js";
+import { memoizeRequestRead, activeRequestReadCache, cacheKey } from "@multiremi/store/request-read-cache.js";
 import { cleanOptionalString, nullableString, parseJson, toJson } from "@multiremi/store/helpers.js";
 import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
 import { advisoryXactLock, afterCommit } from "@multiremi/store/db/postgres.js";
@@ -431,9 +432,9 @@ export class FeishuBotRepo {
   }
 
   getConfig(workspaceId: string): MultiremiFeishuBotConfig | null {
-    const row = this.ctx.db
-      .query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?")
-      .get(workspaceId, this.botId) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_feishu_bot_configs'], `bot-config:${workspaceId}:${this.botId}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?")
+        .get(workspaceId, this.botId) as Row | null);
     return row ? mapConfig(row) : null;
   }
 
@@ -1281,11 +1282,10 @@ export class FeishuBotRepo {
   }
 
   getIssueIdForChatSession(chatSessionId: string): string | null {
-    const row = this.ctx.db.query(
-      `SELECT issue_id FROM multiremi_feishu_bot_chat_bindings
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_feishu_bot_chat_bindings'], `chat-issue:${chatSessionId}`,
+      () => this.ctx.db.query(`SELECT issue_id FROM multiremi_feishu_bot_chat_bindings
        WHERE chat_session_id = ? AND issue_id IS NOT NULL
-       ORDER BY created_at ASC, id ASC LIMIT 1`,
-    ).get(chatSessionId) as Row | null;
+       ORDER BY created_at ASC, id ASC LIMIT 1`).get(chatSessionId) as Row | null);
     return nullableString(row?.issue_id);
   }
 
@@ -2843,7 +2843,7 @@ export class FeishuBotRepo {
     }
     const config = this.getConfig(input.issue.workspaceId);
     if (!config?.enabled) return [];
-    const leaderTurn = this.ctx.db.query("SELECT turn_id FROM multiremi_turn_attempts WHERE id = ?").get(input.leaderTask.id);
+    const leaderTurn = readAttemptTurn(this.ctx.db, input.leaderTask.id);
     if (!leaderTurn) throw new Error("Round push source turn not found");
     const leaderTurnId = String(leaderTurn.turn_id);
     const rows = this.ctx.db.query(
@@ -4473,9 +4473,9 @@ export class FeishuBotRepo {
     const key = cacheKey("multiremi_feishu_bot_configs", "workspace", workspaceId, this.botId);
     const cached = cache?.get<Row | null>(key);
     if (cached !== undefined) return cached;
-    const row = this.ctx.db
-      .query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?")
-      .get(workspaceId, this.botId) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_feishu_bot_configs'], `bot-config:${workspaceId}:${this.botId}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_feishu_bot_configs WHERE workspace_id = ? AND bot_id = ?")
+        .get(workspaceId, this.botId) as Row | null);
     cache?.set(key, row);
     return row;
   }

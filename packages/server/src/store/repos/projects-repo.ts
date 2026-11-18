@@ -1,3 +1,4 @@
+import { memoizeRequestRead } from "@multiremi/store/request-read-cache.js";
 // Projects domain (projects, pinned items, project resources and project docs/wiki), extracted
 // verbatim from MultiremiStore (the facade delegates every public method here).
 import { joinProjectInstructions, MAX_PROJECT_INSTRUCTIONS_LENGTH, PROJECT_INSTRUCTIONS_TOO_LONG } from "@multiremi/contracts/remi-rules.js";
@@ -177,7 +178,8 @@ export class ProjectsRepo {
   }
 
   getProject(id: string): MultiremiProject | null {
-    const row = this.ctx.db.query(projectSelect("WHERE p.id = ?")).get(id) as Row | null;
+    const row = memoizeRequestRead(this.ctx.db, ['multiremi_projects', 'multiremi_issues', 'multiremi_project_resources'],
+      `project:${id}`, () => this.ctx.db.query(projectSelect("WHERE p.id = ?")).get(id) as Row | null);
     return row ? toProject(row) : null;
   }
 
@@ -452,9 +454,9 @@ export class ProjectsRepo {
 
   listProjectResources(projectId: string): MultiremiProjectResource[] {
     if (!this.getProject(projectId)) throw new Error(`Project not found: ${projectId}`);
-    const rows = this.ctx.db.query(
-      "SELECT * FROM multiremi_project_resources WHERE project_id = ? ORDER BY position ASC, created_at ASC, id ASC",
-    ).all(projectId) as Row[];
+    const rows = memoizeRequestRead(this.ctx.db, ['multiremi_project_resources'], `project-resources:${projectId}`,
+      () => this.ctx.db.query("SELECT * FROM multiremi_project_resources WHERE project_id = ? ORDER BY position ASC, created_at ASC, id ASC")
+        .all(projectId) as Row[]);
     return rows.map(toProjectResource);
   }
 

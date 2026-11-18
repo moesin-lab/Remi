@@ -331,27 +331,25 @@ describe("v2 reports", () => {
     }
 
     it(`keeps frame-level rejections side-effect free for ${type}`, async () => {
-      const { store, task, runtime } = fixture();
+      const { db, store, task, runtime } = fixture();
       store.startTask(task.id);
       store.registerRuntime({ id: "other", provider: "claude", name: "other", daemonId: "other-daemon" });
-      const complete = spyOn(store, "completeTask");
-      const fail = spyOn(store, "failTask");
+      const before = usageState(db, task.id);
+      const messages = db.query('SELECT * FROM multiremi_conversation_log ORDER BY session_id,seq').all();
       const received: unknown[] = [];
       const closed: unknown[] = [];
-      try {
-        for (const [taskId, runtimeId, code] of [["", runtime.id, "invalid_report"],
-          ["missing", runtime.id, type === "turn.complete" ? "stale_attempt" : "task_not_found"],
-          [task.id, "other", type === "turn.complete" ? "stale_attempt" : "authority_revoked"]]) {
-          expect(await sendReport(store, type, { task_id: taskId, ...cardFields }, {
-            runtimeId, onRoundCard: (...args) => received.push(args), onTraceClosed: (...args) => closed.push(args),
-          })).toEqual({ ok: false, code, retryable: false });
-        }
-        expect(store.getTask(task.id)?.status).toBe("running");
-        expect(complete).not.toHaveBeenCalled();
-        expect(fail).not.toHaveBeenCalled();
-        expect(received).toEqual([]);
-        expect(closed).toEqual([]);
-      } finally { complete.mockRestore(); fail.mockRestore(); }
+      for (const [taskId, runtimeId, code] of [["", runtime.id, "invalid_report"],
+        ["missing", runtime.id, type === "turn.complete" ? "stale_attempt" : "task_not_found"],
+        [task.id, "other", type === "turn.complete" ? "stale_attempt" : "authority_revoked"]]) {
+        expect(await sendReport(store, type, { task_id: taskId, ...cardFields }, {
+          runtimeId, onRoundCard: (...args) => received.push(args), onTraceClosed: (...args) => closed.push(args),
+        })).toEqual({ ok: false, code, retryable: false });
+      }
+      expect(store.getTask(task.id)?.status).toBe("running");
+      expect(usageState(db, task.id)).toEqual(before);
+      expect(db.query('SELECT * FROM multiremi_conversation_log ORDER BY session_id,seq').all()).toEqual(messages);
+      expect(received).toEqual([]);
+      expect(closed).toEqual([]);
     });
   }
 

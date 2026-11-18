@@ -12977,7 +12977,7 @@
         "forced_at": null,
         "remaining_tasks": 1,
         "awaiting_daemon_ack": false,
-        "expiry_action": "runtime_recovery"
+        "expiry_action": "planned_restart"
       }
     },
     {

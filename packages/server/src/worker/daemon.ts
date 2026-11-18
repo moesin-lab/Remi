@@ -1704,7 +1704,7 @@ export class MultiremiDaemon {
             this.options.runtimeId, this.sshMeshManager.getHeartbeatStatus(),
             { ackGeneration: this.appliedDrainGeneration, activeTaskCount: this.protocolClient.processActiveTaskCount(), scope: "daemon", activeTaskIds: [...this.activeTaskIds] },
             capabilities.supports_bot_menu === true,
-            Boolean(capabilities.feishu_concierge_protocol), this.pollAbort.signal,
+            Boolean(capabilities.feishu_concierge_protocol), this.pollAbort.signal, [], capabilities.planned_restart,
           );
           for (const task of ack.cancelled_tasks ?? []) {
             if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
@@ -1936,6 +1936,7 @@ export class MultiremiDaemon {
   private runtimeCapabilities(): DaemonRuntimeCapabilities {
     const concierge = this.feishuConcierge !== null;
     return {
+      planned_restart: 1,
       supports_batch_import: true,
       supports_directory_scan: true,
       supports_skill_directory: true,

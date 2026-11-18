@@ -338,6 +338,8 @@ export type DaemonProtocolReply = DaemonProtocolOkReply | DaemonProtocolErrorRep
 
 /** Per-runtime capability fields use the same names and versions as the HTTP heartbeat. */
 export interface DaemonRuntimeCapabilities {
+  /** Version 1 accepts turn.restart and persists same-attempt checkpoints. Missing means unsupported. */
+  planned_restart?: number;
   external_chats?: number;
   external_chat_models?: number;
   supports_batch_import?: boolean;

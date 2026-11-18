@@ -1728,9 +1728,20 @@ export class RuntimesRepo {
       const tasks = this.ctx.db.query(`SELECT id,runtime_id FROM multiremi_turn_execution_records
         WHERE runtime_id IN (${ids.map(() => "?").join(",")})
           AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`).all(...ids) as Row[];
-      for (const task of tasks) new PlannedRestarts(this.ctx).request(String(task.id), {
-        workspaceId, daemonId, runtimeId: String(task.runtime_id),
-      });
+      // Capability is per runtime and refreshed on hello/heartbeat. Never send
+      // a new frame to a legacy daemon: it cannot acknowledge a checkpoint.
+      const legacyRuntimeIds = new Set<string>();
+      for (const task of tasks) {
+        const taskRuntimeId = String(task.runtime_id);
+        if (this.getRuntimeLite(taskRuntimeId)?.metadata.planned_restart !== 1) {
+          legacyRuntimeIds.add(taskRuntimeId);
+          continue;
+        }
+        new PlannedRestarts(this.ctx).request(String(task.id), { workspaceId, daemonId, runtimeId: taskRuntimeId });
+      }
+      // Preserve MUL-45 crash/retry semantics for legacy hosts. Their normal
+      // cancellation downlink and zero-active ACK then release update admission.
+      for (const id of legacyRuntimeIds) this.ctx.tasks().recoverOrphans(id);
       this.notifyDaemonDrainChanged(workspaceId);
     })();
   }
@@ -2496,6 +2507,7 @@ export class RuntimesRepo {
     supportsDirectoryScan?: boolean;
     supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
+    plannedRestartProtocol?: number;
     supportsBotMenu?: boolean;
     botMenuProtocol?: number;
     supportsFeishuBotConfig?: boolean;
@@ -2513,6 +2525,7 @@ export class RuntimesRepo {
     // Capability flags a daemon re-advertises on every heartbeat. Collected once
     // so the three metadata-writing branches below stay in step.
     const metadataPatch: Record<string, unknown> = {};
+    if (options.plannedRestartProtocol !== undefined) metadataPatch.planned_restart = options.plannedRestartProtocol === 1 ? 1 : 0;
     if (options.health !== undefined && JSON.stringify(runtime.metadata.health) !== JSON.stringify(options.health)) metadataPatch.health = options.health;
     if (options.supportsBatchImport !== undefined) metadataPatch.supports_batch_import = options.supportsBatchImport;
     if (options.supportsDirectoryScan !== undefined) metadataPatch.supports_directory_scan = options.supportsDirectoryScan;

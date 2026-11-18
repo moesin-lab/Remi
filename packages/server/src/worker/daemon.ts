@@ -5508,14 +5508,9 @@ export class MultiremiDaemon {
         // A range hint must reach the provider before its CLI read can satisfy
         // the server's input barrier. Acknowledging while building the prompt
         // would fail before the unread ordinary messages could ever be read.
-        if (via !== "none") injectedSteerIds.push(...ids);
-        else {
-          // No prompt follows a force-answer expiry: acknowledge the injected
-          // steers still pending with the late ones, or the lower-seq injected
-          // ids would fail the contiguous acknowledgement ("unconfirmed turn input gap").
-          await this.taskDownlinks.consumeTaskSteerMessages(task.id, [...injectedSteerIds, ...ids]);
-          injectedSteerIds = [];
-        }
+        // Both injected and force-answer-expired batches belong to the final
+        // receipt. Never wait for their ACK before the reply is durable.
+        injectedSteerIds.push(...ids);
         for (const message of messages) recordedSteerIds.add(message.id);
         // A reconnect replay of an already-handled id must not re-enqueue
         // them, or the stale duplicate would trip the next turn's interrupt.
@@ -5788,11 +5783,6 @@ export class MultiremiDaemon {
         // A native call still in flight may yet inject its batch or hand it
         // back for the re-prompt below; neither may be missed.
         await roundPump?.idle();
-        if (injectedSteerIds.length && !this.taskDownlinks.pendingTaskSteerMessages(task.id)
-          .some(message => !recordedSteerIds.has(message.id))) {
-          await this.taskDownlinks.consumeTaskSteerMessages(task.id, injectedSteerIds);
-          injectedSteerIds = [];
-        }
         // Claude may still owe this attempt a late answer (PR 5 §2.5): a
         // background subagent that ended before the prompt's result starts a
         // model cycle of its own. Listen for it in the same attempt, unless a
@@ -5931,22 +5921,19 @@ export class MultiremiDaemon {
         onUsage?.(finalUsage);
         await this.client.reportTaskUsageSnapshot(task.id, finalUsage);
         try {
-          // Inline receipts still advance normally; unread bodies are handled
-          // by the recoverable completion gate instead of the receipt-resync loop.
-          await this.taskDownlinks.consumeTaskSteerMessages(task.id, [], true);
-          await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
+          // Persist the reply and its input receipts before any platform wait.
+          // The outbox delivers receipts first; unread bodies still use the completion gate.
+          await this.client.completeTurn({ ...this.taskDownlinks.completionInput(task.id, injectedSteerIds), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
         } catch (err) {
           if (remindUnreadInput(err, candidate)) continue;
           if (!isTurnInputPendingConflict(err)) throw err;
           const pendingNow = await this.taskDownlinks.waitForSteer(task.id, this.options.taskDrainTimeoutMs, signal);
-          // Already-recorded ids still pending mean an earlier consume call
-          // failed (e.g. transient network) — retry it so the barrier lifts,
-          // instead of letting an ignorable consume error become a terminal
-          // completion conflict.
+          // Already-delivered ids still pending join the next durable receipt;
+          // a transport timeout must not fail this already-produced reply.
           // A doorbell among them is the bridge's to deliver (§2.6): recorded now, never prompted.
           for (const message of pendingNow) if (isDoorbellSteer(message)) divertDoorbell(message);
           const stale = pendingNow.filter((m) => recordedSteerIds.has(m.id));
-          if (stale.length) await this.taskDownlinks.consumeTaskSteerMessages(task.id, stale.map((m) => m.id));
+          injectedSteerIds.push(...stale.map((m) => m.id));
           const fresh = pendingNow.filter((m) => !recordedSteerIds.has(m.id));
           if (!forceAnswerExpired && fresh.length) {
             // The attempt runs on: its background tasks are its own again until its next end decides (§2.2).
@@ -5963,7 +5950,7 @@ export class MultiremiDaemon {
           // settle() is still the one rule before every completion attempt.
           this.recordTrace(task.id, () => trace.settle());
           try {
-            await this.client.completeTurn({ ...this.taskDownlinks.turnInput(task.id), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
+            await this.client.completeTurn({ ...this.taskDownlinks.completionInput(task.id, injectedSteerIds), input_unread_fallback: unreadReminders >= 2 || forceAnswerExpired }, candidate, finalSessionId, workDir);
           } catch (error) {
             if (remindUnreadInput(error, candidate)) continue;
             throw error;

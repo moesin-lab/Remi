@@ -1256,7 +1256,8 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     // requests after recording that acknowledgement, without requiring polling.
     for (const rt of session.runtimeIds) if (store.hasCliUpdateDrainForRuntime(rt)) downlinks.kick(rt, "pending");
   } });
-  registerTaskInputRpcs(daemonProtocol, store, rt => downlinks.kick(rt), daemonTurnBridge);
+  registerTaskInputRpcs(daemonProtocol, store, rt => downlinks.kick(rt), daemonTurnBridge,
+    task => prepareTaskOffer(store, task, offerProjectKnowledge, repositoryWiki, false, daemonTurnBridge.offerInput(task), "running"));
   registerBackgroundTaskHandlers(daemonProtocol, store, rt => downlinks.kick(rt, "pending"));
   const browserWebSockets: BrowserWebSocketRegistry = new Map();
   const daemonTrace = registerDaemonTraceHandlers(daemonProtocol, store,

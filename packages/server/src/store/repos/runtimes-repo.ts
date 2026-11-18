@@ -1,3 +1,4 @@
+import { PlannedRestarts } from "../planned-restarts.js";
 import { isBuildCommit } from "@shared/daemon-artifact-manifest.js";
 import { DEFAULT_DAEMON_DRAIN_MS, type DaemonDrainStatus, type DaemonDrainReason } from "@multiremi/contracts/daemon-drain.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
@@ -1721,24 +1722,16 @@ export class RuntimesRepo {
         WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND scope = 'cli'
           AND status IN ('restarting', 'verifying')`).get(...ids)) return;
       if (Date.parse(String(drain.deadline)) > Date.now() || drain.forced_at) return;
-      if (drain.update_request_id) {
-        const remaining = this.getDaemonDrainStatus(workspaceId, daemonId).remaining_tasks;
-        if (!remaining) return;
-        const tasks = this.ctx.db.query(`SELECT id FROM multiremi_turn_execution_records
-          WHERE runtime_id IN (${ids.map(() => "?").join(",")})
-            AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`).all(...ids) as Row[];
-        this.ctx.db.run(`UPDATE multiremi_runtime_update_requests SET status = 'failed', error = ?, updated_at = ?
-          WHERE id = ? AND status IN ('pending', 'running')`,
-          [`CLI update drain deadline exceeded; remaining tasks: ${tasks.map(task => String(task.id)).join(", ") || "daemon-reported active tasks"} (${remaining})`, nowIso(), drain.update_request_id]);
-        this.handoffOrReleaseUpdateDrain(workspaceId, daemonId, String(drain.update_request_id), ids);
-        this.notifyDaemonDrainChanged(workspaceId);
-        return;
-      }
       if (!this.daemonDrainTaskCount(ids)) return;
       this.ctx.db.run(`UPDATE multiremi_daemon_drains SET forced_at = ? WHERE workspace_id = ? AND daemon_id = ?`,
         [nowIso(), workspaceId, daemonId]);
-      // Existing MUL-45 recovery supplies lost/runtime_recovery, retry budgets and notifications.
-      for (const id of ids) this.ctx.tasks().recoverOrphans(id);
+      const tasks = this.ctx.db.query(`SELECT id,runtime_id FROM multiremi_turn_execution_records
+        WHERE runtime_id IN (${ids.map(() => "?").join(",")})
+          AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`).all(...ids) as Row[];
+      for (const task of tasks) new PlannedRestarts(this.ctx).request(String(task.id), {
+        workspaceId, daemonId, runtimeId: String(task.runtime_id),
+      });
+      this.notifyDaemonDrainChanged(workspaceId);
     })();
   }
 
@@ -1784,7 +1777,7 @@ export class RuntimesRepo {
       status: !drain ? "normal" : remaining || awaitingAck ? "draining" : drain.forced_at ? "drained_forced" : "drained",
       started_at: drain ? String(drain.started_at) : null, deadline: drain ? String(drain.deadline) : null,
       reason: drain?.reason as DaemonDrainReason ?? null, forced_at: drain?.forced_at ? String(drain.forced_at) : null,
-      remaining_tasks: remaining, awaiting_daemon_ack: awaitingAck, expiry_action: drain?.update_request_id ? "fail_update" : "runtime_recovery" };
+      remaining_tasks: remaining, awaiting_daemon_ack: awaitingAck, expiry_action: "planned_restart" };
   }
 
   private daemonDrainRuntimeRows(workspaceId: string, daemonId: string): Row[] {
@@ -1796,7 +1789,9 @@ export class RuntimesRepo {
   private daemonDrainTaskCount(ids: string[]): number {
     if (!ids.length) return 0;
     const row = this.ctx.db.query(`SELECT COUNT(*) AS count FROM multiremi_turn_execution_records
-      WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`)
+      WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
+        AND NOT EXISTS (SELECT 1 FROM multiremi_planned_restarts pr WHERE pr.attempt_id=multiremi_turn_execution_records.id
+          AND pr.state IN ('suspended','resuming'))`)
       .get(...ids) as { count: number };
     return Number(row.count);
   }

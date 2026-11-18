@@ -8,14 +8,20 @@ import { PlannedRestartJournal } from "@multiremi/worker/planned-restart-journal
 useMigratedIntegrationDatabases();
 
 // Real daemon/provider lifetime, disk outbox/journal and authenticated v2 RPCs.
-// This is the suspension half, not the candidate-update acceptance harness.
+// Candidate update acceptance is exercised separately with the MUL-27 harness.
 test("daemon joins provider shutdown before preparing and acknowledging the same-attempt checkpoint", async () => {
   let entered = false;
+  let resumed = false;
   let providerClosed = false;
   let releaseClose!: () => void;
   const closed = new Promise<void>(resolve => { releaseClose = resolve; });
   const h = await DaemonProtocolHarness.create({ outboxBackoffMs: [5], providerFactory: () => ({
     async *sendStream(_message, options) {
+      if (providerClosed) {
+        resumed = true;
+        yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "complete resumed answer" }] } as any;
+        return;
+      }
       entered = true;
       await new Promise<never>((_resolve, reject) => {
         const stop = () => reject(new Error("Cancelled"));
@@ -23,7 +29,7 @@ test("daemon joins provider shutdown before preparing and acknowledging the same
         else options?.signal?.addEventListener("abort", stop, { once: true });
       });
     },
-    getLastResponse: () => ({ text: "", sessionId: "planned-session", usage: [], toolCalls: [] } as any),
+    getLastResponse: () => ({ text: resumed ? "complete resumed answer" : "", sessionId: "planned-session", usage: [], toolCalls: [] } as any),
     close: async () => { await closed; providerClosed = true; },
   }) });
   try {
@@ -39,7 +45,7 @@ test("daemon joins provider shutdown before preparing and acknowledging the same
     await waitFor(() => h.received.some(f => f.t === "turn.restart"), "restart request delivered");
     expect(providerClosed).toBe(false);
     expect(h.store.plannedRestarts().get(task.id)?.state).toBe("requested");
-    expect(readdirSync(h.root).some(name => name.startsWith("restart-"))).toBe(false);
+    expect((h.daemon as any).restartJournal.entries()).toHaveLength(0);
     releaseClose();
     await waitFor(() => h.store.plannedRestarts().get(task.id)?.state === "suspended", "checkpoint RPC committed", 10_000);
     await waitFor(() => (h.daemon as any).activeTaskCount === 0, "checkpoint locally acknowledged");
@@ -52,6 +58,22 @@ test("daemon joins provider shutdown before preparing and acknowledging the same
     expect(h.ledger.some(e => e.type === "task.fail")).toBe(false);
     expect(h.ledger.some(e => e.type === "turn.restart.checkpoint")).toBe(true);
     expect(h.ledger.some(e => e.type === "turn.restart.suspend")).toBe(true);
+    await h.stopDaemon();
+    h.store.undrainDaemon("local", daemonId);
+    await h.recreateDaemon();
+    await waitFor(() => h.store.getTask(task.id)?.status === "completed", "same attempt finished after replacement", 10_000);
+    expect(resumed).toBe(true);
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1, maxAttempts: 1, result: "complete resumed answer" });
+    expect(h.ledger.some(e => e.type === "turn.restart.resume")).toBe(true);
+    expect(h.ledger.some(e => e.type === "task.fail")).toBe(false);
+    expect(h.ledger.filter(e => e.type === "turn.complete").at(-1)?.frame.p.generation).toBe(1);
+    expect(h.db.query("SELECT id FROM multiremi_turn_attempts WHERE turn_id=?").all(handoff.turn_id)).toHaveLength(1);
+    const trace = h.daemon.traceStore().read(task.id, 0, 500, 1024 * 1024).events;
+    expect(trace.filter(event => event.type === "turn.started")).toHaveLength(1);
+    expect(trace.some(event => {
+      const item = event.item as { type?: string; title?: string } | undefined;
+      return event.type === "item.completed" && item?.type === "notice" && item.title === "Remi 已更新";
+    })).toBe(true);
   } finally { releaseClose(); await h.dispose(); }
 }, 25_000);
 
@@ -101,4 +123,45 @@ test("live report, input and trace boundaries reject suspended and obsolete gene
       .rejects.toMatchObject({ code: "stale_attempt" });
     expect(h.store.getTask(task.id)?.status).toBe("running");
   } finally { await h.dispose(); }
+}, 20_000);
+
+for (const unresponsive of ["cancel", "close"] as const) test(`planned restart bounds an unresponsive provider ${unresponsive} and keeps crash retry semantics`, async () => {
+  let entered = false;
+  let expired = false;
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const h = await DaemonProtocolHarness.create({ daemonOptions: { stopTimeoutMs: 200, onStopTimeout: () => { expired = true; } },
+    providerFactory: () => ({
+      async *sendStream(_message, options) {
+        entered = true;
+        if (unresponsive === "cancel") { await gate; throw new Error("Cancelled"); }
+        await new Promise<never>((_resolve, reject) => options?.signal?.addEventListener("abort", () => reject(new Error("Cancelled")), { once: true }));
+      },
+      getLastResponse: () => ({ text: "", sessionId: "timeout-session", usage: [], toolCalls: [] } as any),
+      close: async () => { if (unresponsive === "close") await gate; },
+    }) });
+  try {
+    await h.startDaemon();
+    const runtimeId = h.store.listRuntimes()[0]!.id;
+    const daemonId = h.store.getRuntimeLite(runtimeId)!.daemonId!;
+    const agent = h.store.createAgent({ name: "Uncooperative provider", provider: "claude", runtimeId });
+    const issue = h.store.createIssue({ title: "Hung provider restart", assigneeType: "agent", assigneeId: agent.id });
+    const task = h.store.createTask({ agentId: agent.id, issueId: issue.id, runtimeId, prompt: "Long tool", maxAttempts: 2 });
+    await waitFor(() => entered, "provider entered", 5_000);
+    h.store.beginDaemonDrain("local", daemonId, "deploy", 1);
+    await Bun.sleep(5);
+    h.store.reconcileDaemonDrain(runtimeId);
+    const started = performance.now();
+    await waitFor(() => expired, "bounded crash fallback", 2_000);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(h.daemon.restartRequested()).toBe(true);
+    expect(h.store.plannedRestarts().get(task.id)?.state).toBe("requested");
+    expect(h.store.plannedRestarts().protectsFromOrphanRecovery(task.id)).toBe(false);
+    release();
+    await h.stopDaemon();
+    const recovered = h.store.recoverOrphans(runtimeId);
+    expect(recovered).toEqual({ orphaned: 1, retried: 1 });
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
+    expect(h.store.listTasks().filter(next => next.parentTaskId === task.id)).toHaveLength(1);
+  } finally { release(); await h.dispose(); }
 }, 20_000);

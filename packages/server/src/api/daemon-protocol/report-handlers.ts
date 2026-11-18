@@ -244,7 +244,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
           } else task = authorizeReportTask(store, session, taskId, frame.rt);
         } else task = authorizeReportTask(store, session, taskId, frame.rt);
         const authority = { runtimeId: reportingRuntimeId ?? task.runtimeId!, workspaceId: task.workspaceId,
-          daemonId: session.daemonId, userId: session.ownerAccessToken?.userId };
+          daemonId: session.daemonId, userId: session.ownerAccessToken?.userId, generation: p.generation as number | undefined };
         const isCompletion = frame.type === "task.fail";
         const fields = isCompletion ? completionFields(p, taskId) : null;
         const traceEventCount = isCompletion ? completionTraceEventCount(p.trace, taskId) : undefined;
@@ -348,7 +348,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
           return { ok: true };
         };
         // Accepted usage runs retain accounting authority after execution handoff.
-        return frame.type === "task.usage" ? apply()
+        return frame.type === "task.usage" || frame.type === "task.fail" ? apply()
           : store.plannedRestarts().withExecution(taskId, p.generation, authority, apply);
       }
       const runtimeId = frame.rt ?? string(p.runtime_id);

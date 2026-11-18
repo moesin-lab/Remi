@@ -64,7 +64,7 @@ export interface DaemonReportTraceHooks {
 }
 
 export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: () => string | null, outbox: () => MultiremiTaskReportOutbox,
-  waitTimeoutMs = 30_000, waitSignal?: () => AbortSignal, trace?: DaemonReportTraceHooks): DaemonReportTransport {
+  waitTimeoutMs = 30_000, waitSignal?: () => AbortSignal, trace?: DaemonReportTraceHooks, executionGeneration: (taskId: string) => number = () => 0): DaemonReportTransport {
   return {
     async report(type, partition, payload, wait = false) {
       const runtimeId = runtime();
@@ -72,7 +72,8 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
       const status = type === "turn.complete" ? "completed" : "failed";
       // The fields describe the close below; the trace is sealed only after the
       // report is queued (or accepted), so a rejected completion can continue the turn.
-      const p = { ...payload, runtime_id: payload.runtime_id ?? runtimeId,
+      const generation = executionGeneration(partition);
+      const p = { ...(generation ? { generation } : {}), ...payload, runtime_id: payload.runtime_id ?? runtimeId,
         ...(terminal ? trace?.completion(partition, status) : {}) };
       const kind = (type.startsWith("task.") ? type.slice(5) : type) as MultiremiOutboxKind;
       if (wait) {
@@ -99,7 +100,7 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
 async function deliverCompletionReceipt(protocol: DaemonProtocolClient, record: MultiremiOutboxRecord): Promise<void> {
   if (record.kind !== "turn.complete" || !record.payload.input_receipt) return;
   const { messages } = record.payload.input_receipt as { messages: Array<{ id: string; seq: number }> };
-  const input = { turn_id: record.payload.turn_id, attempt_id: record.taskId, input_to_seq: record.payload.input_to_seq };
+  const input = { turn_id: record.payload.turn_id, attempt_id: record.taskId, input_to_seq: record.payload.input_to_seq, ...(record.payload.generation !== undefined ? { generation: record.payload.generation } : {}) };
   const runtimeId = record.payload.runtime_id as string;
   const receipt = (ids: string[]) => protocol.rpc("turn.input", { ...input, message_ids: ids }, runtimeId);
   try {

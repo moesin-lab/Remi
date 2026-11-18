@@ -19,7 +19,7 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
   private readonly nativeQuestionWaits = new Map<string, DaemonQuestionWait>();
   beginQuestionWait(attemptId: string, messageId: string, waitId: string): void { this.nativeQuestionWaits.set(messageId, { attempt_id: attemptId, message_id: messageId, wait_id: waitId }); }
   activeQuestionWaits(): DaemonQuestionWait[] { return [...this.nativeQuestionWaits.values()]; }
-  private readonly turns = new Map<string, { turnId: string; inputToSeq: number; wrapUpAt: string | null }>();
+  private readonly turns = new Map<string, { turnId: string; inputToSeq: number; generation: number; wrapUpAt: string | null }>();
   private readonly inputResyncs = new Map<string, number>();
   private readonly inputSeqs = new Map<string, number>();
   private readonly decisions = new Map<string, UnifiedMessage>();
@@ -87,8 +87,8 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
     listener?.(status);
   }
 
-  bindTurn(input: DaemonTurnInput): void {
-    this.turns.set(input.attempt_id, { turnId: input.turn_id, inputToSeq: input.input_to_seq, wrapUpAt: null });
+  bindTurn(input: DaemonTurnInput & { generation?: number }): void {
+    this.turns.set(input.attempt_id, { turnId: input.turn_id, inputToSeq: input.input_to_seq, generation: input.generation ?? 0, wrapUpAt: null });
     // Offer inputs have already reached this provider. A decision receipt must
     // include them when it advances past the original, still unacknowledged range.
     const delivered = new Set<string>();
@@ -99,10 +99,10 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
     this.confirmedDecisionInputs.set(input.attempt_id, delivered);
   }
 
-  turnInput(attemptId: string): { turn_id: string; attempt_id: string; input_to_seq: number } {
+  turnInput(attemptId: string): { turn_id: string; attempt_id: string; input_to_seq: number; generation?: number } {
     const turn = this.turns.get(attemptId);
     if (!turn) throw new Error("attempt has no bound turn");
-    return { turn_id: turn.turnId, attempt_id: attemptId, input_to_seq: turn.inputToSeq };
+    return { turn_id: turn.turnId, attempt_id: attemptId, input_to_seq: turn.inputToSeq, ...(turn.generation ? { generation: turn.generation } : {}) };
   }
 
   /** Persist these receipts with the final reply before waiting for platform ACKs. */

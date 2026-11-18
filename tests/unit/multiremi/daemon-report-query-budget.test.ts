@@ -129,8 +129,10 @@ for (const size of [2, 40]) {
       expectConstantCost(type, size, sql.length);
       const budgets = {
         "task.workspace": 48,
-        "turn.complete": 211,
-        "task.fail": 134,
+        // MUL-31: fixed-cost execution fence + restart downlink reads. The
+        // 2/40 comparison above still rejects history-dependent query growth.
+        "turn.complete": 214,
+        "task.fail": 137,
         "task.usage": 40,
       };
       expect(sql.length).toBeLessThanOrEqual(

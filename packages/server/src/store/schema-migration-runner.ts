@@ -1,5 +1,5 @@
 import { snapshotSchemaCatalog, assertAdditiveSchemaCatalog } from './schema-catalog.js';
-import { hasDestructiveSchemaStatement, hasUnsupportedSchemaSql } from "./schema-ddl.js";
+import { hasDestructiveSchemaStatement, unsupportedSchemaSqlReason } from "./schema-ddl.js";
 import type { SqlDatabase } from './db/postgres.js';
 import { assertSchemaCompatible, validateSchemaCompatibility, ensureSchemaMeta, readSchemaLevels, type SchemaCompatibility } from './schema-levels.js';
 
@@ -108,7 +108,8 @@ function expandOnlyDatabase(db: SqlDatabase): SqlDatabase {
       const value = Reflect.get(target, key, target);
       if (['exec', 'run', 'query', 'prepare'].includes(String(key))) {
         return (sql: string, ...args: unknown[]) => {
-          if (hasUnsupportedSchemaSql(sql)) throw new Error('Unicode escape identifiers/strings are unsupported in registered migrations; use ordinary double-quoted identifiers and ordinary strings');
+          const unsupported = unsupportedSchemaSqlReason(sql);
+          if (unsupported) throw new Error(unsupported);
           if (hasDestructiveSchemaStatement(sql)) throw new Error('Destructive DDL is forbidden in an expand migration; declare a later-release contract step');
           return value.call(target, sql, ...args);
         };

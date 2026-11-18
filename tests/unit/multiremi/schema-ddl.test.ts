@@ -144,3 +144,13 @@ for (const sql of [
   expect(hasDestructiveSchemaSql(sql)).toBe(true);
   expect(hasDestructiveSchemaStatement(sql)).toBe(true);
 });
+
+import { unsupportedStringContinuations, supportedSingleLiterals } from '../../fixtures/schema-string-continuations.js';
+for (const sql of unsupportedStringContinuations) it(`rejects unsupported string continuation: ${sql}`, () => {
+  expect(hasDestructiveSchemaSql(sql)).toBe(true);
+  expect(hasDestructiveSchemaStatement(sql)).toBe(true);
+});
+for (const sql of supportedSingleLiterals) it(`allows single literals: ${sql}`, () => {
+  expect(hasDestructiveSchemaSql(sql)).toBe(false);
+  expect(hasDestructiveSchemaStatement(sql)).toBe(false);
+});

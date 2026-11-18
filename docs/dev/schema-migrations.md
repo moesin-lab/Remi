@@ -136,7 +136,12 @@ IMPORT FOREIGN SCHEMA。CREATE OR REPLACE 的既有定义保护由运行时 cata
 arch 与 expand guard 使用相同的 token 归一化。登记迁移禁止 PostgreSQL `U&"…"` 和 `U&'…'`
 Unicode 转义标识符/字符串（不区分大小写，包括所有 UESCAPE/注释/续接变体），即使是加法 ALTER 也拒绝。
 迁移 SQL 由项目维护，不需要这种语法；为保证 fail-closed，不尝试实现完整 PostgreSQL lexer。
-请改用普通双引号标识符或普通字符串。运行时在执行前明确报错，不记账、不推进 level；
+字符串字面量也禁止换行续接：普通单引号、E/e、B/X/N 前缀字面量结束后，
+若仅隔着含换行的空白（可夹行注释或嵌套块注释）又出现单引号，整体拒绝；请合成一个字面量。
+普通单个 E 串（含反斜杠转义）和逗号分隔的字面量不受影响。
+守卫的 PostgreSQL 前提是 `standard_conforming_strings=on`（PG 默认值）；不支持关闭此设置后的字符串语义。
+两类不支持的 token 共用拒绝路径。请改用普通双引号标识符或单个字符串。
+运行时在执行前明确报错，不记账、不推进 level；
 arch 对含该 token 的源码 SQL 字符串无条件报违规，不依赖语句头消歧。
 运行时面对已知 SQL，任何顶层语句以 TRUNCATE 开头都直接拒绝，不依赖尾部形态或 catalog diff；
 arch 仅作 fail-fast：TRUNCATE 后接 TABLE、ONLY 或引用名称时
@@ -146,3 +151,9 @@ DO 执行体、DROP（含 ON table）、其它 ALTER、TRUNCATE、REVOKE 等候�
 历史 bootstrap 的 [冻结 allowlist](../../tests/arch/startup-schema-ddl-allowlist.json)
 精确绑定表达式及次数，只减不增；CI 设置 `SCHEMA_DDL_BASE_REF` 校验基线。历史一次性 DDL 仍是显式例外。
 A4 切换接入和 A5 live 验收不由本单实现；本地 PG 混跑不等于已验证 slot 零失败或生产部署。
+
+legacy 归档指纹的 [data-schema-inputs.json](../../packages/platform-updater/src/data-schema-inputs.json)
+冻结为 B1 合入前 main `80f749990` 的逐项内容，不添加新版独有路径，否则 updater 从旧 `/app` 读取时会失败。
+新增 DDL 模块走 level 纪律；[覆盖门禁](../../tests/arch/data-schema-inputs.test.ts)
+要求 migrations.ts 可达的每个 DDL 模块要么在冻结列表中，要么在 B1 arch scanner 的实际扫描集合中；
+该集合由 scanner 的同一次遍历报告，包含 schema-levels.ts。此规则不改变 level 指纹或 legacy 哈希算法。

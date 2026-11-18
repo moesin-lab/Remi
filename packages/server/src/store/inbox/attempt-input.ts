@@ -61,8 +61,7 @@ export function acknowledgeAttemptInput(ctx: StoreContext, turn: any, toSeq: num
 }
 
 /** Sparse receipts with explicit provider consumption, committed by restart CAS. */
-export function plannedRestartDeliveredInputs(ctx: StoreContext, attemptId: string): Set<string> {
-    const row = ctx.db.query("SELECT checkpoint FROM multiremi_planned_restarts WHERE attempt_id=? AND state='running' AND generation>0").get(attemptId);
-    const checkpoint = typeof row?.checkpoint === 'string' ? JSON.parse(row.checkpoint) : row?.checkpoint;
+export function plannedRestartDeliveredInputs(value: unknown): Set<string> {
+    const checkpoint = (typeof value === 'string' ? JSON.parse(value) : value) as { delivered_message_ids?: string[] } | null;
     return new Set(checkpoint?.delivered_message_ids ?? []);
 }

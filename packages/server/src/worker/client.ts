@@ -1163,7 +1163,7 @@ export class MultiremiDaemonClient {
     });
   }
 
-  async completeTurn(input: { turn_id: string; attempt_id: string; input_to_seq: number; input_unread_fallback?: boolean }, output: string,
+  async completeTurn(input: { turn_id: string; attempt_id: string; input_to_seq: number; input_unread_fallback?: boolean; input_receipt?: { messages: Array<{ id: string; seq: number }> } }, output: string,
     sessionId?: string | null, workDir?: string | null): Promise<void> {
     await this.report("turn.complete", input.attempt_id, {
       ...input,

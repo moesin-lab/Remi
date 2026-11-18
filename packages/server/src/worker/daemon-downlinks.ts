@@ -105,6 +105,26 @@ export class DaemonTaskDownlinks implements TaskSteerSource {
     return { turn_id: turn.turnId, attempt_id: attemptId, input_to_seq: turn.inputToSeq };
   }
 
+  /** Persist these receipts with the final reply before waiting for platform ACKs. */
+  completionInput(attemptId: string, deliveredIds: string[] = []) {
+    for (const pending of this.steers.get(attemptId)?.values() ?? []) {
+      if (this.decisionRangeHints.has(pending.id) && !deliveredIds.includes(pending.id)) throw new Error("unconfirmed turn input gap");
+    }
+    const input = this.turnInput(attemptId);
+    const messages = [...new Set([...deliveredIds, ...(this.confirmedDecisionInputs.get(attemptId) ?? [])])]
+      .map(id => ({ id, seq: this.inputSeqs.get(`${attemptId}:${id}`) }))
+      .filter((message): message is { id: string; seq: number } => message.seq !== undefined)
+      .sort((a, b) => a.seq - b.seq);
+    const to = Math.max(input.input_to_seq, ...messages.map(message => message.seq));
+    const confirmed = new Set(messages.map(message => message.id));
+    for (const pending of this.steers.get(attemptId)?.values() ?? []) {
+      const seq = this.inputSeqs.get(`${attemptId}:${pending.id}`);
+      if (seq !== undefined && seq <= to && !confirmed.has(pending.id)) throw new Error("unconfirmed turn input gap");
+    }
+    return { ...input, input_to_seq: to,
+      ...(messages.length ? { input_receipt: { messages } } : {}) };
+  }
+
   private queueInput(attemptId: string, message: MultiremiTaskSteerMessage, notify = true): void {
     let messages = this.steers.get(attemptId);
     if (!messages) { messages = new Map(); this.steers.set(attemptId, messages); }

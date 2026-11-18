@@ -980,6 +980,14 @@ available_commands?: SlashCommandCatalogue | null;  // agent 最近一次发布�
   终态照常生效；截断后写进这一尝试的 agent 会话线 `multiremi_session_lanes.available_commands`
   （JSON 文本，迁移 `20261020_lane_available_commands`），空列表照存；较早的尝试不覆盖较新尝试写下的目录。
   Chat 菜单经 `GET /api/chat/slash-commands` 读取。
+- daemon 收尾时将最终回复与尚待确认的输入收据一同写入同一条 outbox 完成记录，
+  收据包含初始输入、已投递的 native/reprompt steer 和 force-answer 到期后记录的输入；
+  自然结束时不再提前同步确认已投递 steer。然后由该记录先执行 `turn.input`
+  （默认等待 10 秒），再发送 `turn.complete`。
+  本地 `input_receipt` 不进入完成帧；传输超时保留整个完成记录重放，不能重跑 provider。
+  daemon 重启仍先回放终态，不把待送达的完成记录当成孤儿执行；完成 ACK 丢失时，
+  已结束轮次的收据可返回 `stale_attempt`，由完成报告自身的幂等校验决定是否已送达。
+  输入 `input_gap` 仍先 resync 并重试一次，再交给下面的未读校验，不伪造读取确认。
 - 折叠输入未读只在协商 `input_unread` 能力后返回 `input_unread`（`retryable:false`），
   附 `read_to_seq`、`required_to_seq`、`read_command` 和包含连续读取命令的 `message`。
   outbox 将该拒绝交回执行器，将原完成记录持久暂停，保持 trace 开放；后继终态入队时

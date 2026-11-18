@@ -281,7 +281,9 @@ export class DaemonProtocolClient {
     return new Promise((resolve, reject) => {
       const timer = this.schedule(() => {
         this.pending.delete(key);
-        reject(new DaemonProtocolRpcError("daemon_timeout", true));
+        const error = new DaemonProtocolRpcError("daemon_timeout", true, frame.t);
+        error.message += ` (${frame.t}, ${timeoutMs}ms)`;
+        reject(error);
       }, timeoutMs);
       this.pending.set(key, { timer, resolve, reject });
       try {

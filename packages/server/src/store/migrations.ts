@@ -1,7 +1,7 @@
 import { assertSchemaBeforeExpand, readSchemaLevels, SCHEMA_COMPATIBILITY } from "./schema-levels.js";
 import { runSchemaExpands } from "./schema-migration-runner.js";
 import { SCHEMA_MIGRATIONS } from "./schema-migrations.js";
-import { version as SCHEMA_RELEASE } from "../../../../package.json";
+import { PACKAGE_VERSION as SCHEMA_RELEASE } from "@shared/package-version.js";
 import { migrateExecutionEndpoints } from "./execution-endpoint-migration.js";
 import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
 import { ensureTurnListIndexes } from './turn-list-indexes.js';

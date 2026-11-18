@@ -1,9 +1,10 @@
 import { expect, it } from "bun:test";
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { UNIFIED_MODEL_MIGRATION } from "@multiremi/store/unified-model-schema.js";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 
-pendingTurnBackendTests("execution binding catalog startup upgrade", (fixture, backend) => {
+pendingTurnBackendTests("execution binding catalog maintenance upgrade", (fixture, backend) => {
   it("upgrades an already unified database without losing old bindings, accepts the current catalog and reopens idempotently", () => {
     const f = fixture();
     const runtime = f.store.registerRuntime({ name: "Existing machine", provider: "codex", metadata: { codex_profiles: 1 } });
@@ -26,6 +27,8 @@ pendingTurnBackendTests("execution binding catalog startup upgrade", (fixture, b
       if (backend === "PostgreSQL") f.reopen();
       else f.store = new MultiremiStore(f.db);
     };
+    // Repair the deliberately downgraded historical fixture offline.
+    runMigrations(f.db, { historicalMaintenance: true });
     reopen();
     expect(f.db.query("PRAGMA table_info(multiremi_execution_binding_states)").all().some(column => column.name === "model_catalog")).toBe(true);
     expect(f.db.query("SELECT profile_id,profile_revision,generation,status FROM multiremi_execution_binding_states").get()).toEqual(before);

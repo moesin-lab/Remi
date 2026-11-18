@@ -1,4 +1,4 @@
-import { unsupportedStringContinuations, supportedSingleLiterals } from '../fixtures/schema-string-continuations.js';
+import { unsupportedStringContinuations, supportedSingleLiterals, destructiveDollarQuotes, supportedDollarQuotes } from '../fixtures/schema-string-continuations.js';
 import { describe, expect, it } from 'bun:test';
 import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -82,11 +82,11 @@ describe('startup migration expand discipline', () => {
           expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([unicodeSql]);
         }
       }
-      for (const sql of unsupportedStringContinuations) {
+      for (const sql of [...unsupportedStringContinuations, ...destructiveDollarQuotes]) {
         writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
         expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql]);
       }
-      for (const sql of supportedSingleLiterals) {
+      for (const sql of [...supportedSingleLiterals, ...supportedDollarQuotes]) {
         writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
         expect(startupSchemaDdl(fixture)).toEqual([]);
       }

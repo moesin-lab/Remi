@@ -1,4 +1,4 @@
-import { unsupportedStringContinuations } from '../../fixtures/schema-string-continuations.js';
+import { unsupportedStringContinuations, destructiveDollarQuotes, supportedDollarQuotes } from '../../fixtures/schema-string-continuations.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { runMigrations } from '@multiremi/store/migrations.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
@@ -133,6 +133,34 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
     expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
     expect(readSchemaLevels(db).expandLevel).toBe(0);
     console.info(`Original row retained; steps=[]; expandLevel=0 after ${sql}`);
+  });
+  for (const template of destructiveDollarQuotes) for (const method of ['query', 'exec'] as const) it(`rejects dollar boundary through ${method}: ${template}`, () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.retained (id integer); INSERT INTO ${schema}.retained VALUES (42)`);
+    const before = snapshotSchemaCatalog(db), levels = readSchemaLevels(db);
+    const sql = template.replaceAll('public.', `${schema}.`);
+    const migration = step(`dollar-${method}-${serial}`, sql);
+    migration.run = guarded => { if (method === 'exec') guarded.exec(sql); else guarded.query(sql).run(); };
+    try {
+      let failure: unknown;
+      try { runSchemaExpands(db, [migration], '9.0.0', { minLevel: 0, maxLevel: 100 }); } catch (error) { failure = error; }
+      console.info(`Dollar probe ${method}: error=${String(failure)}; rows=${JSON.stringify(db.query(`SELECT id FROM ${schema}.retained`).all())}; steps=${JSON.stringify(db.query('SELECT id FROM multiremi_schema_steps').all())}; levels=${JSON.stringify(readSchemaLevels(db))}`);
+      expect(failure).toBeDefined();
+      expect(snapshotSchemaCatalog(db)).toEqual(before);
+      expect(readSchemaLevels(db)).toEqual(levels);
+      expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
+      expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
+      console.info(`Dollar boundary rejected (${method}); row=42; steps=[]; levels=${JSON.stringify(levels)}: ${sql}`);
+    } finally { db.exec('DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
+  });
+  for (const sql of supportedDollarQuotes) it(`executes opaque dollar content: ${sql}`, () => {
+    fixture();
+    try {
+      runSchemaExpands(db, [step(`dollar-allowed-${serial}`, sql)], '9.0.0', { minLevel: 0, maxLevel: 100 });
+      expect(readSchemaLevels(db).expandLevel).toBe(1);
+      expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([{ id: `dollar-allowed-${serial}` }]);
+      console.info(`Dollar literal executed and expand committed: ${sql}`);
+    } finally { db.exec('DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
   });
   // These SELECT statements deliberately pass text lint. Only before/after
   // catalog comparison can detect the function's transactional side effects.

@@ -154,3 +154,13 @@ for (const sql of supportedSingleLiterals) it(`allows single literals: ${sql}`, 
   expect(hasDestructiveSchemaSql(sql)).toBe(false);
   expect(hasDestructiveSchemaStatement(sql)).toBe(false);
 });
+
+import { destructiveDollarQuotes, supportedDollarQuotes } from '../../fixtures/schema-string-continuations.js';
+for (const sql of destructiveDollarQuotes) it(`rejects case-sensitive dollar boundary: ${sql}`, () => {
+  expect(hasDestructiveSchemaSql(sql)).toBe(true);
+  expect(hasDestructiveSchemaStatement(sql)).toBe(true);
+});
+for (const sql of supportedDollarQuotes) it(`allows opaque dollar content: ${sql}`, () => {
+  expect(hasDestructiveSchemaSql(sql)).toBe(false);
+  expect(hasDestructiveSchemaStatement(sql)).toBe(false);
+});

@@ -25,7 +25,7 @@ function fixture() {
   setSystemTime(start);
   for (const [id, daemonId, provider] of [["rt_a", "machine-a", "codex"], ["rt_a_other", "machine-a", "claude"], ["rt_b", "machine-b", "codex"]] as const) {
     store.registerRuntime({ id, daemonId, provider, name: id, workspaceId: "local", maxConcurrency: 4 });
-    store.heartbeatRuntime(id, { claimPending: false, plannedRestartProtocol: 1 });
+    store.heartbeatRuntime(id, { claimPending: false, plannedRestartNegotiated: true, plannedRestartProtocol: 1 });
   }
   const agent = store.createAgent({ name: "drain test", provider: "codex" });
   return { store, agent };
@@ -78,6 +78,47 @@ describe("daemon drain", () => {
       // This fixture started an independent fence before creating the update.
       expect(store.getDaemonDrainStatus("local", "machine-a").mode).toBe("draining");
     }
+  });
+
+  for (const reason of ["manual", "deploy", "cli_update"] as const) it(`HTTP version 1 cannot upgrade an unnegotiated socket before ${reason} expiry`, async () => {
+    const { store, agent } = fixture();
+    // This is the result of hello without turn.restart, even though the runtime
+    // advertises protocol 1. HTTP must not overwrite that intersection.
+    store.heartbeatRuntime("rt_a", { claimPending: false, plannedRestartNegotiated: false, plannedRestartProtocol: 1 });
+    const issue = createResponsibleTestIssue(store, { title: "HTTP probe drain", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "long work", maxAttempts: 3 });
+    store.claimTask("rt_a"); store.startTask(task.id); ack(store, 1);
+    store.recordDaemonProtocol("rt_a", "machine-a", 2, "0.2.90");
+    const app = createMultiremiApp({ store, authToken: "test-root" });
+    const report = (count: number) => app.request("/api/daemon/heartbeat", { method: "POST",
+      headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" },
+      body: JSON.stringify({ runtime_id: "rt_a", planned_restart: 1, drain_ack_generation: 0,
+        active_task_count: count, active_task_ids: count ? [task.id] : [] }) });
+    expect((await report(1)).status).toBe(200);
+    expect(store.getRuntimeLite("rt_a")?.metadata).toMatchObject({ planned_restart: 0, planned_restart_negotiated: false });
+    store.beginDaemonDrain("local", "machine-a", reason, 1);
+    advance(1); store.reconcileDaemonDrain("rt_a"); store.reconcileDaemonDrain("rt_a");
+    expect(store.plannedRestarts().get(task.id)).toBeNull();
+    expect(store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery", attempt: 1 });
+    expect(store.listTasks("queued").filter(retry => retry.attempt === 2)).toHaveLength(1);
+    const inputs = taskInputSnapshot(store, "rt_a", "machine-a", new Set([task.id]), () => {});
+    expect(inputs.some(input => input.type === "turn.restart")).toBe(false);
+    expect(inputs.some(input => input.type === "task.cancelled")).toBe(true);
+    advance(2); ack(store, 0); expect((await report(0)).status).toBe(200);
+    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "drained_forced", remaining_tasks: 0 });
+  });
+
+  it("requires socket reauthorization after HTTP revokes negotiated support", async () => {
+    const { store } = fixture();
+    const app = createMultiremiApp({ store, authToken: "test-root" });
+    for (const body of [{ runtime_id: "rt_a" }, { runtime_id: "rt_a", planned_restart: 1 }]) {
+      const response = await app.request("/api/daemon/heartbeat", { method: "POST",
+        headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      expect(response.status).toBe(200);
+      expect(store.getRuntimeLite("rt_a")?.metadata.planned_restart).toBe(0);
+    }
+    store.heartbeatRuntime("rt_a", { claimPending: false, plannedRestartNegotiated: true, plannedRestartProtocol: 1 });
+    expect(store.getRuntimeLite("rt_a")?.metadata.planned_restart).toBe(1);
   });
 
   it("clears stale support before enforcing an old HTTP heartbeat's expired deadline", async () => {
@@ -169,7 +210,7 @@ describe("daemon drain", () => {
 
   it("accepts an explicit process-wide HTTP report without waiting for a disabled historical lane", async () => {
     const { store, agent } = fixture();
-    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION, planned_restart: 1 })]);
+    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION, planned_restart: 1, planned_restart_negotiated: true })]);
     const task = store.createTask({ agentId: agent.id, prompt: "long tool" });
     store.claimTask("rt_a"); store.startTask(task.id);
     // B's stale process-wide count is retained in storage after it was disabled.
@@ -190,7 +231,7 @@ describe("daemon drain", () => {
 
   it("aggregates HTTP provider counts while a checkpoint is pending", async () => {
     const { store, agent } = fixture();
-    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION, planned_restart: 1 })]);
+    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION, planned_restart: 1, planned_restart_negotiated: true })]);
     const task = store.createTask({ agentId: agent.id, prompt: "local long task" });
     store.claimTask("rt_a"); store.startTask(task.id);
     const app = createMultiremiApp({ store, authToken: "test-root" });
@@ -293,7 +334,7 @@ describe("daemon drain", () => {
 
   for (const reason of ["manual", "deploy"] as const) it(`omits an expired ${reason} deadline from an HTTP upgrade claim`, async () => {
     const { store } = fixture();
-    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION, planned_restart: 1 })]);
+    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION, planned_restart: 1, planned_restart_negotiated: true })]);
     ack(store, 0);
     const original = store.beginDaemonDrain("local", "machine-a", reason, 60_000);
     advance(600_000);

@@ -1733,7 +1733,8 @@ export class RuntimesRepo {
       const legacyRuntimeIds = new Set<string>();
       for (const task of tasks) {
         const taskRuntimeId = String(task.runtime_id);
-        if (this.getRuntimeLite(taskRuntimeId)?.metadata.planned_restart !== 1) {
+        const capabilities = this.getRuntimeLite(taskRuntimeId)?.metadata;
+        if (capabilities?.planned_restart !== 1 || capabilities.planned_restart_negotiated !== true) {
           legacyRuntimeIds.add(taskRuntimeId);
           continue;
         }
@@ -2507,6 +2508,8 @@ export class RuntimesRepo {
     supportsDirectoryScan?: boolean;
     supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
+    /** Set only by the socket session after named-capability negotiation. */
+    plannedRestartNegotiated?: boolean;
     plannedRestartProtocol?: number;
     supportsBotMenu?: boolean;
     botMenuProtocol?: number;
@@ -2525,7 +2528,11 @@ export class RuntimesRepo {
     // Capability flags a daemon re-advertises on every heartbeat. Collected once
     // so the three metadata-writing branches below stay in step.
     const metadataPatch: Record<string, unknown> = {};
-    if (options.plannedRestartProtocol !== undefined) metadataPatch.planned_restart = options.plannedRestartProtocol === 1 ? 1 : 0;
+    if (options.plannedRestartNegotiated !== undefined) metadataPatch.planned_restart_negotiated = options.plannedRestartNegotiated;
+    if (options.plannedRestartProtocol !== undefined) {
+      const negotiated = options.plannedRestartNegotiated ?? runtime.metadata.planned_restart_negotiated === true;
+      metadataPatch.planned_restart = negotiated && options.plannedRestartProtocol === 1 ? 1 : 0;
+    }
     if (options.health !== undefined && JSON.stringify(runtime.metadata.health) !== JSON.stringify(options.health)) metadataPatch.health = options.health;
     if (options.supportsBatchImport !== undefined) metadataPatch.supports_batch_import = options.supportsBatchImport;
     if (options.supportsDirectoryScan !== undefined) metadataPatch.supports_directory_scan = options.supportsDirectoryScan;

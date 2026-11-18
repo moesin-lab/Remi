@@ -22,7 +22,8 @@ export function taskInputSnapshot(store: MultiremiStore, runtimeId: string, daem
       continue;
     }
     const restart = restarts.get(id);
-    if (restart?.state === "requested" && host?.metadata.planned_restart === 1) entities.push({
+    if (restart?.state === "requested" && host?.metadata.planned_restart === 1
+      && host.metadata.planned_restart_negotiated === true) entities.push({
       key: `turn.restart:${restart.handoff_id}`, type: "turn.restart",
       payload: { turn_id: restart.turn_id, attempt_id: id, handoff_id: restart.handoff_id, generation: restart.generation },
     });

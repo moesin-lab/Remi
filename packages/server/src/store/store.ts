@@ -3749,6 +3749,8 @@ runMigrations(this.db);
     supportsDirectoryScan?: boolean;
     supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
+    /** Set only by the socket session after named-capability negotiation. */
+    plannedRestartNegotiated?: boolean;
     plannedRestartProtocol?: number;
     supportsBotMenu?: boolean;
     botMenuProtocol?: number;

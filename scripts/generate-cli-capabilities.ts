@@ -20,7 +20,7 @@ const RUNTIME_MANIFEST_PATH = resolve(ROOT, "packages/server/src/api/cli-capabil
 const MAX_PLANNED_ROUTES = 0;
 
 const DOMAINS = [
-  "context", "workspace", "account", "member", "invite", "token",
+  "context", "db", "workspace", "account", "member", "invite", "token",
   "project", "repo", "knowledge", "memory", "wiki",
   "issue", "comment", "session", "share", "label", "attachment",
   "chat", "task", "message", "turn",

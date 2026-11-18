@@ -40,8 +40,8 @@ export function readSchemaLevels(db: SqlDatabase): SchemaLevels {
   if (!exists) {
     return { expandLevel: 0, contractLevel: 0 };
   }
-  const rows = db.query('SELECT expand_level, contract_level FROM multiremi_schema_meta').all();
-  if (rows.length !== 1) throw new Error('Invalid schema metadata: expected exactly one multiremi_schema_meta row');
+  const rows = db.query('SELECT singleton, expand_level, contract_level FROM multiremi_schema_meta').all();
+  if (rows.length !== 1 || Number(rows[0].singleton) !== 1) throw new Error('Invalid schema metadata: expected exactly one multiremi_schema_meta row with singleton=1');
   if (rows[0].expand_level == null || rows[0].contract_level == null) throw new Error('Invalid schema metadata: null level');
   const schema = { expandLevel: Number(rows[0].expand_level), contractLevel: Number(rows[0].contract_level) };
   validateSchemaLevels(schema);

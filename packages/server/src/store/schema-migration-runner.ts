@@ -1,6 +1,6 @@
 import { hasDestructiveSchemaSql } from "./schema-ddl.js";
 import type { SqlDatabase } from './db/postgres.js';
-import { assertSchemaCompatible, ensureSchemaMeta, readSchemaLevels, type SchemaCompatibility } from './schema-levels.js';
+import { assertSchemaCompatible, validateSchemaCompatibility, ensureSchemaMeta, readSchemaLevels, type SchemaCompatibility } from './schema-levels.js';
 
 export interface SchemaMigration {
   id: string;
@@ -42,6 +42,8 @@ export function validateSchemaMigrations(steps: readonly SchemaMigration[]): voi
 /** Caller owns the migration lock; each step and its marker commit together. */
 export function runSchemaExpands(db: SqlDatabase, steps: readonly SchemaMigration[], release: string, code: SchemaCompatibility): void {
   validateSchemaMigrations(steps);
+  validateSchemaCompatibility(code);
+  releaseParts(release);
   // Refuse contracted databases before creating or changing any metadata.
   const schema = readSchemaLevels(db);
   if (schema.contractLevel > code.maxLevel) assertSchemaCompatible(schema, code);

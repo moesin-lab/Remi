@@ -4,6 +4,7 @@
   "max_planned_routes": 0,
   "domains": [
     "context",
+    "db",
     "workspace",
     "account",
     "member",

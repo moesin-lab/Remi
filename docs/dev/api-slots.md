@@ -64,6 +64,9 @@ term 不匹配时将原上下文永久失效、记录错误并停止全部后台
 [offer 代号回归](../../tests/unit/multiremi/daemon-task-offers.test.ts)覆盖 hello 的暂停 prepare、发送期间接管后的 SQL 拒写、手动时钟触发的旧代 retry/rescind，以及重新启动后拒绝旧回调。
 [live term 回归](../../tests/unit/multiremi/live-term-fence.test.ts)覆盖 A/B 接管、prepared SQL、暂停的异步续体、Cron/title/wiki 无写入、trigger 单次运行、后台停止及重新激活。
 [PG 双进程回归](../../tests/integration/live-term-fence.test.ts)在配置 `MULTIREMI_TEST_POSTGRES_URL` 后检查接管被旧事务的行锁阻塞、提交后新进程写入，以及旧进程续体被拒绝；没有测试 PG 时明确跳过。
+锁等待观测在每次事务内轮询前调用 `pg_stat_clear_snapshot()`，避免 PostgreSQL 统计快照缓存隐藏后连接的接管进程。
+offer 回归同时覆盖无 term 与已激活 term 的接受/拒绝落库，以及接管后旧 term 的显式 SQL 拒写；默认无 slot 服务另行断言先激活 `single:<pid>` term。
+共享的 [offer 测试传输](../../tests/fixtures/task-offer.ts)须在生产 reply hook 完成后才停止任务，`runtime.ready` 也须在 offers 启动期间处理；停止后的事件会被生命周期守卫忽略。
 
 [PG deadline 事务清理回归](../../tests/integration/postgres-deadline-cleanup.test.ts)覆盖 worker 查询超时及语句之间预算过期，检查后续查询、事务状态、未提交写入、锁释放和独立进程接管，并覆盖嵌套事务与 savepoint 清理；测试专用 PG 协议代理把 ROLLBACK / ROLLBACK TO / RELEASE 替换为被观察连接 advisory lock 持续阻塞的真实 SQL，验证 cleanup 超时返回、旧 backend 消失、锁归零和独立进程取得角色锁并写入；需要隔离的 `MULTIREMI_TEST_POSTGRES_URL`。
 

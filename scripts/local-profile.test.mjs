@@ -179,6 +179,8 @@ function fixture(t) {
     const result = spawnSync(process.execPath, ['--import', pathToFileURL(mock).href, script, profile, action, ...args], {
       env: {
         ...inheritedEnvironment,
+        HOME: join(root, 'home'),
+        XDG_CONFIG_HOME: join(root, 'home/.config'),
         ...environment,
         NODE_OPTIONS: '',
         REMI_PROFILES_ROOT: profileBase,
@@ -1347,6 +1349,90 @@ test('prune protects active, both candidates, in-flight snapshots and latest dis
   }
   assert.ok(existsSync(source(OLD_REF)));
   assert.ok(existsSync(source('manual-release')));
+});
+
+test('prune protects effective daemon and latest distinct drop-in refs in systemd filename order', (t) => {
+  const f = fixture(t); f.activate();
+  const releases = join(f.profileRoot(), 'releases');
+  const refs = ['b', 'c', 'd', 'e', 'f'].map(c => c.repeat(40));
+  for (const ref of refs) { mkdirSync(join(releases, ref)); writeFileSync(join(releases, `${ref}.tar`), 'archive'); }
+  const config = join(f.root, 'home/.config/systemd/user'); mkdirSync(config, { recursive: true });
+  const unit = join(config, 'multiremi-daemon.service'); mkdirSync(`${unit}.d`);
+  writeFileSync(unit, `[Service]\nExecStart="${join(releases, refs[4], 'daemon-bin/remi')}" daemon start\n`);
+  const dropin = (name, ref) => writeFileSync(join(`${unit}.d`, name),
+    `[Service]\nExecStart=\nExecStart="-${join(releases, ref, 'daemon-bin/remi')}" \\\n daemon start --foreground\n`);
+  // Create in reverse lexical order; duplicate B must not consume retention.
+  dropin('99-last.conf', refs[0]); dropin('98-duplicate.conf', refs[0]);
+  dropin('50-middle.conf', refs[1]); dropin('20-old.conf', refs[2]); dropin('10-oldest.conf', refs[3]);
+  const dry = f.run('stable', 'prune-releases', { args: ['--dry-run'] }); succeeds(dry);
+  assert.doesNotMatch(dry.stderr, /Release pruning failed/);
+  for (const ref of refs.slice(0, 3)) {
+    assert.ok(dry.stdout.includes(`Keeping release for daemon reference: ${join(releases, ref)}`));
+    assert.ok(!dry.stdout.includes(`Would remove release: ${join(releases, ref)}`));
+  }
+  for (const ref of refs.slice(3)) assert.ok(dry.stdout.includes(`Would remove release: ${join(releases, ref)}`));
+  succeeds(f.run('stable', 'prune-releases'));
+  for (const [i, ref] of refs.entries()) {
+    assert.equal(existsSync(join(releases, ref)), i < 3);
+    assert.equal(existsSync(join(releases, `${ref}.tar`)), i < 3);
+  }
+  assert.ok(existsSync(join(releases, OLD_REF)));
+});
+
+test('daemon empty ExecStart clears active references and keep zero retains only effective command', (t) => {
+  const f = fixture(t); f.activate();
+  const releases = join(f.profileRoot(), 'releases');
+  const config = join(f.root, 'custom-config');
+  const unit = join(config, 'systemd/user/multiremi-daemon.service'); mkdirSync(`${unit}.d`, { recursive: true });
+  mkdirSync(join(releases, NEW_REF));
+  writeFileSync(unit, `[Service]\nExecStart="${join(releases, NEW_REF, 'daemon-bin/remi')}" daemon start\n`);
+  const environment = { XDG_CONFIG_HOME: config, REMI_RELEASES_KEEP: '0' };
+  const dry = f.run('stable', 'prune-releases', { environment, args: ['--dry-run'] }); succeeds(dry);
+  assert.ok(dry.stdout.includes(`Keeping release for daemon reference: ${join(releases, NEW_REF)}`));
+  writeFileSync(join(`${unit}.d`, '99-clear.conf'), '[Service]\nExecStart=\nExecStart=/usr/bin/remi daemon start\n');
+  succeeds(f.run('stable', 'prune-releases', { environment }));
+  assert.ok(!existsSync(join(releases, NEW_REF)));
+});
+
+test('automatic pruning protects daemon unit reference with HOME fallback and ignores manual paths', (t) => {
+  const f = fixture(t); f.activate();
+  const ref = '1'.repeat(40);
+  const releases = join(f.profileRoot(), 'releases'); mkdirSync(join(releases, ref));
+  const unit = join(f.root, 'home/.config/systemd/user/multiremi-daemon.service');
+  mkdirSync(dirname(unit), { recursive: true });
+  writeFileSync(unit, `[Service]\nExecStart="${join(releases, ref, 'daemon-bin/remi')}" daemon start\n`);
+  const environment = { XDG_CONFIG_HOME: '', REMI_RELEASES_KEEP: '0' };
+  const result = f.run('stable', 'deploy', { commit: NEW_REF, environment }); succeeds(result);
+  assert.doesNotMatch(result.stderr, /Release pruning failed/);
+  assert.ok(existsSync(join(releases, ref)));
+  mkdirSync(`${unit}.d`);
+  writeFileSync(join(`${unit}.d`, '99-manual.conf'),
+    `[Service]\nExecStart=\nExecStart="${join(releases, 'native-agy-test/daemon-bin/remi')}" daemon start\n`);
+  const dry = f.run('stable', 'prune-releases', { environment, args: ['--dry-run'] }); succeeds(dry);
+  assert.ok(dry.stdout.includes(`Would remove release: ${join(releases, ref)}`));
+  assert.doesNotMatch(dry.stdout, /Keeping release for daemon reference/);
+});
+
+test('unreadable or unparseable daemon configuration aborts the entire prune plan', (t) => {
+  const f = fixture(t); f.activate();
+  const obsolete = join(f.profileRoot(), 'releases', NEW_REF); mkdirSync(obsolete);
+  const unit = join(f.root, 'home/.config/systemd/user/multiremi-daemon.service');
+  mkdirSync(`${unit}.d`, { recursive: true });
+  const dropin = join(`${unit}.d`, '99-bad.conf');
+  // EISDIR is a deterministic read failure even when tests run as root.
+  mkdirSync(dropin);
+  const check = () => {
+    for (const args of [['--dry-run'], []]) {
+      const result = f.run('stable', 'prune-releases', { args }); succeeds(result);
+      assert.match(result.stderr, /Release pruning failed/);
+      assert.doesNotMatch(result.stdout, /(?:Would remove|Removing) release:/);
+      assert.ok(existsSync(obsolete));
+    }
+  };
+  check(); rmSync(dropin, { recursive: true });
+  writeFileSync(dropin, '[Service]\nExecStart="unterminated\n'); check();
+  writeFileSync(dropin, '[Service]\nExecStart=%unknown/daemon\n'); check();
+  writeFileSync(dropin, '[Service\nExecStart=/usr/bin/remi\n'); check();
 });
 
 test('prune excludes internal SHA and tar symlinks and mismatched entry types from its plan', (t) => {

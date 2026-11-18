@@ -369,7 +369,13 @@ node scripts/local-profile.mjs stable prune-releases
 手工命名目录始终保留。保留 active、deployment、compose.env
 引用的源码，以及 running / recovery_required 宿主操作 previous / candidate
 快照引用的源码。另按备份目录时间名倒序保留最新 3 个不同 ref 的源码；
-`REMI_RELEASES_KEEP` 可设为非负整数覆盖此数量（0 表示不额外保留备份 ref）。
+`REMI_RELEASES_KEEP` 可设为非负整数覆盖此数量（0 表示不额外保留备份或 daemon 历史 ref）。
+同时读取 `${XDG_CONFIG_HOME:-~/.config}/systemd/user/multiremi-daemon.service`
+及其 `.d/*.conf`（按文件名字典序，空 `ExecStart=` 清空先前命令），保护生效的
+ExecStart 在本 profile releases 下引用的 SHA，以及从新到旧最近 N 个不同 daemon SHA。
+N 同样使用 `REMI_RELEASES_KEEP`，默认 3；回滚到更早的 daemon 版本需重新部署。
+dry-run 输出会注明 daemon 引用的保留原因。unit 或 drop-in 目录不存在视为无引用；
+存在但无法读取、语法错误或 executable 使用无法解析的扩展时，警告并放弃整次修剪。
 受保护 ref 对应的 tar 也保留；新解压的 tar 始终立即删除。
 元数据读取或路径校验失败会停止本次修剪并警告，修剪失败不影响部署结果。
 不清理 Docker 镜像、backups 或 ACP bundles。首次真实环境清理需由运维授权。

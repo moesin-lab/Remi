@@ -32,6 +32,7 @@ import type {
   SubjectSnapshot,
 } from "@multiremi/contracts/storage.js";
 import { createLogger } from "@shared/logger.js";
+import { sweepCodexPluginCaches } from "./codex-plugin-cache.js";
 import { DiskUsage, diskSpace, freeDiskBytes, freedBetween } from "./disk-usage.js";
 import {
   cleanLaneGeneration,
@@ -371,6 +372,13 @@ export class ReclaimEngine {
       await this.recoverTopicMigrations(errors);
     }
 
+    const cacheFreeBefore = mutate ? await freeDiskBytes(this.root) : null;
+    const codexPluginCache = await sweepCodexPluginCaches({
+      root: this.root, mutate, tracker, locker: this.options.locker,
+      assertRootOwner: this.options.assertRootOwner, errors,
+    });
+    if (mutate) freedBytes += freedBetween(cacheFreeBefore, await freeDiskBytes(this.root));
+
     const records = listSubjectRecords(this.root, (path, error) => {
       errors.push({ subject_id: null, message: `unreadable registry record ${path}: ${errorMessage(error)}` });
     });
@@ -478,6 +486,7 @@ export class ReclaimEngine {
       reclaimed_this_round: reclaimedCount,
       forgotten_this_round: forgottenCount,
       freed_bytes: freedBytes,
+      codex_plugin_cache: codexPluginCache,
       plan: requested === "periodic" ? plan.filter((item) => item.action !== "keep") : plan,
       errors,
     };

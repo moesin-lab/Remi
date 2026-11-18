@@ -1,3 +1,4 @@
+import { currentBackgroundTerm, withBackgroundTerm, StaleLiveTermError } from "@shared/db/live-term.js";
 import { DatabaseUnavailableError } from "@shared/db/recovery.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it, spyOn, setSystemTime } from "bun:test";
@@ -14,7 +15,7 @@ afterEach(async () => {
   resetMultiremiTestEnv();
 });
 
-function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<string, unknown> | null>, runtimeCount = 1, sweepMs?: number, metrics = false) {
+function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<string, unknown> | null>, runtimeCount = 1, sweepMs?: number, metrics = false, autostart = true) {
   const store = createLocalStore();
   const runtimeIds = Array.from({ length: runtimeCount }, (_, index) => {
     const id = `rt_offer_${index}`;
@@ -28,7 +29,7 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
   const layer = new DaemonProtocolLayer({ store, metrics: metrics ? { enabled: true,
     summaryIntervalMs: 2_147_483_647, summaryTopTypes: 20, bufferCapacity: 4096 } : undefined });
   layers.push(layer);
-  const offers = new DaemonTaskOffers({ store, layer, clock, sweepMs,
+  const offers = new DaemonTaskOffers({ store, layer, clock, sweepMs, autostart,
     prepare: async task => {
       const execution = prepare ? await prepare(task)
         : { runtime_id: task.runtimeId, auth_token: "fixture-capability" };
@@ -55,6 +56,150 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
 }
 
 describe("A-3 task offers", () => {
+  for (const fenced of [false, true]) {
+    for (const accepted of [false, true]) {
+      it(`persists an ${accepted ? "accepted" : "explicitly rejected"} offer with ${fenced ? "an active" : "no"} term`, async () => {
+        const h = fixture(undefined, 1, undefined, false, false);
+        const task = h.task();
+        const term = fenced ? h.store.activateBackgroundTerm("single:test", () => {}) : undefined;
+        withBackgroundTerm(term, () => h.offers.start());
+        await h.hello();
+        const offer = h.offered()[0]!;
+        expect(offer.p.attempt_id).toBe(task.id);
+        await h.send("res", accepted ? { ok: true } : { ok: false, code: "binary_skill_files_unsupported" },
+          { re: String(offer.seq), ack: offer.seq });
+        await h.layer.drain();
+        const persisted = h.store.getTask(task.id)!;
+        expect(persisted.status).toBe(accepted ? "dispatched" : "queued");
+        if (accepted) expect(persisted.acceptedAt).toBeString();
+        else expect(persisted).toMatchObject({ acceptedAt: null, offeredAt: null });
+      });
+    }
+  }
+
+  for (const accepted of [false, true]) {
+    it(`rejects a stale term's ${accepted ? "accept" : "requeue"} SQL after takeover`, async () => {
+      const h = fixture(undefined, 1, undefined, false, false);
+      const task = h.task();
+      let losses = 0;
+      const a = h.store.activateBackgroundTerm("A", () => { losses++; });
+      withBackgroundTerm(a, () => h.offers.start());
+      await h.hello();
+      const offer = h.offered()[0]!;
+      const before = h.store.getTask(task.id);
+      h.store.activateBackgroundTerm("B", () => {});
+      expect(() => withBackgroundTerm(a, () => accepted
+        ? h.store.acceptTaskOffer(task.id, h.runtimeIds[0]!)
+        : h.store.requeueTaskOffer(task.id, h.runtimeIds[0]!, "rejected"))).toThrow(StaleLiveTermError);
+      await h.send("res", { ok: accepted }, { re: String(offer.seq), ack: offer.seq });
+      await h.layer.drain();
+      expect(losses).toBe(1);
+      expect(h.store.getTask(task.id)).toEqual(before);
+    });
+  }
+
+  it("binds a hello pump and its paused preparation to the activation that started offers", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    const preparing = new Promise<void>(resolve => { entered = resolve; });
+    let observed: ReturnType<typeof currentBackgroundTerm>;
+    const h = fixture(async () => {
+      observed = currentBackgroundTerm();
+      entered();
+      await paused;
+      return { auth_token: "fixture" };
+    }, 1, undefined, false, false);
+    const task = h.task();
+    let losses = 0;
+    const a = h.store.activateBackgroundTerm("A", () => { losses++; });
+    withBackgroundTerm(a, () => h.offers.start());
+    const hello = h.hello(); // WebSocket callback has no inherited background term.
+    try {
+      await preparing;
+      expect(observed).toBe(a);
+      h.store.activateBackgroundTerm("B", () => {});
+    } finally { release(); }
+    await hello;
+    expect(h.offered()).toHaveLength(0);
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "dispatched", offeredAt: null });
+    expect(losses).toBe(1);
+  });
+
+  it("fences offered_at if takeover happens inside the transport send", async () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    let losses = 0;
+    const a = h.store.activateBackgroundTerm("A", () => { losses++; });
+    withBackgroundTerm(a, () => h.offers.start());
+    const original = h.session.sendEvent.bind(h.session);
+    const send = spyOn(h.session, "sendEvent").mockImplementation((...args) => {
+      const sent = original(...args);
+      if (args[0].t === "task.offer") h.store.activateBackgroundTerm("B", () => {});
+      return sent;
+    });
+    try {
+      await h.hello();
+      // The send precedes takeover, but its SQL continuation must not commit.
+      expect(h.offered()).toHaveLength(1);
+      expect(h.store.getTask(task.id)?.offeredAt).toBeNull();
+      expect(losses).toBe(1);
+    } finally { send.mockRestore(); }
+  });
+
+  for (const timer of ["rescind", "database retry", "scheduled retry"] as const) {
+    it(`fences a ${timer} timer fired outside async context after takeover`, async () => {
+      const h = fixture(undefined, 1, undefined, false, false);
+      const task = timer === "database retry" ? null : h.task();
+      const a = h.store.activateBackgroundTerm("A", () => {});
+      withBackgroundTerm(a, () => h.offers.start());
+      if (timer === "database retry") await h.hello();
+      const retryTask = task ?? h.task();
+      const claim = spyOn(h.store, "claimTask");
+      const requeue = spyOn(h.store, "requeueTaskOffer");
+      const runtime = h.store.getRuntimeLite.bind(h.store);
+      const probe = spyOn(h.store, "getRuntimeLite").mockImplementation((...args) => {
+        if (timer === "database retry") throw new DatabaseUnavailableError();
+        return runtime(...args);
+      });
+      try {
+        if (timer === "database retry") {
+          h.offers.kick();
+          await h.layer.drain();
+          expect(probe).toHaveBeenCalled();
+          expect(h.clock.pendingTimerCount).toBe(2); // sweep plus database retry
+        } else await h.hello();
+        if (timer === "scheduled retry") h.offers.enqueued({ ...retryTask,
+          nextRetryAt: new Date(h.clock.now() + 1_000).toISOString() });
+        const before = h.store.getTask(retryTask.id);
+        h.store.activateBackgroundTerm("B", () => {});
+        claim.mockClear(); requeue.mockClear();
+        h.clock.advance(DAEMON_OFFER_TIMEOUT_MS + DAEMON_OFFER_COOLDOWN_MS);
+        await h.layer.drain();
+        expect(claim).not.toHaveBeenCalled();
+        expect(requeue).not.toHaveBeenCalled();
+        expect(h.store.getTask(retryTask.id)).toEqual(before);
+      } finally { claim.mockRestore(); requeue.mockRestore(); probe.mockRestore(); }
+    });
+  }
+
+  it("does not let an old activation callback kick offers after a restart", async () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const a = h.store.activateBackgroundTerm("A", () => {});
+    withBackgroundTerm(a, () => h.offers.start());
+    await h.hello();
+    await h.offers.stop();
+    const b = h.store.activateBackgroundTerm("A", () => {});
+    withBackgroundTerm(b, () => h.offers.start());
+    const task = h.task();
+    withBackgroundTerm(a, () => h.offers.enqueued(task));
+    await h.layer.drain();
+    expect(h.offered()).toHaveLength(0);
+    h.offers.enqueued(task);
+    await h.layer.drain();
+    expect(h.offered()).toHaveLength(1);
+  });
+
   it("workspace wakeups retain queued hosts and unassigned admission without checking idle hosts", async () => {
     const h = fixture(undefined, 2);
     await h.hello();

@@ -1,3 +1,4 @@
+import { currentBackgroundTerm, StaleLiveTermError } from "./live-term.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createLogger } from "../logger.js";
 
@@ -102,7 +103,10 @@ export class DatabaseRetryLoop {
     let delay: number;
     let readingInterval = false;
     try {
-      this.active = Promise.resolve(withDatabaseTimeout(5_000, this.action));
+      this.active = Promise.resolve(withDatabaseTimeout(5_000, () => {
+        currentBackgroundTerm()?.assertCurrent();
+        return this.action();
+      }));
       await this.active;
       if (this.stopped || generation !== this.generation) return;
       // Interval lookup may itself read configuration from the database.
@@ -112,6 +116,7 @@ export class DatabaseRetryLoop {
       this.failures = 0;
       this.lastWarning = -Infinity;
     } catch (error) {
+      if (error instanceof StaleLiveTermError) { this.stopped = true; return; }
       if (!isDatabaseConnectionError(error)) {
         // Report even a late failure, but never let an obsolete tick rearm.
         log.error(`${this.name}: unexpected maintenance error`, error);

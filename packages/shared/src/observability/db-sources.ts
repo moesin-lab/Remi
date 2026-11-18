@@ -1,3 +1,4 @@
+import { currentBackgroundTerm } from "../db/live-term.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export type DbSourceKind = "http" | "ws" | "job";
@@ -53,6 +54,7 @@ export function withDbSource<T>(kind: DbSourceKind, name: string, action: () => 
   return context.run(source, action);
 }
 export function withDbJob<T>(name: DbJobName, action: () => T): T {
+  currentBackgroundTerm()?.assertCurrent();
   return withDbSource("job", name, action);
 }
 

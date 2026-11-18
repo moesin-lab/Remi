@@ -132,17 +132,17 @@ workspace 报告只唤醒所属 daemon（含别名对应的 provider）的派活
 同步读取范围退出即关闭，后台异步工作重新读取。
 [预算和复现报告](../../reports/performance/MUL-182-daemon-report-queries.md)区分历史放大消除、
 终态仍有的固定 SQL 成本、隐藏页/Question 权限查询边界与未完成的 stable 现场验收。
-[MUL-199 规模测量](../../reports/performance/MUL-199-daemon-report-scale.md)提供 100 Issue、40 会话各 501 日志等共享夹具、逐语句差异与 SQLite 固定预算；真实 PG、更多活跃轮与现场数据分布、完整 Release 检查尚待验证。
+[MUL-199 规模测量](../../reports/performance/MUL-199-daemon-report-scale.md)提供 100 Issue、40 会话各 501 日志等共享夹具、逐语句差异与固定预算；七类帧在真实 PG 与 SQLite 的 small/stable 计数一致，Release 证据见下文。更多现场数据分布与 stable 一小时验收仍待验证。
 
 终态事务复用 workspace/lane 首锁，savepoint/嵌套事务回滚恢复入口锁集合；
 终态轮卡通知在事务内累积，最终一次投影并按原次数累计 revision/log_version。
 Session/owner scope、Issue/标签、Agent/Skills 与 usage 的显式原始读缓存登记所有依赖表，
 任一依赖写入、事务首锁或回滚后重读；跨异步范围不复用。
 下行快照只查询既有 UNION 探测命中的队列，platform maintenance 单例存在时无需重复插入。
-[MUL-191 逐语句报告](../../reports/performance/MUL-191-terminal-sql.md)记录共享 stable 规模夹具的 SQLite complete 250（201 读/49 写）、fail 158（137 读/21 写），两档相同；
+[MUL-191 逐语句报告](../../reports/performance/MUL-191-terminal-sql.md)记录共享 stable 规模夹具的 SQLite/PG complete 227（175 读/52 写）、fail 141（116 读/25 写），两档相同；
 派活工作区唤醒只检查 queued/dispatched 的 runtime（未分配任务保留全宿主 admission）；
 Skill 文件按关联 Skill 批量读取；Chat queue 的浏览器失效通知不唤醒 daemon，释放消息仍走正常任务通知。
-这仍未达到 60/40，真实 PG 与完整 Release build check 需单独提供证据。
+这仍未达到 60/40；真实 PG 与 SQLite 查询数一致，完整 [Release build check 44194827781](https://github.com/moesin-lab/Remi/actions/runs/44194827781) 全绿（含真实 PG 后端分片）。该运行验证的是合并 main 前的 head；后续改动需重新验证。
 
 ## Issue 详情首屏的工作区读取
 

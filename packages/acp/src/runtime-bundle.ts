@@ -98,6 +98,24 @@ export function acquireInstallLock(lock: string): void {
   catch (error) { rmSync(lock, { recursive: true, force: true }); throw error; }
 }
 
+/** Windows scanners can retain a handle briefly after npm or a runtime exits.
+ * Keep retries bounded and propagate permanent failures. The installer is synchronous.
+ */
+export function removeRuntimeStaging(
+  path: string,
+  deps = { platform: process.platform as string, remove: (target: string) => rmSync(target, { recursive: true, force: true }),
+    wait: (ms: number) => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } },
+): void {
+  for (let retry = 0; ; retry++) {
+    try { deps.remove(path); return; }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (deps.platform !== "win32" || !["EBUSY", "EPERM", "ENOTEMPTY"].includes(code ?? "") || retry >= 5) throw error;
+      deps.wait(100 * (retry + 1));
+    }
+  }
+}
+
 /** Prepare in a new directory. A failed install never modifies a working bundle. */
 export function installRuntimeBundle(
   provider: RuntimeProvider,
@@ -144,7 +162,7 @@ export function installRuntimeBundle(
       throw error;
     }
   } finally {
-    if (stage) rmSync(stage, { recursive: true, force: true });
-    rmSync(lock, { recursive: true, force: true });
+    try { if (stage) removeRuntimeStaging(stage); }
+    finally { rmSync(lock, { recursive: true, force: true }); }
   }
 }

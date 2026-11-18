@@ -833,6 +833,7 @@ export interface IssueSessionsSurface {
   getOrCreateDefaultIssueSessionWithinTransaction(issueId: string, createdById?: string | null): MultiremiIssueSession;
   createIssueSessionWithinTransaction(issueId: string, input?: CreateIssueSessionInput): MultiremiIssueSession;
   getLatestActiveIssueSession(issueId: string): MultiremiIssueSession | null;
+  getIssueSessionOwnerFacts(ids: readonly string[]): ReturnType<import('./repos/issue-sessions-repo.js').IssueSessionsRepo['getIssueSessionOwnerFacts']>;
   getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null; historicalWorkspaceId: string | null } | null;
   addSessionParticipant(sessionId: string, input: AddSessionParticipantInput): MultiremiSessionParticipant;
   getOrCreateSessionAgentLane(sessionId: string, agentId: string, executionScope?: string): MultiremiSessionAgentLane;

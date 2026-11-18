@@ -4537,6 +4537,10 @@ runMigrations(this.db);
     return this.sessions.getIssueSession(id);
   }
 
+  getIssueSessionOwnerFacts(ids: readonly string[]) {
+    return this.sessions.getIssueSessionOwnerFacts(ids);
+  }
+
   getIssueSessionWithOwnerScope(id: string): { session: MultiremiIssueSession; ownerWorkspaceId: string | null; historicalWorkspaceId: string | null } | null {
     return this.sessions.getIssueSessionWithOwnerScope(id);
   }

@@ -221,7 +221,7 @@ describe("MUL-385 issue detail first-screen query counts", () => {
     const root = store.createIssue({ title: "Count root", assigneeType: "agent", assigneeId: owner.id });
     const child = store.createIssue({ title: "Count child", parentIssueId: root.id, assigneeType: "agent", assigneeId: worker.id });
     const member = testWorkspaceMember(store, root.workspaceId);
-    const aggregate = (sql: string) => sql.includes("message_kind = 'decision'") && sql.includes("resolved_at IS NULL");
+    const aggregate = (sql: string) => /message_kind\s*=\s*'decision'/.test(sql) && sql.includes("resolved_at IS NULL");
     const count = async (issueId: string) => {
       store.checkDatabaseReady(true);
       probe.reset();

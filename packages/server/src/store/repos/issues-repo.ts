@@ -565,26 +565,11 @@ export class IssuesRepo {
    * Qs still climbing the execution-owner chain, Qs of other Issues in the
    * family and frozen `source_workspace_changed` Qs do not count. Unresolved
    * decision rows raised by this Issue's Turns or stored in its sessions are the
-   * candidates, so the common nothing-pending case stays one statement; each
-   * candidate's routed stage is then read from its original Q.
+   * candidates. The common nothing-pending case stays one statement; Q source
+   * integrity facts are read in bulk, independently of the candidate count.
    */
   countPendingIssueDecisions(issueId: string): number {
-    const rows = this.ctx.db.query(
-      `SELECT m.id FROM multiremi_turns t JOIN multiremi_conversation_log m ON m.task_id = t.id
-       WHERE t.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision'
-         AND m.deleted_at IS NULL AND m.resolved_at IS NULL
-       UNION
-       SELECT m.id FROM multiremi_issue_sessions s JOIN multiremi_conversation_log m ON m.session_id = s.id
-       WHERE s.issue_id = ? AND m.kind = 'message' AND m.message_kind = 'decision'
-         AND m.deleted_at IS NULL AND m.resolved_at IS NULL`,
-    ).all(issueId, issueId) as Row[];
-    if (!rows.length) return 0;
-    const questions = new Questions(this.ctx);
-    return rows.filter((row) => {
-      const question = questions.get(String(row.id));
-      return question?.status === "pending" && question.stage === "human" && question.source_issue_id === issueId
-        && question.route_reason !== "source_workspace_changed";
-    }).length;
+    return new Questions(this.ctx).countPendingForIssue(issueId);
   }
 
   listIssueDecisions(issueId: string): MultiremiIssueDecisionList {

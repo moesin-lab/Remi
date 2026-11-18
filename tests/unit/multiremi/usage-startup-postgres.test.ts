@@ -4,7 +4,11 @@ import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { actualUnit } from "@acp/usage-collector.js";
 import { migrateLegacyUsage, USAGE_CUTOVER_MARKER, writeUsageSnapshot } from "@multiremi/store/usage-accounting.js";
-import { prepareUsageAccountingStartup, USAGE_STARTUP_CUTOVER_MARKER } from "@multiremi/store/usage-migration.js";
+import { startUsageAccountingBackfill, prepareUsageAccountingStartup, USAGE_STARTUP_CUTOVER_MARKER } from "@multiremi/store/usage-migration.js";
+
+import { LiveTermFence, liveTermDatabase } from '@multiremi/store/live-term-fence.js';
+import { withBackgroundTerm, StaleLiveTermError } from '@shared/db/live-term.js';
+import { startMultiremiServer } from '@multiremi/api/server.js';
 
 const adminUrl = process.env.MULTIREMI_TEST_POSTGRES_URL;
 const databaseName = `multiremi_usage_startup_${process.pid}_${Math.floor(Math.random() * 1e6)}`;
@@ -57,6 +61,48 @@ describe.skipIf(!adminUrl)("usage startup on isolated PostgreSQL", () => {
   }
   function checkpointCount() { return Number((db!.query("SELECT count(*) AS n FROM multiremi_usage_legacy_sources").get() as { n: string }).n); }
   function ready() { return db!.query("SELECT id FROM multiremi_schema_migrations WHERE id=?").get(USAGE_STARTUP_CUTOVER_MARKER); }
+
+  it("read-only active and standby candidates perform no usage writes on PostgreSQL", async () => {
+    tasks(3);
+    const before = db!.query('SELECT * FROM multiremi_usage_startup_progress').all();
+    for (const start of ['standby', 'active'] as const) {
+      const server = startMultiremiServer({ store, port: 0, hostname: '127.0.0.1', backgroundJobs: false,
+        slotConfiguration: { id: 'candidate', start, controlToken: 'test', lockTimeoutMs: 5000, drainTimeoutMs: 5000 } });
+      try {
+        await server.slotStartup;
+        await Bun.sleep(20);
+        expect(ready()).toBeNull();
+        expect(checkpointCount()).toBe(0);
+        expect(db!.query('SELECT * FROM multiremi_usage_startup_progress').all()).toEqual(before);
+      } finally { await server.shutdown(); }
+    }
+  });
+
+  it("fences usage SQL after takeover and resumes the committed PostgreSQL cursor", async () => {
+    tasks(3);
+    const first = LiveTermFence.activate(db!, 'first', () => {});
+    let batches = 0;
+    const worker = withBackgroundTerm(first, () => startUsageAccountingBackfill(liveTermDatabase(db!), {
+      batchSize: 1, onBatch: () => {
+        if (++batches === 1) withBackgroundTerm(undefined, () => LiveTermFence.activate(db!, 'successor', () => {}));
+      },
+    }));
+    await worker.done;
+    expect(worker.failure).toBeInstanceOf(StaleLiveTermError);
+    expect(checkpointCount()).toBe(1);
+    expect(ready()).toBeNull();
+    const progress = db!.query('SELECT * FROM multiremi_usage_startup_progress').all();
+    await worker.stop();
+    await Bun.sleep(10);
+    expect(db!.query('SELECT * FROM multiremi_usage_startup_progress').all()).toEqual(progress);
+    const next = LiveTermFence.activate(db!, 'resume', () => {});
+    const resumed = withBackgroundTerm(next, () => startUsageAccountingBackfill(liveTermDatabase(db!), { batchSize: 1 }));
+    await resumed.done;
+    expect(resumed.failure).toBeUndefined();
+    expect(checkpointCount()).toBe(3);
+    expect(ready()).not.toBeNull();
+    await resumed.stop();
+  });
 
   it("makes a fresh database ready", async () => {
     await prepareUsageAccountingStartup(db!);

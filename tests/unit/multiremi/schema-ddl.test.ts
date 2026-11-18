@@ -76,6 +76,16 @@ negative.push(
   'REINDEX INDEX i', 'CLUSTER t', 'REFRESH MATERIALIZED VIEW v', 'DISCARD ALL',
 );
 
+// Quoting must never shift the table/column action boundary.
+for (const [open, close] of [['"', '"'], ['`', '`'], ['[', ']']]) {
+  const t = `${open}TaBle , name${close}`, c = `${open}CoL , name${close}`;
+  positive.push(`dRoP tAbLe ${t}`, `aLtEr TaBlE ${t} ReNaMe To replacement`,
+    `ALTER TABLE ${t} DROP COLUMN ${c}`, `ALTER TABLE ${t} ALTER ${c} SET NOT NULL`,
+    `TRUNCATE TABLE ${t}`);
+  negative.push(`aLtEr TaBlE ${t} ADD COLUMN fresh TEXT`,
+    `ALTER TABLE ${t} ALTER ${c} DROP NOT NULL`, `ALTER TABLE ${t} ALTER ${c} SET DEFAULT 1`);
+}
+
 describe('shared schema DDL action detector', () => {
   for (const sql of positive) it(`rejects ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(true));
   for (const sql of negative) it(`allows ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(false));

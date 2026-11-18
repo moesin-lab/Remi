@@ -109,6 +109,26 @@ describe('schema compatibility protocol', () => {
     expect(() => runSchemaContracts(database, [], { release: '1.1.0', targetLevel: 1, code, assertSlotsCompatible() {} })).toThrow('No declared contract');
     expect(() => contractSchema(database, 1)).toThrow('requires PostgreSQL');
   });
+  for (const [open, close] of [['"', '"'], ['`', '`'], ['[', ']']]) {
+    it(`rejects copy-and-swap with ${open} quoted identifiers and preserves rows`, () => {
+      const database = db();
+      database.exec('CREATE TABLE retained (id INTEGER); INSERT INTO retained VALUES (42)');
+      let failure: unknown;
+      try { runSchemaExpands(database, [expand(1, guarded => {
+        guarded.exec('CREATE TABLE replacement (id INTEGER)');
+        guarded.exec(`dRoP tAbLe ${open}retained${close}`);
+        guarded.exec(`aLtEr TaBlE ${open}replacement${close} ReNaMe To ${open}retained${close}`);
+      })], '1.0.0', code); } catch (error) { failure = error; }
+      console.info('COPY_SWAP', JSON.stringify({ quote: open, rejected: Boolean(failure),
+        rows: database.query('SELECT * FROM retained').all(), levels: readSchemaLevels(database),
+        steps: database.query('SELECT id FROM multiremi_schema_steps').all() }));
+      expect(() => { if (failure) throw failure; }).toThrow('Destructive DDL');
+      expect(database.query('SELECT * FROM retained').all()).toEqual([{ id: 42 }]);
+      expect(database.query("SELECT name FROM sqlite_master WHERE name='replacement'").get()).toBeNull();
+      expect(readSchemaLevels(database)).toEqual({ expandLevel: 0, contractLevel: 0 });
+      expect(database.query('SELECT * FROM multiremi_schema_steps').all()).toEqual([]);
+    });
+  }
   it('blocks dynamically generated destructive SQL through every expand statement entry', () => {
     const database = db(); database.exec('CREATE TABLE retained (id INTEGER)');
     for (const method of ['exec', 'run', 'query', 'prepare'] as const) {

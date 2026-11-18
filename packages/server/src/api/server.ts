@@ -1342,7 +1342,9 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   };
   const startJobs = () => withBackgroundTerm(liveTerm, () => {
     liveTerm?.assertCurrent();
-    usageBackfill ??= store.startUsageAccountingBackfill();
+    // Usage migration writes are only allowed in the A3 live activation context.
+    // Read-only candidates and split roles have no singleton term.
+    if (backgroundJobs && liveTerm) usageBackfill ??= store.startUsageAccountingBackfill();
     offers.start();
     scheduler?.start();
     scmPolling?.start();

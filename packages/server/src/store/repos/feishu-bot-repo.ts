@@ -3426,7 +3426,8 @@ export class FeishuBotRepo {
       // known external object and do not create another message.
       const createsMessage = !presentationState?.resultMessageId && row.kind !== 'cot' && row.kind !== 'receipt' && row.kind !== 'decision_card_patch'
         && !(carrier && presentationState?.cot);
-      if (createsMessage && row.status === 'sending' && String(row.leased_until ?? '') <= nowIsoValue
+      if (createsMessage && ((row.status === 'sending' && String(row.leased_until ?? '') <= nowIsoValue)
+          || (row.status === 'pending' && row.last_error === 'send_outcome_unknown'))
           && !(now.getTime() - Date.parse(String(row.created_at)) < FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS)) {
         const error = 'dedupe_window_expired';
         this.ctx.db.run(`UPDATE multiremi_feishu_bot_outbound_deliveries SET status = 'failed',
@@ -3477,9 +3478,12 @@ export class FeishuBotRepo {
       const leasedUntil = new Date(now.getTime() + (supportsTaskStream ? 120_000 : 30_000)).toISOString();
       // Freeze the offered epoch without claiming it. A reconnect must carry
       // the same token/checkpoint until ACK; expired leases start a new epoch.
+      // The pending offer retains unknown-send provenance in last_error. Both
+      // subsequent offers and ACK/claim must recheck the dedupe window.
       const updated = downlink === "peek" ? this.ctx.db.run(
         `UPDATE multiremi_feishu_bot_outbound_deliveries
          SET status = 'pending', claim_token = ?, leased_until = NULL,
+             last_error = CASE WHEN status = 'sending' THEN 'send_outcome_unknown' ELSE last_error END,
              mention_snapshot = COALESCE(mention_snapshot, ?), presentation_checkpoint = COALESCE(presentation_checkpoint, ?)
          WHERE id = ? AND workspace_id = ?
            AND ((status = 'pending' AND available_at <= ?)

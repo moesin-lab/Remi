@@ -82,3 +82,18 @@ describe("Feishu message sending", () => {
     });
   });
 });
+
+
+it("classifies uncertainty only at create/reply, including a missing acknowledgement", async () => {
+  for (const replyToMessageId of [undefined, "om_root"]) {
+    for (const outcome of ["network", "missing", "refusal"] as const) {
+      const request = async () => {
+        if (outcome === "network") throw new Error("connection lost");
+        return outcome === "missing" ? { code: 0, data: {} } : { code: 99991400 };
+      };
+      const client = { im: { message: { create: request, reply: request } } } as any;
+      await expect(sendMessageFeishu(client, "oc_chat", "reply", { replyToMessageId }))
+        .rejects.toMatchObject({ retryable: true, ambiguous: outcome !== "refusal" });
+    }
+  }
+});

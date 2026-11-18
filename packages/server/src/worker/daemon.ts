@@ -2843,11 +2843,7 @@ export class MultiremiDaemon {
         prepareMention: openId => this.client.prepareFeishuBotOutboundMention(runtimeId, delivery.id, delivery.claimToken, openId),
         send: async options => {
           sending = true;
-          try { return await supervisor.sendOutbound({ ...delivery, body }, options); }
-          catch (error) {
-            if (error instanceof FeishuDeliveryError) throw error;
-            throw new FeishuDeliveryError(redactFeishuBotError(error), true, true);
-          }
+          return supervisor.sendOutbound({ ...delivery, body }, options);
         },
         report: async input => {
           try { await this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, input); }

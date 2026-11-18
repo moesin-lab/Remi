@@ -1,3 +1,5 @@
+import { controlPlaneConciergeHost } from "../../../apps/remi/cli/multiremi.js";
+import { MultiremiDaemon } from "@multiremi/worker/daemon.js";
 import { sendMessageFeishu } from "@connectors/feishu/send.js";
 import { FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS } from "@multiremi/store/repos/feishu-bot-repo.js";
 import { reportFrame, reportTraceSink } from "../../fixtures/report-session.js";
@@ -219,6 +221,61 @@ describe("Feishu bot control-plane delivery", () => {
     const retry = test.store.claimFeishuBotOutbound("local", "rt_a", new Date(Date.now() + 10_000), true, true)!;
     expect(retry.id).toBe(first.id); // A real refusal transition also stays retryable.
     expect(retry.idempotencyKey).toBe(first.idempotencyKey);
+  });
+
+  it("keeps unknown-send provenance through socket offers and rechecks the window at ACK", async () => {
+    const test = await scaffold();
+    await report(test, "rt_a", { applied_revision: 1, state: "online" });
+    const submitted = test.store.submitFeishuBotMessage("local", "rt_a", { revision: 1,
+      externalSessionKey: "oc_peek", externalMessageId: "om_peek", chatId: "oc_peek", text: "start", deliveryMode: "native_cot_v1" });
+    test.store.claimFeishuBotOutbound("local", "rt_a", undefined, true, true);
+    db!.run("UPDATE multiremi_feishu_bot_deliveries SET outbound_requested=0 WHERE task_id=?", [submitted.taskId]);
+    db!.run("UPDATE multiremi_feishu_bot_outbound_deliveries SET task_id=NULL, body='reply', kind=NULL, status='pending', attempt_count=0, claim_token=NULL, leased_until=NULL WHERE task_id=?", [submitted.taskId]);
+    const now = new Date(), repo = test.store.feishuBotFor("default");
+    const first = repo.claimOutbound("local", "rt_a", now, true, true, true, true)!;
+    const peekAt = new Date(now.getTime() + 54 * 60_000);
+    const offer = repo.claimOutbound("local", "rt_a", peekAt, true, true, true, true, "peek")!;
+    expect(offer.idempotencyKey).toBe(first.idempotencyKey);
+    expect(offer.claimToken).not.toBe(first.claimToken);
+    expect(db!.query("SELECT status,last_error FROM multiremi_feishu_bot_outbound_deliveries WHERE id=?").get(first.id))
+      .toEqual({ status: "pending", last_error: "send_outcome_unknown" });
+    expect(repo.claimOutbound("local", "rt_a", peekAt, true, true, true, true, "peek")!.claimToken).toBe(offer.claimToken);
+    // Socket ACK and HTTP claim both hit the same final expiry check.
+    expect(repo.claimOutbound("local", "rt_a", new Date(now.getTime() + 61 * 60_000), true, true, true, true,
+      { id: offer.id, claimToken: offer.claimToken })).toBeNull();
+    expect(db!.query("SELECT status,last_error FROM multiremi_feishu_bot_outbound_deliveries WHERE id=?").get(first.id))
+      .toEqual({ status: "failed", last_error: "dedupe_window_expired" });
+  });
+
+  it("retries old attachments after actual host preparation fails before any Feishu create", async () => {
+    const test = await scaffold();
+    await report(test, "rt_a", { applied_revision: 1, state: "online" });
+    const submitted = test.store.submitFeishuBotMessage("local", "rt_a", { revision: 1,
+      externalSessionKey: "oc_prepare", externalMessageId: "om_prepare", chatId: "oc_prepare", text: "start", deliveryMode: "native_cot_v1" });
+    test.store.claimFeishuBotOutbound("local", "rt_a", undefined, true, true);
+    db!.run("UPDATE multiremi_feishu_bot_deliveries SET outbound_requested=0 WHERE task_id=?", [submitted.taskId]);
+    const old = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    db!.run("UPDATE multiremi_feishu_bot_outbound_deliveries SET task_id=NULL, body='', kind=NULL, status='pending', attempt_count=0, claim_token=NULL, leased_until=NULL, created_at=?, attachments=? WHERE task_id=?",
+      [old, JSON.stringify([{ id: "att_test", filename: "file.txt", contentType: "text/plain", sizeBytes: 4 }]), submitted.taskId]);
+    const delivery = test.store.claimFeishuBotOutbound("local", "rt_a", undefined, true, true, true)!;
+    let downloads = 0, creates = 0;
+    const reports: any[] = [];
+    const daemon = Object.create(MultiremiDaemon.prototype) as any;
+    Object.assign(daemon, { options: { serverUrl: "http://unused" },
+      downloadFeishuBotOutboundAttachment: async () => { downloads++; throw new Error("temporary download failure"); },
+      client: { reportFeishuBotOutboundResult: async (_runtime: string, id: string, result: any) => {
+        reports.push(result); expect(test.store.feishuBotFor("default").reportOutbound("local", "rt_a", id, result)).toBe(true);
+      } },
+    });
+    const host = controlPlaneConciergeHost({ daemon: () => daemon,
+      current: () => ({ sendProactiveAttachment: async () => { creates++; return { messageId: "unexpected" }; } }) as any,
+      attach: () => {}, workspacesRoot: () => "/unused" });
+    daemon.feishuConcierge = host;
+    await daemon.handleFeishuBotOutbound("rt_a", delivery, new AbortController().signal);
+    expect(downloads).toBe(1); expect(creates).toBe(0);
+    expect(reports).toEqual([expect.objectContaining({ status: "failed", retryable: true })]);
+    expect(db!.query("SELECT status FROM multiremi_feishu_bot_outbound_deliveries WHERE id=?").get(delivery.id)).toEqual({ status: "pending" });
+    expect(test.store.claimFeishuBotOutbound("local", "rt_a", new Date(Date.now() + 121_000), true, true, true)?.id).toBe(delivery.id);
   });
 
   it("falls back to the legacy status frame only when an older API rejects the new RPC", async () => {

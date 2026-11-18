@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { MultiremiStore } from "@multiremi/store.js";
+import { PlannedRestartJournal, PlannedRestartTransfer, type PlannedRestartRemote } from "@multiremi/worker/planned-restart-journal.js";
 
 pendingTurnBackendTests("planned restart handoff", fixture => {
   function setup() {
@@ -51,7 +52,7 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     expect(x.f.db.query("SELECT * FROM multiremi_turn_attempts WHERE id=?").get(x.task.id)).toEqual(before);
     expect(x.f.db.query("SELECT * FROM multiremi_turns WHERE id=?").get(x.offer.turn_id)).toEqual(turn);
     expect(x.f.store.getTask(x.task.id)).toMatchObject({ status: "running", attempt: 1, maxAttempts: 1 });
-    expect(x.f.db.query("SELECT COUNT(*) AS n FROM multiremi_turn_attempts WHERE turn_id=?").get(x.offer.turn_id).n).toBe(1);
+    expect(Number(x.f.db.query("SELECT COUNT(*) AS n FROM multiremi_turn_attempts WHERE turn_id=?").get(x.offer.turn_id).n)).toBe(1);
   });
 
   it("requires identical checkpoint contents on replay", () => {
@@ -214,11 +215,12 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
   });
 });
 
-it("retains a suspended checkpoint across a real SQLite close/open and serializes separate connection consumers", () => {
+it("recovers daemon journal and server checkpoint across real SQLite close/open with one authorized consumer", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mul31-restart-"));
   const path = join(directory, "store.db");
   let db = openSqliteDatabase(path);
   let second: ReturnType<typeof openSqliteDatabase> | undefined;
+  let journal = new PlannedRestartJournal(join(directory, "daemon.db"));
   try {
     let store = new MultiremiStore(db);
     store.ensureLocalWorkspace();
@@ -232,7 +234,22 @@ it("retains a suspended checkpoint across a real SQLite close/open and serialize
     const savedInput = db.query("SELECT input_ack_seq FROM multiremi_turn_attempts WHERE id=?").get(task.id) as { input_ack_seq: number | null };
     const checkpoint: PlannedRestartCheckpoint = { version: 1, session_id: null, work_dir: null,
       trace_head: 42, input_ack_seq: Number(savedInput.input_ack_seq ?? 0), delivered_message_ids: [] };
-    store.plannedRestarts().suspend(task.id, h.handoff_id, 0, checkpoint, scope);
+    let authorizations = 0;
+    let loseResumeResponse = true;
+    const remote: PlannedRestartRemote = {
+      suspend: async entry => { store.plannedRestarts().suspend(task.id, entry.execution.handoff_id, entry.execution.generation, entry.checkpoint, scope); },
+      resume: async entry => {
+        const result = store.plannedRestarts().resume(task.id, entry.execution.handoff_id, entry.consumer_id, scope, () => { authorizations++; });
+        if (loseResumeResponse) { loseResumeResponse = false; throw new Error("response lost after authorization"); }
+        return { generation: result.generation };
+      },
+    };
+    const transfer = new PlannedRestartTransfer(journal, remote);
+    const saved = await transfer.suspend({ workspace_id: scope.workspaceId, daemon_id: scope.daemonId,
+      runtime_id: scope.runtimeId, turn_id: h.turn_id, attempt_id: task.id, handoff_id: h.handoff_id, generation: 0 }, async () => checkpoint);
+    expect(saved.state).toBe("acknowledged");
+    journal.close();
+    journal = new PlannedRestartJournal(join(directory, "daemon.db"));
     db.close();
     db = openSqliteDatabase(path);
     store = new MultiremiStore(db);
@@ -240,11 +257,15 @@ it("retains a suspended checkpoint across a real SQLite close/open and serialize
     store.undrainDaemon(scope.workspaceId, scope.daemonId);
     second = openSqliteDatabase(path);
     const other = new MultiremiStore(second);
-    expect(store.plannedRestarts().resume(task.id, h.handoff_id, "consumer-disk-0001", scope, () => {}).generation).toBe(1);
+    await expect(new PlannedRestartTransfer(journal, remote).resume(h.handoff_id)).rejects.toThrow("response lost after authorization");
+    expect(journal.get(h.handoff_id)?.state).toBe("acknowledged");
+    journal.close(); journal = new PlannedRestartJournal(join(directory, "daemon.db"));
+    expect((await new PlannedRestartTransfer(journal, remote).resume(h.handoff_id)).resumed_generation).toBe(1);
+    expect(authorizations).toBe(1);
     expect(() => other.plannedRestarts().resume(task.id, h.handoff_id, "consumer-disk-0002", scope, () => {})).toThrow("stale_execution");
-    expect(other.plannedRestarts().resume(task.id, h.handoff_id, "consumer-disk-0001", scope, () => {}).generation).toBe(1);
+    expect(other.plannedRestarts().resume(task.id, h.handoff_id, saved.consumer_id, scope, () => {}).generation).toBe(1);
     expect(other.getTask(task.id)).toMatchObject({ attempt: 1, maxAttempts: 1, status: "running" });
   } finally {
-    second?.close(); db.close(); rmSync(directory, { recursive: true, force: true });
+    journal.close(); second?.close(); db.close(); rmSync(directory, { recursive: true, force: true });
   }
 }, 30_000);

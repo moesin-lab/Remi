@@ -151,8 +151,16 @@ export async function supervise() {
     const { SlotSupervisor } = await import('./slot-supervisor.mjs');
     const { startEdge } = await import(new URL(existsSync(new URL('./edge/index.ts', import.meta.url)) ? './edge/index.ts' : '../../edge/src/index.ts', import.meta.url).href);
     const port = Number(process.env.MULTIREMI_PORT || 6120);
+    const waits = { standbyWait: 120000, releaseWait: 30000, activateWait: 60000, confirmWait: 180000 };
+    for (const name of Object.keys(waits)) {
+      const value = process.env['REMI_SLOT_' + name.replace('Wait', '').toUpperCase() + '_WAIT_MS'];
+      if (value === undefined) continue;
+      if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) <= 0) throw new Error('Invalid slot wait: ' + name);
+      waits[name] = Number(value);
+    }
     const edge = startEdge({ hostname: process.env.MULTIREMI_HOST || '0.0.0.0', port,
-      controlSocket: join(directory, 'edge.sock'), holdMaxMs: 180000 });
+      controlSocket: join(directory, 'edge.sock'),
+      holdMaxMs: waits.releaseWait + 2 * waits.activateWait + waits.standbyWait + 30000 });
     slots = new SlotSupervisor(edge, async id => {
       const selected = id ? await readJson(join(releaseDirectory(root, id), 'complete.json')) : base;
       if (!selected) throw new Error('Release is incomplete');
@@ -160,11 +168,7 @@ export async function supervise() {
         args: ['run', '--preload', process.env.REMI_SUPERVISOR_FENCE || '/usr/local/lib/remi/host-write-fence.ts', 'apps/server/main.ts', 'serve'],
         env: { ...process.env, MULTIREMI_VERSION: selected.version, REMI_APPLICATION_VERSION: selected.version,
           MULTIREMI_HOST_WRITE_FENCE_FILE: join(control, 'write-fence.json') } };
-    }, { port, ...Object.fromEntries(['standbyWait', 'releaseWait', 'activateWait', 'confirmWait'].map(name => {
-      const value = process.env['REMI_SLOT_' + name.replace('Wait', '').toUpperCase() + '_WAIT_MS'];
-      if (value !== undefined && (!/^\d+$/.test(value) || Number(value) <= 0)) throw new Error('Invalid slot wait: ' + name);
-      return [name, value === undefined ? { standbyWait: 120000, releaseWait: 30000, activateWait: 60000, confirmWait: 180000 }[name] : Number(value)];
-    })) });
+    }, { port, ...waits });
   }
   const shutdown = () => { closing = true; };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);

@@ -258,12 +258,27 @@ describe("CLI capabilities manifest", () => {
     }
   });
 
+  it("maps SCM Monitor health, project configuration and subscriptions to executable commands", () => {
+    const root = "/api/workspaces/:workspaceId/scm/repositories/:repositoryId/change-requests/:number/watch";
+    for (const [route, id] of [
+      ["GET /api/workspaces/:workspaceId/scm/monitor/status", "scm.monitor.status"],
+      ["GET /api/projects/:id/scm-monitor", "scm.monitor.project.get"],
+      ["PUT /api/projects/:id/scm-monitor", "scm.monitor.project.set"],
+      [`GET ${root}`, "scm.change-request.watch-list"],
+      [`PUT ${root}`, "scm.change-request.watch"],
+      [`DELETE ${root}`, "scm.change-request.unwatch"],
+    ]) {
+      expect(manifest.routes[route!]).toEqual({ command: id });
+      expect(manifest.commands[id!]?.migration_status).toBe("native");
+    }
+  });
+
   it("maps every user route or records a justified exemption and keeps compatibility aliases", () => {
     expect(cliCoverageReport(manifest)).toEqual({
-      mapped: 658,
+      mapped: 664,
       exempt: 184,
       missing: 0,
-      total: 842,
+      total: 848,
     });
     // PR #97 (MUL-168): these four loopback-only, dedicated-token endpoints are
     // the supervisor's slot lifecycle protocol, not user-facing CLI capabilities.

@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 /**
  * The storage half over a real SQLite engine (`node:sqlite`).
@@ -16,12 +17,9 @@ import { META_SCHEMA_VERSION, META_USER_ID, REPLICA_SCHEMA_VERSION, SQL } from "
 import { rowHeightKey } from "./port";
 import type { HubFrame } from "@multiremi/contracts/live-hub";
 
-interface NodeSqliteModule {
-  DatabaseSync: new (path: string) => unknown;
-}
-
-async function openSqlStorage(): Promise<{ storage: SqlReplicaStorage; db: { exec(sql: string): unknown; close(): unknown; prepare(sql: string): { all(...p: unknown[]): unknown[] } } }> {
-  const { DatabaseSync } = (await import("node:sqlite")) as unknown as NodeSqliteModule;
+function openSqlStorage(): { storage: SqlReplicaStorage; db: { exec(sql: string): unknown; close(): unknown; prepare(sql: string): { all(...p: unknown[]): unknown[] } } } {
+  // Resolve the native driver at module load, outside Vitest's per-test clock.
+  // A cold dynamic import in the first test can stall under parallel CI load.
   const db = new DatabaseSync(":memory:") as {
     exec(sql: string): unknown;
     close(): unknown;
@@ -55,7 +53,7 @@ function entryFrame(seq: number, overrides: Record<string, unknown> = {}): HubFr
 
 describe("SQL replica storage", () => {
   test("retains full presentation fields across SQL reopen and in-place patches", async () => {
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const engine = new ReplicaEngine(storage);
     engine.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     engine.frames("sess_1", [entryFrame(1, { author_type: "member", author_id: "u", parent_id: "p",
@@ -71,14 +69,14 @@ describe("SQL replica storage", () => {
     storage.close();
   });
   test("creates the five plan tables", async () => {
-    const { storage, db } = await openSqlStorage();
+    const { storage, db } = openSqlStorage();
     const names = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all() as { name: string }[]).map((row) => row.name);
     expect(names).toEqual(expect.arrayContaining(["entries", "heads", "meta", "ranges", "row_heights"]));
     storage.close();
   });
 
   test("round-trips entries, coverage and the head through SQL", async () => {
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const engine = new ReplicaEngine(storage);
     engine.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     engine.frames("sess_1", [entryFrame(1), entryFrame(2), entryFrame(3)]);
@@ -94,7 +92,7 @@ describe("SQL replica storage", () => {
   });
 
   test("a patch updates in place instead of inserting a second row", async () => {
-    const { storage, db } = await openSqlStorage();
+    const { storage, db } = openSqlStorage();
     const engine = new ReplicaEngine(storage);
     engine.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     engine.frames("sess_1", [entryFrame(1), entryFrame(2)]);
@@ -109,7 +107,7 @@ describe("SQL replica storage", () => {
   });
 
   test("a sparse deep-link window survives a reopen with its hole intact", async () => {
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const engine = new ReplicaEngine(storage);
     engine.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     engine.writeWindow("sess_1", [entry(880), entry(881)], { from: 880, to: 881 });
@@ -131,7 +129,7 @@ describe("SQL replica storage", () => {
   });
 
   test("clearing a session drops its rows, coverage, head and heights", async () => {
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const engine = new ReplicaEngine(storage);
     engine.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     engine.frames("sess_1", [entryFrame(1)]);
@@ -145,7 +143,7 @@ describe("SQL replica storage", () => {
   });
 
   test("a delayed read window cannot replace a newer streamed revision", async () => {
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const replica = new ReplicaEngine(storage);
     replica.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     replica.frames("sess_1", [entryFrame(1, { revision: 5, body_md: "latest" })]);
@@ -155,7 +153,7 @@ describe("SQL replica storage", () => {
   });
 
   test("meta round-trips and a different user wipes the database", async () => {
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const first = new ReplicaEngine(storage);
     first.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     first.frames("sess_1", [entryFrame(1), entryFrame(2)]);
@@ -176,7 +174,7 @@ describe("SQL replica storage", () => {
   });
 
   test("a schema-version bump wipes the database", async () => {
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const engine = new ReplicaEngine(storage);
     engine.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     engine.frames("sess_1", [entryFrame(1)]);
@@ -189,7 +187,7 @@ describe("SQL replica storage", () => {
   });
 
   test("row heights round-trip per variant and width bucket", async () => {
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const engine = new ReplicaEngine(storage);
     engine.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     const narrow = rowHeightKey({ revision: 1, renderVersion: "v1", widthPx: 500 });
@@ -208,7 +206,7 @@ describe("SQL replica storage", () => {
     // The regression this pins: the ack arrives before the frames it announces, so
     // storing `ack.head_seq` as the local head makes the very next freshness check
     // compare the server's number with itself and call a stale window fresh.
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const engine = new ReplicaEngine(storage);
     engine.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     engine.ack("sess_1", { stream: "log", id: "sess_1", first_seq: 1, head_seq: 170, log_version: 7, gap: null });
@@ -230,7 +228,7 @@ describe("SQL replica storage", () => {
     // The offline catch-up shape: the ack is older than the frames, so a
     // freshness check that only ever looked at the ack would call a caught-up
     // replica stale — the plan's "之后每收一帧都成立".
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const engine = new ReplicaEngine(storage);
     engine.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     engine.ack("sess_1", { stream: "log", id: "sess_1", first_seq: 1, head_seq: 2, log_version: 7, gap: null });
@@ -257,7 +255,7 @@ describe("SQL replica storage", () => {
     // C8's rule, pinned against the real table: an edited row (revision) and a
     // re-rendered pipeline (render_version) must not inherit the old height, and a
     // narrower container must not inherit a wider measurement's reservation.
-    const { storage } = await openSqlStorage();
+    const { storage } = openSqlStorage();
     const engine = new ReplicaEngine(storage);
     engine.openSession({ sessionId: "sess_1", userId: "user_1", workspaceId: "ws_1" });
     const key = rowHeightKey({ revision: 1, renderVersion: "v1", widthPx: 1440 });

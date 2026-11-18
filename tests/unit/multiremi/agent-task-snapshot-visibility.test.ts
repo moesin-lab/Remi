@@ -14,6 +14,7 @@ const databases: Array<Awaited<ReturnType<typeof openHotspotDatabase>>> = [];
 afterEach(async () => { for (const database of databases.splice(0)) await database.dispose(); });
 
 async function fixture() {
+  const started = performance.now();
   const database = await openHotspotDatabase();
   databases.push(database);
   let bytes = 0;
@@ -42,6 +43,10 @@ async function fixture() {
   const store = new MultiremiStore(db);
   const seed = seedFirstScreenHotspotsFixture(store, { sessions: 100, agents: 3, inboxRows: 0, issues: 0,
     taskPromptBytes: 2048, skillBodyBytes: 4096, run: (sql, params) => db.run(sql, params) });
+  console.info(`REMI_TEST_HOTSPOT_SETUP_STATS ${JSON.stringify({
+    dialect: db.dialect, sessions: seed.counts.sessions, seedMs: seed.seedMs,
+    databaseAndStoreMs: performance.now() - started - seed.seedMs,
+  })}`);
   return { db, store, seed, queries, usageReads,
     mutateExecution(sql: string, params: unknown[] = []) {
       runTurnExecutionMutation((store as unknown as { db: SqlDatabase }).db, sql, ...params);
@@ -179,4 +184,6 @@ test("both snapshot routes share the same human public contract and preserve tas
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual(path.startsWith("/api/multiremi") ? { tasks: [], total: 0 } : []);
   }
-}, 20000);
+  // Includes the 100-Chat PG seed and token creation for every binding. The
+  // full contract took 33.7s in run 44307088058; assertions and scale stay fixed.
+}, process.env.MULTIREMI_TEST_POSTGRES_URL ? 90000 : 20000);

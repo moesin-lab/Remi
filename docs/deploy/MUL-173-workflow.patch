@@ -62,12 +62,12 @@
    im-platform-smoke:
      runs-on: ubuntu-latest
      timeout-minutes: 15
-@@ -681,7 +736,7 @@
+@@ -748,7 +803,7 @@
    # dependency can become a green full-run release gate.
    build:
      if: always()
--    needs: [im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, runtime-platform, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
-+    needs: [schema-compatibility, im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, runtime-platform, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
+-    needs: [daemon-n-minus-one, im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, runtime-platform, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
++    needs: [schema-compatibility, daemon-n-minus-one, im-platform-smoke, execution-configuration, platform-updater, guards, frontend-types, frontend-tests, cli-build, api-build, web-build, runtime-platform, frontend-replica, backend-plan, backend, backend-evidence, backend-retry]
      runs-on: ubuntu-latest
      steps:
        - name: Require every applicable check

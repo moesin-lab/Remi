@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { PostgresSyncDatabase, advisoryLock } from '@multiremi/store/db/postgres.js';
 import { MIGRATION_ADVISORY_LOCK_KEY } from '@multiremi/store/advisory-locks.js';
-import { readSchemaLevels } from '@multiremi/store/schema-levels.js';
+import { assertSchemaCompatible, readSchemaLevels } from '@multiremi/store/schema-levels.js';
 import { runMigrations, runStartupMigrations } from '@multiremi/store/migrations.js';
 import { assertSchemaContractClientsOffline } from '@multiremi/store/schema-contracts.js';
 import { runSchemaExpands, runSchemaContracts, type SchemaMigration } from '@multiremi/store/schema-migration-runner.js';
@@ -29,17 +29,27 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
   it('enrolls and reopens the production migration chain on PostgreSQL', () => {
     expect(readSchemaLevels(db)).toEqual({ expandLevel: 0, contractLevel: 0 });
     runMigrations(db); runMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 1, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: 2, contractLevel: 0 });
   }, 30_000);
+  it('adds A3 live terms to an enrolled level 1 database and preserves old reader compatibility', () => {
+    db.exec('DROP TABLE multiremi_live_terms');
+    db.exec('DELETE FROM multiremi_schema_steps WHERE level=2');
+    db.exec('UPDATE multiremi_schema_meta SET expand_level=1');
+    runStartupMigrations(db);
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: 2, contractLevel: 0 });
+    expect(db.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name='multiremi_live_terms'").get()).not.toBeNull();
+    expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 1, maxLevel: 1 })).not.toThrow();
+    console.info('A3 startup expand: level 1 -> 2, live terms table exists; previous B1 reader interval [1,1] remains compatible');
+  });
   it('refuses contracted schemas before historical migrations execute', () => {
-    db.exec('UPDATE multiremi_schema_meta SET expand_level=2, contract_level=2');
+    db.exec('UPDATE multiremi_schema_meta SET expand_level=3, contract_level=3');
     try {
       let refusal: Error | undefined;
       try { runStartupMigrations(db); } catch (error) { refusal = error as Error; }
-      expect(refusal?.message).toContain('contract_level=2 exceeds code maxLevel=1');
+      expect(refusal?.message).toContain('contract_level=3 exceeds code maxLevel=2');
       console.info(`startup guard: ${refusal?.message}`);
     }
-    finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=1'); }
+    finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=2'); }
   });
   it('production maintenance CLI refuses undeclared contract and retains the floor', () => {
     db.close();

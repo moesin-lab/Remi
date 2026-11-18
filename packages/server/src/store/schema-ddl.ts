@@ -1,11 +1,18 @@
+const unsupportedSql = {
+  '<unsupported-unicode-escape>': 'Unicode escape identifiers/strings are unsupported in registered migrations; use ordinary double-quoted identifiers and ordinary strings',
+  '<unsupported-string-continuation>': 'String continuations are unsupported in registered migrations; combine the value into a single literal',
+} as const;
+const isUnsupportedToken = (token: string): token is keyof typeof unsupportedSql => Object.hasOwn(unsupportedSql, token);
+
 /** Tokenize SQL without treating comments, values or quoted identifiers as keywords.
  * Template placeholders are opaque identifiers for the architecture scanner. */
 function sqlTokens(sql: string): string[] {
   const tokens: string[] = [];
-  const pattern = /\s+|--[^\n]*|E'(?:\\[\s\S]|''|[^'\\])*'|'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|\$([a-z_][a-z_0-9]*)?\$[\s\S]*?\$\1\$|(?:\$\{[^}]*\}|[\p{L}_](?:[\p{L}\p{N}_]|\$(?!\{))*|\$[0-9]+|\?)+|[^\s]/giu;
-  let offset = 0;
+  const pattern = /\s+|--[^\n]*|E'(?:\\[\s\S]|''|[^'\\])*'|[BXN]?'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]|\$([a-z_][a-z_0-9]*)?\$[\s\S]*?\$\1\$|(?:\$\{[^}]*\}|[\p{L}_](?:[\p{L}\p{N}_]|\$(?!\{))*|\$[0-9]+|\?)+|[^\s]/giu;
+  let offset = 0, afterLiteral = false, newlineTrivia = false;
   while (offset < sql.length) {
     if (sql.startsWith('/*', offset)) {
+      const start = offset;
       let depth = 1;
       offset += 2;
       while (offset < sql.length && depth) {
@@ -13,7 +20,13 @@ function sqlTokens(sql: string): string[] {
         else if (sql.startsWith('*/', offset)) { depth--; offset += 2; }
         else offset++;
       }
+      if (afterLiteral && /[\r\n]/.test(sql.slice(start, offset))) newlineTrivia = true;
       continue;
+    }
+    // Do not parse continuation contents: an E prefix changes the escape rules
+    // of every following segment. Reject before those rules can hide SQL.
+    if (afterLiteral && newlineTrivia && sql[offset] === "'") {
+      return [...tokens, '<unsupported-string-continuation>'];
     }
     // Registered SQL deliberately excludes PG Unicode escapes. Do not try to
     // parse UESCAPE or its string continuations: reject the whole statement.
@@ -26,10 +39,15 @@ function sqlTokens(sql: string): string[] {
     const match = pattern.exec(sql)!;
     const token = match[0];
     offset = pattern.lastIndex;
-    if (/^(?:\s|--)/.test(token)) continue;
+    if (/^(?:\s|--)/.test(token)) {
+      if (afterLiteral && /[\r\n]/.test(token)) newlineTrivia = true;
+      continue;
+    }
+    afterLiteral = /^(?:[EBXN])?'/i.test(token);
+    newlineTrivia = false;
     tokens.push(token);
   }
-  return tokens.map(token => token === '<unsupported-unicode-escape>' ? token : /^(?:["'$`\[]|E')/i.test(token)
+  return tokens.map(token => isUnsupportedToken(token) ? token : /^(?:["'$`\[]|[EBXN]')/i.test(token)
     ? '<identifier-or-value>' : token.toUpperCase());
 }
 
@@ -99,9 +117,13 @@ export function hasDestructiveSchemaSql(sql: string): boolean {
   return destructiveSchemaSql(sql, false);
 }
 
-/** Unicode escape identifiers/strings are outside the registered SQL subset. */
+/** Both unsupported lexical forms share the runtime and arch rejection path. */
+export function unsupportedSchemaSqlReason(sql: string): string | undefined {
+  const token = sqlTokens(sql).find(isUnsupportedToken);
+  return token && unsupportedSql[token];
+}
 export function hasUnsupportedSchemaSql(sql: string): boolean {
-  return sqlTokens(sql).includes('<unsupported-unicode-escape>');
+  return unsupportedSchemaSqlReason(sql) !== undefined;
 }
 
 /** Known SQL fails closed on TRUNCATE regardless of shape. Catalog diffs
@@ -112,7 +134,7 @@ export function hasDestructiveSchemaStatement(sql: string): boolean {
 
 function destructiveSchemaSql(sql: string, knownSql: boolean): boolean {
   const tokens = sqlTokens(sql);
-  if (tokens.includes('<unsupported-unicode-escape>')) return true;
+  if (tokens.some(isUnsupportedToken)) return true;
   return splitTopLevel(tokens, ';').some(s => {
     if (s[0] === 'DO') return s[1] === '<identifier-or-value>' || s[1] === 'LANGUAGE'
       || (s[1] === 'E' && s[2] === '<identifier-or-value>');

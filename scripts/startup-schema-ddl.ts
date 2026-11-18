@@ -78,7 +78,7 @@ export function assertStartupContractIsolation(root: string): void {
 }
 
 /** All non-test server source plus its transitive repository runtime imports. */
-export function startupSchemaDdl(root: string): StartupDdl[] {
+export function startupSchemaDdl(root: string, scannedFiles?: Set<string>): StartupDdl[] {
   const read = dependencyGraph(root);
   const pending = sources(resolve(root, 'packages/server/src'));
   const visited = new Set<string>();
@@ -90,6 +90,7 @@ export function startupSchemaDdl(root: string): StartupDdl[] {
     const filename = relative(root, file).replaceAll('\\', '/');
     if (contracts.has(filename) || filename.startsWith('..') || filename.includes('node_modules/') || !/\.[cm]?[jt]sx?$/.test(filename)) continue;
     const { source, dependencies } = read(file);
+    scannedFiles?.add(filename);
     pending.push(...dependencies);
     function visit(node: ts.Node) {
       // A frozen generic DROP helper must not acquire new startup callers.

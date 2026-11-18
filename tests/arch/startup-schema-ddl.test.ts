@@ -1,3 +1,4 @@
+import { unsupportedStringContinuations, supportedSingleLiterals } from '../fixtures/schema-string-continuations.js';
 import { describe, expect, it } from 'bun:test';
 import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -80,6 +81,14 @@ describe('startup migration expand discipline', () => {
           writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(unicodeSql)};`);
           expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([unicodeSql]);
         }
+      }
+      for (const sql of unsupportedStringContinuations) {
+        writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
+        expect(startupSchemaDdl(fixture).map(entry => entry.sql)).toEqual([sql]);
+      }
+      for (const sql of supportedSingleLiterals) {
+        writeFileSync(resolve(store, 'new-background-job.ts'), `export const sql = ${JSON.stringify(sql)};`);
+        expect(startupSchemaDdl(fixture)).toEqual([]);
       }
       writeFileSync(resolve(store, 'new-background-job.ts'), 'export const sql = "DROP TABLE t";');
       const shared = resolve(fixture, 'packages/shared/src');

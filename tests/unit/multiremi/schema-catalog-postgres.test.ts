@@ -1,3 +1,4 @@
+import { unsupportedStringContinuations } from '../../fixtures/schema-string-continuations.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { runMigrations } from '@multiremi/store/migrations.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
@@ -121,6 +122,17 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
     rejected(`unicode-string-${serial}`, `SELECT u&'hello'`, 'Unicode escape identifiers/strings are unsupported');
     expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
     expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
+  });
+  for (const template of unsupportedStringContinuations) it(`rejects string continuation without data loss: ${template}`, () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.retained (id integer); INSERT INTO ${schema}.retained VALUES (42)`);
+    expect(db.query('SHOW standard_conforming_strings').get()).toEqual({ standard_conforming_strings: 'on' });
+    const sql = template.replaceAll('S.', `${schema}.`);
+    rejected(`string-continuation-${serial}`, sql, 'String continuations are unsupported');
+    expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
+    expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
+    expect(readSchemaLevels(db).expandLevel).toBe(0);
+    console.info(`Original row retained; steps=[]; expandLevel=0 after ${sql}`);
   });
   // These SELECT statements deliberately pass text lint. Only before/after
   // catalog comparison can detect the function's transactional side effects.

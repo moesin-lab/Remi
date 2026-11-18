@@ -22,4 +22,8 @@ export function migrationDdlModules(root) {
   visit(resolve(root, 'packages/server/src/store/migrations.ts'));
   return ddl.sort();
 }
-export function missingMigrationInputs(root, inputs) { return migrationDdlModules(root).filter(path => !inputs.includes(path)); }
+// inputs is the frozen legacy archive list; new modules must be covered by the
+// B1 scanner's actual traversal instead of changing old archive fingerprints.
+export function missingMigrationInputs(root, inputs, scannedFiles = new Set()) {
+  return migrationDdlModules(root).filter(path => !inputs.includes(path) && !scannedFiles.has(path));
+}

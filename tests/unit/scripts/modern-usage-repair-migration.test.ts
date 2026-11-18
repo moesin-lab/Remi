@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { expect, it } from "bun:test";
 import { MultiremiStore } from "@multiremi/store.js";
 import { writeUsageSnapshot } from "@multiremi/store/usage-accounting.js";
@@ -6,12 +7,13 @@ import { assertUsageReconciliationSchema, applyModernUsageRepairs, buildModernUs
 import { unifiedModelBackendTests } from "../multiremi/unified-model-test-backends.js";
 
 unifiedModelBackendTests("modern repair schema support after real historical migration", fixture => {
-  it("rejects unmigrated schemas and repairs a terminal run after the current startup migrates them", () => {
+  it("rejects unmigrated schemas and repairs a terminal run after offline prepare migrates them", () => {
     const { db, store: historical } = fixture();
     const agent = historical.createAgent({ name: "Historical repair", provider: "claude" });
     const task = historical.createTask({ agentId: agent.id, prompt: "Historical execution", status: "completed" });
     db.run("UPDATE multiremi_tasks SET provider='claude',session_id='migrated-session',started_at='2026-10-01T00:00:00Z',completed_at='2026-10-01T02:00:00Z',usage='[]' WHERE id=?", [task.id]);
     expect(() => assertUsageReconciliationSchema(db)).toThrow("Unsupported usage reconciliation schema");
+    runMigrations(db, { historicalMaintenance: true });
     const current = new MultiremiStore(db);
     current.ensureUsageAccountingStartup();
     expect(() => assertUsageReconciliationSchema(db)).not.toThrow();

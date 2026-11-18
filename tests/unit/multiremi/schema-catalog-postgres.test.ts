@@ -81,7 +81,8 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
     rejected(`direct-${index}`, template.replaceAll('S.', `${schema}.`).replace('SCHEMA S ', `SCHEMA ${schema} `), 'Destructive DDL is forbidden');
   });
   for (const name of ['U&"retained"', String.raw`u&"ret\0061ined"`,
-    `U&"ret!0061ined" UESCAPE '!'`]) it(`rejects Unicode TRUNCATE without losing rows: ${name}`, () => {
+    `U&"ret!0061ined" UESCAPE '!'`,
+    ...["E'!'", '$$!$$', "'!'\n''"].map(escape => `U&"ret!0061ined" UESCAPE ${escape}`)]) it(`rejects Unicode TRUNCATE without losing rows: ${name}`, () => {
     const schema = fixture();
     db.exec(`CREATE TABLE ${schema}.retained (id integer); INSERT INTO ${schema}.retained VALUES (42)`);
     const sql = `TRUNCATE TABLE ${schema}.${name}`;
@@ -89,14 +90,21 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
     expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
     console.info(`Original row retained after ${sql}`);
   });
-  it('allows Unicode quoted additive ALTER with custom escape', () => {
+  for (const escape of ["'!'", "E'!'", '$$!$$', "'!'\n''"]) it(`allows Unicode additive ALTER with ${escape}`, () => {
     const schema = fixture();
     db.exec(`CREATE TABLE ${schema}.retained (id integer)`);
-    const sql = `ALTER TABLE ${schema}.U&"ret!0061ined" UESCAPE '!' ADD COLUMN U&"c!006fl" UESCAPE '!' text`;
+    const sql = `ALTER TABLE ${schema}.U&"ret!0061ined" UESCAPE ${escape} ADD COLUMN U&"c!006fl" UESCAPE ${escape} text`;
     expect(hasDestructiveSchemaSql(sql)).toBe(false);
-    runSchemaExpands(db, [step('unicode-additive', sql)], '9.0.0', { minLevel: 0, maxLevel: 100 });
+    runSchemaExpands(db, [step(`unicode-additive-${serial}`, sql)], '9.0.0', { minLevel: 0, maxLevel: 100 });
     expect(db.query(`SELECT col FROM ${schema}.retained`).all()).toEqual([]);
+    expect(db.query('SELECT id FROM multiremi_schema_steps WHERE id=?').get(`unicode-additive-${serial}`)).not.toBeNull();
     expect(readSchemaLevels(db).expandLevel).toBe(1);
+  });
+  it('rejects TRUNCATE with an unrecognized tail before the SQL backend', () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.retained (id integer); INSERT INTO ${schema}.retained VALUES (42)`);
+    rejected(`unknown-tail-${serial}`, `TRUNCATE ${schema}.retained @ unknown_tail`, 'Destructive DDL is forbidden');
+    expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
   });
   // These SELECT statements deliberately pass text lint. Only before/after
   // catalog comparison can detect the function's transactional side effects.

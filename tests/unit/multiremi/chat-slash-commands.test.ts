@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 /**
  * ADR 0025: the agent's command catalogue on the server.
  *
@@ -145,6 +146,7 @@ for (const backend of backends) {
         db.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [LANE_SLASH_COMMANDS_MIGRATION]);
         db.exec("ALTER TABLE multiremi_session_lanes DROP COLUMN available_commands");
         expect(hasColumn()).toBe(false);
+        runMigrations(db, { historicalMaintenance: true });
         new MultiremiStore(db);
         new MultiremiStore(db);
         expect(hasColumn()).toBe(true);

@@ -2175,6 +2175,10 @@ export async function captureApiSnapshot(): Promise<SnapshotFile> {
       resetDeterministicState();
       const db = schema ? deserializeSqliteDatabase(schema) : openSqliteDatabase(":memory:");
       const store = new MultiremiStore(db);
+      // Model the already prepared deployment owner explicitly. Enrolled slot
+      // startup no longer replays the historical owner-identity backfill.
+      db.run("UPDATE multiremi_users SET external_id = ? WHERE id = 'local' AND external_id IS NULL",
+        [process.env.MULTIREMI_OWNER_OPEN_ID ?? "ou_e6b7ffc662b392317275b817295c0b44"]);
       if (!schema) {
         schema = db.serialize();
         seedState = { clock, uuid: uuidCounter, prng: prngState };

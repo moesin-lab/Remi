@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { hasDestructiveSchemaSql, SCHEMA_DDL_OBJECT_CLASSES } from '@multiremi/store/schema-ddl.js';
+import { hasDestructiveSchemaSql as hasDestructiveSchemaStatement, hasDestructiveSchemaSql, SCHEMA_DDL_OBJECT_CLASSES } from '@multiremi/store/schema-ddl.js';
 
 // Cross product: table modifiers, qualification, quoted names (spaces/commas),
 // optional COLUMN and IF EXISTS; every action is also checked after ADD.
@@ -101,4 +101,35 @@ for (const table of ['U&"retained"', String.raw`u&"ret\0061ined"`,
 describe('shared schema DDL action detector', () => {
   for (const sql of positive) it(`rejects ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(true));
   for (const sql of negative) it(`allows ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(false));
+});
+
+// Reviewer counterexamples: UESCAPE consumes a complete string constant.
+const escapes = ["E'!'", '$$!$$', "'!'\n''", "$escape$!$escape$", String.raw`E'\''`];
+describe('known SQL fail-closed boundary', () => {
+  for (const escape of escapes) {
+    const name = `U&"ret!0061ined" UESCAPE ${escape}`;
+    it(`rejects TRUNCATE with ${escape} at both boundaries`, () => {
+      expect(hasDestructiveSchemaSql(`TRUNCATE TABLE ${name}`)).toBe(true);
+      expect(hasDestructiveSchemaStatement(`TRUNCATE TABLE ${name}`)).toBe(true);
+    });
+    it(`accepts additive ALTER with ${escape}`, () => {
+      const sql = `ALTER TABLE ${name} ADD COLUMN U&"c!006fl" UESCAPE ${escape} text`;
+      expect(hasDestructiveSchemaSql(sql)).toBe(false);
+      expect(hasDestructiveSchemaStatement(sql)).toBe(false);
+    });
+  }
+  for (const sql of ['TRUNCATE t unexpected @ tail', 'SELECT 1; TRUNCATE ?',
+    'TRUNCATE', `ALTER TABLE U&"t" UESCAPE not_a_string ADD COLUMN c text`,
+    `SELECT U&"t" UESCAPE 42`, `ALTER TABLE U&"t" UESCAPE E ADD COLUMN c text`]) {
+    it(`fails closed in known SQL: ${sql}`, () => expect(hasDestructiveSchemaStatement(sql)).toBe(true));
+  }
+  for (const prefix of ['TABLE t', 'ONLY t', '"t"', 'U&"t"']) {
+    it(`arch rejects explicit TRUNCATE candidate with unknown tail: ${prefix}`, () => {
+      expect(hasDestructiveSchemaSql(`TRUNCATE ${prefix} unrecognized @ tail`)).toBe(true);
+    });
+  }
+  it('arch still distinguishes bare-word prose', () => {
+    expect(hasDestructiveSchemaSql('TRUNCATE this log message')).toBe(false);
+    expect(hasDestructiveSchemaStatement('TRUNCATE this log message')).toBe(true);
+  });
 });

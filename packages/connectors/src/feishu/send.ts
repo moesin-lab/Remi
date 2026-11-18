@@ -57,7 +57,7 @@ export async function sendMessageFeishu(
 
   if (options?.replyToMessageId) {
     const response = await feishuMessageRequest("Feishu message reply", () => client.im.message.reply({
-      path: { message_id: options.replyToMessageId },
+      path: { message_id: options.replyToMessageId! },
       data: {
         content,
         msg_type: msgType,
@@ -158,7 +158,7 @@ export async function sendCardFeishu(
 
   if (options?.replyToMessageId) {
     const response = await feishuMessageRequest("Feishu message reply", () => client.im.message.reply({
-      path: { message_id: options.replyToMessageId },
+      path: { message_id: options.replyToMessageId! },
       data: { content, msg_type: "interactive", reply_in_thread: true,
         ...(options.idempotencyKey ? { uuid: options.idempotencyKey } : {}) },
     }));

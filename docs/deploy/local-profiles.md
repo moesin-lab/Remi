@@ -352,3 +352,33 @@ API：`GET /api/daemons/:daemonId/drain` 查询，`POST` 同路径发起
 更新下发还可能等待下一次零在途探测。未安装本功能的旧 daemon 不会消费新增取消字段，
 平台无法仅靠数据库恢复终止其本地进程：这类实例需在维护窗口人工停止旧 daemon 后升级，
 不能把服务端任务归零当作已完成本地排空。
+
+## 发布源码保留
+
+stable 解压源码快照并写入 `.remi-profile-source` 后立即删除对应 SHA tar。
+成功 deploy、up 或宿主激活后，在主机锁内自动修剪 `releases/`。
+手动预览与执行（也可用于旧部署遗留的 tar）：
+
+```bash
+node scripts/local-profile.mjs stable prune-releases --dry-run
+node scripts/local-profile.mjs stable prune-releases
+```
+
+只删除完整小写 40 位 SHA 命名的真实目录或 `<sha>.tar` 普通文件，真实路径必须仍在
+`releases/` 内。符号链接（包括指向 releases 内部的链接）不进入 dry-run 或实际删除计划；
+手工命名目录始终保留。保留 active、deployment、compose.env
+引用的源码，以及 running / recovery_required 宿主操作 previous / candidate
+快照引用的源码。另按备份目录时间名倒序保留最新 3 个不同 ref 的源码；
+`REMI_RELEASES_KEEP` 可设为非负整数覆盖此数量（0 表示不额外保留备份或 daemon 历史 ref）。
+同时读取 `${XDG_CONFIG_HOME:-~/.config}/systemd/user/multiremi-daemon.service`
+及其 `.d/*.conf`（按文件名字典序，空 `ExecStart=` 清空先前命令），保护生效的
+ExecStart 在本 profile releases 下引用的 SHA，以及从新到旧最近 N 个不同 daemon SHA。
+N 同样使用 `REMI_RELEASES_KEEP`，默认 3；回滚到更早的 daemon 版本需重新部署。
+daemon 生效与历史引用同时保护路径中的 SHA 和符号链接解析后仍在 `releases/` 下的 SHA。
+引用的 SHA 目录不存在时忽略；若目录或链接存在但真实路径无法解析（如断链、循环或权限错误），
+则在任何删除之前警告并放弃整次修剪，dry-run 也遵循相同规则。解析到 releases 外的目标不加入保护。
+dry-run 输出会注明 daemon 引用的保留原因。unit 或 drop-in 目录不存在视为无引用；
+存在但无法读取、语法错误或 executable 使用无法解析的扩展时，警告并放弃整次修剪。
+受保护 ref 对应的 tar 也保留；新解压的 tar 始终立即删除。
+元数据读取或路径校验失败会停止本次修剪并警告，修剪失败不影响部署结果。
+不清理 Docker 镜像、backups 或 ACP bundles。首次真实环境清理需由运维授权。

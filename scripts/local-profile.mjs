@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, fsyncSync, realpathSync, unlinkSync, renameSync, readdirSync, rmSync, statSync, statfsSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, openSync, closeSync, fsyncSync, realpathSync, unlinkSync, renameSync, readdirSync, rmSync, lstatSync, statSync, statfsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve, delimiter, relative, isAbsolute, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -275,6 +275,7 @@ function prepare(profile, ref, lanHost) {
       execute('git', ['archive', '--format=tar', '--output', archive, sha]);
       execute('tar', ['-xf', archive, '-C', source]);
       writeFileSync(join(source, '.remi-profile-source'), `${sha}\n`);
+      try { unlinkSync(archive); } catch (error) { console.warn(`Release archive cleanup failed: ${error.message}`); }
     }
   }
   const version = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8')).version;
@@ -511,6 +512,166 @@ function acquireHostLock(root) {
     }
   }
   throw new Error('Unable to acquire the local-profile host lock');
+}
+
+// Parse the user unit without invoking systemctl. Unsupported executable
+// expansions fail closed: pruning is optional, losing a daemon executable is not.
+function daemonReleaseRefs(releases, keep) {
+  const config = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+  const unit = join(config, 'systemd/user/multiremi-daemon.service');
+  const optional = (path, read) => {
+    try { lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    return read(path);
+  };
+  const base = optional(unit, path => readFileSync(path, 'utf8'));
+  const dropins = optional(`${unit}.d`, path => readdirSync(path)) ?? [];
+  const files = base === null ? [] : [[unit, base]];
+  for (const name of dropins.filter(name => name.endsWith('.conf')).sort()) {
+    // Unlike an absent unit/directory, a missing or unreadable listed drop-in
+    // is an incomplete configuration snapshot and must abort the plan.
+    files.push([join(`${unit}.d`, name), readFileSync(join(`${unit}.d`, name), 'utf8')]);
+  }
+  const words = (value) => {
+    const tokens = [];
+    let token = '', quote = null, started = false;
+    for (let i = 0; i < value.length; i++) {
+      let c = value[i];
+      if (c === '\\') {
+        c = value[++i];
+        const escapes = { a: '\x07', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', s: ' ', '\\': '\\', '"': '"', "'": "'" };
+        if (c in escapes) token += escapes[c];
+        else if (c === 'x' && /^[a-f0-9]{2}$/iu.test(value.slice(i + 1, i + 3))) {
+          token += String.fromCharCode(parseInt(value.slice(i + 1, i + 3), 16)); i += 2;
+        } else throw new Error('Unsupported daemon ExecStart escape');
+        started = true;
+      } else if (quote) {
+        if (c === quote) quote = null; else token += c;
+      } else if (c === '"' || c === "'") {
+        if (started) throw new Error('Invalid daemon ExecStart quoting');
+        quote = c; started = true;
+      } else if (/\s/u.test(c)) {
+        if (started) { tokens.push(token); token = ''; started = false; }
+      } else { token += c; started = true; }
+    }
+    if (quote) throw new Error('Unterminated daemon ExecStart quote');
+    if (started) tokens.push(token);
+    return tokens;
+  };
+  const refFor = (value) => {
+    const tokens = words(value);
+    if (!tokens.length) throw new Error('Empty daemon ExecStart command');
+    let executable = tokens[0].replace(/^[-@:+!|]+/u, '');
+    executable = executable.replace(/%./gu, specifier => {
+      if (specifier === '%%') return '%';
+      if (specifier === '%h') return homedir();
+      if (specifier === '%E') return config;
+      throw new Error('Unsupported daemon ExecStart specifier');
+    });
+    if (!executable || /[$%\x00-\x1f]/u.test(executable)) throw new Error('Unresolved daemon ExecStart executable');
+    if (!isAbsolute(executable)) {
+      if (executable.includes('/')) throw new Error('Invalid daemon ExecStart executable');
+      return null; // systemd search-path executable, outside profile releases
+    }
+    const path = relative(resolve(releases), resolve(executable));
+    const ref = path.split(/[\\/]/u)[0];
+    return /^[a-f0-9]{40}$/u.test(ref) ? ref : null;
+  };
+  let effective = [];
+  const history = [];
+  for (const [path, content] of files) {
+    let section = '', pending = '';
+    for (const raw of content.split(/\r?\n/u)) {
+      const line = raw.trim();
+      if (!line || /^[#;]/u.test(line)) continue;
+      const logical = pending + line;
+      if ((logical.match(/\\+$/u)?.[0].length ?? 0) % 2) {
+        pending = `${logical.slice(0, -1)} `; continue;
+      }
+      pending = '';
+      if (/^\[[^\]]+\]$/u.test(logical)) { section = logical.slice(1, -1); continue; }
+      const assignment = /^([^=\s]+)\s*=(.*)$/u.exec(logical);
+      if (!assignment || !section) throw new Error(`Invalid daemon unit syntax: ${path}`);
+      if (section !== 'Service' || assignment[1] !== 'ExecStart') continue;
+      const value = assignment[2].trim();
+      if (!value) effective = [];
+      else effective.push(refFor(value));
+    }
+    if (pending) throw new Error(`Unterminated daemon unit continuation: ${path}`);
+    history.push([...effective]);
+  }
+  const refs = new Set(effective.filter(Boolean));
+  const recent = new Set();
+  for (const snapshot of history.reverse()) for (const ref of snapshot.filter(Boolean).reverse()) {
+    if (recent.size < keep) recent.add(ref);
+  }
+  for (const ref of recent) refs.add(ref);
+  return refs;
+}
+
+// Caller holds host-update.lock, including during automatic post-activation cleanup.
+function pruneReleases(root, dryRun = false) {
+  try {
+    const keep = Number(process.env.REMI_RELEASES_KEEP ?? 3);
+    if (!Number.isSafeInteger(keep) || keep < 0) throw new Error('REMI_RELEASES_KEEP must be a non-negative integer');
+    const releases = join(root, 'releases');
+    if (!existsSync(releases)) return;
+    if (canonicalPath(releases) !== join(canonicalPath(root), 'releases')) throw new Error('Release path escapes profile root');
+    const protectedRefs = new Set();
+    const protect = (source, refs = protectedRefs) => {
+      if (!source) return;
+      const path = resolve(source);
+      if (dirname(path) === resolve(releases)) refs.add(basename(path));
+      // A missing release is harmless, but an existing link whose target cannot
+      // be resolved must abort the entire plan before any deletion takes place.
+      try { lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      const canonical = realpathSync(path);
+      if (dirname(canonical) === canonicalPath(releases)) refs.add(basename(canonical));
+    };
+    const readOptional = (path) => existsSync(path) ? readJson(path) : null;
+    for (const name of ['active.json', 'deployment.json']) protect(readOptional(join(root, name))?.source);
+    if (existsSync(join(root, 'compose.env'))) protect(parseEnv(readFileSync(join(root, 'compose.env'), 'utf8')).REMI_SOURCE_DIR);
+    const operations = join(root, 'host-operations');
+    if (existsSync(operations)) for (const name of readdirSync(operations)) {
+      const operation = join(operations, name);
+      const state = readJson(join(operation, 'operation.json'));
+      if (['running', 'recovery_required'].includes(state.status)) {
+        for (const side of ['previous', 'candidate']) protect(readOptional(join(operation, side, 'deployment.json'))?.source);
+      }
+    }
+    const backups = join(root, 'backups');
+    const backupRefs = new Set();
+    if (existsSync(backups)) for (const name of readdirSync(backups).sort().reverse()) {
+      if (backupRefs.size >= keep) break;
+      const active = readOptional(join(backups, name, 'active.json'));
+      if (!active?.ref || backupRefs.has(active.ref)) continue;
+      backupRefs.add(active.ref);
+      protect(active.source);
+      protectedRefs.add(active.ref);
+    }
+    const daemonRefs = new Set();
+    for (const ref of daemonReleaseRefs(releases, keep)) protect(join(releases, ref), daemonRefs);
+    for (const ref of daemonRefs) protectedRefs.add(ref);
+    // Validate the entire deletion plan before changing anything. Only real
+    // source directories and regular tar files are eligible; never follow links.
+    const candidates = readdirSync(releases).filter(name => /^[a-f0-9]{40}(\.tar)?$/u.test(name))
+      .filter(name => !protectedRefs.has(name.replace(/\.tar$/u, '')))
+      .filter(name => {
+        const stat = lstatSync(join(releases, name));
+        return name.endsWith('.tar') ? stat.isFile() : stat.isDirectory();
+      })
+      .map(name => {
+        const path = join(releases, name);
+        if (dirname(canonicalPath(path)) !== canonicalPath(releases)) throw new Error(`Release path escapes releases: ${name}`);
+        return path;
+      });
+    if (dryRun) for (const ref of daemonRefs) {
+      console.log(`Keeping release for daemon reference: ${join(releases, ref)}`);
+    }
+    for (const path of candidates) {
+      console.log(`${dryRun ? 'Would remove' : 'Removing'} release: ${path}`);
+      if (!dryRun) rmSync(path, { recursive: true, force: true });
+    }
+  } catch (error) { console.warn(`Release pruning failed: ${error.message}`); }
 }
 
 function validateHostCapacity(root) {
@@ -889,6 +1050,7 @@ async function hostActivate(profile, flags) {
       const deployment = readJson(join(root, 'deployment.json'));
       saveJson(join(root, 'active.json'), deployment);
       saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
+      pruneReleases(root);
     } catch (error) {
       if (switchPhases.has(state.phase)) await rollbackInterruptedUpdate(root, state, `Update failed: ${error.message}`);
       else saveOperation(root, state, { status: 'failed', phase: 'failed', error: error.message });
@@ -963,6 +1125,7 @@ async function hostRollbackActivate(profile, flags) {
       await verifyProfileHealth(profile);
       const deployment = readJson(join(root, 'active.json'));
       saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
+      pruneReleases(root);
     } catch (error) {
       await recoverFailedRollback(root, state, `Rollback failed: ${error.message}`);
       throw error;
@@ -1017,6 +1180,7 @@ async function hostRecover(profile) {
           await verifyProfileHealth(profile);
           const deployment = readJson(join(root, 'active.json'));
           saveOperation(root, state, { status: 'succeeded', phase: 'succeeded', resultRelease: resultRelease(deployment) });
+          pruneReleases(root);
         } catch (error) {
           await recoverFailedRollback(root, state, `Rollback recovery failed: ${error.message}`);
         }
@@ -1046,7 +1210,7 @@ async function status(root) {
 async function main() {
   const [profile, action, ...args] = process.argv.slice(2);
   if (!Object.hasOwn(settings, profile) || !action || action === '--help') {
-    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|stop|restart|status|logs|watch|backup|token|host-preflight|host-stage|host-activate|host-recover|host-rollback-stage|host-rollback-activate|host-finalize|host-auth-refresh> [options]');
+    console.log('Usage: node scripts/local-profile.mjs <stable|dev> <prepare|build|deploy|up|prune-releases|stop|restart|status|logs|watch|backup|token|host-preflight|host-stage|host-activate|host-recover|host-rollback-stage|host-rollback-activate|host-finalize|host-auth-refresh> [options]');
     console.log('stable deploy: pull verified CI images for a fixed commit, back up data, then update containers.');
     console.log('--image-manifest <path>: use a downloaded stable-images.json; --build-local true: explicitly compile locally.');
     console.log('--runtime-proxy true: opt in to API runtime HTTP(S)_PROXY for deploy/up/watch; repeat on each container recreation.');
@@ -1058,6 +1222,7 @@ async function main() {
   const flags = {};
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
+    if (key === '--dry-run' && !Object.hasOwn(flags, key)) { flags[key] = true; index -= 1; continue; }
     const value = args[index + 1];
     if (!['--ref', '--lan-host', '--operation-id', '--version', '--source-url', '--source-sha256', '--data-schema', '--preserve-data', '--image-manifest', '--build-local', '--runtime-proxy'].includes(key) || !value || value.startsWith('--') || Object.hasOwn(flags, key)) {
       throw new Error('Unsupported, missing, or duplicate --ref/--lan-host/host option');
@@ -1066,6 +1231,7 @@ async function main() {
   }
   const actionOptions = {
     prepare: ['--ref', '--lan-host'], deploy: ['--ref', '--lan-host', '--image-manifest', '--build-local', '--runtime-proxy'],
+    'prune-releases': ['--dry-run'],
     up: ['--runtime-proxy'], watch: ['--runtime-proxy'],
     'host-stage': ['--operation-id', '--ref', '--version', '--source-url', '--source-sha256', '--data-schema', '--image-manifest', '--build-local'],
     'host-activate': ['--operation-id'],
@@ -1090,7 +1256,13 @@ async function main() {
     && (action.startsWith('host-') || ['prepare', 'deploy', 'build', 'restart', 'backup'].includes(action))) {
     throw new Error('This profile uses internal updates. Use Web settings or remi platform operation create for updates, restart and backups; base-image maintenance requires an explicit migration.');
   }
-  if (action === 'host-stage') await hostStage(profile, flags);
+  const releaseLock = ['prepare', 'build', 'deploy', 'up', 'prune-releases'].includes(action) ? acquireHostLock(root) : null;
+  try { await runAction(profile, action, flags, root); } finally { releaseLock?.(); }
+}
+
+async function runAction(profile, action, flags, root) {
+  if (action === 'prune-releases') pruneReleases(root, flags['--dry-run'] === true);
+  else if (action === 'host-stage') await hostStage(profile, flags);
   else if (action === 'host-activate') await hostActivate(profile, flags);
   else if (action === 'host-recover') await hostRecover(profile);
   else if (action === 'host-rollback-stage') hostRollbackStage(profile, flags);
@@ -1142,6 +1314,7 @@ async function main() {
       throw error;
     }
     saveJson(join(root, 'active.json'), readJson(join(root, 'deployment.json')));
+    pruneReleases(root);
     await status(root);
   } else if (action === 'build') compose(root, 'build', 'api', 'web');
   else if (action === 'up') {
@@ -1151,6 +1324,7 @@ async function main() {
     }
     compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
     saveJson(join(root, 'active.json'), candidate);
+    pruneReleases(root);
   }
   else if (action === 'stop') compose(root, 'stop');
   else if (action === 'restart') {

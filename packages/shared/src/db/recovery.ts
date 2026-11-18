@@ -19,10 +19,32 @@ export class DatabaseUnavailableError extends Error {
 }
 
 const timeoutContext = new AsyncLocalStorage<number>();
+const deadlineContext = new AsyncLocalStorage<{ at: number; active: boolean }>();
 export function withDatabaseTimeout<T>(timeoutMs: number, action: () => T): T {
   return timeoutContext.run(timeoutMs, action);
 }
-export function databaseTimeoutMs(): number | undefined { return timeoutContext.getStore(); }
+/** Recompute the remaining budget for every SQL boundary, including synchronous bridges. */
+export async function withDatabaseDeadline<T>(at: number, action: () => T | Promise<T>): Promise<T> {
+  const context = { at, active: true };
+  try { return await deadlineContext.run(context, action); }
+  finally {
+    // Jobs spawned by startup inherit ALS. Once startup settles, they must use
+    // their own normal query budgets rather than an expired activation budget.
+    context.active = false;
+  }
+}
+export function databaseTimeoutMs(options: { cleanup?: boolean } = {}): number | undefined {
+  const timeout = timeoutContext.getStore();
+  // Cleanup must reach the worker even after an activation deadline expires:
+  // otherwise a live transaction (or the worker's lost-transaction flag) leaks
+  // into unrelated requests. Give it a fresh, bounded transport budget.
+  if (options.cleanup) return Math.min(timeout ?? 5_000, 5_000);
+  const deadline = deadlineContext.getStore();
+  if (!deadline?.active) return timeout;
+  const remaining = Math.ceil(deadline.at - performance.now());
+  if (remaining <= 0) throw new DatabaseUnavailableError("Database operation deadline exceeded");
+  return Math.min(timeout ?? Infinity, remaining);
+}
 
 const log = createLogger("db-recovery");
 

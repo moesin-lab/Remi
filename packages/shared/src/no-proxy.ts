@@ -8,7 +8,7 @@ function unbracket(host: string): string {
 export function matchesNoProxy(url: string | URL, noProxy: string): boolean {
   const target = new URL(url);
   const host = unbracket(target.hostname);
-  const port = target.port || (target.protocol === "https:" ? "443" : "80");
+  const port = target.port || (["https:", "wss:"].includes(target.protocol) ? "443" : "80");
   return noProxy.split(",").some((raw) => {
     let entry = raw.trim().toLowerCase();
     if (!entry) return false;

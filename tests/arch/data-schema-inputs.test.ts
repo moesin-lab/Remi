@@ -8,6 +8,7 @@ import { migrationDdlModules, missingMigrationInputs } from '../../packages/plat
 test('schema fingerprint covers transitive migration DDL', () => {
   const root = resolve(import.meta.dir, '../..');
   expect(migrationDdlModules(root)).toContain('packages/server/src/store/unified-model-migration.ts');
+  expect(migrationDdlModules(root)).toContain('packages/server/src/store/live-term-fence.ts');
   expect(missingMigrationInputs(root, inputs)).toEqual([]);
 });
 test('detects a missing DDL helper through a re-export', () => {

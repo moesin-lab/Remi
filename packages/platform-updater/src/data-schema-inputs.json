@@ -15,6 +15,7 @@
   "packages/server/src/store/inbox/decision-records.ts",
   "packages/server/src/store/inbox/lane-migration.ts",
   "packages/server/src/store/inbox/question-indexes.ts",
+  "packages/server/src/store/live-term-fence.ts",
   "packages/server/src/store/lock-order-sentinel.ts",
   "packages/server/src/store/pending-turns.ts",
   "packages/server/src/store/turn-execution-records.ts",

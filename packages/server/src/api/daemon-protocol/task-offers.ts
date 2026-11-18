@@ -1,3 +1,4 @@
+import { currentBackgroundTerm, withBackgroundTerm, StaleLiveTermError, type BackgroundTerm } from "@shared/db/live-term.js";
 import { isDatabaseConnectionError, withDatabaseTimeout } from "@shared/db/recovery.js";
 import { withDbJob } from "@shared/observability/db-sources.js";
 import { DAEMON_OFFER_COOLDOWN_MS, DAEMON_OFFER_TIMEOUT_MS, type DaemonTurnInput } from "@multiremi/contracts/daemon-protocol.js";
@@ -77,6 +78,7 @@ export class DaemonTaskOffers {
   private readonly clock: DaemonProtocolClock;
   private readonly heartbeatCounts = new Map<string, number>();
   private stopped = false;
+  private generation: { term: BackgroundTerm | undefined; lost: boolean } = { term: undefined, lost: false };
   private sweepTimer: DaemonProtocolTimer | null = null;
   private readonly retryTimers = new Map<string, DaemonProtocolTimer>();
 
@@ -93,7 +95,7 @@ export class DaemonTaskOffers {
     this.stopped = options.autostart === false;
     options.layer.registerSessionHooks({
       stop: () => { void this.stop(); },
-      hello: (session, hello) => {
+      hello: (session, hello) => this.inGeneration(() => {
         for (const rt of session.runtimeIds) {
           options.store.reconcileQuestionWaits(rt, hello.runtimes.find(r => r.runtimeId === rt)?.activeQuestionWaits ?? []);
           for (const retry of options.store.taskOfferRetryDeadlines(rt)) {
@@ -101,8 +103,8 @@ export class DaemonTaskOffers {
           }
           this.kick(rt);
         }
-      },
-      heartbeat: (session, hb) => {
+      }),
+      heartbeat: (session, hb) => this.inGeneration(() => {
         const count = hb.payload.active_task_count;
         if (typeof count !== "number" || this.heartbeatCounts.get(session.sessionId) === count) return;
         this.heartbeatCounts.set(session.sessionId, count);
@@ -116,30 +118,52 @@ export class DaemonTaskOffers {
           }
           this.kick(rt);
         }
-      },
-      reply: (session, frame) => this.reply(session, frame),
-      ack: session => this.resume(session),
-      drain: session => this.resume(session),
-      close: session => this.closed(session),
+      }),
+      reply: (session, frame) => this.inGeneration(() => this.reply(session, frame)),
+      ack: session => this.inGeneration(() => this.resume(session)),
+      drain: session => this.inGeneration(() => this.resume(session)),
+      close: session => this.inGeneration(() => this.closed(session)),
     });
-    options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.ready(frame, session));
+    options.layer.registerBestEffortHandler("runtime.ready", (frame, session) => this.inGeneration(() => this.ready(frame, session)));
     // Dispatch is driven by queue/capacity/configuration events and explicit deadlines.
     // Keep a low-frequency safety net for missed events; recoveries expose missing wiring.
     if (options.autostart !== false) this.start();
   }
 
+  /** Bind event work and every continuation to one immutable activation. */
+  private bindGeneration<T extends unknown[]>(action: (...args: T) => void): (...args: T) => void {
+    const generation = this.generation;
+    return (...args) => this.inGeneration(() => action(...args), generation);
+  }
+
+  private inGeneration(action: () => void, generation = this.generation): void {
+    if (this.stopped || generation.lost || generation !== this.generation) return;
+    // A late callback from an earlier activation must never adopt its successor.
+    const inherited = currentBackgroundTerm();
+    if (inherited && inherited !== generation.term) return;
+    try {
+      // SQL is guarded by Store; the async pump checks at tick entry too.
+      // Keep the binding itself query-free so an outage reaches pump backoff.
+      withBackgroundTerm(generation.term, action);
+    } catch (error) {
+      if (!(error instanceof StaleLiveTermError)) throw error;
+      generation.lost = true;
+    }
+  }
+
   start(): void {
     if (this.sweepTimer !== null) return;
+    this.generation = { term: currentBackgroundTerm(), lost: false };
     this.stopped = false;
     const sweepMs = this.options.sweepMs ?? (process.env.NODE_ENV === "test" ? 2_147_483_647 : DAEMON_OFFER_SWEEP_MS);
-    const sweep = () => {
+    const sweep = this.bindGeneration(() => {
       if (this.stopped) return;
       for (const session of this.options.layer.registry.listSessions()) {
         for (const rt of session.runtimeIds) this.kick(rt, true);
       }
       this.sweepTimer = this.clock.setTimeout(sweep, sweepMs);
       (this.sweepTimer as ReturnType<typeof setTimeout>).unref?.();
-    };
+    });
     this.sweepTimer = this.clock.setTimeout(sweep, sweepMs);
     (this.sweepTimer as ReturnType<typeof setTimeout>).unref?.();
   }
@@ -161,6 +185,10 @@ export class DaemonTaskOffers {
   }
 
   kick(runtimeId?: string | null, sweep = false): void {
+    this.inGeneration(() => this.kickCurrent(runtimeId, sweep));
+  }
+
+  private kickCurrent(runtimeId?: string | null, sweep = false): void {
     if (this.stopped) return;
     if (!runtimeId) {
       for (const session of this.options.layer.registry.listSessions()) for (const rt of session.runtimeIds) this.kick(rt, sweep);
@@ -172,8 +200,11 @@ export class DaemonTaskOffers {
     pump.dirty = true;
     if (pump.running || pump.waiting || pump.pending || this.clock.now() < pump.cooldownUntil) return;
     // hello's callback precedes welcome. Start on the next microtask, after the handshake commits.
+    const generation = this.generation;
     const run = Promise.resolve().then(async () => {
       do {
+        if (generation !== this.generation || this.stopped) return;
+        currentBackgroundTerm()?.assertCurrent();
         pump.dirty = false;
         const fromSweep = pump.sweep;
         pump.sweep = false;
@@ -182,6 +213,7 @@ export class DaemonTaskOffers {
         pump.databaseWarningAt = undefined;
       } while (!this.stopped && pump.dirty && !pump.waiting && !pump.pending && this.clock.now() >= pump.cooldownUntil);
     }).catch(error => {
+      if (error instanceof StaleLiveTermError) { generation.lost = true; pump.dirty = false; return; }
       if (!isDatabaseConnectionError(error)) {
         console.error("daemon offer failed", error);
         throw error;
@@ -192,11 +224,11 @@ export class DaemonTaskOffers {
       pump.cooldownUntil = this.clock.now() + delay;
       pump.cooldownReason = "database_unavailable";
       if (pump.cooldownTimer !== null) this.clock.clearTimeout(pump.cooldownTimer);
-      pump.cooldownTimer = this.clock.setTimeout(() => {
+      pump.cooldownTimer = this.clock.setTimeout(this.bindGeneration(() => {
         pump.cooldownTimer = null;
         pump.cooldownReason = null;
         this.kick(runtimeId);
-      }, delay);
+      }), delay);
       (pump.cooldownTimer as ReturnType<typeof setTimeout>).unref?.();
       if (pump.databaseWarningAt !== undefined && this.clock.now() - pump.databaseWarningAt < 30_000) return;
       pump.databaseWarningAt = this.clock.now();
@@ -204,13 +236,17 @@ export class DaemonTaskOffers {
         error_class: error instanceof Error ? error.name : typeof error }));
     }).finally(() => {
       pump.running = null;
-      if (pump.dirty && !pump.waiting && !pump.pending && this.clock.now() >= pump.cooldownUntil) this.kick(runtimeId);
+      if (generation === this.generation && pump.dirty && !pump.waiting && !pump.pending && this.clock.now() >= pump.cooldownUntil) this.kick(runtimeId);
     });
     pump.running = run;
     this.options.layer.trackBackground(run);
   }
 
   kickWorkspace(workspaceId: string): void {
+    this.inGeneration(() => this.kickWorkspaceCurrent(workspaceId));
+  }
+
+  private kickWorkspaceCurrent(workspaceId: string): void {
     // A released slot can unblock work on another host (global agent limits),
     // but hosts with no queued/offered work cannot claim anything. Preserve
     // workspace-wide admission for unassigned attempts and the periodic sweep.
@@ -223,6 +259,10 @@ export class DaemonTaskOffers {
   }
 
   enqueued(task: MultiremiTask): void {
+    this.inGeneration(() => this.enqueuedCurrent(task));
+  }
+
+  private enqueuedCurrent(task: MultiremiTask): void {
     this.kick(task.runtimeId);
     if (!task.nextRetryAt) return;
     this.scheduleRetry(task.id, task.runtimeId, Date.parse(task.nextRetryAt));
@@ -232,15 +272,19 @@ export class DaemonTaskOffers {
     const previous = this.retryTimers.get(taskId);
     if (previous !== undefined) this.clock.clearTimeout(previous);
     if (!Number.isFinite(deadline)) return;
-    const timer = this.clock.setTimeout(() => {
+    const timer = this.clock.setTimeout(this.bindGeneration(() => {
       this.retryTimers.delete(taskId);
       this.kick(runtimeId);
-    }, Math.max(0, deadline - this.clock.now()));
+    }), Math.max(0, deadline - this.clock.now()));
     (timer as ReturnType<typeof setTimeout>).unref?.();
     this.retryTimers.set(taskId, timer);
   }
 
   terminal(taskId: string, runtimeId: string | null): void {
+    this.inGeneration(() => this.terminalCurrent(taskId, runtimeId));
+  }
+
+  private terminalCurrent(taskId: string, runtimeId: string | null): void {
     const timer = this.retryTimers.get(taskId);
     if (timer !== undefined) this.clock.clearTimeout(timer);
     this.retryTimers.delete(taskId);
@@ -284,6 +328,8 @@ export class DaemonTaskOffers {
     pump.preparing = task.id;
     try {
       const payload = await this.options.prepare(task, session.supportsWikiFetch);
+      if (this.stopped || this.generation.term !== currentBackgroundTerm()) return;
+      currentBackgroundTerm()?.assertCurrent();
       invalidateRequestReadCache();
       const current = store.getTaskIdentity(task.id);
       if (!payload || current?.status !== "dispatched" || current.runtimeId !== runtimeId) return;
@@ -318,7 +364,7 @@ export class DaemonTaskOffers {
         console.warn(JSON.stringify({ event: "daemon_offer_sweep_recovered", runtime_id: runtimeId, task_id: task.id }));
         this.options.layer.recordOfferSweepRecovery();
       }
-      const timer = this.clock.setTimeout(() => this.rescind(runtimeId, pump, task.id), DAEMON_OFFER_TIMEOUT_MS);
+      const timer = this.clock.setTimeout(this.bindGeneration(() => this.rescind(runtimeId, pump, task.id)), DAEMON_OFFER_TIMEOUT_MS);
       (timer as ReturnType<typeof setTimeout>).unref?.();
       const projection = payload.session_projection as { session_id?: string; to_seq: number; jsonl?: string; mode?: string } | undefined;
       const inlineRead = projection?.session_id && projection.jsonl ? { sessionId: projection.session_id, toSeq: projection.to_seq,
@@ -328,7 +374,7 @@ export class DaemonTaskOffers {
           .map(entry => Number(entry.seq)) } : null;
       pump.pending = { taskId: task.id, agentId: task.agentId, inlineRead, session, seq: sent.seq, timer };
     } catch (error) {
-      if (isDatabaseConnectionError(error)) throw error;
+      if (error instanceof StaleLiveTermError || isDatabaseConnectionError(error)) throw error;
       const current = store.getTaskIdentity(task.id);
       if (current?.status === "dispatched" && current.runtimeId === runtimeId) this.rescind(runtimeId, pump, task.id);
       throw error;
@@ -361,6 +407,7 @@ export class DaemonTaskOffers {
   }
 
   private rescind(runtimeId: string, pump: RuntimePump, taskId: string, reason: string | null = null, rejected = false): void {
+    currentBackgroundTerm()?.assertCurrent();
     if (pump.pending?.taskId === taskId) {
       this.clock.clearTimeout(pump.pending.timer);
       pump.pending = null;
@@ -368,11 +415,11 @@ export class DaemonTaskOffers {
     if (pump.cooldownTimer !== null) this.clock.clearTimeout(pump.cooldownTimer);
     pump.cooldownReason = reason;
     pump.cooldownUntil = this.clock.now() + DAEMON_OFFER_COOLDOWN_MS;
-    pump.cooldownTimer = this.clock.setTimeout(() => {
+    pump.cooldownTimer = this.clock.setTimeout(this.bindGeneration(() => {
       pump.cooldownTimer = null;
       pump.cooldownReason = null;
       this.kick(runtimeId);
-    }, DAEMON_OFFER_COOLDOWN_MS);
+    }), DAEMON_OFFER_COOLDOWN_MS);
     (pump.cooldownTimer as ReturnType<typeof setTimeout>).unref?.();
     this.options.store.requeueTaskOffer(taskId, runtimeId, rejected ? "rejected" : "unknown");
   }

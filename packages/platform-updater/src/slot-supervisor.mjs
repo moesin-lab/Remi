@@ -83,31 +83,29 @@ export class SlotSupervisor {
     await slot.exit;
     this.edge.setState(`slot-${index}`, 'down'); this.slots[index] = null;
   }
-  async activate(index, requireTerm = false) {
+  async activate(index, previousTerm = null) {
     const slot = this.slots[index];
     const deadline = Date.now() + this.waits.activateWait;
     await this.request(slot, 'activate', this.waits.activateWait);
     const ready = await this.wait(slot, true, Math.max(1, deadline - Date.now()));
     const hasTerm = (typeof ready.term === 'string' && /^[1-9]\d*$/.test(ready.term))
       || (Number.isSafeInteger(ready.term) && ready.term > 0);
-    if (requireTerm && !hasTerm) throw new Error('Candidate lacks live term fencing');
-    this.supportsSwitch = hasTerm;
+    if (!hasTerm) throw new Error('Slot lacks live term fencing');
+    if (previousTerm !== null && BigInt(ready.term) <= BigInt(previousTerm)) throw new Error('Candidate live term did not advance');
+    slot.term = String(ready.term);
+    this.supportsSwitch = true;
     this.edge.setState(`slot-${index}`, 'live'); this.live = index; this.edge.unhold();
   }
   async change(id, revision) {
     const oldIndex = this.live, old = this.slots[oldIndex], index = oldIndex === 0 ? 1 : 0;
     this.transition = { revision, target: id, previous: old?.id ?? null, hasPrevious: Boolean(old), recovery: 'rollback-on-restart' };
     let held = false;
-    if (old && !this.supportsSwitch) {
-      await this.phase('failed', { error: 'Current release lacks live term fencing; use the offline update path' });
-      this.revision = revision; return;
-    }
     try {
       await this.phase('standby'); const next = await this.start(index, id);
       await this.wait(next, false, this.waits.standbyWait);
       await this.phase('releasing'); this.edge.hold(); held = true;
       if (old) { this.edge.setState(`slot-${oldIndex}`, 'draining'); await this.request(old, 'release', this.waits.releaseWait); }
-      await this.phase('activating'); await this.activate(index, Boolean(old));
+      await this.phase('activating'); await this.activate(index, old?.term ?? null);
       if (old) {
         await this.request(old, 'exit', 1000).catch(() => {});
         await Promise.race([old.exit, sleep(30000, undefined, { ref: false })]);

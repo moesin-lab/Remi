@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { startEdge } from '../../packages/edge/src/index.js';
 import { SlotSupervisor } from '../../packages/platform-updater/src/slot-supervisor.mjs';
 
-for (const [name, behavior] of Object.entries({ success: {}, oldNoTerm: {}, noTerm: { noTerm: true }, releaseFailure: {}, unhealthyAfter: { unhealthyAfter: 200 }, immediateExit: { immediateExit: true },
+for (const [name, behavior] of Object.entries({ success: {}, termNotAdvanced: { term: '9007199254740993' }, termRegressed: { term: '9007199254740992' }, noTerm: { noTerm: true }, releaseFailure: {}, unhealthyAfter: { unhealthyAfter: 200 }, immediateExit: { immediateExit: true },
   standbyTimeout: { neverStandby: true }, activateFailure: { activateFails: true },
   readinessTimeout: { neverReady: true }, crashAfter30s: { crashAfter: 30000 } })) {
   test(`two releases: ${name}, continuous edge requests succeed`, async () => {
@@ -15,12 +15,14 @@ for (const [name, behavior] of Object.entries({ success: {}, oldNoTerm: {}, noTe
     const edge = startEdge({ hostname: '127.0.0.1', port: 0, holdMaxMs: 10000, log: () => {} });
     for (const server of reservations) await server.stop(true);
     const controller = new SlotSupervisor(edge, async (id: string | null) => ({ cwd: join(root, id!), executable: process.execPath,
-      args: [resolve('tests/fixtures/supervisor-slot.ts')], version: id!, env: process.env }),
+      args: [resolve('tests/fixtures/supervisor-slot.ts')], version: id!, env: { ...process.env, REMI_TEST_TERM_FILE: join(root, 'term') } }),
       { ports, standbyWait: 500, activateWait: 500, releaseWait: 500, confirmWait: name === 'crashAfter30s' ? 32000 : name === 'unhealthyAfter' ? 4100 : 200 });
     let probing = true, failures = 0, count = 0;
     let probe: Promise<void> | undefined;
     try {
-      for (const id of ['old', 'new']) { await mkdir(join(root, id!)); await writeFile(join(root, id, 'behavior.json'), JSON.stringify({ name: id, ...(id === 'new' ? behavior : { releaseFails: name === 'releaseFailure', noTerm: name === 'oldNoTerm' }) })); }
+      for (const id of ['old', 'new']) { await mkdir(join(root, id!)); await writeFile(join(root, id, 'behavior.json'), JSON.stringify({ name: id, ...(id === 'new' ? behavior : { releaseFails: name === 'releaseFailure' }) })); }
+      // Exercise adjacent BIGINT terms beyond JavaScript's safe integer range.
+      await writeFile(join(root, 'term'), '9007199254740992');
       await controller.reconcile({ mode: 'run', releaseId: 'old', revision: 'initial' });
       const oldPid = controller.snapshot().childPid;
       probe = (async () => { while (probing) {
@@ -32,7 +34,8 @@ for (const [name, behavior] of Object.entries({ success: {}, oldNoTerm: {}, noTe
       await controller.reconcile({ mode: 'run', releaseId: 'new', revision: 'switch', strategy: 'switch' });
       expect(controller.snapshot().transition!.phase).toBe(name === 'success' ? 'succeeded' : 'failed');
       expect(controller.snapshot().releaseId).toBe(name === 'success' ? 'new' : 'old');
-      if (['immediateExit', 'standbyTimeout', 'activateFailure', 'readinessTimeout', 'releaseFailure', 'noTerm', 'oldNoTerm'].includes(name)) expect(controller.snapshot().childPid).toBe(oldPid);
+      if (['termNotAdvanced', 'termRegressed'].includes(name)) expect(controller.snapshot().transition!.error).toBe('Candidate live term did not advance');
+      if (['immediateExit', 'standbyTimeout', 'activateFailure', 'readinessTimeout', 'releaseFailure', 'noTerm', 'termNotAdvanced', 'termRegressed'].includes(name)) expect(controller.snapshot().childPid).toBe(oldPid);
       probing = false; await probe;
       expect(count).toBeGreaterThan(0); expect(failures).toBe(0);
     } finally { probing = false; await probe; await controller.stop(); await rm(root, { recursive: true, force: true }); }
@@ -64,7 +67,7 @@ test(`image supervisor restores previous release after ${interruptedPhase} resta
     throw new Error('Supervisor state wait timed out');
   }
   const start = () => Bun.spawn([process.execPath, resolve('packages/platform-updater/src/supervisor.mjs')], {
-    env: { ...process.env, REMI_SUPERVISOR_ROLE: 'api', REMI_SUPERVISOR_SOURCE: source,
+    env: { ...process.env, REMI_TEST_TERM_FILE: join(root, 'term'), REMI_SUPERVISOR_ROLE: 'api', REMI_SUPERVISOR_SOURCE: source,
       REMI_SUPERVISOR_CONTROL: control, REMI_APPLICATION_ROOT: program, REMI_SUPERVISOR_SEED: join(root, 'seed'),
       REMI_SUPERVISOR_FENCE: resolve('deploy/docker/host-write-fence.ts'), REMI_APPLICATION_BASE_VERSION: 'old',
       REMI_APPLICATION_BASE_REF: 'test', REMI_SLOT_SWITCH: interruptedPhase === 'disabled' ? undefined : '1', MULTIREMI_PORT: String(port), MULTIREMI_HOST: '127.0.0.1',
@@ -144,7 +147,7 @@ test('a live child crash holds edge requests until the same release restarts', a
   const edge = startEdge({ hostname: '127.0.0.1', port: 0, holdMaxMs: 5000, log: () => {} });
   for (const server of reservations) await server.stop(true);
   const controller = new SlotSupervisor(edge, async () => ({ cwd: root, executable: process.execPath,
-    args: [resolve('tests/fixtures/supervisor-slot.ts')], version: 'old', env: process.env }),
+    args: [resolve('tests/fixtures/supervisor-slot.ts')], version: 'old', env: { ...process.env, REMI_TEST_TERM_FILE: join(root, 'term') } }),
     { ports, standbyWait: 2000, activateWait: 2000 });
   let request: Promise<Response> | undefined;
   try {
@@ -173,7 +176,7 @@ test('standby timeout concurrent with old live crash restores an active old slot
   const edge = startEdge({ hostname: '127.0.0.1', port: 0, holdMaxMs: 5000, log: () => {} });
   for (const server of reservations) await server.stop(true);
   const controller = new SlotSupervisor(edge, async id => ({ cwd: join(root, id!), executable: process.execPath,
-    args: [resolve('tests/fixtures/supervisor-slot.ts')], version: id!, env: process.env }),
+    args: [resolve('tests/fixtures/supervisor-slot.ts')], version: id!, env: { ...process.env, REMI_TEST_TERM_FILE: join(root, 'term') } }),
     { ports, standbyWait: 700, activateWait: 1000, confirmWait: 100 });
   let probing = true, failures = 0, count = 0;
   let probe: Promise<void> | undefined;
@@ -219,7 +222,7 @@ for (const launchFailures of [1, 5]) {
     const controller = new SlotSupervisor(edge, async () => {
       launches++;
       if (launches > 1 && launches <= launchFailures + 1) throw new Error('Release is incomplete');
-      return { cwd: root, executable: process.execPath, args: [resolve('tests/fixtures/supervisor-slot.ts')], version: 'old', env: process.env };
+      return { cwd: root, executable: process.execPath, args: [resolve('tests/fixtures/supervisor-slot.ts')], version: 'old', env: { ...process.env, REMI_TEST_TERM_FILE: join(root, 'term') } };
     }, { ports, standbyWait: 1000, activateWait: 1000 });
     const desired = { mode: 'run' as const, releaseId: 'old', revision: 'stable' };
     try {
@@ -242,3 +245,22 @@ for (const launchFailures of [1, 5]) {
     } finally { await controller.stop(); await rm(root, { recursive: true, force: true }); }
   }, 40000);
 }
+
+
+test('opt-in slot bootstrap requires A3 live term before opening edge', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'remi-slot-no-term-'));
+  const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') });
+  const port = reservation.port!;
+  await reservation.stop(true);
+  const edge = startEdge({ hostname: '127.0.0.1', port: 0, log: () => {} });
+  const controller = new SlotSupervisor(edge, async () => ({ cwd: root, executable: process.execPath,
+    args: [resolve('tests/fixtures/supervisor-slot.ts')], version: 'old', env: process.env }),
+    { ports: [port], standbyWait: 1000, activateWait: 1000 });
+  try {
+    await writeFile(join(root, 'behavior.json'), JSON.stringify({ name: 'old', noTerm: true }));
+    await expect(controller.reconcile({ mode: 'run', releaseId: 'old', revision: 'initial' })).rejects.toThrow('Slot lacks live term fencing');
+    expect(edge.status().held).toBe(true);
+    expect(controller.snapshot().slotSwitch).toBe(false);
+    expect(controller.snapshot().childPid).toBeNull();
+  } finally { await controller.stop(); await rm(root, { recursive: true, force: true }); }
+});

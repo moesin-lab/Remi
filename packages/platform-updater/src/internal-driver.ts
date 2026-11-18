@@ -136,7 +136,7 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
     const target = parseApplicationManifest(value);
     const current = (await this.selected()) ?? await this.baseSelection();
     const api = await this.status('api');
-    const switching = process.env.REMI_SLOT_SWITCH !== '0' && api?.slotSwitch
+    const switching = process.env.REMI_SLOT_SWITCH === '1' && api?.slotSwitch
       && current.release.dataSchema === target.dataSchema;
     return this.preflight(!switching);
   }
@@ -334,7 +334,7 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
       target = match;
     }
     const api = await this.status('api');
-    const switching = operation.kind !== 'restart' && process.env.REMI_SLOT_SWITCH !== '0' && api?.slotSwitch
+    const switching = operation.kind !== 'restart' && process.env.REMI_SLOT_SWITCH === '1' && api?.slotSwitch
       && previous.release.dataSchema === target.release.dataSchema;
     const preflight = await this.preflight(!switching);
     if (!preflight.ready) throw new Error(preflight.checks.filter(value => !value.ok).map(value => value.message).join('; '));

@@ -7,7 +7,9 @@ summary: 单 all API 的同指纹切换、观察期回退、状态与关闭开�
 # Internal updater 双 slot 运维
 
 [internal-updates Compose](../../deploy/docker/compose.internal-updates.yml) 的 API
-supervisor 在进程内持有 edge，公开端口仍为 6120。两个 API 子进程只监听回环
+默认保持单子进程路径；API/updater 容器显式设置 `REMI_SLOT_SWITCH=1` 后，
+默认保留单子进程路径。仅显式设置 `REMI_SLOT_SWITCH=1` 并重新创建 API/updater 容器后，
+supervisor 才在进程内持有 edge，公开端口仍为 6120。A5 验收后再评估默认开启。两个 API 子进程只监听回环
 6121/6122，并信任 edge 的回环转发头。edge 的控制 socket 位于控制卷
 `/remi-control/api/edge.sock`，权限 0600；slot 控制 token 每次启动生成，不写入状态文件。
 必须先采用包含本实现的 API 基础镜像；应用包不能更新 image-owned supervisor/edge。
@@ -27,7 +29,7 @@ switch 先做在线一致性 `pg_dump` 并用 `pg_restore --list` 检查，失�
 `backupError` 后继续。在线备份仅包含数据库，不是 HOME 的完整灾备快照；此路径不
 自动恢复数据库。随后启动 standby，等待就绪，hold edge，release 旧 slot，activate
 新 slot，确认 `/readyz` 为 200，设为 live 并 unhold，最后退出旧 slot。
-release 失败也回到旧 slot，不在存活旧请求仍持锁时继续交接。standby 失败不触碰旧 slot。
+release 失败也回到旧 slot，不在存活旧请求仍持锁时继续交接。standby 失败保留健康旧 slot；若旧 slot 同时崩溃，重建、激活并检查就绪后才报告回退完成。
 activate 失败会杀掉候选并重新 activate 旧 slot。新版本观察期内崩溃或连续 3 秒不就绪，
 会从前一 release 重新启动 standby 并切回。观察期结束才向 updater 确认成功。
 WS/SSE 按 slot release 协议断开重连；hold 缓存有界，新请求等待不代表无限期可用性。
@@ -37,7 +39,11 @@ WS/SSE 按 slot release 协议断开重连；hold 缓存有界，新请求等待
 在 API 容器查看 `/remi-control/api/status.json`：`releaseId`、`childPid`、`revision`、
 `transition.phase`、`transition.error`、`transition.phases`（各阶段时间）和 `heartbeatAt`。
 阶段为 standby、releasing、activating、confirming、succeeded，失败时 rolling_back → failed。
-`slot-selection.json` 单独保存最终选择，防止启动心跳覆盖回退结果。
+`slot-selection.json` 在每个阶段执行前原子持久化 revision、target、previous、
+`hasPrevious` 和恢复策略（`rollback-on-restart`），与心跳文件分离。切换或观察期中
+supervisor 重启时，保守恢复 previous（null 表示基础镜像版本），重新激活并检查就绪后
+将本次更新标为 failed；不会因重启跳过观察期而确认候选成功。终态选择也跨重启保留；
+新的 desired revision 才能重试被拒绝的目标。
 updater journal 位于 `/remi-state/operations/<operation-id>.json`，保存 target、previous、
 revision、备份结果及最终 verified/recovered 状态。切换等待期间 supervisor 持续写心跳。
 回退失败则 supervisor 退出，由容器 restart 策略恢复；不要将此状态当作成功回退。
@@ -64,7 +70,7 @@ API supervisor 支持正整数毫秒环境变量：`REMI_SLOT_STANDBY_WAIT_MS`�
 `REMI_SLOT_CONFIRM_WAIT_MS`（180000）。edge hold 上限按 release + 两次 activate + standby + 30 秒退出宽限计算（默认 5 分钟），
 覆盖观察期崩溃后等待旧 slot 退出并重启的预算；updater 等待结果上限为 15 分钟。
 调高预算应同时审视 updater 的上限。live slot 意外退出先 hold，再按
-1 秒至 30 秒退避重启，连续失败 5 次退出；健康运行一分钟后清除失败计数。
+1 秒至 30 秒退避重启，连续失败 5 次退出并保留原始启动错误；包括 complete.json 不完整等启动前异常。健康运行一分钟后清除失败计数。
 
 在 Compose 环境设置 `REMI_SLOT_SWITCH=0` 并重新创建 API/updater 容器，恢复旧的单子进程
 路径；此操作会重启服务。不要在正在切换时改变开关。关闭开关不需要改映射端口或 web URL。
@@ -75,3 +81,4 @@ bun run test tests/integration/supervisor-slots.test.ts tests/arch/data-schema-i
 ```
 
 这些测试使用真实 edge 和假 slot 子进程，不代替真实 PostgreSQL/Compose 的上线验收。
+真实 120 秒冷启动下的零失败未验证，由 A5（MUL-172）负责验证。

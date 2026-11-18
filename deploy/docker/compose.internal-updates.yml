@@ -7,7 +7,7 @@ services:
     command: ["bun", "/usr/local/lib/remi/supervisor.mjs"]
     environment:
       REMI_SUPERVISOR_ROLE: api
-      REMI_SLOT_SWITCH: ${REMI_SLOT_SWITCH:-1}
+      REMI_SLOT_SWITCH: ${REMI_SLOT_SWITCH:-0}
     volumes:
       - program:/remi-program:ro
       - update-control:/remi-control
@@ -33,7 +33,7 @@ services:
     env_file:
       - ${REMI_UPDATER_ENV_FILE:?set REMI_UPDATER_ENV_FILE to an external env file}
     environment:
-      REMI_SLOT_SWITCH: ${REMI_SLOT_SWITCH:-1}
+      REMI_SLOT_SWITCH: ${REMI_SLOT_SWITCH:-0}
       MULTIREMI_API_URL: http://api:6120
       MULTIREMI_PLATFORM_WEB_HEALTH_URL: http://web:3000/login
       MULTIREMI_DATABASE_URL: postgresql://multiremi:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/multiremi

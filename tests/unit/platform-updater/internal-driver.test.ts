@@ -16,6 +16,9 @@ import { READY_GATE } from './helpers.js';
 const cleanup: Array<() => Promise<unknown>> = [];
 afterEach(async () => { for (const action of cleanup.splice(0).reverse()) await action(); });
 async function fixture() {
+  const previousSwitch = process.env.REMI_SLOT_SWITCH;
+  process.env.REMI_SLOT_SWITCH = '1';
+  cleanup.push(async () => { if (previousSwitch === undefined) delete process.env.REMI_SLOT_SWITCH; else process.env.REMI_SLOT_SWITCH = previousSwitch; });
   const root = await mkdtemp(join(tmpdir(), 'remi-internal-driver-'));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const config = { root: join(root, 'program'), state: join(root, 'state'), control: join(root, 'control'), seeds: join(root, 'seeds'),
@@ -158,10 +161,12 @@ describe('socket-free internal application updates', () => {
       expect(await readJson(join(f.config.control, 'write-fence.json'))).toBeNull();
     } finally { stage.mockRestore(); }
   });
-  it.each(['missing capability', 'disabled switch'])('equal schemas retain old path for %s', async reason => {
+  it.each(['missing capability', 'disabled switch', 'unset switch', 'invalid switch'])('equal schemas retain old path for %s', async reason => {
     const f = await fixture(); f.preflight();
     const previousFlag = process.env.REMI_SLOT_SWITCH;
     if (reason === 'disabled switch') { process.env.REMI_SLOT_SWITCH = '0'; f.statuses.api.slotSwitch = true; }
+    if (reason === 'unset switch') { delete process.env.REMI_SLOT_SWITCH; f.statuses.api.slotSwitch = true; }
+    if (reason === 'invalid switch') { process.env.REMI_SLOT_SWITCH = 'yes'; f.statuses.api.slotSwitch = true; }
     await writeJson(join(f.config.control, 'api/status.json'), f.statuses.api);
     f.operation.kind = 'update'; f.operation.targetManifest = f.manifest as any;
     const stage = spyOn(f.driver as any, 'stage').mockResolvedValue(f.selection);

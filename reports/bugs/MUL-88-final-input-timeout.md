@@ -112,3 +112,18 @@ PR/最终 SHA 的远端检查以交付评论内 stable 同版本 CLI 查询结�
 
 本轮实际校验命令、结果、最终 head 与远端完整工作流证据见交付评论/附件；
 CI 进行中、缺失、跳过不计为 PG 分片通过。未合并、未部署、未作生产修复验证。
+
+### 本轮本地回归（Bun 1.3.14）
+
+低并发运行十文件：`bun run test tests/unit/daemon/turn-protocol.test.ts
+ tests/integration/daemon-protocol-v2/final-input-timeout.test.ts
+ tests/integration/multiremi-daemon-steer.test.ts tests/unit/daemon/task-report-outbox.test.ts
+ tests/unit/daemon/daemon-protocol-client.test.ts
+ tests/integration/daemon-protocol-v2/terminal-replay.test.ts
+ tests/integration/daemon-protocol-v2/chat-unread-consumption.test.ts
+ tests/integration/daemon-protocol-v2/task-input-authority.test.ts
+ tests/unit/multiremi/turn-input-complete.test.ts tests/unit/daemon/report-handlers.test.ts`。
+初次结果 243 pass、2 fail：新测试在超时后继续拦截重放请求，造成模拟时钟下第二次等待；
+修正测试恢复时点（deadline 后立即解除拦截，不放宽 timeout 或业务断言）后，
+只重跑改变的 `final-input-timeout.test.ts`：**11 pass、0 fail、113 assertions**。
+其余九文件未作后续修改；原有 steer/force-answer/unread/幂等回归全部通过。

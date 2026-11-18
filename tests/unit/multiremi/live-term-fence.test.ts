@@ -11,6 +11,26 @@ import { createLocalStore, createResponsibleTestIssue, db, resetMultiremiTestEnv
 
 afterEach(resetMultiremiTestEnv);
 
+test("the default server activates a single-process term before starting offers and jobs", async () => {
+  const store = createLocalStore();
+  const scheduler = new MultiremiScheduler({ store });
+  let captured: ReturnType<typeof currentBackgroundTerm>;
+  const start = spyOn(scheduler, "start").mockImplementation(() => { captured = currentBackgroundTerm(); });
+  const server = startMultiremiServer({ store, port: 0, hostname: "127.0.0.1", backgroundJobs: true,
+    scheduler, scmPolling: null, messaging: null, issueTitleScheduler: null,
+    bodyHtmlBackfill: null, controlPlaneSshMesh: null });
+  try {
+    await server.slotStartup;
+    expect(server.slot).toBeNull();
+    expect(captured).toBeDefined();
+    expect(() => captured!.assertCurrent()).not.toThrow();
+    expect(db!.query("SELECT holder FROM multiremi_live_terms").get()).toEqual({ holder: `single:${process.pid}` });
+  } finally {
+    await server.shutdown();
+    start.mockRestore();
+  }
+});
+
 test("old prepared statements and async continuations stay fenced after a new activation", async () => {
   const raw = openSqliteDatabase(":memory:");
   try {

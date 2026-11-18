@@ -1,4 +1,5 @@
-import { unsupportedStringContinuations, destructiveDollarQuotes, supportedDollarQuotes } from '../../fixtures/schema-string-continuations.js';
+import { unsupportedRegisteredSql } from '../../fixtures/schema-sql-allowlist.js';
+import { unsupportedStringContinuations, destructiveDollarQuotes, unsupportedDollarQuotes, unsupportedSingleLiterals, allowedDollarIdentifiers } from '../../fixtures/schema-string-continuations.js';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { runMigrations } from '@multiremi/store/migrations.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
@@ -79,7 +80,7 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
   ];
   for (const [index, template] of direct.entries()) it(`rejects reviewer SQL ${template}`, () => {
     const schema = fixture();
-    rejected(`direct-${index}`, template.replaceAll('S.', `${schema}.`).replace('SCHEMA S ', `SCHEMA ${schema} `), 'Destructive DDL is forbidden');
+    rejected(`direct-${index}`, template.replaceAll('S.', `${schema}.`).replace('SCHEMA S ', `SCHEMA ${schema} `), hasDestructiveSchemaSql(template) && /inner|DO \$\$/.test(template) ? 'unsupported' : 'Destructive DDL is forbidden');
   });
   for (const name of ['U&"retained"', String.raw`u&"ret\0061ined"`,
     `U&"ret!0061ined" UESCAPE '!'`,
@@ -123,12 +124,12 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
     expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
     expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
   });
-  for (const template of unsupportedStringContinuations) it(`rejects string continuation without data loss: ${template}`, () => {
+  for (const template of [...unsupportedStringContinuations, ...unsupportedDollarQuotes, ...unsupportedSingleLiterals]) it(`rejects string continuation without data loss: ${template}`, () => {
     const schema = fixture();
     db.exec(`CREATE TABLE ${schema}.retained (id integer); INSERT INTO ${schema}.retained VALUES (42)`);
     expect(db.query('SHOW standard_conforming_strings').get()).toEqual({ standard_conforming_strings: 'on' });
     const sql = template.replaceAll('S.', `${schema}.`);
-    rejected(`string-continuation-${serial}`, sql, 'String continuations are unsupported');
+    rejected(`string-continuation-${serial}`, sql, 'unsupported');
     expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{ id: 42 }]);
     expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
     expect(readSchemaLevels(db).expandLevel).toBe(0);
@@ -153,7 +154,7 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
       console.info(`Dollar boundary rejected (${method}); row=42; steps=[]; levels=${JSON.stringify(levels)}: ${sql}`);
     } finally { db.exec('DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
   });
-  for (const sql of supportedDollarQuotes) it(`executes opaque dollar content: ${sql}`, () => {
+  for (const sql of allowedDollarIdentifiers) it(`executes opaque dollar content: ${sql}`, () => {
     fixture();
     try {
       runSchemaExpands(db, [step(`dollar-allowed-${serial}`, sql)], '9.0.0', { minLevel: 0, maxLevel: 100 });
@@ -203,6 +204,90 @@ describe.skipIf(!adminUrl)('transactional catalog authority on PostgreSQL', () =
     const sql = indirect ? `SELECT public.${fn}()` : ddl;
     if (indirect) expect(hasDestructiveSchemaSql(sql)).toBe(false);
     rejected(`hidden-${index}-${indirect}`, sql, indirect || !hasDestructiveSchemaSql(sql) ? 'Destructive schema catalog change' : 'Destructive DDL is forbidden');
+  });
+  it('VALUES ACL atoms exactly match the legacy unnest snapshot, including grant options', () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.acl_atoms(a integer,b integer);
+      GRANT SELECT ON ${schema}.acl_atoms TO pg_monitor;
+      GRANT UPDATE ON ${schema}.acl_atoms TO pg_monitor WITH GRANT OPTION;
+      GRANT SELECT(a) ON ${schema}.acl_atoms TO pg_monitor;
+      GRANT UPDATE(b) ON ${schema}.acl_atoms TO pg_monitor WITH GRANT OPTION`);
+    let replaced = 0;
+    const legacy = new Proxy(db, { get(target, key) {
+      if (key === 'query') return (sql: string) => target.query(sql.replace(
+        /CROSS JOIN LATERAL \(VALUES \(([^\n]+)\),\n      \(CASE ([^\n]+) END\)\) v\(atom\)/g,
+        (_match, atom, conditional) => { replaced++; return `CROSS JOIN LATERAL unnest(ARRAY[${atom}, CASE ${conditional} END]) atom`; },
+      ));
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const before = snapshotSchemaCatalog(legacy), after = snapshotSchemaCatalog(db);
+    expect(replaced).toBe(5);
+    expect(after).toEqual(before);
+    const entries = [...after.values()].filter(entry => entry.key.includes(`"${schema}","acl_atoms"`));
+    for (const kind of ['relation:', 'column:']) {
+      const atoms = entries.filter(entry => entry.key.startsWith(kind)).flatMap(entry => entry.acl ?? []);
+      expect(atoms.some(atom => atom.endsWith(':grant'))).toBe(true);
+      expect(atoms.some(atom => !atom.endsWith(':grant'))).toBe(true);
+    }
+    for (const entry of after.values()) if (entry.acl) expect(entry.acl).toEqual([...entry.acl].sort());
+    console.info('ACL equivalence: 5 legacy unnest queries; full snapshots equal; table/column grants and grant options, atom order identical');
+  });
+  for (const template of unsupportedRegisteredSql) for (const method of ['exec', 'query'] as const) it(`allowlist refuses ${method} ${JSON.stringify(template)}`, () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.retained(id integer); INSERT INTO ${schema}.retained VALUES(42)`);
+    const sql = template.replaceAll('S.', `${schema}.`), id = `allowlist-${serial}`;
+    const before = snapshotSchemaCatalog(db), levels = readSchemaLevels(db);
+    const migration = step(id, sql);
+    migration.run = guarded => { if (method === 'exec') guarded.exec(sql); else guarded.query(sql).run(); };
+    try {
+      let failure: unknown;
+      try { runSchemaExpands(db, [migration], '9.0.0', {minLevel:0,maxLevel:100}); } catch (error) { failure = error; }
+      console.info(`ALLOWLIST ${method} ${JSON.stringify(sql)}: error=${String(failure)}; rows=${JSON.stringify(db.query(`SELECT id FROM ${schema}.retained`).all())}; steps=${JSON.stringify(db.query('SELECT id FROM multiremi_schema_steps').all())}; levels=${JSON.stringify(readSchemaLevels(db))}`);
+      expect(String(failure)).toContain('unsupported');
+      expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{id:42}]);
+      expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
+      expect(readSchemaLevels(db)).toEqual(levels);
+      expect(snapshotSchemaCatalog(db)).toEqual(before);
+    } finally { db.exec('DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
+  });
+  it('executes allowlisted batches by guarded boundaries on PostgreSQL', () => {
+    const schema = fixture();
+    const sql = `CREATE TABLE ${schema}.pieces(v text); INSERT INTO ${schema}.pieces VALUES('a;b'); -- ; comment
+INSERT INTO ${schema}.pieces VALUES('c'';d')`;
+    const statements: string[] = [];
+    const handle = new Proxy(db, {get(target, key) {
+      if (key === 'exec') return (batch: string) => { expect(batch).not.toBe(sql); target.exec(batch); };
+      if (key === 'query') return (statement: string) => { statements.push(statement); return target.query(statement); };
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    }});
+    try {
+      const migration = step(`batch-${serial}`, sql);
+      migration.run = guarded => guarded.exec(sql);
+      runSchemaExpands(handle, [migration], '9.0.0', {minLevel:0,maxLevel:100});
+      expect(statements).toContain(`CREATE TABLE ${schema}.pieces(v text)`);
+      expect(statements).toContain(` INSERT INTO ${schema}.pieces VALUES('a;b')`);
+      expect(db.query(`SELECT v FROM ${schema}.pieces ORDER BY v`).all()).toEqual([{v:'a;b'}, {v:"c';d"}]);
+      expect(readSchemaLevels(db).expandLevel).toBe(1);
+      console.info('PostgreSQL exec: batch bypasses bridge exec, quoted/comment semicolons retained, three statements executed and committed');
+    } finally { db.exec('DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
+  });
+  it('refuses standard_conforming_strings=off before any expand work', () => {
+    const schema = fixture();
+    db.exec(`CREATE TABLE ${schema}.retained(id integer); INSERT INTO ${schema}.retained VALUES(42)`);
+    db.exec('SET standard_conforming_strings=off');
+    try {
+      expect(db.query('SHOW standard_conforming_strings').get().standard_conforming_strings).toBe('off');
+      let ran = false;
+      const migration = step(`scs-off-${serial}`, 'SELECT 1');
+      migration.run = () => { ran = true; };
+      expect(() => runSchemaExpands(db, [migration], '9.0.0', {minLevel:0,maxLevel:100})).toThrow('standard_conforming_strings=on');
+      expect(ran).toBe(false);
+      expect(db.query(`SELECT id FROM ${schema}.retained`).all()).toEqual([{id:42}]);
+      expect(db.query('SELECT id FROM multiremi_schema_steps').all()).toEqual([]);
+      expect(readSchemaLevels(db).expandLevel).toBe(0);
+    } finally { db.exec('SET standard_conforming_strings=on; DELETE FROM multiremi_schema_steps; UPDATE multiremi_schema_meta SET expand_level=0'); }
   });
   function oldReader(sql: string) {
     db.exec('SET ROLE pg_monitor');

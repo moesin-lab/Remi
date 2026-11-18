@@ -1,5 +1,5 @@
 import { snapshotSchemaCatalog, assertAdditiveSchemaCatalog } from './schema-catalog.js';
-import { hasDestructiveSchemaStatement, unsupportedSchemaSqlReason } from "./schema-ddl.js";
+import { hasDestructiveSchemaStatement, unsupportedSchemaSqlReason, splitSchemaStatements } from "./schema-ddl.js";
 import type { SqlDatabase } from './db/postgres.js';
 import { assertSchemaCompatible, validateSchemaCompatibility, ensureSchemaMeta, readSchemaLevels, type SchemaCompatibility } from './schema-levels.js';
 
@@ -42,6 +42,9 @@ export function validateSchemaMigrations(steps: readonly SchemaMigration[]): voi
 
 /** Caller owns the migration lock; each step and its marker commit together. */
 export function runSchemaExpands(db: SqlDatabase, steps: readonly SchemaMigration[], release: string, code: SchemaCompatibility): void {
+  if (db.dialect === 'postgres' && db.query('SHOW standard_conforming_strings').get()?.standard_conforming_strings !== 'on') {
+    throw new Error('Registered schema expands require standard_conforming_strings=on; restore the PostgreSQL default before retrying');
+  }
   validateSchemaMigrations(steps);
   validateSchemaCompatibility(code);
   releaseParts(release);
@@ -111,6 +114,22 @@ function expandOnlyDatabase(db: SqlDatabase): SqlDatabase {
           const unsupported = unsupportedSchemaSqlReason(sql);
           if (unsupported) throw new Error(unsupported);
           if (hasDestructiveSchemaStatement(sql)) throw new Error('Destructive DDL is forbidden in an expand migration; declare a later-release contract step');
+          if (key === 'exec') {
+            // Split with the very same tokens the guard inspected, never with
+            // the bridge splitter. Validate the full batch before executing.
+            const statements = splitSchemaStatements(sql);
+            for (const statement of statements) {
+              if (target.dialect === 'postgres' && target.query('SHOW standard_conforming_strings').get()?.standard_conforming_strings !== 'on') {
+                throw new Error('Registered schema expands require standard_conforming_strings=on');
+              }
+              target.query(statement).run();
+            }
+            return;
+          }
+          // This premise also holds if a preceding expand statement changed it.
+          if (target.dialect === 'postgres' && target.query('SHOW standard_conforming_strings').get()?.standard_conforming_strings !== 'on') {
+            throw new Error('Registered schema expands require standard_conforming_strings=on');
+          }
           return value.call(target, sql, ...args);
         };
       }

@@ -16,8 +16,8 @@ const relationKey = (schema: unknown, name: unknown) => `relation:${JSON.stringi
 // Split grant options into atoms so removing grantability also removes an atom.
 const acl = (expression: string, kind: string, owner: string) =>
   `ARRAY(SELECT atom FROM pg_catalog.aclexplode(coalesce(${expression}, pg_catalog.acldefault(${kind.startsWith('CASE') ? kind : "'" + kind + "'"}, ${owner}))) x
-    CROSS JOIN LATERAL unnest(ARRAY[x.grantor::text || ':' || x.grantee::text || ':' || x.privilege_type,
-      CASE WHEN x.is_grantable THEN x.grantor::text || ':' || x.grantee::text || ':' || x.privilege_type || ':grant' END]) atom
+    CROSS JOIN LATERAL (VALUES (x.grantor::text || ':' || x.grantee::text || ':' || x.privilege_type),
+      (CASE WHEN x.is_grantable THEN x.grantor::text || ':' || x.grantee::text || ':' || x.privilege_type || ':grant' END)) v(atom)
     WHERE atom IS NOT NULL ORDER BY atom)`;
 
 /** Token boundaries retain literal values, so changing a named CHECK's value

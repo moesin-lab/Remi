@@ -100,6 +100,12 @@ for (const table of ['U&"retained"', String.raw`u&"ret\0061ined"`,
     `ALTER TABLE ${table} ALTER U&"col" SET DEFAULT 1`);
 }
 
+// These used to be additive lexer compatibility cases. The owner's registered
+// SQL allowlist now excludes their dollar quotes, nested comments and SQLite quotes.
+const excludedAdditiveForms = negative.filter(sql => /\$\$|\$body\$|^\/\* outer|`|\[/.test(sql));
+for (const sql of excludedAdditiveForms) negative.splice(negative.indexOf(sql), 1);
+positive.push(...excludedAdditiveForms);
+
 describe('shared schema DDL action detector', () => {
   for (const sql of positive) it(`rejects ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(true));
   for (const sql of negative) it(`allows ${sql}`, () => expect(hasDestructiveSchemaSql(sql)).toBe(false));
@@ -155,12 +161,23 @@ for (const sql of supportedSingleLiterals) it(`allows single literals: ${sql}`, 
   expect(hasDestructiveSchemaStatement(sql)).toBe(false);
 });
 
-import { destructiveDollarQuotes, supportedDollarQuotes } from '../../fixtures/schema-string-continuations.js';
+import { destructiveDollarQuotes, unsupportedDollarQuotes, unsupportedSingleLiterals, allowedDollarIdentifiers } from '../../fixtures/schema-string-continuations.js';
 for (const sql of destructiveDollarQuotes) it(`rejects case-sensitive dollar boundary: ${sql}`, () => {
   expect(hasDestructiveSchemaSql(sql)).toBe(true);
   expect(hasDestructiveSchemaStatement(sql)).toBe(true);
 });
-for (const sql of supportedDollarQuotes) it(`allows opaque dollar content: ${sql}`, () => {
+for (const sql of allowedDollarIdentifiers) it(`allows dollar in identifiers: ${sql}`, () => {
   expect(hasDestructiveSchemaSql(sql)).toBe(false);
   expect(hasDestructiveSchemaStatement(sql)).toBe(false);
+});
+
+import { unsupportedRegisteredSql } from '../../fixtures/schema-sql-allowlist.js';
+for (const sql of unsupportedRegisteredSql) it(`registered lexical allowlist rejects ${JSON.stringify(sql)}`, () => {
+  expect(hasDestructiveSchemaSql(sql)).toBe(true);
+  expect(hasDestructiveSchemaStatement(sql)).toBe(true);
+});
+
+for (const sql of [...unsupportedSingleLiterals, ...unsupportedDollarQuotes]) it(`refuses previously supported extended literals: ${sql}`, () => {
+  expect(hasDestructiveSchemaSql(sql)).toBe(true);
+  expect(hasDestructiveSchemaStatement(sql)).toBe(true);
 });

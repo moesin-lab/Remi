@@ -186,6 +186,8 @@ export interface StorageReport {
    * nothing is walked). Other writers, space the filesystem frees later and compression make it differ from the bytes deleted.
    */
   freed_bytes: number;
+  /** Curated cache homes eligible this round and fully cleaned; dry runs only plan. Space is included in freed_bytes. */
+  codex_plugin_cache?: { planned_homes: number; cleaned_homes: number };
   /** Always present; periodic rounds include only non-keep items. */
   plan: StoragePlanItem[];
   errors: Array<{ subject_id: string | null; message: string }>;

@@ -212,6 +212,7 @@ export function mergeCodexSessionConfig(
   fragment: string,
   relayUsesEnvApiKey: boolean,
   modelCatalogPath?: string,
+  codexPluginInstalled = false,
 ): string {
   const mergedToml = mergeCodexConfig(currentToml, fragment);
   let merged: Record<string, unknown>;
@@ -236,6 +237,11 @@ export function mergeCodexSessionConfig(
     if (isPlainObject(provider)) delete provider.experimental_bearer_token;
   }
   enableDefaultModeRequestUserInput(merged);
+  // Remi installs only explicitly bound Agent Plugins. Avoid a curated clone
+  // for every execution home while preserving user/Relay feature choices.
+  if (!codexPluginInstalled && isPlainObject(merged.features) && !("plugins" in merged.features)) {
+    merged.features.plugins = false;
+  }
   if (!relayUsesEnvApiKey) return stringifyToml(merged);
 
   const active = activeProvider && providers && isPlainObject(providers[activeProvider])

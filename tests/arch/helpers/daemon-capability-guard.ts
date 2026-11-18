@@ -4,6 +4,8 @@ import ts from "typescript";
 // conservatively (a version-derived binding stays marked). Symbols keep lexical
 // scopes separate. No cross-file or general data-flow analysis: passing a version
 // through a helper parameter/return value is a known limitation and needs review.
+// Destructuring keys support static strings/templates, not dynamic expressions.
+// Const comparison-function aliases use the same single-file lexical fixed point.
 
 // Directories/globs cover future files as well as today's claim/recheck,
 // scheduler, runtime admission, and both sides of daemon negotiation.
@@ -86,6 +88,7 @@ export function findVersionDecisions(file: string, source: string): string[] {
   host.getSourceFile = name => name === file ? tree : undefined;
   const checker = ts.createProgram([file], { noLib: true, noResolve: true }, host).getTypeChecker();
   const marked = new Set<ts.Symbol>();
+  const comparisonAliases = new Set<ts.Symbol>();
   const symbol = (node: ts.Node) => checker.getSymbolAtLocation(node);
   const failures: string[] = [];
   const importedNames = new Map<ts.Symbol, string>();
@@ -108,7 +111,8 @@ export function findVersionDecisions(file: string, source: string): string[] {
     }
   }
   const isVersionCall = (expression: ts.Expression): boolean => {
-    if (ts.isIdentifier(expression)) return semverBindings.has(expression.text)
+    if (ts.isParenthesizedExpression(expression)) return isVersionCall(expression.expression);
+    if (ts.isIdentifier(expression)) return comparisonAliases.has(symbol(expression)!) || semverBindings.has(expression.text)
       || /^(?:compare\w*versions?\w*|meetsDaemonMinCliVersion)$/i.test(
         importedNames.get(symbol(expression)!) ?? expression.text);
     if (ts.isPropertyAccessExpression(expression)) return isVersionCall(expression.expression)
@@ -141,6 +145,12 @@ export function findVersionDecisions(file: string, source: string): string[] {
     const binding = symbol(name);
     if (binding) marked.add(binding);
   };
+  const isVersionKey = (key: ts.Node): boolean => {
+    if (ts.isComputedPropertyName(key)) {
+      return ts.isStringLiteralLike(key.expression) && versionName.test(key.expression.text);
+    }
+    return (ts.isIdentifier(key) || ts.isStringLiteralLike(key)) && versionName.test(key.text);
+  };
   const bind = (name: ts.BindingName, derived: boolean): void => {
     if (ts.isIdentifier(name)) {
       if (derived) mark(name);
@@ -149,7 +159,7 @@ export function findVersionDecisions(file: string, source: string): string[] {
     for (const element of name.elements) {
       if (ts.isOmittedExpression(element)) continue;
       const key = element.propertyName ?? element.name;
-      const field = (ts.isIdentifier(key) || ts.isStringLiteralLike(key)) && versionName.test(key.text);
+      const field = isVersionKey(key);
       bind(element.name, derived || field || (!!element.initializer && containsVersionRead(element.initializer)));
     }
   };
@@ -166,7 +176,7 @@ export function findVersionDecisions(file: string, source: string): string[] {
         } else if (ts.isPropertyAssignment(property)) {
           const key = property.name;
           assign(property.initializer, derived
-            || ((ts.isIdentifier(key) || ts.isStringLiteralLike(key)) && versionName.test(key.text)));
+            || isVersionKey(key));
         } else if (ts.isSpreadAssignment(property)) assign(property.expression, derived);
       }
     } else if (ts.isArrayLiteralExpression(target)) {
@@ -178,6 +188,12 @@ export function findVersionDecisions(file: string, source: string): string[] {
   const collect = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node)) {
       bind(node.name, !!node.initializer && containsVersionRead(node.initializer));
+      if (ts.isIdentifier(node.name) && node.initializer
+        && ts.isVariableDeclarationList(node.parent) && (node.parent.flags & ts.NodeFlags.Const)
+        && isVersionCall(node.initializer)) {
+        const binding = symbol(node.name);
+        if (binding) comparisonAliases.add(binding);
+      }
     } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
       assign(node.left, containsVersionRead(node.right));
     }
@@ -187,9 +203,9 @@ export function findVersionDecisions(file: string, source: string): string[] {
   // assignment. Deliberately conservative, without control-flow/path inference.
   let previousSize: number;
   do {
-    previousSize = marked.size;
+    previousSize = marked.size + comparisonAliases.size;
     collect(tree);
-  } while (marked.size !== previousSize);
+  } while (marked.size + comparisonAliases.size !== previousSize);
   const visit = (node: ts.Node): void => {
     if (allowed(node)) return;
     const versionCall = ts.isCallExpression(node) && isVersionCall(node.expression);

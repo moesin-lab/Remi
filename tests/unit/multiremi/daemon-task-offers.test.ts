@@ -1,4 +1,4 @@
-import { currentBackgroundTerm, withBackgroundTerm } from "@shared/db/live-term.js";
+import { currentBackgroundTerm, withBackgroundTerm, StaleLiveTermError } from "@shared/db/live-term.js";
 import { DatabaseUnavailableError } from "@shared/db/recovery.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { afterEach, describe, expect, it, spyOn, setSystemTime } from "bun:test";
@@ -56,6 +56,48 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
 }
 
 describe("A-3 task offers", () => {
+  for (const fenced of [false, true]) {
+    for (const accepted of [false, true]) {
+      it(`persists an ${accepted ? "accepted" : "explicitly rejected"} offer with ${fenced ? "an active" : "no"} term`, async () => {
+        const h = fixture(undefined, 1, undefined, false, false);
+        const task = h.task();
+        const term = fenced ? h.store.activateBackgroundTerm("single:test", () => {}) : undefined;
+        withBackgroundTerm(term, () => h.offers.start());
+        await h.hello();
+        const offer = h.offered()[0]!;
+        expect(offer.p.attempt_id).toBe(task.id);
+        await h.send("res", accepted ? { ok: true } : { ok: false, code: "binary_skill_files_unsupported" },
+          { re: String(offer.seq), ack: offer.seq });
+        await h.layer.drain();
+        const persisted = h.store.getTask(task.id)!;
+        expect(persisted.status).toBe(accepted ? "dispatched" : "queued");
+        if (accepted) expect(persisted.acceptedAt).toBeString();
+        else expect(persisted).toMatchObject({ acceptedAt: null, offeredAt: null });
+      });
+    }
+  }
+
+  for (const accepted of [false, true]) {
+    it(`rejects a stale term's ${accepted ? "accept" : "requeue"} SQL after takeover`, async () => {
+      const h = fixture(undefined, 1, undefined, false, false);
+      const task = h.task();
+      let losses = 0;
+      const a = h.store.activateBackgroundTerm("A", () => { losses++; });
+      withBackgroundTerm(a, () => h.offers.start());
+      await h.hello();
+      const offer = h.offered()[0]!;
+      const before = h.store.getTask(task.id);
+      h.store.activateBackgroundTerm("B", () => {});
+      expect(() => withBackgroundTerm(a, () => accepted
+        ? h.store.acceptTaskOffer(task.id, h.runtimeIds[0]!)
+        : h.store.requeueTaskOffer(task.id, h.runtimeIds[0]!, "rejected"))).toThrow(StaleLiveTermError);
+      await h.send("res", { ok: accepted }, { re: String(offer.seq), ack: offer.seq });
+      await h.layer.drain();
+      expect(losses).toBe(1);
+      expect(h.store.getTask(task.id)).toEqual(before);
+    });
+  }
+
   it("binds a hello pump and its paused preparation to the activation that started offers", async () => {
     let release!: () => void;
     let entered!: () => void;

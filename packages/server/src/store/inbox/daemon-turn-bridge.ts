@@ -106,7 +106,7 @@ export class DaemonTurnBridge {
       if(!turn)throw new Error('stale_attempt');lockLane(this.ctx,turn.session_id,turn.agent_id,turn.execution_scope);
       const from=this.cursor(turn),to=this.ctx.conversationLog().getConversationLogHead(turn.session_id)?.headSeq??from;
       this.ctx.db.run('UPDATE multiremi_turn_attempts SET projection_to_seq=CASE WHEN COALESCE(projection_to_seq,0)<? THEN ? ELSE projection_to_seq END WHERE id=?',[to,to,attempt.id]);
-      return {turn_id:turn.id,attempt_id:attempt.id,input_from_seq:from,input_to_seq:to,input_messages:this.project(this.inputMessages(turn,from,to),turn,from,to)};
+      return {turn_id:turn.id,attempt_id:attempt.id,input_from_seq:from,input_to_seq:to,input_messages:this.project(this.inputMessages(turn,from,to),turn,from,to,this.messages(turn.session_id,from,to))};
     });
   }
   snapshot(scope:DaemonTurnScope,activeAttemptIds:ReadonlySet<string>) {
@@ -173,8 +173,8 @@ export class DaemonTurnBridge {
         const id=String(row.snapshot_attempt_id),head=Number(row.snapshot_head);
         const from=Number(row.input_ack_seq??(row.provider_session_id?row.lane_cursor:0)??0);
         const delivered=plannedRestartDeliveredInputs(this.ctx,id);
-        const read=Number(row.input_read_seq??from),window=(windows.get(id)??[]).filter(message=>!delivered.has(message.id));
-        const interrupts=window.filter(m=>m.wake_applied==='now'&&m.to_agent_id===row.agent_id
+        const read=Number(row.input_read_seq??from),window=windows.get(id)??[];
+        const interrupts=window.filter(m=>!delivered.has(m.id)&&m.wake_applied==='now'&&m.to_agent_id===row.agent_id
           &&(m.metadata.execution_scope??'')===row.execution_scope&&m.seq>Number(row.wake_seq));
         for(const message of this.project(interrupts,row,from,head,window,read))messages.push({turn_id:row.id,attempt_id:id,message});
         if(row.wrap_up_requested_at)wrapUps.push({turn_id:row.id,attempt_id:id,requested_at:row.wrap_up_requested_at});

@@ -32,6 +32,9 @@ test.skipIf(!process.env.MULTIREMI_TEST_POSTGRES_URL)("PG takeover waits for the
       const deadline = performance.now() + 3000;
       let waiting = false;
       while (performance.now() < deadline) {
+        // Statistics are cached for the transaction. Refresh before observing
+        // the successor, which connects after this transaction has begun.
+        raw.query("SELECT pg_stat_clear_snapshot()").get();
         waiting = !!raw.query("SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND application_name = 'mul169-successor' AND wait_event_type = 'Lock'").get();
         if (waiting) break;
         Bun.sleepSync(10);

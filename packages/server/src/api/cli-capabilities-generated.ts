@@ -5223,6 +5223,84 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "jsonl"
       ]
     },
+    "scm.monitor.status": {
+      "command": "remi scm monitor status",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.monitor.status",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.monitor.project.get": {
+      "command": "remi scm monitor project get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.monitor.project.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.monitor.project.set": {
+      "command": "remi scm monitor project set",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.monitor.project.set",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.watch": {
+      "command": "remi scm change-request watch",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.watch",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.unwatch": {
+      "command": "remi scm change-request unwatch",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.unwatch",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "scm.change-request.watch-list": {
+      "command": "remi scm change-request watch-list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "scm.change-request.watch-list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
     "scm.change-request.checks": {
       "command": "remi scm change-request checks",
       "auth": [

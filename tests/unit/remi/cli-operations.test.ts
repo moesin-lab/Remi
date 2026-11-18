@@ -29,6 +29,38 @@ afterEach(() => {
 });
 
 describe("operations CLI contracts", () => {
+  it("maps SCM event cursor to the server after parameter", async () => {
+    useCliEnv(); const spec = specById("scm.event.list");
+    globalThis.fetch = capabilityFetch(spec.id, request => {
+      expect(new URL(request.url).searchParams.get("after")).toBe("sce_last");
+      expect(new URL(request.url).searchParams.has("cursor")).toBe(false);
+      return Response.json({ events: [], nextAfter: null });
+    });
+    await capture(() => registryFor([spec]).execute(["scm", "event", "list", "--cursor", "sce_last", "--json"]));
+  });
+
+  it("registers real watch, unwatch, subscription list and health commands", async () => {
+    useCliEnv();
+    const entries = [
+      { id: "scm.change-request.watch", args: ["scm", "change-request", "watch", "acme/widgets", "42", "--session", "ises_watch", "--until", "settled"], method: "PUT" },
+      { id: "scm.change-request.unwatch", args: ["scm", "change-request", "unwatch", "acme/widgets", "42", "--session", "ises_watch"], method: "DELETE" },
+      { id: "scm.change-request.list", args: ["scm", "change-request", "list", "acme/widgets", "42"], method: "GET" },
+      { id: "scm.monitor.status", args: ["scm", "monitor", "status"], method: "GET" },
+    ];
+    for (const entry of entries) {
+      const spec = specById(entry.id);
+      globalThis.fetch = capabilityFetch(spec.id, async request => {
+        const url = new URL(request.url);
+        expect(request.method).toBe(entry.method);
+        expect(url.pathname).toBe(entry.id === "scm.monitor.status" ? "/api/workspaces/ws_1/scm/monitor/status" : "/api/workspaces/ws_1/scm/repositories/acme%2Fwidgets/change-requests/42/watch");
+        if (entry.method === "PUT") expect(await request.json()).toEqual({ sessionId: "ises_watch", until: "settled" });
+        if (entry.method === "DELETE") expect(url.searchParams.get("session")).toBe("ises_watch");
+        return Response.json({ watches: [], streams: [] });
+      });
+      await capture(() => registryFor([spec]).execute([...entry.args, "--json"]));
+    }
+  });
+
   it("reads live checks with the canonical repository and provider PR number", async () => {
     useCliEnv();
     const spec = specById("scm.change-request.checks");

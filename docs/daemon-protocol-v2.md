@@ -1343,11 +1343,13 @@ manual、deploy、CLI update 的 drain 到期时，只有支持的 runtime 请�
    attempt 数不变，没有 `lost`/`failed`，trace 保留同一轮和“Remi 已更新”条目。
 
 续接 CAS 提交后保持 `resuming`，直到对应 consumer 的持久 `task.start` 提交才变为
-`running`。`suspended` 和 `resuming` 均受孤儿恢复保护；RPC 超时或回复丢失后，
-daemon 用原 consumer 重试，复用同一 generation 和授权，不消耗 attempt。
+`running`。`suspended` 保留孤儿恢复保护；`resuming` 从 CAS 提交起有固定 5 分钟的
+start 确认宽限期。RPC 超时或回复丢失后，daemon 用原 consumer 重试，复用同一 generation
+和授权，不消耗 attempt，也不延长宽限期。恢复扫描或 offer 安全扫描发现未 start 的 receipt 期限已过时，在 workspace/lane 锁下撤销旧执行授权并交回 MUL-45 崩溃恢复；遵循既有
+重试上限，不把丢失 journal/consumer 的真实崩溃永久隐藏为运行中。已确认 start 的执行不走该宽限期回收；心跳或同 consumer 重试不会延长期限。
+期限已过的迟到 start、执行报告和输入在同一生命周期锁下返回 `stale_execution`；撤销记录
+保留的新 generation 不授予执行权，也不再豁免孤儿恢复。
 等待续接时轮询间隔为 `max(1 秒, pollIntervalMs)`，不等待普通空闲时的十分钟刷新。
-续接 offer 使用普通任务的大小预算；原生 Q 保持完整，无法装入帧时返回明确的
-`capacity`，保留续接保护，不能静默丢弃回复或改判执行已恢复。
 
 ### 计划内重启的原生等待
 

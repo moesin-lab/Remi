@@ -1,3 +1,4 @@
+import { registerDaemonReportHandlers } from "@multiremi/api/daemon-protocol/report-handlers.js";
 import { expect, it } from "bun:test";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 import type { PlannedRestartCheckpoint } from "@multiremi/store/planned-restarts.js";
@@ -9,12 +10,13 @@ import { MultiremiStore } from "@multiremi/store.js";
 import { PlannedRestartJournal, PlannedRestartTransfer, type PlannedRestartRemote } from "@multiremi/worker/planned-restart-journal.js";
 
 pendingTurnBackendTests("planned restart handoff", fixture => {
-  function setup() {
+  function setup(maxAttempts = 1) {
     const f = fixture();
     const scope = { workspaceId: "local", runtimeId: "rt_planned", daemonId: "daemon_planned" };
     f.store.registerRuntime({ id: scope.runtimeId, daemonId: scope.daemonId, name: "Planned restart", provider: "codex", workspaceId: scope.workspaceId });
     const agent = f.store.createAgent({ name: "Restart agent", provider: "codex", runtimeId: scope.runtimeId });
-    const task = f.store.createTask({ agentId: agent.id, prompt: "Continue the same turn", maxAttempts: 1 });
+    const issue = maxAttempts > 1 ? f.createIssue({ title: "Restart recovery", assigneeType: "agent", assigneeId: agent.id }) : null;
+    const task = f.store.createTask({ agentId: agent.id, issueId: issue?.id, prompt: "Continue the same turn", maxAttempts });
     expect(f.store.claimTask(scope.runtimeId)?.id).toBe(task.id);
     f.store.startTask(task.id);
     const offer = f.store.getDaemonTurnBridge().offerInput(f.store.getTaskWithAgent(task.id)!);
@@ -261,6 +263,70 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     x.planned().withExecution(x.task.id, 1, x.scope, () => {}, consumer);
     expect(x.planned().get(x.task.id)?.state).toBe("running");
     expect(x.planned().protectsFromOrphanRecovery(x.task.id)).toBe(false);
+  });
+
+  it("expires a no-start resume, fences its consumer and recovers through the crash policy", () => {
+    const x = setup(3), h = x.suspend();
+    x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+    const consumer = "expired-resume-consumer";
+    const resume = () => x.planned().resume(x.task.id, h.handoff_id, consumer, x.scope, () => {
+      x.f.store.reportTaskUsageSnapshot(x.task.id, { version: 2, runId: consumer, revision: 0, complete: false, units: [] }, x.scope);
+    });
+    resume();
+    expect(x.f.store.recoverOrphans(x.scope.runtimeId, [])).toEqual({ orphaned: 0, retried: 0 });
+    expect(resume().generation).toBe(1);
+    x.f.db.run("UPDATE multiremi_planned_restarts SET updated_at='2000-01-01T00:00:00.000Z' WHERE attempt_id=?", [x.task.id]);
+    expect(x.f.store.recoverOrphans(x.scope.runtimeId, [])).toEqual({ orphaned: 1, retried: 1 });
+    // The server's periodic sweep is also safe after ordinary recovery.
+    x.planned().recoverExpiredResumes(x.scope.runtimeId);
+    expect(x.f.store.isTaskUsageExecutionAuthorized(x.task.id, consumer, x.scope.runtimeId)).toBe(false);
+    expect(() => resume()).toThrow("stale_execution");
+    expect(() => x.planned().withExecution(x.task.id, 1, x.scope, () => {} , consumer)).toThrow("stale_execution");
+    expect(x.f.store.recoverOrphans(x.scope.runtimeId, [])).toEqual({ orphaned: 0, retried: 0 });
+    expect(x.f.store.getTask(x.task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
+    expect(Number(x.f.db.query("SELECT COUNT(*) AS n FROM multiremi_turn_attempts WHERE turn_id=?").get(h.turn_id).n)).toBe(2);
+  });
+
+  it("rejects late start, report and input after an unstarted resume expires", async () => {
+    const x = setup(), h = x.suspend(), consumer = "late-expired-consumer";
+    x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+    x.planned().resume(x.task.id, h.handoff_id, consumer, x.scope, () => {});
+    x.f.db.run("UPDATE multiremi_planned_restarts SET updated_at='2000-01-01T00:00:00.000Z' WHERE attempt_id=?", [x.task.id]);
+    const handlers = new Map<string, Function>();
+    const register = (type: string, handler: Function) => { handlers.set(type, handler); };
+    registerDaemonReportHandlers({ registerEventHandler: register, registerBestEffortHandler: register,
+      registerRpcHandler: register } as any, x.f.store);
+    const session = { runtimeIds: [x.scope.runtimeId], daemonId: x.scope.daemonId, ownerAccessToken: null };
+    const report = (type: string) => handlers.get(type)!({ type, rt: x.scope.runtimeId,
+      payload: { task_id: x.task.id, generation: 1, usage_run_id: consumer, summary: "late report" } }, session);
+    // Even before the periodic sweep, a delayed start cannot renew the receipt.
+    expect(await report("task.start")).toMatchObject({ ok: false, code: "stale_execution" });
+    expect(x.f.store.recoverOrphans(x.scope.runtimeId, [])).toEqual({ orphaned: 1, retried: 0 });
+    for (const type of ["task.start", "task.progress"]) {
+      expect(await report(type)).toMatchObject({ ok: false, code: "stale_execution" });
+    }
+    expect(x.f.store.getDaemonTurnBridge().rpc("turn.input", { turn_id: h.turn_id, attempt_id: x.task.id,
+      generation: 1, input_to_seq: x.offer.input_to_seq, message_ids: x.offer.input_messages.map(message => message.id) }, x.scope))
+      .toMatchObject({ ok: false, code: "stale_execution" });
+    expect(x.f.store.getTask(x.task.id)?.status).toBe("failed");
+    expect(x.planned().get(x.task.id)).toMatchObject({ state: "running", consumer_id: null, generation: 2 });
+  });
+
+  it("never authorizes a revoked receipt tombstone or exempts it from orphan recovery", () => {
+    const x = setup(), h = x.suspend();
+    x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+    x.planned().resume(x.task.id, h.handoff_id, "revoked-receipt-consumer", x.scope, () => {});
+    // Model the durable state between revocation and crash-policy completion.
+    x.f.db.run("UPDATE multiremi_planned_restarts SET state='running',consumer_id=NULL,generation=2 WHERE attempt_id=?", [x.task.id]);
+    let writes = 0;
+    for (const generation of [undefined, 0, 1, 2, 3]) {
+      expect(() => x.planned().withExecution(x.task.id, generation, x.scope, () => ++writes)).toThrow("stale_execution");
+      expect(() => x.f.transaction(() => x.planned().assertExecutionWithinTransaction(x.task.id, generation))).toThrow("stale_execution");
+    }
+    expect(writes).toBe(0);
+    expect(x.planned().protectsFromOrphanRecovery(x.task.id)).toBe(false);
+    expect(x.f.store.recoverOrphans(x.scope.runtimeId, [])).toEqual({ orphaned: 1, retried: 0 });
+    expect(x.f.store.getTask(x.task.id)?.status).toBe("failed");
   });
 
   it("keeps existing crash policy when no acknowledged checkpoint exists", () => {

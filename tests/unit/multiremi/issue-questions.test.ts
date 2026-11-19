@@ -94,6 +94,10 @@ pendingTurnBackendTests('one question through the responsibility chain', fixture
       expect(h.bridge.rpc('turn.decision', { ...payload, metadata: { ...metadata, kind: 'foreign' } }, h.scope))
         .toMatchObject({ ok: false, code: 'question_restart_binding_changed' });
       expect(h.bridge.rpc('turn.decision', { ...payload, generation: 0 }, h.scope).ok).toBe(false);
+      // The provider may rebind only after the replacement consumer's durable start.
+      expect(h.bridge.rpc('turn.decision', payload, h.scope))
+        .toMatchObject({ ok: false, code: 'question_restart_binding_changed' });
+      restarts.withExecution(h.task.id, 1, h.scope, () => {}, 'same-q-resume-consumer');
       expect(h.bridge.rpc('turn.decision', payload, h.scope)).toMatchObject({ ok: true, message: { id: h.q.id } });
       expect(h.bridge.rpc('turn.decision', payload, h.scope)).toMatchObject({ ok: true, message: { id: h.q.id } });
       if (answerAt === 'rebound') answer();

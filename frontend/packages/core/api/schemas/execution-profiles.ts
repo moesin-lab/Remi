@@ -17,7 +17,7 @@ export interface ExecutionGroupInput {
   provider: string;
   profile_id?: string | null;
   endpoint_id?: string | null;
-  model_policy?: { model?: string; models?: string[] };
+  model_policy?: { model?: string; models?: string[]; blocked_models?: string[] };
   runtime_ids: string[];
   connection?: Omit<ExecutionProfileInput, "provider">;
 }

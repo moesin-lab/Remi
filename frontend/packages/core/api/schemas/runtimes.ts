@@ -74,7 +74,7 @@ export const EMPTY_AGENT_RUNTIME_LIST: AgentRuntime[] = [];
 export const ExecutionGroupSchema = z.object({
   endpoint_id: z.string().nullable().optional(),
   connection_mode: z.enum(["legacy", "native", "endpoint"]).optional(),
-  model_policy: z.object({ model: z.string().optional(), models: z.array(z.string()).optional() }).optional(),
+  model_policy: z.object({ model: z.string().optional(), models: z.array(z.string()).optional(), blocked_models: z.array(z.string()).optional() }).optional(),
     id: z.string().min(1),
     workspace_id: z.string(),
     name: z.string(),
@@ -272,6 +272,7 @@ const ModelThinkingSchema = z.object({
 });
 
 const FleetProviderModelsSchema = z.object({
+  blocked_models: z.array(z.string()).optional(),
   provider: z.string(),
   model_catalog_status: z.enum(["ready", "error", "unknown"]).catch("unknown").optional(),
   online_runtime_count: z.number().default(0),

@@ -26,6 +26,13 @@ function renderDropdown(provider = "codex", value = "inventory-only", fallback =
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe("ModelDropdown execution catalog", () => {
+  it("keeps a saved blocked model visible with an explicit policy warning", async () => {
+    listFleetModels.mockResolvedValue({ providers: [{ provider: "claude", blocked_models: ["hidden"], models: [] }] });
+    const onChange = renderDropdown("claude", "hidden");
+    expect(await screen.findByRole("alert")).toHaveTextContent(enAgents.model_dropdown.blocked_by_policy);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("disables the primary model for fallback selection and lets the user clear the fallback", async () => {
     listFleetModels.mockResolvedValue({ providers: [{ provider: "codex", model_catalog_status: "ready", models: [
       { id: "primary", label: "Primary", execution_status: "available" },

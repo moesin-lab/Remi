@@ -203,7 +203,8 @@
     "label": "模型",
     "default_provider": "默认（提供方）",
     "discovery_failed": "发现失败",
-    "clear_full": "清除选择（使用提供方默认）"
+    "clear_full": "清除选择（使用提供方默认）",
+    "blocked_by_policy": "该模型已被组策略屏蔽，请选择其他模型。"
   },
   "tabs": {
     "activity": "动态",

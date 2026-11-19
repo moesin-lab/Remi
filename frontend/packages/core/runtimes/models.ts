@@ -68,6 +68,7 @@ export function useExecutionTargetModels(wsId: string, provider: string, runtime
   return {
     models: bucket?.models ?? NO_MODELS,
     modelCatalogStatus: bucket?.model_catalog_status,
+    blockedModels: bucket?.blocked_models ?? [],
     defaultThinking: bucket?.default_thinking,
     onlineRuntimeCount: bucket?.online_runtime_count ?? 0,
     isLoading: query.isLoading,

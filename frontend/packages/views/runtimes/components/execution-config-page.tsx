@@ -875,6 +875,7 @@ function CapabilityGroupCard({
               <Sparkles className="h-3 w-3 shrink-0" aria-hidden="true" />
               {t(($) => $.configuration.model_catalog)}
             </span>
+            {!group.model_policy?.model && <span className="text-[11px] text-muted-foreground">{t(($) => $.configuration.no_default_model)}</span>}
             {group.model_policy?.model && (
               <span className="inline-flex max-w-full items-center truncate rounded-md border bg-background px-1.5 py-0.5 font-mono text-[11px] text-foreground/85">
                 {t(($) => $.configuration.default_model, {

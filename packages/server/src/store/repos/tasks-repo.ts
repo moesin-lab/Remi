@@ -1,3 +1,4 @@
+import { ExecutionModelPolicyError } from "@multiremi/contracts/execution-endpoint.js";
 import { PlannedRestarts } from "../planned-restarts.js";
 import { readCurrentTurnRow } from "@multiremi/store/execution-reads.js";
 import { readAttemptTurn, readTurnRow } from "@multiremi/store/execution-reads.js";
@@ -1852,6 +1853,12 @@ export class TasksRepo {
     const agent = this.ctx.agents().getAgent(input.agentId);
     if (!agent) throw new Error(`Agent not found: ${input.agentId}`);
     if (agent.archivedAt) throw new Error(`Agent is archived: ${input.agentId}`);
+    const policyReason = this.ctx.runtimes().agentModelPolicyReason({ ...agent,
+      model: cleanOptionalString(input.executionModel ?? input.execution_model) ?? agent.model });
+    // Retries of a claimed attempt retain its frozen connection and model.
+    if (policyReason === "model_blocked_by_policy" && !input.executionFingerprint && !input.execution_fingerprint)
+      throw new ExecutionModelPolicyError(policyReason, `model blocked by policy: ${input.executionModel ?? input.execution_model ?? agent.model}`);
+
     const explicitIssueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id);
     const explicitIssueSession = explicitIssueSessionId
       ? this.ctx.issueSessions().getIssueSession(explicitIssueSessionId)
@@ -4132,12 +4139,14 @@ ${routing.sql}
 
   /** The capability reason for a Task, given its claimable Runtime set. */
   private queuedCapabilityReasonFor(
-    row: { agent_id: string; execution_model: string | null; execution_thinking_level: string | null; created_at: string },
+    row: { agent_id: string; execution_model: string | null; execution_thinking_level: string | null; created_at: string; execution_fingerprint?: string | null },
     decision: { agent: MultiremiAgent | null; candidateSupportsModel: boolean[] },
     now: number,
   ): { reason: string; alerted: boolean } | null {
     const { agent, candidateSupportsModel } = decision;
     if (!agent || (agent.workspaceId ?? "local") !== (agent.workspaceId ?? "local")) return null;
+    const policyReason = this.ctx.runtimes().agentModelPolicyReason(agent);
+    if (policyReason && !row.execution_fingerprint) return { reason: `${policyReason}: ${agent.model || "default"}`, alerted: false };
     return queuedCapabilityWait({
       candidateSupportsModel,
       model: agent.model,

@@ -40,6 +40,7 @@ export function agentCompatibilityResponse(store: MultiremiStore, agent: Multire
     status: agent.archivedAt ? "archived" : "active",
     max_concurrent_tasks: agent.maxConcurrentTasks,
     model: agent.model ?? "",
+    model_policy_reason: store.agentModelPolicyReason(agent),
     fallback_model: agent.fallbackModel ?? "",
     thinking_level: agent.thinkingLevel ?? "",
     fallback_thinking_level: agent.fallbackThinkingLevel ?? "",

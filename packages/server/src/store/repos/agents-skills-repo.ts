@@ -887,6 +887,7 @@ export class AgentsSkillsRepo {
   }
 
   hydrateAgent(agent: MultiremiAgent, options: { includeFiles?: boolean } = {}): MultiremiAgent {
+    agent.model_policy_reason = this.ctx.runtimes().agentModelPolicyReason(agent);
     return {
       ...agent,
       skills: this.listAgentSkillsForExistingAgent(agent, options),

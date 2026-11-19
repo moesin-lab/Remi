@@ -1,3 +1,4 @@
+import { ExecutionModelPolicyError } from "@multiremi/contracts/execution-endpoint.js";
 import { withBackgroundTerm } from "@shared/db/live-term.js";
 import type { LiveTermFence } from "../store/live-term-fence.js";
 import { API_SHUTDOWN_TIMEOUT_MS, DrainTimeoutError, SlotLifecycle, resolveSlotConfiguration, type SlotConfiguration } from "./slot-lifecycle.js";
@@ -767,6 +768,7 @@ export function createMultiremiApp(options: MultiremiApiOptions = {}): Hono {
   app.use("*", createPlatformMaintenanceWriteGate(store));
 
   app.onError((err, c) => {
+    if (err instanceof ExecutionModelPolicyError) return c.json({ error: err.message, code: err.code, field: err.field }, 400);
     if (isDatabaseConnectionError(err)) {
       c.header("Retry-After", "1");
       c.header("Cache-Control", "no-store");

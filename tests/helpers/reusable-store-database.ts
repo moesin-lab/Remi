@@ -4,6 +4,7 @@ import { PostgresSyncDatabase, type SqlDatabase } from "@multiremi/store/db/post
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { activeRequestReadCache } from "@multiremi/store/request-read-cache.js";
 import { readConnectionPragma } from "./sqlite-store-snapshot.js";
+import type { PostgresCaseDatabase } from "./postgres-store-template.js";
 import type { StoreContext } from "@multiremi/store/context.js";
 
 import type { NotificationSenderRegistry } from "../../packages/server/src/notifications/outbound-dispatcher.js";
@@ -37,6 +38,8 @@ export function createReusableStoreDatabase(dialect: "sqlite" | "postgres", post
   fixture: string;
   label: string;
   strictStoreState?: boolean;
+  /** An isolated DB created and dropped by the caller’s PG template owner. */
+  postgresDatabase?: PostgresCaseDatabase;
   /** Initial fake senders for this fixture’s cleanup-contract regressions only. */
   notificationSenders?: NotificationSenderRegistry;
   notificationSendTimeoutMs?: number;
@@ -69,6 +72,7 @@ export function createReusableStoreDatabase(dialect: "sqlite" | "postgres", post
     }
   }
   try {
+    if (options.postgresDatabase && dialect !== "postgres") throw new Error(`${label} template database requires PostgreSQL`);
     if (dialect === "postgres") {
       if (!postgresUrl) throw new Error(`${label} requires an explicit test PostgreSQL URL`);
       const url = new URL(postgresUrl);
@@ -77,16 +81,26 @@ export function createReusableStoreDatabase(dialect: "sqlite" | "postgres", post
       if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
         throw new Error(`${label} requires a localhost PostgreSQL test URL`);
       }
-      const connectionStarted = performance.now();
-      admin = new PostgresSyncDatabase(url.toString());
-      stats.connectionMs += performance.now() - connectionStarted;
-      stats.connections++;
-      const createStarted = performance.now();
-      admin.exec(`CREATE DATABASE ${quote(name)}`);
-      stats.databaseCreateMs += performance.now() - createStarted;
-      created = true;
-      stats.databaseCreates++;
-      url.pathname = `/${name}`;
+      if (options.postgresDatabase) {
+        const supplied = new URL(options.postgresDatabase.url);
+        const expected = new URL(url);
+        expected.pathname = `/${options.postgresDatabase.name}`;
+        if (!/^[a-z][a-z0-9_]*$/.test(options.postgresDatabase.name) || supplied.toString() !== expected.toString()) {
+          throw new Error(`${label} template database must belong to the configured local test server`);
+        }
+        url.pathname = supplied.pathname;
+      } else {
+        const connectionStarted = performance.now();
+        admin = new PostgresSyncDatabase(url.toString());
+        stats.connectionMs += performance.now() - connectionStarted;
+        stats.connections++;
+        const createStarted = performance.now();
+        admin.exec(`CREATE DATABASE ${quote(name)}`);
+        stats.databaseCreateMs += performance.now() - createStarted;
+        created = true;
+        stats.databaseCreates++;
+        url.pathname = `/${name}`;
+      }
       const databaseConnectionStarted = performance.now();
       database = new PostgresSyncDatabase(url.toString());
       stats.connectionMs += performance.now() - databaseConnectionStarted;
@@ -105,7 +119,7 @@ export function createReusableStoreDatabase(dialect: "sqlite" | "postgres", post
       }
     }
     const storeStarted = performance.now();
-    const store = new TimedStore(db, {
+    const store: MultiremiStore = new TimedStore(db, {
       notificationSenders: options.notificationSenders,
       notificationSendTimeoutMs: options.notificationSendTimeoutMs,
     });
@@ -301,7 +315,7 @@ export function createReusableStoreDatabase(dialect: "sqlite" | "postgres", post
     stats.baselineMs = performance.now() - baselineStarted;
     stats.setupMs = performance.now() - setupStarted;
     return { db, transactionDatabase, store, reset, stats, close, dispose, assertIdle, assertClean,
-      databaseUrl: dialect === "postgres" ? (() => { const url = new URL(postgresUrl!); url.pathname = `/${name}`; return url.toString(); })() : undefined };
+      databaseUrl: dialect === "postgres" ? (() => { const url = new URL(postgresUrl!); url.pathname = `/${options.postgresDatabase?.name ?? name}`; return url.toString(); })() : undefined };
   } catch (error) {
     try { close(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], `${label} initialization and cleanup failed`); }
     throw error;

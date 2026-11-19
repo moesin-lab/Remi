@@ -5,8 +5,37 @@ import { withRequestReadCache } from "@multiremi/store/request-read-cache.js";
 
 for (const dialect of ["sqlite", "postgres"] as const) {
   describe.skipIf(dialect === "postgres" && !process.env.MULTIREMI_TEST_POSTGRES_URL)(`routing matrix fixture (${dialect})`, () => {
-    it("restores native seed values and removes committed cells without restarting the Store", () => {
+    // Captured by ci-backend.ts in each PG shard artifact as well as the log.
+    function measuredIt(name: string, body: () => void) {
+      it(name, () => {
+        const started = performance.now();
+        try { body(); } finally {
+          const totalMs = performance.now() - started;
+          console.log("REMI_TEST_DB_FIXTURE_STATS " + JSON.stringify({
+            dialect, case: name,
+            ...lastStats, fixture: "routing-matrix-contract-case",
+            bodyMs: totalMs - (lastStats?.setupMs ?? 0) - cleanupMs,
+            cleanupMs, totalMs,
+          }));
+          lastStats = undefined;
+          cleanupMs = 0;
+        }
+      });
+    }
+    let lastStats: ReturnType<typeof createRoutingMatrixDatabase>["stats"] | undefined;
+    let cleanupMs = 0;
+    function createFixture() {
       const fixture = createRoutingMatrixDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL);
+      lastStats = fixture.stats;
+      const close = fixture.close;
+      fixture.close = () => {
+        const started = performance.now();
+        try { close(); } finally { cleanupMs += performance.now() - started; }
+      };
+      return fixture;
+    }
+    measuredIt("restores native seed values and removes committed cells without restarting the Store", () => {
+      const fixture = createFixture();
       try {
         const baseline = fixture.db.query("SELECT * FROM multiremi_workspaces ORDER BY id").all();
         const store = fixture.reset();
@@ -31,8 +60,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       }
     });
 
-    it("closes its connection when a cell fails", () => {
-      const fixture = createRoutingMatrixDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL);
+    measuredIt("closes its connection when a cell fails", () => {
+      const fixture = createFixture();
       const closeDatabase = fixture.db.close.bind(fixture.db);
       let closes = 0;
       fixture.db.close = () => { closes++; closeDatabase(); };
@@ -49,8 +78,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       expect(closes).toBe(1);
     });
 
-    it("refuses request caches, live subscriptions, open transactions and schema changes", () => {
-      const fixture = createRoutingMatrixDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL);
+    measuredIt("refuses request caches, live subscriptions, open transactions and schema changes", () => {
+      const fixture = createFixture();
       try {
         expect(() => withRequestReadCache(() => fixture.reset())).toThrow("request read caches");
         const unsubscribe = fixture.store.subscribeConversationLog({ onEntry() {} });
@@ -69,8 +98,8 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     });
 
     if (dialect === "postgres") {
-      it("does not retain afterCommit callbacks from a rolled-back probe", () => {
-        const fixture = createRoutingMatrixDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL);
+      measuredIt("does not retain afterCommit callbacks from a rolled-back probe", () => {
+        const fixture = createFixture();
         try {
           let delivered = 0;
           expect(() => fixture.db.transaction(() => {

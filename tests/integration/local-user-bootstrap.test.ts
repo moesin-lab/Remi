@@ -28,7 +28,7 @@ test('local user bootstrap preserves the winner of a concurrent first insert', a
       expect(winner).toMatchObject({ id: 'local', name: 'Winning user', email: 'winner@example.test',
         profileDescription: 'Preserve this profile' });
       expect(store.getCurrentUser()).toEqual(winner);
-      expect(db.query("SELECT COUNT(*) AS count FROM multiremi_users WHERE id = 'local'").get()).toEqual({ count: 1 });
+      expect(db.query("SELECT id FROM multiremi_users WHERE id = 'local'").all()).toEqual([{ id: 'local' }]);
     } finally { db.run = run; }
   } finally { await fixture.close(); }
 });

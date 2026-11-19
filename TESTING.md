@@ -47,6 +47,13 @@ bun run test tests/arch/
 
 API/store 测试可参考 [issues API 测试](tests/unit/multiremi/multiremi-api-issues.test.ts)的进程内 `app.request()`，共享夹具在 [helpers.ts](tests/unit/multiremi/helpers.ts)。需要真实服务的测试应在自身入口明确配置和隔离方式，不能把本地凭据或生产数据作为普通单测前提。
 
+[runtime.ready 夹具](tests/fixtures/task-offer.ts)通过真实 hello/ready 帧和 Store 执行 orphan recovery，
+但显式抑制 offer pump 的 `kick`，使调用方能检查恢复后的 queued 重试。只让 `prepare` 返回 null
+不足以隔离派发，因为 pump 在 prepare 前已经 claim。回归入口为
+`bun run test tests/unit/multiremi/task-offer-fixture.test.ts`：检查两个 parent 的全部重试仍 queued，
+并观察没有 claim 调用，避免只检查一个 parent 时被未约定的恢复顺序掩盖。
+真实派发和 ready 后继续派发的行为由 [daemon-task-offers](tests/unit/multiremi/daemon-task-offers.test.ts)覆盖。
+
 普通合成根 Issue 使用 `createResponsibleTestIssue(store, input)`；Issue 不再指定人类，保留的
 `responsibleMemberId` 参数可选且被忽略。合成自动化配置使用 `createResponsibleTestAutopilot`，同样不需要测试人类。
 生产创建的负向用例直接调用原 Store，不能覆盖 Store 方法。闭环用例明确配置 Agent/团队执行归属，

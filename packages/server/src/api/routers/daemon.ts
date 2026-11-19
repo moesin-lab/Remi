@@ -373,6 +373,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       supports_directory_scan?: boolean;
       supports_skill_directory?: boolean;
       agent_plugin_protocol?: number;
+      planned_restart?: number;
       ssh_mesh_protocol?: number;
       ssh_mesh_status?: MultiremiDaemonSshMeshStatus;
       drain_ack_generation?: number;
@@ -411,7 +412,6 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     // bot to code that cannot host it.
     const feishuConciergeProtocol = normalizeDaemonProtocolVersion(body.feishu_concierge_protocol);
     const supportsFeishuBotConfig = feishuConciergeProtocol >= FEISHU_CONCIERGE_PROTOCOL_VERSION;
-    store.reconcileDaemonDrain(runtimeId);
     const ackGeneration = Number(body.drain_ack_generation);
     if (Number.isSafeInteger(ackGeneration) && ackGeneration >= 0) {
       const activeCount = Number(body.active_task_count);
@@ -423,6 +423,10 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
       );
     }
     const ack = store.heartbeatRuntime(runtimeId, {
+      // An HTTP upgrade probe cannot negotiate a socket handler. It may
+      // preserve or revoke support; only a fresh socket hello/hb may grant it.
+      plannedRestartProtocol: body.planned_restart === 1
+        && store.getRuntimeLite(runtimeId)?.metadata.planned_restart === 1 ? 1 : 0,
       supportsBatchImport: body.supports_batch_import ?? false,
       supportsDirectoryScan: body.supports_directory_scan ?? false,
       supportsSkillDirectory: body.supports_skill_directory === true,
@@ -439,6 +443,7 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         >= FEISHU_ISSUE_DECISION_CARD_PROTOCOL_VERSION,
     });
     if (ack.status === "runtime_gone") return c.json({ error: "runtime not found" }, 404);
+    store.reconcileDaemonDrain(runtimeId);
     ensureDaemonProtocolUpgrade(store, runtimeId, ack);
     if (reportsSshMeshProtocol) {
       const protocol = normalizeDaemonProtocolVersion(body.ssh_mesh_protocol);
@@ -449,7 +454,6 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
     }
     // Reading the maintenance row also enforces the drain lease TTL lazily,
     // so an expired lease flips back to normal on the very next heartbeat.
-    store.reconcileDaemonDrain(runtimeId);
     ack.drain = store.daemonDrainDirective(runtimeId);
     if (body.execution_profile_protocol === 1) {
       store.recordRuntimeExecutionBindingAcks(runtimeId, body.runtime_binding_acks);

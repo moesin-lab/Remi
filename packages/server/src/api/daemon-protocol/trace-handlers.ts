@@ -1,3 +1,4 @@
+import { PlannedRestartError } from "@multiremi/store/planned-restarts.js";
 import { DAEMON_TRACE_APPEND_MAX_BYTES, DAEMON_TRACE_APPEND_MAX_EVENTS } from "@multiremi/contracts/daemon-protocol.js";
 import type { TraceEvent } from "@multiremi/contracts/trace.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
@@ -13,6 +14,7 @@ interface Subscription { sink: TraceSinkSubscription; cursor: number; closed: bo
 const failure = (code = "invalid_report") => ({ ok: false, code, retryable: false });
 function reject(code = "invalid_report"): never { throw Object.assign(new Error(code), { code }); }
 function traceRejection(error: unknown) {
+  if (error instanceof PlannedRestartError) return failure(error.code);
   const code = (error as { code?: unknown })?.code;
   if (["invalid_report", "authority_revoked", "task_not_found"].includes(String(code))) return failure(String(code));
   throw error;
@@ -85,6 +87,8 @@ export class DaemonTraceService {
       const bytes = Buffer.byteLength(JSON.stringify(frame.raw));
       if (events.length > 1 && bytes > DAEMON_TRACE_APPEND_MAX_BYTES) return failure();
       for (let i = 1; i < events.length; i++) if (events[i]!.seq !== events[i - 1]!.seq + 1) return failure();
+      return this.store.plannedRestarts().withExecution(task.id, frame.payload.generation,
+        { workspaceId: task.workspaceId, runtimeId: task.runtimeId!, daemonId: session.daemonId }, () => {
       const previous = this.sink.head(task.id) ?? 0;
       const fresh = events.filter(event => event.seq > previous);
       if (previous > 0 && fresh.length && fresh[0]!.seq !== previous + 1) return failure();
@@ -101,6 +105,7 @@ export class DaemonTraceService {
       }
       this.wake();
       return { ok: true, hub_head: result.head };
+      });
     } catch (error) { return traceRejection(error); }
   }
 

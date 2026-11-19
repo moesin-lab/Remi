@@ -16,7 +16,7 @@ import type { DaemonProtocolClient } from "@multiremi/worker/daemon-protocol-cli
 import type { MultiremiDaemonHeartbeatConfigAck } from "@multiremi/worker/client.js";
 import { MultiremiCliUpdateCoordinator } from "@multiremi/worker/cli-update-coordinator.js";
 import { disabledSshMeshRuntime } from "../../helpers/ssh-mesh-isolation.js";
-import { createLocalStore, db, resetMultiremiTestEnv } from "./helpers.js";
+import { createLocalStore, createResponsibleTestIssue, db, resetMultiremiTestEnv } from "./helpers.js";
 
 const start = new Date("2026-11-17T02:00:00Z");
 afterEach(() => { setSystemTime(); resetMultiremiTestEnv(); });
@@ -25,6 +25,7 @@ function fixture() {
   setSystemTime(start);
   for (const [id, daemonId, provider] of [["rt_a", "machine-a", "codex"], ["rt_a_other", "machine-a", "claude"], ["rt_b", "machine-b", "codex"]] as const) {
     store.registerRuntime({ id, daemonId, provider, name: id, workspaceId: "local", maxConcurrency: 4 });
+    store.heartbeatRuntime(id, { claimPending: false, plannedRestartNegotiated: true, plannedRestartProtocol: 1 });
   }
   const agent = store.createAgent({ name: "drain test", provider: "codex" });
   return { store, agent };
@@ -37,7 +38,105 @@ function ack(store: MultiremiStore, count: number) {
   }
 }
 
+function suspend(store: MultiremiStore, taskId: string) {
+  const task = store.getTask(taskId)!;
+  const scope = { workspaceId: "local", runtimeId: task.runtimeId!, daemonId: "machine-a" };
+  const handoff = store.plannedRestarts().get(taskId)!;
+  store.plannedRestarts().suspend(taskId, handoff.handoff_id, handoff.generation,
+    store.plannedRestarts().checkpointReferences(taskId, scope), scope);
+}
+
 describe("daemon drain", () => {
+  for (const reason of ["manual", "deploy", "cli_update"] as const) it(`legacy ${reason} deadline interrupts and retries without requesting an unsupported checkpoint`, () => {
+    const { store, agent } = fixture();
+    // The capability fixture is the payload an old daemon reports: no planned_restart.
+    store.heartbeatRuntime("rt_a", { claimPending: false, plannedRestartProtocol: 0 });
+    const issue = createResponsibleTestIssue(store, { title: "Legacy drain", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "legacy long work", maxAttempts: 3 });
+    store.claimTask("rt_a"); store.startTask(task.id); ack(store, 1);
+    store.recordDaemonProtocol("rt_a", "machine-a", 2, "0.2.90");
+    const deadlineMs = reason === "manual" ? 1 : 1_000;
+    store.beginDaemonDrain("local", "machine-a", reason, deadlineMs);
+    const update = reason === "cli_update" ? store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" }) : null;
+    advance(deadlineMs); store.reconcileDaemonDrain("rt_a");
+    // A second reconcile must not strand requested or spend another retry.
+    store.reconcileDaemonDrain("rt_a");
+    expect(store.plannedRestarts().get(task.id)).toBeNull();
+    expect(store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
+    const snapshot = taskInputSnapshot(store, "rt_a", "machine-a", new Set([task.id]), () => {});
+    expect(snapshot.some(input => input.type === "turn.restart")).toBe(false);
+    expect(snapshot.some(input => input.type === "task.cancelled")).toBe(true);
+    expect(store.listTasks("queued").filter(retry => retry.attempt === 2)).toHaveLength(1);
+    advance(1_001); ack(store, 0);
+    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "drained_forced", remaining_tasks: 0 });
+    if (update) {
+      expect(store.claimRuntimeUpdateRequest("rt_a")?.id).toBe(update.id);
+      store.reportRuntimeUpdateResult("rt_a", update.id, { status: "restarting" });
+      store.recordDaemonProtocol("rt_a", "machine-a", 2, "0.2.96");
+      store.reportRuntimeUpdateResult("rt_a", update.id, { status: "completed", self_check: true });
+      expect(store.getRuntimeUpdateRequest("rt_a", update.id)?.status).toBe("completed");
+      // This fixture started an independent fence before creating the update.
+      expect(store.getDaemonDrainStatus("local", "machine-a").mode).toBe("draining");
+    }
+  });
+
+  for (const reason of ["manual", "deploy", "cli_update"] as const) it(`HTTP version 1 cannot upgrade an unnegotiated socket before ${reason} expiry`, async () => {
+    const { store, agent } = fixture();
+    // This is the result of hello without turn.restart, even though the runtime
+    // advertises protocol 1. HTTP must not overwrite that intersection.
+    store.heartbeatRuntime("rt_a", { claimPending: false, plannedRestartNegotiated: false, plannedRestartProtocol: 1 });
+    const issue = createResponsibleTestIssue(store, { title: "HTTP probe drain", status: "in_progress", assigneeType: "agent", assigneeId: agent.id });
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "long work", maxAttempts: 3 });
+    store.claimTask("rt_a"); store.startTask(task.id); ack(store, 1);
+    store.recordDaemonProtocol("rt_a", "machine-a", 2, "0.2.90");
+    const app = createMultiremiApp({ store, authToken: "test-root" });
+    const report = (count: number) => app.request("/api/daemon/heartbeat", { method: "POST",
+      headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" },
+      body: JSON.stringify({ runtime_id: "rt_a", planned_restart: 1, drain_ack_generation: 0,
+        active_task_count: count, active_task_ids: count ? [task.id] : [] }) });
+    expect((await report(1)).status).toBe(200);
+    expect(store.getRuntimeLite("rt_a")?.metadata).toMatchObject({ planned_restart: 0, planned_restart_negotiated: false });
+    store.beginDaemonDrain("local", "machine-a", reason, 1);
+    advance(1); store.reconcileDaemonDrain("rt_a"); store.reconcileDaemonDrain("rt_a");
+    expect(store.plannedRestarts().get(task.id)).toBeNull();
+    expect(store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery", attempt: 1 });
+    expect(store.listTasks("queued").filter(retry => retry.attempt === 2)).toHaveLength(1);
+    const inputs = taskInputSnapshot(store, "rt_a", "machine-a", new Set([task.id]), () => {});
+    expect(inputs.some(input => input.type === "turn.restart")).toBe(false);
+    expect(inputs.some(input => input.type === "task.cancelled")).toBe(true);
+    advance(2); ack(store, 0); expect((await report(0)).status).toBe(200);
+    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "drained_forced", remaining_tasks: 0 });
+  });
+
+  it("requires socket reauthorization after HTTP revokes negotiated support", async () => {
+    const { store } = fixture();
+    const app = createMultiremiApp({ store, authToken: "test-root" });
+    for (const body of [{ runtime_id: "rt_a" }, { runtime_id: "rt_a", planned_restart: 1 }]) {
+      const response = await app.request("/api/daemon/heartbeat", { method: "POST",
+        headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      expect(response.status).toBe(200);
+      expect(store.getRuntimeLite("rt_a")?.metadata.planned_restart).toBe(0);
+    }
+    store.heartbeatRuntime("rt_a", { claimPending: false, plannedRestartNegotiated: true, plannedRestartProtocol: 1 });
+    expect(store.getRuntimeLite("rt_a")?.metadata.planned_restart).toBe(1);
+  });
+
+  it("clears stale support before enforcing an old HTTP heartbeat's expired deadline", async () => {
+    const { store, agent } = fixture();
+    const task = store.createTask({ agentId: agent.id, prompt: "legacy HTTP downgrade" });
+    store.claimTask("rt_a"); store.startTask(task.id);
+    store.beginDaemonDrain("local", "machine-a", "manual", 1_000);
+    const app = createMultiremiApp({ store, authToken: "test-root" });
+    advance(1_000);
+    const response = await app.request("/api/daemon/heartbeat", { method: "POST",
+      headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" },
+      body: JSON.stringify({ runtime_id: "rt_a", active_task_count: 1, active_task_ids: [task.id] }) });
+    expect(response.status).toBe(200);
+    expect(store.getRuntimeLite("rt_a")?.metadata.planned_restart).toBe(0);
+    expect(store.plannedRestarts().get(task.id)).toBeNull();
+    expect(store.getTask(task.id)?.failureReason).toBe("runtime_recovery");
+  });
+
   it("invalidates joined runtime drain state on writes and never leaks it across requests", () => {
     const { store } = fixture();
     withRequestReadCache(() => {
@@ -111,7 +210,7 @@ describe("daemon drain", () => {
 
   it("accepts an explicit process-wide HTTP report without waiting for a disabled historical lane", async () => {
     const { store, agent } = fixture();
-    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION })]);
+    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION, planned_restart: 1, planned_restart_negotiated: true })]);
     const task = store.createTask({ agentId: agent.id, prompt: "long tool" });
     store.claimTask("rt_a"); store.startTask(task.id);
     // B's stale process-wide count is retained in storage after it was disabled.
@@ -121,24 +220,25 @@ describe("daemon drain", () => {
     const app = createMultiremiApp({ store, authToken: "test-root" });
     const report = async (count: number) => app.request("/api/daemon/heartbeat", { method: "POST",
       headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" },
-      body: JSON.stringify({ runtime_id: "rt_a", drain_ack_generation: 0, active_task_count: count,
+      body: JSON.stringify({ runtime_id: "rt_a", planned_restart: 1, drain_ack_generation: 0, active_task_count: count,
         active_task_count_scope: "daemon", active_task_ids: [task.id] }) });
     advance(1001); await report(1); // A/B still executing in the current process.
     expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "draining", remaining_tasks: 1 });
+    suspend(store, task.id);
     advance(1002); await report(0); // Only A now exists and has stopped its task.
     expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "drained_forced", remaining_tasks: 0 });
   });
 
-  it("aggregates HTTP provider counts and returns terminal cancellation to upgrade probes", async () => {
+  it("aggregates HTTP provider counts while a checkpoint is pending", async () => {
     const { store, agent } = fixture();
-    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION })]);
+    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION, planned_restart: 1, planned_restart_negotiated: true })]);
     const task = store.createTask({ agentId: agent.id, prompt: "local long task" });
     store.claimTask("rt_a"); store.startTask(task.id);
     const app = createMultiremiApp({ store, authToken: "test-root" });
     const heartbeat = async (id: string, count: number, ids: string[] = []) => {
       const response = await app.request("/api/daemon/heartbeat", { method: "POST",
         headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" },
-        body: JSON.stringify({ runtime_id: id, drain_ack_generation: 0, active_task_count: count, active_task_ids: ids }) });
+        body: JSON.stringify({ runtime_id: id, planned_restart: 1, drain_ack_generation: 0, active_task_count: count, active_task_ids: ids }) });
       expect(response.status).toBe(200);
       return response.json();
     };
@@ -147,9 +247,11 @@ describe("daemon drain", () => {
     advance(1000); store.reconcileDaemonDrain("rt_a");
     advance(1001);
     const probe = await heartbeat("rt_a", 1, [task.id, "unknown"]);
-    expect(probe.cancelled_tasks).toEqual([{ task_id: task.id, status: "failed" }]);
+    expect(probe.cancelled_tasks ?? []).toEqual([]);
+    expect(store.plannedRestarts().get(task.id)?.state).toBe("requested");
     advance(1002); await heartbeat("rt_a_other", 0);
     expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "draining", remaining_tasks: 1 });
+    suspend(store, task.id);
     advance(1003); await heartbeat("rt_a", 0);
     expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "drained_forced", remaining_tasks: 0 });
   });
@@ -180,45 +282,43 @@ describe("daemon drain", () => {
     expect(store.hasCliUpdateDrainForRuntime("rt_a")).toBe(true);
   });
 
-  it("expires through runtime_recovery exactly once and waits for local cancellation acknowledgement", () => {
+  for (const reason of ["manual", "deploy"] as const) it(`${reason} deadline requests the same attempt and counts only acknowledged checkpoints`, () => {
     const { store, agent } = fixture();
-    const issue = store.createIssue({ title: "long running", assigneeType: "agent", assigneeId: agent.id });
-    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "long running" });
-    store.claimTask("rt_a"); store.startTask(task.id);
-    ack(store, 1);
-    store.beginDaemonDrain("local", "machine-a", "manual", 1_000);
+    const task = store.createTask({ agentId: agent.id, prompt: "long running", maxAttempts: 1 });
+    store.claimTask("rt_a"); store.startTask(task.id); ack(store, 1);
+    store.beginDaemonDrain("local", "machine-a", reason, 1_000);
     advance(999); store.reconcileDaemonDrain("rt_a");
-    expect(store.getTask(task.id)?.status).toBe("running");
+    expect(store.plannedRestarts().get(task.id)).toBeNull();
     advance(1_000); store.reconcileDaemonDrain("rt_a");
-    expect(store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
-    expect(db!.query("SELECT status FROM multiremi_turn_attempts WHERE id = ?").get(task.id)).toEqual({ status: "lost" });
-    // Public task projection already maps lost -> failed, including the normal cancellation push.
-    const cancel = taskInputSnapshot(store, "rt_a", "machine-a", new Set([task.id]), () => {}).find(input => input.type === "task.cancelled");
-    expect(cancel?.payload).toMatchObject({ task_id: task.id, status: "failed" });
-    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "draining", awaiting_daemon_ack: true });
+    expect(store.getTask(task.id)).toMatchObject({ status: "running", attempt: 1 });
+    const restart = taskInputSnapshot(store, "rt_a", "machine-a", new Set([task.id]), () => {}).find(input => input.type === "turn.restart");
+    expect(restart?.payload).toMatchObject({ attempt_id: task.id, generation: 0 });
     store.reconcileDaemonDrain("rt_a_other");
-    const attempts = db!.query("SELECT id FROM multiremi_turn_attempts WHERE turn_id = (SELECT turn_id FROM multiremi_turn_attempts WHERE id = ?)").all(task.id);
-    expect(attempts).toHaveLength(2);
+    expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "draining", remaining_tasks: 1 });
+    suspend(store, task.id);
+    // A committed checkpoint alone cannot claim the process has stopped its provider.
+    expect(store.getDaemonDrainStatus("local", "machine-a").remaining_tasks).toBe(1);
     advance(1_001); ack(store, 0);
     expect(store.getDaemonDrainStatus("local", "machine-a")).toMatchObject({ status: "drained_forced", remaining_tasks: 0, awaiting_daemon_ack: false });
+    const attempts = db!.query("SELECT id FROM multiremi_turn_attempts WHERE turn_id = (SELECT turn_id FROM multiremi_turn_attempts WHERE id = ?)").all(task.id);
+    expect(attempts).toHaveLength(1);
+    expect(store.recoverOrphans("rt_a")).toEqual({ orphaned: 0, retried: 0 });
     expect(store.claimTask("rt_a")).toBeNull();
-    expect(store.listTasks().find(next => next.parentTaskId === task.id)?.status).toBe("queued");
-    store.undrainDaemon("local", "machine-a");
-    expect(store.claimTask("rt_a")?.parentTaskId).toBe(task.id);
   });
 
-  it("fails an expired CLI drain without recovering or cancelling the running round", () => {
+  it("admits an expired CLI update after checkpoint acknowledgement instead of failing the update", () => {
     const { store, agent } = fixture();
-    const task = store.createTask({ agentId: agent.id, prompt: "long running" });
+    const task = store.createTask({ agentId: agent.id, prompt: "long running", maxAttempts: 1 });
     store.claimTask("rt_a"); store.startTask(task.id); ack(store, 1);
     const update = store.createRuntimeUpdateRequest("rt_a", { scope: "cli", targetVersion: "0.2.96" });
     expect(store.claimRuntimeUpdateRequest("rt_a")).toBeNull();
     advance(300_000); store.reconcileDaemonDrain("rt_a");
-    expect(store.getRuntimeUpdateRequest("rt_a", update.id)).toMatchObject({ status: "failed" });
-    expect(store.getRuntimeUpdateRequest("rt_a", update.id)?.error).toContain(task.id);
+    expect(store.getRuntimeUpdateRequest("rt_a", update.id)?.status).toBe("pending");
     expect(store.getTask(task.id)?.status).toBe("running");
-    expect(store.getDaemonDrainStatus("local", "machine-a").mode).toBe("normal");
-    expect(store.claimRuntimeUpdateRequest("rt_a")).toBeNull();
+    expect(store.getDaemonDrainStatus("local", "machine-a").mode).toBe("draining");
+    suspend(store, task.id);
+    advance(300_001); ack(store, 0);
+    expect(store.claimRuntimeUpdateRequest("rt_a")?.id).toBe(update.id);
   });
 
   it("keeps a busy update pending until natural drain, then hands off the original deadline", () => {
@@ -234,7 +334,7 @@ describe("daemon drain", () => {
 
   for (const reason of ["manual", "deploy"] as const) it(`omits an expired ${reason} deadline from an HTTP upgrade claim`, async () => {
     const { store } = fixture();
-    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION })]);
+    db!.run("UPDATE multiremi_runtimes SET metadata = ?", [JSON.stringify({ cli_version: DAEMON_MIN_CLI_VERSION, planned_restart: 1, planned_restart_negotiated: true })]);
     ack(store, 0);
     const original = store.beginDaemonDrain("local", "machine-a", reason, 60_000);
     advance(600_000);
@@ -246,7 +346,7 @@ describe("daemon drain", () => {
     const app = createMultiremiApp({ store, authToken: "test-root" });
     const response = await app.request("/api/daemon/heartbeat", { method: "POST",
       headers: { Authorization: "Bearer test-root", "Content-Type": "application/json" },
-      body: JSON.stringify({ runtime_id: "rt_a", drain_ack_generation: 0, active_task_count: 0 }) });
+      body: JSON.stringify({ runtime_id: "rt_a", planned_restart: 1, drain_ack_generation: 0, active_task_count: 0 }) });
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.pending_update).toMatchObject({ id: update.id, scope: "cli", target_version: "0.2.96" });
@@ -291,10 +391,15 @@ describe("daemon drain", () => {
     if (busy) {
       expect(store.claimRuntimeUpdateRequest("rt_a_other")).toBeNull();
       advance(310_000); ack(store, 1); store.reconcileDaemonDrain("rt_a_other");
-      expect(store.getRuntimeUpdateRequest("rt_a_other", second.id)).toMatchObject({ status: "failed" });
-      expect(store.getRuntimeUpdateRequest("rt_a_other", second.id)?.error).toContain(task!.id);
+      expect(store.getRuntimeUpdateRequest("rt_a_other", second.id)).toMatchObject({ status: "pending" });
       expect(store.getTask(task!.id)?.status).toBe("running");
       expect(store.claimRuntimeUpdateRequest("rt_a_other")).toBeNull();
+      suspend(store, task!.id);
+      advance(310_001); ack(store, 0);
+      expect(store.claimRuntimeUpdateRequest("rt_a_other")?.id).toBe(second.id);
+      store.reportRuntimeUpdateResult("rt_a_other", second.id, { status: "restarting" });
+      store.recordDaemonProtocol("rt_a_other", "machine-a", 2, "0.2.97");
+      store.reportRuntimeUpdateResult("rt_a_other", second.id, { status: "completed", self_check: true });
     } else {
       expect(store.claimRuntimeUpdateRequest("rt_a_other")?.id).toBe(second.id);
       store.reportRuntimeUpdateResult("rt_a_other", second.id, { status: "restarting" });
@@ -370,7 +475,7 @@ describe("daemon drain", () => {
     expect(db!.query("SELECT update_request_id FROM multiremi_daemon_drains WHERE daemon_id = 'machine-a'").get()).toEqual({ update_request_id: oldest.id });
   });
 
-  it("hands off an expired owner's fence with a fresh deadline", () => {
+  it("preserves the active update owner while its expired drain awaits checkpoint", () => {
     const { store, agent } = fixture();
     const task = store.createTask({ agentId: agent.id, prompt: "busy across two deadlines" });
     store.claimTask("rt_a"); store.startTask(task.id); ack(store, 1);
@@ -378,13 +483,13 @@ describe("daemon drain", () => {
     advance(1_000);
     const second = store.createRuntimeUpdateRequest("rt_a_other", { scope: "cli", targetVersion: "0.2.97" });
     advance(300_000); store.reconcileDaemonDrain("rt_a");
-    expect(store.getRuntimeUpdateRequest("rt_a", first.id)?.status).toBe("failed");
+    expect(store.getRuntimeUpdateRequest("rt_a", first.id)?.status).toBe("pending");
     expect(store.getRuntimeUpdateRequest("rt_a_other", second.id)?.status).toBe("pending");
-    expect(store.getDaemonDrainStatus("local", "machine-a").deadline).toBe("2026-11-17T02:10:00.000Z");
+    expect(store.getDaemonDrainStatus("local", "machine-a").deadline).toBe("2026-11-17T02:05:00.000Z");
     advance(600_000); ack(store, 1); store.reconcileDaemonDrain("rt_a_other");
-    expect(store.getRuntimeUpdateRequest("rt_a_other", second.id)?.status).toBe("failed");
-    expect(store.getDaemonDrainStatus("local", "machine-a").mode).toBe("normal");
+    expect(store.getRuntimeUpdateRequest("rt_a", first.id)?.status).toBe("pending");
     expect(store.getTask(task.id)?.status).toBe("running");
+    expect(db!.query("SELECT update_request_id FROM multiremi_daemon_drains WHERE daemon_id='machine-a'").get()).toEqual({ update_request_id: first.id });
   });
 
   it("carries the persisted remaining deadline from runtime snapshot through downlink mapping into the daemon", async () => {
@@ -460,7 +565,7 @@ describe("daemon drain", () => {
       store.claimRuntimeUpdateRequest("persisted");
       store.reportRuntimeUpdateResult("persisted", update.id, { status: "restarting" });
       handle.close(); handle = openSqliteDatabase(path); store = new MultiremiStore(handle);
-      expect(store.getDaemonDrainStatus("local", "machine")).toMatchObject({ mode: "draining", deadline, expiry_action: "fail_update" });
+      expect(store.getDaemonDrainStatus("local", "machine")).toMatchObject({ mode: "draining", deadline, expiry_action: "planned_restart" });
       store.recordDaemonProtocol("persisted", "machine", 2, "0.2.96");
       store.reportRuntimeUpdateResult("persisted", update.id, { status: outcome, self_check: true });
       expect(store.getDaemonDrainStatus("local", "machine").mode).toBe("normal");
@@ -484,6 +589,7 @@ describe("daemon drain", () => {
     store.claimTask("rt_a"); store.startTask(task.id); ack(store, 1);
     store.beginDaemonDrain("local", "machine-a", "manual", 1_000);
     advance(1_000); store.reconcileDaemonDrain("rt_a");
+    suspend(store, task.id);
     advance(1_001); store.recordRuntimeDrainAck("rt_a", 0, 0);
     expect(store.getDaemonDrainStatus("local", "machine-a").status).toBe("drained_forced");
   });

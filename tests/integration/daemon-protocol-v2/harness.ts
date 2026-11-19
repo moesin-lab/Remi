@@ -197,7 +197,7 @@ export class DaemonProtocolHarness {
     runtimeId?: string;
     daemonOptions?: Pick<MultiremiDaemonOptions,
       "once" | "onceOfferTimeoutMs" | "maxConcurrency" | "providerFactory" | "requestTimeoutMs" | "taskDrainTimeoutMs"
-      | "gcEnabled" | "gcIntervalMs" | "inProcessRuntimeModelDiscoveryEnabled" | "runtimeModelRefreshIntervalMs">;
+      | "stopTimeoutMs" | "onStopTimeout" | "approvalMode" | "gcEnabled" | "gcIntervalMs" | "inProcessRuntimeModelDiscoveryEnabled" | "runtimeModelRefreshIntervalMs">;
     runtimeIds?: string[];
     outboxBackoffMs?: number[];
     providerFactory?: MultiremiDaemonProviderFactory;

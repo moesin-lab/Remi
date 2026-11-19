@@ -328,9 +328,10 @@ remi daemon undrain --daemon-id <id>
 同一工作区其他 daemon 继续接单。`MULTIREMI_DAEMON_ID` 可代替每次传 `--daemon-id`。
 
 status 返回 `remaining_tasks`、`started_at`、`deadline`、`reason`、`expiry_action`
-和 `awaiting_daemon_ack`。到期会通过既有恢复路径中断剩余尝试，记录为
-`lost` / `runtime_recovery`，按 MUL-45 的重试预算自动生成新尝试；本期仍消耗重试次数。
-只有服务端在途任务归零且 daemon 报告本地执行归零，强制排空才报告 `drained_forced`。
+和 `awaiting_daemon_ack`。到期通过 `planned_restart` 请求 provider 关闭、报告/trace 确认和
+持久化 checkpoint。重启后解除围栏，在同一 Turn/attempt 恢复，不消耗重试次数。
+provider 不响应取消/close 时按 daemon stop budget 终止进程，继续按 MUL-45 崩溃重试。
+只有服务端未挂起任务归零且 daemon 报告本地执行归零，强制排空才报告 `drained_forced`。
 失联 daemon 未确认时仍显示等待，不能把数据库已恢复任务当作本地进程已停止。
 
 CLI 更新创建同样的排空状态，归零或到期取消并确认后再下发更新。更新结束或请求超时

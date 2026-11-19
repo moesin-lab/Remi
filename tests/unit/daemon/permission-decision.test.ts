@@ -30,18 +30,21 @@ const answer = (optionId: string): UnifiedMessage => ({ ...decision, id: "msg_re
   reply_to_id: decision.id, message_kind: "reply", sender_type: "member", sender_id: "member_one",
   body_md: optionId, metadata: { option_id: optionId } });
 
-function fixture(input: { reply?: UnifiedMessage | null; expiredReply?: UnifiedMessage; failure?: Error; abort?: boolean } = {}) {
+function fixture(input: { reply?: UnifiedMessage | null; expiredReply?: UnifiedMessage; failure?: Error; abort?: boolean; recovered?: Record<string, unknown> } = {}) {
   const calls: Array<{ type: string; payload: Record<string, unknown> }> = [];
   const trace: TraceEventInput[] = [];
   const translator = createTraceTranslator(createAdapter("claude"), (events) => trace.push(...events));
   const confirmed: UnifiedMessage[] = [];
   const boundaries: string[] = [];
+  let waitId: string | undefined;
   const daemon = Object.create(MultiremiDaemon.prototype) as MultiremiDaemon;
   const signal = input.abort ? AbortSignal.abort() : new AbortController().signal;
   Object.assign(daemon, {
     options: { approvalMode: "ask", humanRequestTimeoutMs: 1000, runtimeId: "rt_one" },
-    pollAbort: new AbortController(),
+    restartExecutions: new Map(), restartQuestions: new Map(input.recovered ? [["tsk_one", [{ ...decision, metadata: { human_request: { payload: input.recovered } } }]]] : []), pollAbort: new AbortController(),
     taskDownlinks: {
+      beginQuestionWait: (_attempt: string, _message: string, nonce: string) => { waitId = nonce; },
+      activeQuestionWaits: () => [{ message_id: decision.id, wait_id: waitId }],
       beginDecision: () => boundaries.push("begin"), finishDecision: () => boundaries.push("finish"),
       turnInput: () => ({ turn_id: "turn_one", attempt_id: "tsk_one", input_to_seq: 1 }),
       rpc: async (type: string, payload: Record<string, unknown>) => {
@@ -67,6 +70,13 @@ function fixture(input: { reply?: UnifiedMessage | null; expiredReply?: UnifiedM
 }
 
 describe("permission decision messages", () => {
+  it("retains the original question and denies a changed operation after restart", async () => {
+    const h = fixture({ recovered: { kind: "permission", tool_call: { ...params.toolCall, title: "A different operation" }, options: params.options } });
+    expect(await h.run()).toEqual({ outcome: "cancelled" });
+    expect(h.calls).toEqual([]);
+    expect(h.confirmed).toEqual([]);
+  });
+
   for (const optionId of ["allow", "deny"]) it(`returns the selected ${optionId} option and confirms its reply`, async () => {
     const reply = answer(optionId); const h = fixture({ reply });
     expect(await h.run()).toEqual({ outcome: "selected", optionId });
@@ -103,7 +113,8 @@ describe("permission decision messages", () => {
   for (const abort of [false, true]) it(`expires an unanswered decision as ${abort ? "cancelled" : "timeout"}`, async () => {
     const h = fixture({ abort });
     expect(await h.run()).toEqual({ outcome: "cancelled" });
-    expect(h.calls[1]).toMatchObject({ type: "turn.decision.expire", payload: {
+    expect(h.calls[1]!.type).toBe("turn.decision.get");
+    expect(h.calls[2]).toMatchObject({ type: "turn.decision.expire", payload: {
       turn_id: "turn_one", attempt_id: "tsk_one", message_id: decision.id, status: abort ? "cancelled" : "timeout",
     } });
     expect(h.confirmed).toEqual([]);

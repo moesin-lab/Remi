@@ -75,6 +75,7 @@ export class FeishuConnector implements Connector {
     this._config = config;
     this._channel = createLarkChannel({
       appId: config.appId,
+      recoveryChats: config.recoveryChats,
       appSecret: config.appSecret,
       domain: config.domain as any,
       connectionMode: config.connectionMode as any,
@@ -305,6 +306,9 @@ export class FeishuConnector implements Connector {
       }
     } catch (err) {
       _log.error(`failed to process message: ${String(err)}`);
+      // The durable inbound journal owns retry. Do not acknowledge failed
+      // server submission (or send a new error card on each history overlap).
+      if (this._taskStreamHandler) throw err;
       await this._channel.setMessageReceipt(msg.messageId, "failed");
       try {
         await this._channel.sendText(msg.chatId, `**Error:** ${String(err)}`);

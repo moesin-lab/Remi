@@ -58,6 +58,8 @@ import { extractMentionTargets, extractMessageBody } from "./mention.js";
 import { getMessageFeishu, sendMarkdownCardFeishu } from "./send.js";
 import { handleFormSubmission, handleButtonClick, hasPendingAction } from "./card-actions.js";
 import { handleIssueDecisionInteractionEvent, handleTaskInteractionEvent } from "./task-interaction.js";
+import { resolveFeishuCommand, isUnknownFeishuCommand } from "@shared/feishu-commands.js";
+import { FeishuInboundRecovery, feishuRecoveryPath, recoverFeishuHistory } from "./inbound-recovery.js";
 
 // ── Dedup (persisted across restarts) ────────────────────────
 const DEDUP_TTL_MS = 30 * 60 * 1000;
@@ -519,6 +521,8 @@ export type ParsedFeishuMessage = {
 export type FeishuAdmissionDenialReason = "not_member" | "unavailable";
 
 export interface FeishuMessageAdmissionOptions {
+  /** Durable Task intake uses the server's external_message_id dedup. */
+  durableIntake?: boolean;
   authorizeSender: FeishuSenderAuthorizer;
   onDenied: (
     context: FeishuMessageContext,
@@ -560,9 +564,13 @@ export async function processFeishuMessageEvent(
     logDroppedGroupMessage(event, "bot_message");
     return null;
   }
+  if (admission?.durableIntake && event.message.chat_type === "group"
+      && event.message.mentions?.length && !botOpenId) {
+    throw new Error("Feishu bot identity unavailable for durable group admission");
+  }
 
   // Dedup
-  if (!tryRecordMessage(messageId)) {
+  if (!admission?.durableIntake && !tryRecordMessage(messageId)) {
     logDroppedGroupMessage(event, "duplicate");
     return null;
   }
@@ -583,6 +591,7 @@ export async function processFeishuMessageEvent(
   try {
     admitted = Boolean(ctx.senderOpenId) && await admission.authorizeSender(ctx.senderOpenId);
   } catch {
+    if (admission.durableIntake) throw new Error("Feishu sender admission temporarily unavailable");
     log.error("workspace membership lookup failed; message denied");
     logDroppedGroupMessage(event, "membership_unavailable", "warn");
     return shouldNotifyAdmissionDenial
@@ -778,6 +787,49 @@ export async function processFeishuMessageEventWithBotIdentity(
   return processFeishuMessageEvent(client, event, botIdentity.botOpenId, admission);
 }
 
+/** Shared live/history intake; exported for transport-independent recovery verification. */
+export function createFeishuInboundDelivery(options: {
+  client: Lark.Client;
+  botIdentity: FeishuBotIdentityState;
+  authorizeSender: FeishuSenderAuthorizer;
+  onMessage: FeishuMessageCallback;
+  recovery: FeishuInboundRecovery | null;
+  appId: string;
+  isStopped?: () => boolean;
+}): (event: FeishuMessageEvent) => Promise<void> {
+  const { client, botIdentity, authorizeSender, onMessage, recovery, appId } = options;
+  const isStopped = options.isStopped ?? (() => false);
+  return async (event: FeishuMessageEvent) => {
+    if (isStopped()) throw new Error("Feishu connector stopped before input acknowledgement");
+    const msg = await processFeishuMessageEventWithBotIdentity(client, event, botIdentity, {
+      authorizeSender,
+      durableIntake: Boolean(recovery),
+      onDenied: async (context, reason) => {
+        // Overlapping history scans may revisit denied messages. They have no
+        // durable outbound delivery identity; notify only on live admission.
+        if (event.recovery_source === "history") return;
+        // Without recovery the pipeline already recorded this message. Durable
+        // intake bypasses that gate, so deduplicate this live side effect here.
+        if (recovery && !tryRecordMessage(context.messageId)) return;
+        await sendMarkdownCardFeishu(client, context.chatId, feishuAdmissionDenialMessage(reason), { replyToMessageId: context.messageId });
+      },
+    });
+    if (!msg) return;
+    const command = resolveFeishuCommand(msg.rawContent);
+    const intercepted = command !== null || isUnknownFeishuCommand(msg.rawContent);
+    if (intercepted && event.recovery_source === "history") {
+      recovery!.skipped(msg.chatId, "history_operational_command", msg.messageId, command?.name ?? msg.rawContent.trim().slice(1));
+      log.warn(JSON.stringify({ event: "feishu_recovery_skipped", app_id: appId, chat_id: msg.chatId,
+        message_id: msg.messageId, command: command?.name ?? msg.rawContent.trim().slice(1), reason: "history_operational_command" }));
+      return;
+    }
+    // Operational commands predate Task intake and have no server delivery row.
+    // Keep their existing suppression; history never re-executes old operations.
+    if (intercepted && recovery && !tryRecordMessage(event.message.message_id)) return;
+    await onMessage(msg);
+  };
+}
+
 /** Start WebSocket listener. Returns a handle to stop it. */
 export function startWebSocketListener(
   config: FeishuChannelConfig,
@@ -793,6 +845,27 @@ export function startWebSocketListener(
   const client = createFeishuClient(creds);
   const botIdentity = createFeishuBotIdentityState(creds);
   let stopped = false;
+  const recovery = config.recoveryChats ? new FeishuInboundRecovery(feishuRecoveryPath(creds.appId, creds.domain)) : null;
+  for (const chat of config.recoveryChats ?? []) recovery!.rememberChat(chat.chat_id, chat.chat_type);
+  const deliver = createFeishuInboundDelivery({ client, botIdentity, authorizeSender, onMessage,
+    recovery, appId: creds.appId, isStopped: () => stopped });
+  let recovering: Promise<void> | null = null;
+  let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  const catchUp = (): Promise<void> => {
+    if (!recovery || stopped) return Promise.resolve();
+    if (recovering) return recovering;
+    recovering = recoverFeishuHistory({ journal: recovery, deliver,
+      list: params => client.im.message.list({ params }),
+      warn: (id, reason) => log.warn(`skipped Feishu recovery chat_hash=${hashIdentifier(id)} reason=${reason}`),
+    }).catch(error => {
+      log.warn(`Feishu inbound recovery pending: ${redactFeishuError(error, [creds.appId, creds.appSecret])}`);
+    }).finally(() => {
+      recovering = null;
+      // Poll also catches a transparent SDK reconnect, which has no public hook.
+      if (!stopped) recoveryTimer = setTimeout(() => { void catchUp(); }, 30_000);
+    });
+    return recovering;
+  };
 
   // Create event dispatcher + WS client
   const eventDispatcher = createEventDispatcher({
@@ -810,17 +883,8 @@ export function startWebSocketListener(
         return;
       }
       try {
-        const msg = await processFeishuMessageEventWithBotIdentity(client, event, botIdentity, {
-          authorizeSender,
-          onDenied: async (context, reason) => {
-            await sendMarkdownCardFeishu(client, context.chatId, feishuAdmissionDenialMessage(reason), {
-              replyToMessageId: context.messageId,
-            });
-          },
-        });
-        if (msg) {
-          await onMessage(msg);
-        }
+        if (recovery) await recovery.accept(event, deliver);
+        else await deliver(event);
       } catch (err) {
         log.error(`error handling message: ${redactFeishuError(err, [creds.appId, creds.appSecret])}`);
         logDroppedGroupMessage(event, "processing_error", "error");
@@ -908,7 +972,7 @@ export function startWebSocketListener(
   const wsClient = createFeishuWSClient(creds);
   const ready = wsClient.start({ eventDispatcher })
     .then(() => waitForFeishuWSReady(wsClient))
-    .then(() => log.info("WebSocket client connected"));
+    .then(() => { log.info("WebSocket client connected"); void catchUp(); });
   log.info("WebSocket client starting");
 
   return {
@@ -916,6 +980,7 @@ export function startWebSocketListener(
     botOpenIdReady: botIdentity.botOpenIdReady,
     stop() {
       stopped = true;
+      clearTimeout(recoveryTimer);
       wsClient.close({ force: true });
     },
   };

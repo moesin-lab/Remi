@@ -3,6 +3,7 @@
  * Adapted from OpenClaw feishu extension send.ts — removed runtime/account dependencies.
  */
 
+import { feishuMessageRequest } from "./message-request.js";
 import type * as Lark from "@larksuiteoapi/node-sdk";
 import { feishuResponseError } from "./native-cot.js";
 import type { FeishuSendResult } from "./types.js";
@@ -55,22 +56,22 @@ export async function sendMessageFeishu(
   const { content, msgType } = buildFeishuPostMessagePayload({ messageText: rawText });
 
   if (options?.replyToMessageId) {
-    const response = await client.im.message.reply({
-      path: { message_id: options.replyToMessageId },
+    const response = await feishuMessageRequest("Feishu message reply", () => client.im.message.reply({
+      path: { message_id: options.replyToMessageId! },
       data: {
         content,
         msg_type: msgType,
         reply_in_thread: true,
         ...(options.idempotencyKey ? { uuid: options.idempotencyKey } : {}),
       },
-    });
+    }));
     if (response.code !== 0) {
       throw feishuResponseError("Feishu reply", response);
     }
     return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
   }
 
-  const response = await client.im.message.create({
+  const response = await feishuMessageRequest("Feishu message create", () => client.im.message.create({
     params: { receive_id_type: receiveIdType },
     data: {
       receive_id: receiveId,
@@ -78,7 +79,7 @@ export async function sendMessageFeishu(
       msg_type: msgType,
       ...(options?.idempotencyKey ? { uuid: options.idempotencyKey } : {}),
     },
-  });
+  }));
   if (response.code !== 0) {
     throw feishuResponseError("Feishu send", response);
   }
@@ -156,22 +157,22 @@ export async function sendCardFeishu(
   const content = JSON.stringify(card);
 
   if (options?.replyToMessageId) {
-    const response = await client.im.message.reply({
-      path: { message_id: options.replyToMessageId },
+    const response = await feishuMessageRequest("Feishu message reply", () => client.im.message.reply({
+      path: { message_id: options.replyToMessageId! },
       data: { content, msg_type: "interactive", reply_in_thread: true,
         ...(options.idempotencyKey ? { uuid: options.idempotencyKey } : {}) },
-    });
+    }));
     if (response.code !== 0) {
       throw feishuResponseError("Feishu card reply", response);
     }
     return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
   }
 
-  const response = await client.im.message.create({
+  const response = await feishuMessageRequest("Feishu message create", () => client.im.message.create({
     params: { receive_id_type: receiveIdType },
     data: { receive_id: receiveId, content, msg_type: "interactive",
       ...(options?.idempotencyKey ? { uuid: options.idempotencyKey } : {}) },
-  });
+  }));
   if (response.code !== 0) {
     throw feishuResponseError("Feishu card send", response);
   }

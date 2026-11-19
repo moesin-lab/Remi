@@ -1,7 +1,8 @@
 import { join } from "node:path";
 import { DiskPressureMonitor } from "@daemon/agent-runtime/workspace/disk-pressure.js";
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
+import * as fs from "node:fs";
 import { workDirectory } from "@daemon/agent-runtime/workspace/layout.js";
 import { cleanupFixtures, reclaimFixture } from "./reclaim-fixture.js";
 import { executionTrackerFor } from "@daemon/agent-runtime/workspace/execution-tracker.js";
@@ -126,7 +127,10 @@ test("equal pressure and critical thresholds reclaim beyond the critical exit li
   expect(wakes).toBe(1);
 });
 
-test("pressure cleans finished execution caches first, keeps running caches and stops before ended subjects", async () => {
+test.each([
+  ["plugins.sha", "plugins.sync.lock"],
+  ["plugins.sync.lock", "plugins.sha"],
+])("pressure cleans finished execution caches first, keeps running caches and stops before ended subjects (%s before %s)", async (first, second) => {
   const f = reclaimFixture();
   const ended = { kind: "issue" as const, id: "iss_cache_ended" };
   const running = { kind: "issue" as const, id: "iss_cache_running" };
@@ -139,15 +143,29 @@ test("pressure cleans finished execution caches first, keeps running caches and 
     writeFileSync(join(home, "plugins.sync.lock"), "cached");
     return home;
   });
+  // Directory enumeration order is filesystem-dependent. Exercise both orders
+  // while retaining real cache files, safe deletion and the reclaim engine.
+  const readDirectory = fs.readdirSync;
+  let cacheReads = 0;
+  const enumeration = spyOn(fs, "readdirSync").mockImplementation(((...args: Parameters<typeof readDirectory>) => {
+    if (String(args[0]) === paths[0] && args[1] === undefined) {
+      cacheReads++;
+      return [first, second];
+    }
+    return readDirectory(...args);
+  }) as typeof readDirectory);
   const release = executionTrackerFor(f.root).begin(running.id, "tsk_running");
   try {
-    const report = await f.engine({ diskSpace: async () => existsSync(join(paths[0]!, "plugins.sha")) ? low : high }).run("pressure");
-    expect(existsSync(join(paths[0]!, "plugins.sha"))).toBe(false);
+    // One deleted entry frees enough space, whichever entry was enumerated first.
+    const report = await f.engine({ diskSpace: async () =>
+      [first, second].every(name => existsSync(join(paths[0]!, name))) ? low : high }).run("pressure");
+    expect(existsSync(join(paths[0]!, first))).toBe(false);
     // Check after every entry: enough space means leave even the next cache entry alone.
-    expect(existsSync(join(paths[0]!, "plugins.sync.lock"))).toBe(true);
-    expect(existsSync(join(paths[1]!, "plugins.sha"))).toBe(true);
+    expect(existsSync(join(paths[0]!, second))).toBe(true);
+    for (const name of [first, second]) expect(existsSync(join(paths[1]!, name))).toBe(true);
     expect(existsSync(workDirectory(f.root, ended))).toBe(true);
     expect(report.reclaimed_this_round).toBe(0);
+    expect(cacheReads).toBe(1);
     expect(report.codex_plugin_cache).toEqual({ planned_homes: 1, cleaned_homes: 0 });
-  } finally { release(); }
+  } finally { enumeration.mockRestore(); release(); }
 });

@@ -151,7 +151,7 @@ test("live report, input and trace boundaries reject suspended and obsolete gene
       p: { task_id: task.id, summary: "late progress", generation } });
     await expect(progress(0)).rejects.toMatchObject({ code: "stale_execution" });
     await expect(h.client.rpc("turn.input", { ...input, message_ids: [], generation: 0 }, runtimeId))
-      .rejects.toMatchObject({ code: "stale_attempt" });
+      .rejects.toMatchObject({ code: "stale_execution" });
     const append = (generation: number) => h.client.rpc("trace.append", { task_id: task.id, generation, closed: false,
       events: [{ seq: 1, ts: new Date().toISOString(), type: "turn.started", turn: { status: "running" } }] }, runtimeId);
     await expect(append(0)).rejects.toMatchObject({ code: "stale_execution" });
@@ -169,7 +169,7 @@ test("live report, input and trace boundaries reject suspended and obsolete gene
       p: { task_id: task.id, generation: 0, error: "old provider died" } })).rejects.toMatchObject({ code: "stale_execution" });
     await expect(h.client.event({ t: "turn.complete", seq: ++seq, rt: runtimeId,
       p: { ...input, generation: 0, reply: { body_md: "old reply", message_kind: "final" } } }))
-      .rejects.toMatchObject({ code: "stale_attempt" });
+      .rejects.toMatchObject({ code: "stale_execution" });
     expect(h.store.getTask(task.id)?.status).toBe("running");
   } finally { await h.dispose(); }
 }, 20_000);

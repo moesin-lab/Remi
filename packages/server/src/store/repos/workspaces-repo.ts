@@ -338,12 +338,15 @@ export class WorkspacesRepo {
     const existing = this.getUser("local");
     if (existing) return existing;
     const now = nowIso();
+    // Another API process can create the default user after our read. Keep
+    // its profile intact and read back the winning row.
     this.ctx.db.run(
       `INSERT INTO multiremi_users (
         id, name, email, avatar_url, language, timezone, onboarded_at,
         onboarding_questionnaire, starter_content_state, profile_description,
         created_at, updated_at
-      ) VALUES ('local', 'Local User', 'local@multiremi.local', NULL, NULL, NULL, NULL, '{}', NULL, '', ?, ?)`,
+      ) VALUES ('local', 'Local User', 'local@multiremi.local', NULL, NULL, NULL, NULL, '{}', NULL, '', ?, ?)
+      ON CONFLICT (id) DO NOTHING`,
       [now, now],
     );
     return this.getUser("local")!;

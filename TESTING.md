@@ -38,6 +38,13 @@ ERROR 的 JSONL 保留异常 name、message 和 stack。
 随后仅基准请求承担 readiness SQL 的计数错位；归档增量和规模预算在每个样本计数重置前强制刷新 readiness，
 继续严格断言归档增加一次查询及各规模查询数相等。该回归沿用同一夹具运行 SQLite 和配置的真实 PostgreSQL。
 
+默认用户冷启动回归：`bun run test tests/integration/local-user-bootstrap.test.ts tests/integration/multiremi-two-process.test.ts`。
+前者在真实 SQL 边界确定性地安排另一个已提交 INSERT，覆盖首次查询后出现同一主键的用户且保留胜者资料；
+它不模拟多进程或网络，按集成夹具配置运行 SQLite 或 PostgreSQL。后者继续以真实 PostgreSQL 上的
+10 个新库、每库两个 API 进程检查冷启动和迁移锁争用，不调整超时或轮数。
+`supervisor-recovery` 的 slot 端口保留到 edge 监听完成，初始化失败也必须清理 edge 探针和目录，
+其失败清理回归观察一个完整探针周期，避免探针污染后续 skill import 的全局 fetch mock。
+
 ## 后端测试入口
 
 ```bash

@@ -5,7 +5,7 @@ import { currentAccessToken, currentRequestUserId, isHumanOperatorRequest } from
 import { readJson } from "../helpers/request.js";
 import { denyCurrentUserWorkspaceAccess } from "../helpers/auth-guards.js";
 import { loadRuntimeForCurrentOwner, loadRuntimeForCurrentUser, requestedRuntimeWorkspaceId } from "../helpers/runtimes.js";
-import { canUseRuntimeWorkspace, runtimeWorkspaceResponse } from "../helpers/runtime-workspaces.js";
+import { canUseRuntimeWorkspace, runtimeWorkspaceResponse, runtimeWorkspaceListResponse } from "../helpers/runtime-workspaces.js";
 import type { RouterDeps } from "./deps.js";
 
 export function registerRuntimeWorkspaceRoutes(app: Hono, { store }: RouterDeps): void {
@@ -14,15 +14,15 @@ export function registerRuntimeWorkspaceRoutes(app: Hono, { store }: RouterDeps)
     if (workspaceId instanceof Response) return workspaceId;
     const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
     if (denied) return denied;
-    return c.json({ workspaces: store.runtimeWorkspaces.list(workspaceId, c.req.query("archived") === "true")
-      .filter(w => canUseRuntimeWorkspace(c, store, w)).map(w => runtimeWorkspaceResponse(store, w)) });
+    return c.json({ workspaces: runtimeWorkspaceListResponse(c, store, workspaceId,
+      store.runtimeWorkspaces.list(workspaceId, c.req.query("archived") === "true")) });
   });
   app.get("/api/runtimes/:id/workspaces", c => {
     const loaded = loadRuntimeForCurrentUser(c, store, c.req.param("id"));
     if (loaded instanceof Response) return loaded;
-    return c.json({ workspaces: store.runtimeWorkspaces.list(loaded.runtime.workspaceId ?? "local")
-      .filter(w => w.daemonId === loaded.runtime.daemonId && canUseRuntimeWorkspace(c, store, w))
-      .map(w => runtimeWorkspaceResponse(store, w)) });
+    return c.json({ workspaces: runtimeWorkspaceListResponse(c, store, loaded.runtime.workspaceId ?? "local",
+      store.runtimeWorkspaces.list(loaded.runtime.workspaceId ?? "local")
+        .filter(w => w.daemonId === loaded.runtime.daemonId)) });
   });
   app.post("/api/runtimes/:id/workspaces", async c => {
     if (currentAccessToken(c)?.type === "task") return c.json({ error: "task tokens cannot register local directories" }, 403);

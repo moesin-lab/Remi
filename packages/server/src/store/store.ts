@@ -3343,6 +3343,10 @@ runMigrations(this.db);
     return this.runtimes.listRuntimes();
   }
 
+  listRuntimesLiteForWorkspace(workspaceId: string): MultiremiRuntime[] {
+    return this.runtimes.listRuntimesLiteForWorkspace(workspaceId);
+  }
+
   listRuntimesForWorkspace(workspaceId: string): MultiremiRuntime[] {
     return this.runtimes.listRuntimesForWorkspace(workspaceId);
   }

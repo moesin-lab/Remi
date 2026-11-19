@@ -71,6 +71,12 @@ childProcess.spawnSync = (command, args, options = {}) => {
     return succeed();
   }
   if (command !== 'docker') throw new Error('Unmocked command: ' + command);
+  if (args.includes('--entrypoint') && args.includes('/bin/sh') && args.includes('--network')) return succeed(process.env.TEST_SCHEMA_TARGET || 'null');
+  if (args.includes('psql')) {
+    if (process.env.TEST_FAIL === 'schema_query') return fail();
+    if (args.at(-1).includes('json_agg')) return succeed(process.env.TEST_SCHEMA_ROWS || '[{"singleton":1,"expand_level":3,"contract_level":0}]');
+    return succeed(process.env.TEST_SCHEMA_INVENTORY || '{"historical":true,"metadata":true}');
+  }
   if (args.includes('image') && args.includes('ls')) {
     const tag = args[args.indexOf('--filter') + 1].slice('reference='.length);
     const service = tag.startsWith('remi-api:') ? 'api' : 'web';
@@ -107,6 +113,7 @@ childProcess.spawnSync = (command, args, options = {}) => {
   if (process.env.TEST_FAIL === 'build' && args.includes('build')) return fail();
   if (process.env.TEST_FAIL === 'pull' && args.includes('pull')) return fail();
   if (process.env.TEST_FAIL === 'crash_build' && args.includes('build')) process.exit(91);
+  if (process.env.TEST_FAIL === 'deploy_rollback_failure' && args.includes('up') && !args.includes('postgres')) return fail();
   if (['activate', 'activate_restore'].includes(process.env.TEST_FAIL) && args.includes('up') && selection?.ref === process.env.TEST_NEW_COMMIT) return fail();
   if (['restore_old', 'activate_restore'].includes(process.env.TEST_FAIL) && args.includes('pg_restore') && selection?.ref !== process.env.TEST_NEW_COMMIT) return fail();
   if (process.env.TEST_FAIL === 'control_overlay' && args.includes('pg_restore') && String(options.input ?? '').includes('CONTROL-PLANE')) return fail();
@@ -158,6 +165,7 @@ function fixture(t) {
   mkdirSync(join(source, 'deploy/docker'), { recursive: true });
   mkdirSync(join(source, 'packages/platform-updater/src'), { recursive: true });
   copyFileSync(join(repository, 'packages/platform-updater/src/data-schema-inputs.json'), join(source, 'packages/platform-updater/src/data-schema-inputs.json'));
+  copyFileSync(join(repository, 'packages/platform-updater/src/schema-preflight.mjs'), join(source, 'packages/platform-updater/src/schema-preflight.mjs'));
   copyFileSync(join(repository, 'packages/platform-updater/src/schema-fingerprint.mjs'), join(source, 'packages/platform-updater/src/schema-fingerprint.mjs'));
   writeFileSync(script, scriptSource);
   copyFileSync(join(repository, 'scripts/ci-images.mjs'), join(source, 'scripts/ci-images.mjs'));
@@ -269,7 +277,10 @@ test('unrelated startup failure is not retried or treated as proof of migration'
   assert.equal(dockerCalls(result).filter(call => call.args.includes('up') && call.selectedRef === NEW_REF).length, 1);
   assert.equal(result.calls.filter(call => call.command === 'backoff').length, 0);
   assert.equal(f.readProfile('active.json').ref, OLD_REF);
-  assert.match(result.stderr, /Check API migration logs/);
+  assert.match(result.stderr, /Previous release .* restored/);
+  assert.equal(f.readProfile('deployment.json').ref, OLD_REF);
+  assert.ok(dockerCalls(result).some(call => call.args.includes('up') && call.selectedRef === OLD_REF));
+  assert.ok(!dockerCalls(result).some(call => call.args.includes('pg_restore')));
   assert.doesNotMatch(result.stderr, /Restore the matching|before rolling code back/);
 });
 
@@ -1591,4 +1602,37 @@ test('default retention keeps three distinct backup refs and rejects an escaping
   const result = f.run('stable', 'prune-releases'); succeeds(result);
   assert.match(result.stderr, /Release path escapes profile root/);
   assert.ok(existsSync(sentinel));
+});
+
+const MODERN_SCHEMA = JSON.stringify({ format: 1, expandLevel: 3, contractLevel: 0, minLevel: 3, maxLevel: 3 });
+for (const [name, environment, expected] of [
+  ['missing metadata', { TEST_SCHEMA_INVENTORY: '{"historical":true,"metadata":false}' }, /remi db prepare/],
+  ['empty metadata', { TEST_SCHEMA_ROWS: '[]' }, /Invalid schema metadata/],
+  ['contract floor', { TEST_SCHEMA_ROWS: '[{"singleton":1,"expand_level":4,"contract_level":4}]' }, /exceeds target maximum/],
+  ['query failure', {}, /failed/],
+]) {
+  test(`schema preflight rejects ${name} before stopping old containers`, t => {
+    const f = fixture(t); f.activate();
+    const result = f.run('stable', 'deploy', { commit: NEW_REF, fail: name === 'query failure' ? 'schema_query' : '', environment: { TEST_SCHEMA_TARGET: MODERN_SCHEMA, ...environment } });
+    assert.equal(result.status, 1); assert.match(result.stderr, expected);
+    assert.equal(f.readProfile('deployment.json').ref, OLD_REF);
+    assert.equal(f.readProfile('active.json').ref, OLD_REF);
+    assert.ok(!dockerCalls(result).some(call => call.args.includes('stop') || call.args.includes('up') || call.args.includes('pg_restore')));
+  });
+}
+for (const inventory of ['{"historical":false,"metadata":false}', '{"historical":true,"metadata":true}']) {
+  test(`schema preflight permits bootstrap or enrolled database: ${inventory}`, t => {
+    const f = fixture(t); f.activate();
+    succeeds(f.run('stable', 'deploy', { commit: NEW_REF, environment: { TEST_SCHEMA_TARGET: MODERN_SCHEMA, TEST_SCHEMA_INVENTORY: inventory } }));
+    assert.equal(f.readProfile('active.json').ref, NEW_REF);
+  });
+}
+
+test('failed automatic container rollback reports recovery required and never restores data', t => {
+  const f = fixture(t); f.activate();
+  const result = f.run('stable', 'deploy', { commit: NEW_REF, fail: 'deploy_rollback_failure' });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /automatic container rollback failed.*manual recovery required/);
+  assert.equal(f.readProfile('active.json').ref, OLD_REF);
+  assert.ok(!dockerCalls(result).some(call => call.args.includes('pg_restore') || call.args.includes('createdb')));
 });

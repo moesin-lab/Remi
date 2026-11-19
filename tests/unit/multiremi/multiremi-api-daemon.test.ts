@@ -1,6 +1,6 @@
 import { acceptTestIssueDelivery, createResponsibleTestIssue } from './helpers.js';
 import { turnApiPath, mutateExecutionFixture } from "./unified-test-paths.js";
-import { taskOfferResponse, reconcileRuntimeReady } from "../../fixtures/task-offer.js";
+import { taskOfferResponse } from "../../fixtures/task-offer.js";
 import { requestRuntimeRpc } from "../../fixtures/runtime-downlinks.js";
 import { reportFrame } from "../../fixtures/report-session.js";
 // HTTP surface the daemon itself calls: install commands and token minting,
@@ -1249,7 +1249,11 @@ describe("Multiremi API — daemon endpoints", () => {
     expect(store.claimTask(runtime.id)?.id).toBe(waiting.id);
     store.markTaskWaitingLocalDirectory(waiting.id, "/tmp/project");
 
-    await reconcileRuntimeReady(store, runtime.id);
+    // Exercise this HTTP contract directly. The runtime.ready fixture also
+    // starts an offer pump, which can claim a retry before we inspect it.
+    const recovered = await app.request(`/api/daemon/runtimes/${runtime.id}/recover-orphans`, { method: "POST" });
+    expect(recovered.status).toBe(200);
+    expect(await recovered.json()).toEqual({ orphaned: 2, retried: 2 });
     expect([running, waiting].filter(task => store.getTask(task.id)?.status === "failed")).toHaveLength(2);
     expect(store.listTasks().filter(task => task.parentTaskId === running.id || task.parentTaskId === waiting.id)).toHaveLength(2);
     expect(store.getTask(running.id)?.failureReason).toBe("runtime_recovery");

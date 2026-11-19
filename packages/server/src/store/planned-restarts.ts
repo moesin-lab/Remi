@@ -9,6 +9,9 @@ import { nowIso } from "@multiremi/ids.js";
 import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 export type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 
+// Fixed grace from the resume CAS, never extended by retries or heartbeat activity.
+export const PLANNED_RESTART_START_GRACE_MS = 5 * 60_000;
+
 export interface PlannedRestartScope { workspaceId: string; runtimeId: string; daemonId: string }
 export interface PlannedRestartHandoff {
   attempt_id: string;
@@ -21,7 +24,7 @@ export interface PlannedRestartHandoff {
 }
 
 export class PlannedRestartError extends Error {
-  constructor(readonly code: "stale_execution" | "invalid_checkpoint" | "drain_not_active" | "resume_fenced") { super(code); }
+  constructor(readonly code: "stale_execution" | "invalid_checkpoint" | "drain_not_active" | "resume_fenced" | "capacity") { super(code); }
 }
 
 
@@ -137,7 +140,7 @@ export class PlannedRestarts {
 
   /**
    * Consume the checkpoint CAS and authorize the fresh usage run in ONE
-   * transaction. There is no committed resuming lease to strand on a crash.
+   * transaction. The resuming receipt remains protected until the daemon acknowledges task.start.
    * A duplicate response for the same consumer returns its committed generation.
    */
   resume(attemptId: string, handoffId: string, consumerId: string, scope: PlannedRestartScope,
@@ -148,7 +151,8 @@ export class PlannedRestarts {
       if (typeof consumerId !== "string" || consumerId.length < 16 || consumerId.length > 256) throw new PlannedRestartError("stale_execution");
       const handoff = this.get(attemptId);
       if (!handoff || handoff.handoff_id !== handoffId) throw new PlannedRestartError("stale_execution");
-      if (handoff.state === "running" && handoff.consumer_id === consumerId) return handoff;
+      if (handoff.state === "resuming" && this.resumeExpired(attemptId)) throw new PlannedRestartError("stale_execution");
+      if (["resuming", "running"].includes(handoff.state) && handoff.consumer_id === consumerId) return handoff;
       if (handoff.state !== "suspended") throw new PlannedRestartError("stale_execution");
       // Manual fences survive replacement. Undrain is explicit; a CLI owner
       // must finish candidate verification before any resumed execution.
@@ -158,7 +162,6 @@ export class PlannedRestarts {
         WHERE attempt_id=? AND handoff_id=? AND state='suspended'`, [consumerId, generation, nowIso(), attemptId, handoffId]);
       new Questions(this.ctx).preparePlannedRestartResume(attemptId, handoff.handoff_id, generation, handoff.checkpoint?.question_ids ?? []);
       authorize(generation, handoff.checkpoint!);
-      this.ctx.db.run("UPDATE multiremi_planned_restarts SET state='running',updated_at=? WHERE attempt_id=?", [nowIso(), attemptId]);
       return this.get(attemptId)!;
     })();
   }
@@ -176,11 +179,21 @@ export class PlannedRestarts {
       if ((generation ?? 0) !== 0) throw new PlannedRestartError("stale_execution");
       return;
     }
-    if (!["requested", "running"].includes(current.state) || current.generation !== (generation ?? 0)) throw new PlannedRestartError("stale_execution");
+    // A revoked receipt is a tombstone, never an execution grant, even if a
+    // caller guesses its new generation. Expiry also fences late starts before
+    // the next safety sweep has applied the ordinary crash policy.
+    if ((current.state === "running" && current.consumer_id === null)
+      || (current.state === "resuming" && this.resumeExpired(current.attempt_id))) throw new PlannedRestartError("stale_execution");
+    if (!["requested", "resuming", "running"].includes(current.state) || current.generation !== (generation ?? 0)) throw new PlannedRestartError("stale_execution");
+  }
+
+  private resumeExpired(attemptId: string): boolean {
+    const row = this.ctx.db.query("SELECT updated_at FROM multiremi_planned_restarts WHERE attempt_id=?").get(attemptId);
+    return !!row && Date.now() - Date.parse(row.updated_at) >= PLANNED_RESTART_START_GRACE_MS;
   }
 
   /** Transport writes serialize with resume CAS, including the live trace sink. */
-  withExecution<T>(attemptId: string, generation: unknown, scope: PlannedRestartScope, write: () => T): T {
+  withExecution<T>(attemptId: string, generation: unknown, scope: PlannedRestartScope, write: () => T, startConsumer?: string): T {
     return this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(scope.workspaceId);
       if (generation !== undefined && (!Number.isSafeInteger(generation) || Number(generation) < 0)) throw new PlannedRestartError("stale_execution");
@@ -195,7 +208,14 @@ export class PlannedRestarts {
         // Absence stays valid until commit; avoid an identical second SELECT.
         this.assertExecution(null, generation as number | undefined);
       }
-      return write();
+      const result = write();
+      // A resume response can be lost after its CAS commits. Only the durable
+      // start from that exact consumer proves the daemon received execution.
+      if (current?.state === "resuming" && startConsumer === current.consumer_id) {
+        this.ctx.db.run("UPDATE multiremi_planned_restarts SET state='running',updated_at=? WHERE attempt_id=? AND state='resuming' AND consumer_id=?",
+          [nowIso(), attemptId, startConsumer]);
+      }
+      return result;
     })();
   }
 
@@ -208,6 +228,54 @@ export class PlannedRestarts {
       return { version: 1 as const, session_id: attempt.session_id ?? null, work_dir: attempt.work_dir ?? null,
         input_ack_seq: Number(attempt.input_ack_seq ?? 0), trace_head: 0, delivered_message_ids: [],
         question_ids: new Questions(this.ctx).plannedRestartWaits(attemptId).map(message => message.id) };
+    })();
+  }
+
+  /** The offer safety sweep also handles a replacement that connected once
+   * without a usable journal and will never issue another runtime.ready. */
+  recoverExpiredResumes(runtimeId: string): void {
+    const runtime = this.ctx.runtimes().getRuntimeLite(runtimeId);
+    if (!runtime) return;
+    this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(runtime.workspaceId ?? "local");
+      const expired = this.ctx.db.query(`SELECT p.attempt_id FROM multiremi_planned_restarts p
+        JOIN multiremi_turn_execution_records a ON a.id=p.attempt_id
+        WHERE p.runtime_id=? AND p.state='resuming' AND p.updated_at<=?
+        AND a.status IN ('running','waiting_local_directory','awaiting_human')`)
+        .all(runtimeId, new Date(Date.now() - PLANNED_RESTART_START_GRACE_MS).toISOString());
+      for (const row of expired) this.ctx.tasks().recoverOrphanAttempt(runtimeId, row.attempt_id);
+    })();
+  }
+
+  /** Called only for an absent attempt under recoverOrphans' workspace lock. */
+  expireUnstartedResumeWithinTransaction(attemptId: string): void {
+    if (!this.ctx.db.inTransaction) throw new Error("Resume expiry requires a lifecycle transaction");
+    const row = this.ctx.db.query("SELECT * FROM multiremi_planned_restarts WHERE attempt_id=?").get(attemptId);
+    if (!row || row.state !== "resuming" || Date.now() - Date.parse(row.updated_at) < PLANNED_RESTART_START_GRACE_MS) return;
+    this.lock(attemptId, { workspaceId: row.workspace_id, runtimeId: row.runtime_id, daemonId: row.daemon_id });
+    // The workspace/lane locks serialize this revocation with task.start and
+    // resume. Keep accounting history, but revoke execution before crash retry.
+    this.revokeWithinTransaction(attemptId);
+  }
+
+  private revokeWithinTransaction(attemptId: string): void {
+    this.ctx.db.run("UPDATE multiremi_planned_restarts SET state='running',generation=generation+1,consumer_id=NULL,updated_at=? WHERE attempt_id=?",
+      [nowIso(), attemptId]);
+    this.ctx.db.run("UPDATE multiremi_usage_task_scopes SET active_run_id=NULL WHERE task_id=?", [attemptId]);
+    this.ctx.db.run("UPDATE multiremi_access_tokens SET revoked_at=? WHERE type='task' AND task_id=? AND revoked_at IS NULL", [nowIso(), attemptId]);
+  }
+
+  /** A complete canonical recovery package cannot be delivered. No new run may start. */
+  rejectUndeliverableResume(attemptId: string, handoffId: string, consumerId: string, scope: PlannedRestartScope): void {
+    this.ctx.db.transaction(() => {
+      const attempt = this.lock(attemptId, scope);
+      this.assertLive(attempt);
+      const handoff = this.get(attemptId);
+      if (!handoff || handoff.handoff_id !== handoffId || (handoff.state !== "suspended"
+        && !(handoff.state === "resuming" && handoff.consumer_id === consumerId))) throw new PlannedRestartError("stale_execution");
+      this.revokeWithinTransaction(attemptId);
+      // Recover only this absent execution, never other tasks on this runtime.
+      this.ctx.tasks().recoverOrphanAttempt(scope.runtimeId, attemptId);
     })();
   }
 

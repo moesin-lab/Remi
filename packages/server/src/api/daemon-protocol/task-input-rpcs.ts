@@ -80,15 +80,33 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
       // The CAS rechecks attempt, daemon, drain and consumer authority afterwards.
       const offer = await prepareResume(task);
       if (!offer) return denied("stale_execution");
-      const receipt = store.plannedRestarts().resume(task.id, p.handoff_id, p.consumer_id, scope, () => {
+      let reply: Record<string, any> | null = null;
+      const delivery = (generation: number, checkpoint: PlannedRestartCheckpoint) => {
+        const questions = (checkpoint.question_ids ?? []).map(id => store.getMessage(id)).filter(Boolean);
+        reply = fitRestartResumeToBudget({ ...offer, ...turns.offerInput(task) }, questions, generation, frame.rt!);
+        if (!reply) throw new PlannedRestartError("capacity");
+      };
+      const receipt = store.plannedRestarts().resume(task.id, p.handoff_id, p.consumer_id, scope, (generation, checkpoint) => {
+        // Check the complete, current package under the CAS locks. A capacity
+        // failure rolls back Q preparation and generation before any run grant.
+        delivery(generation, checkpoint);
         store.reportTaskUsageSnapshot(task.id, { version: 2, runId: p.consumer_id as string,
           revision: 0, complete: false, units: [] }, scope);
       });
       if (!store.isTaskUsageExecutionAuthorized(task.id, p.consumer_id, frame.rt!)) return denied("stale_execution");
-      const questions = (receipt.checkpoint?.question_ids ?? []).map(id => store.getMessage(id)).filter(Boolean);
-      return fitRestartResumeToBudget({ ...offer, ...turns.offerInput(task) }, questions, receipt.generation, frame.rt!)
-        ?? denied("capacity");
+      // The idempotent path does not execute authorize. Rebuild current inputs
+      // and questions as they can change while a committed reply is lost.
+      if (!reply) delivery(receipt.generation, receipt.checkpoint!);
+      return reply;
     } catch (error) {
+      if (error instanceof PlannedRestartError && error.code === "capacity") {
+        try {
+          store.plannedRestarts().rejectUndeliverableResume(task.id, p.handoff_id, p.consumer_id, scope);
+        } catch (rejection) {
+          if (rejection instanceof PlannedRestartError) return denied(rejection.code);
+          throw rejection;
+        }
+      }
       if (error instanceof PlannedRestartError) return denied(error.code);
       throw error;
     }

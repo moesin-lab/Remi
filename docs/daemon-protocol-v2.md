@@ -1350,6 +1350,11 @@ start 确认宽限期。RPC 超时或回复丢失后，daemon 用原 consumer �
 期限已过的迟到 start、执行报告和输入在同一生命周期锁下返回 `stale_execution`；撤销记录
 保留的新 generation 不授予执行权，也不再豁免孤儿恢复。
 等待续接时轮询间隔为 `max(1 秒, pollIntervalMs)`，不等待普通空闲时的十分钟刷新。
+续接 offer 使用普通任务的大小预算；原生 Q 保持完整。完整恢复包在 CAS 锁内、执行授权
+提交前校验，无法装入帧则回滚新 generation/Q 准备，返回不可重试的 `capacity`，撤销该
+handoff 并仅将这一 attempt 交回既有崩溃恢复。原 consumer 重放时若当前恢复包也已无法
+下发，同样撤销未 start 的授权。不会无限重投同一个不可下发包，也不截断原 Q 或答案。
+容量失败后的正常重试仍可保留原会话，但不承诺计划内的同 attempt 续接。
 
 ### 计划内重启的原生等待
 

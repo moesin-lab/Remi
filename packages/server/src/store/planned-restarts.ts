@@ -24,7 +24,7 @@ export interface PlannedRestartHandoff {
 }
 
 export class PlannedRestartError extends Error {
-  constructor(readonly code: "stale_execution" | "invalid_checkpoint" | "drain_not_active" | "resume_fenced") { super(code); }
+  constructor(readonly code: "stale_execution" | "invalid_checkpoint" | "drain_not_active" | "resume_fenced" | "capacity") { super(code); }
 }
 
 
@@ -263,6 +263,20 @@ export class PlannedRestarts {
       [nowIso(), attemptId]);
     this.ctx.db.run("UPDATE multiremi_usage_task_scopes SET active_run_id=NULL WHERE task_id=?", [attemptId]);
     this.ctx.db.run("UPDATE multiremi_access_tokens SET revoked_at=? WHERE type='task' AND task_id=? AND revoked_at IS NULL", [nowIso(), attemptId]);
+  }
+
+  /** A complete canonical recovery package cannot be delivered. No new run may start. */
+  rejectUndeliverableResume(attemptId: string, handoffId: string, consumerId: string, scope: PlannedRestartScope): void {
+    this.ctx.db.transaction(() => {
+      const attempt = this.lock(attemptId, scope);
+      this.assertLive(attempt);
+      const handoff = this.get(attemptId);
+      if (!handoff || handoff.handoff_id !== handoffId || (handoff.state !== "suspended"
+        && !(handoff.state === "resuming" && handoff.consumer_id === consumerId))) throw new PlannedRestartError("stale_execution");
+      this.revokeWithinTransaction(attemptId);
+      // Recover only this absent execution, never other tasks on this runtime.
+      this.ctx.tasks().recoverOrphans(scope.runtimeId, [], attemptId);
+    })();
   }
 
   /** No checkpoint acknowledgement => ordinary crash policy, including a requested handoff. */

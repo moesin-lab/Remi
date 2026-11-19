@@ -5,7 +5,7 @@ import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 import { executionGroupModelCatalog } from "@multiremi/api/helpers/agents.js";
-import { resetMultiremiTestEnv } from "./helpers.js";
+import { createResponsibleTestIssue, resetMultiremiTestEnv } from "./helpers.js";
 
 const key = "endpoint-test-secret";
 const connection = { base_url: "http://127.0.0.1:8788/v1", protocols: ["openai-responses", "anthropic-messages"],
@@ -14,6 +14,42 @@ useEndpointEncryptionKey();
 afterEach(resetMultiremiTestEnv);
 
 pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
+  it.each([true, false])("keeps frozen retries after a policy block and capability sweep (fallback: %s)", (fallback) => {
+    const { store } = fixture();
+    const endpoint = store.saveExecutionEndpoint("local", { name: "Frozen gateway", connection, api_key: key });
+    const runtime = store.registerRuntime({ name: "Frozen Codex", provider: "codex", metadata: { execution_endpoints: 1, codex_profiles: 1 } });
+    const input = { name: "Frozen group", provider: "codex", endpoint_id: endpoint.id, runtime_ids: [runtime.id] };
+    const group = store.saveExecutionGroup("local", input);
+    const ack = () => {
+      const binding = store.getRuntimeExecutionBindings(runtime.id)[0]!;
+      store.recordRuntimeExecutionBindingAcks(runtime.id, [{ ...binding, status: "ready", model_catalog: { status: "ready",
+        models: ["primary", "fallback"].map(id => ({ id, label: id, provider: "codex", default: id === "primary" })) } }]);
+    };
+    ack();
+    const agent = store.createAgent({ name: "Frozen agent", provider: "codex", executionGroupId: group.id, model: "primary",
+      ...(fallback ? { fallbackModel: "fallback" } : {}) });
+    const issue = createResponsibleTestIssue(store, { title: "Frozen retry", assigneeType: "agent", assigneeId: agent.id });
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Keep frozen model" });
+    expect(store.claimTask(runtime.id)?.id).toBe(task.id);
+    store.startTask(task.id);
+    const frozen = store.getTask(task.id)!;
+    expect(frozen.executionFingerprint).toBeTruthy();
+    store.saveExecutionGroup("local", { ...input, model_policy: { blocked_models: ["primary"] } }, group.id);
+    ack();
+    store.failTask(task.id, { error: "Infrastructure timeout", failureReason: "timeout" });
+    const retry = store.listTasks().find(candidate => candidate.parentTaskId === task.id)!;
+    expect(retry).toMatchObject({ status: "queued", fallbackSwitched: false,
+      executionFingerprint: frozen.executionFingerprint, executionModel: frozen.executionModel,
+      executionConnection: frozen.executionConnection, codexProfile: frozen.codexProfile });
+    const afterFiveMinutes = Date.parse(retry.createdAt) + 6 * 60_000;
+    expect(store.refreshQueuedCapabilityWaitReasons(afterFiveMinutes).alerted).toBe(0);
+    expect(store.getTask(retry.id)).toMatchObject({ status: "queued", waitReason: null, fallbackSwitched: false });
+    expect(store.listTasks().filter(candidate => candidate.parentTaskId === retry.id)).toEqual([]);
+    expect(store.claimTask(runtime.id)).toMatchObject({ id: retry.id, executionModel: frozen.executionModel,
+      executionFingerprint: frozen.executionFingerprint, executionConnection: frozen.executionConnection,
+      codexProfile: frozen.codexProfile, fallbackSwitched: false });
+  });
+
   it("blocks exact IDs across catalog, API selection, enqueue and claim while preserving frozen work", async () => {
     const { store } = fixture();
     const endpoint = store.saveExecutionEndpoint("local", { name: "Policy gateway", connection, api_key: key });

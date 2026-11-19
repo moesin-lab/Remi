@@ -51,6 +51,15 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 - **风险推断：** 长 trace 的分页、全数组派生与 DOM 成本仍可能随事件数增长；断线补读可能与当前帧追赶叠加。需要用请求数、长任务和 React commit 测量实际成本。
 - **采集重点：** 固定事件数、平均文本长度、工具/子 agent 比例和每秒事件数；记录首次打开、滚动、实时追加与断线重连期间的请求数、长任务、React commit 时长与内存。
 
+## Runtime 目录列表
+
+目录列表按目标 workspace 一次读取 Runtime 身份、可见性、心跳和能力 metadata，
+复用本次响应的权限事实；不为每个目录水合全平台 Runtime 的历史 usage、模型或执行组。
+详情与创建/改名/归档响应同样使用轻量读取。状态仍从当前心跳推导，归档优先于在线；
+没有跨请求缓存。[查询预算与状态回归](../../tests/unit/multiremi/runtime-workspaces-cost.test.ts)
+覆盖同 daemon ID 的跨 workspace 隔离与心跳过期，
+[本地前后测量](../../reports/performance/MUL-279-runtime-workspaces.md)明确区分 SQLite 样本和未测的 stable PG。
+
 ## Agent 与 Skill 文件读取边界
 
 普通 `getAgent`、Agent 列表、`getSkill` 和 `listAgentSkills` 不读取关联的

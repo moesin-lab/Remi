@@ -588,6 +588,10 @@ export class WorkspacesRepo {
   }
 
   createWorkspace(input: CreateWorkspaceInput, actingUserId?: string | null): MultiremiWorkspace {
+    return this.createWorkspaceWithOperator(input);
+  }
+
+  private createWorkspaceWithOperator(input: CreateWorkspaceInput, ifAbsent = false): MultiremiWorkspace {
     const name = String(input.name ?? "").trim();
     const slug = normalizeWorkspaceSlug(input.slug ?? slugifyWorkspaceName(name));
     if (!name || !slug) throw new Error("name and slug are required");
@@ -597,7 +601,7 @@ export class WorkspacesRepo {
     this.ctx.db.run(
       `INSERT INTO multiremi_workspaces (
         id, name, slug, description, context, settings, repos, issue_prefix, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)${ifAbsent ? ' ON CONFLICT (id) DO NOTHING' : ''}`,
       [
         id,
         name,
@@ -611,20 +615,11 @@ export class WorkspacesRepo {
         now,
       ],
     );
-    // The authenticated creator (not the legacy "local" user) becomes the owner,
-    // otherwise a new user could create a workspace they cannot access.
+    // All workspaces use the shared local operator identity.
     const user = this.getCurrentUser();
-    const memberId = `mem_${id}_${user.id}`;
-    if (!this.getWorkspaceMember(memberId)) {
-      this.createWorkspaceMember({
-        id: memberId,
-        workspaceId: id,
-        userId: user.id,
-        name: "Operator",
-        email: null,
-        role: "owner",
-      });
-    }
+    // The row is visible before its operator exists. Startup in a peer can
+    // repair that operator now, so use the same lifecycle lock and re-read.
+    this.ensureWorkspaceOperator(id);
     this.ctx.db.run("UPDATE multiremi_users SET onboarded_at = COALESCE(onboarded_at, ?), updated_at = ? WHERE id = ?", [now, now, user.id]);
     return this.getWorkspace(id)!;
   }
@@ -854,7 +849,9 @@ export class WorkspacesRepo {
   ensureLocalWorkspace(): MultiremiWorkspace {
     const existing = this.getWorkspace("local");
     if (existing) return existing;
-    return this.createWorkspace({ id: "local", name: "Local Workspace", slug: "local", issuePrefix: "MUL" });
+    // A row lock cannot protect a workspace that does not exist yet. Let the
+    // primary key select the winner, preserve its settings, then read it back.
+    return this.createWorkspaceWithOperator({ id: "local", name: "Local Workspace", slug: "local", issuePrefix: "MUL" }, true);
   }
 
   // ── Workspace env (task-session environment variables) ─────────

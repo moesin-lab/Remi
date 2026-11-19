@@ -10,6 +10,7 @@ it("keeps the minimum CLI fixed to a declared contract release", () => {
 });
 import { capabilityDecisionGlobs, findVersionDecisions, versionDecisionExceptions } from "./helpers/daemon-capability-guard.js";
 
+// Full-directory AST/lexical scans can exceed Bun's default 5s under parallel CI load.
 it("does not infer features from CLI/build versions across capability decision directories", () => {
   const files = new Set(capabilityDecisionGlobs.flatMap(pattern =>
     [...new Bun.Glob(pattern).scanSync({ cwd: root })]));
@@ -17,7 +18,7 @@ it("does not infer features from CLI/build versions across capability decision d
   const failures = [...files].sort().flatMap(file =>
     findVersionDecisions(file, readFileSync(resolve(root, file), "utf8")));
   expect(failures).toEqual([]);
-});
+}, 15_000);
 
 it("rejects version inference including review counterexamples and future files", () => {
   const counterexamples = [

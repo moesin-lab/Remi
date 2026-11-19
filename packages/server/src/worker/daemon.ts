@@ -1,3 +1,6 @@
+import { foldStoredTrace } from "./trace-pages.js";
+import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution } from "./planned-restart-journal.js";
+import { restartQuestionKey, type PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
 import { resolveCoAuthoredByIdentity } from "@multiremi/contracts/co-authored-by";
 import { performUpdate } from "@shared/cli-update.js";
@@ -14,7 +17,7 @@ import { discoverRuntimeProfileModels } from "./runtime-profile-models.js";
 import { ensureAntigravityServer, installedAntigravity } from "@acp/antigravity-install.js";
 import { AntigravityGatewayShim, type GatewayShimRun } from "@daemon/agent-runtime/antigravity/gateway-shim.js";
 import { prepareRuntimeCodexModelCatalog } from "./runtime-codex-model-catalog.js";
-import { isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
+import { FeishuDeliveryError, isPermanentFeishuDeliveryError } from "@shared/feishu-delivery-error.js";
 import { existsSync, realpathSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { cpus, homedir, hostname } from "node:os";
 import { multiremiStateDir } from "@shared/home-paths.js";
@@ -59,7 +62,7 @@ import {
   type UploadFeishuBotAttachmentInput,
 } from "./client.js";
 import { responseToUsageUnits } from "./usage-units.js";
-import { createTraceTranslator, type TraceSubagentRef, type TraceTranslator } from "./trace-translator.js";
+import { createTraceTranslator, type TraceSubagentRef, type TraceTranslator, type TraceTranslatorCheckpoint } from "./trace-translator.js";
 import { nativeAgentItemId } from "@acp/adapters/trace-vendor.js";
 import { TaskActivityReporter } from "./task-activity.js";
 import { LaneTaskContextFile, type LaneTaskContext } from "./lane-task-context.js";
@@ -92,7 +95,7 @@ import {
   type DaemonProtocolClientOptions,
   type DaemonProtocolLane,
 } from "./daemon-protocol-client.js";
-import { registerDaemonOfferHandler } from "./daemon-offers.js";
+import { normalizeDaemonTurnOffer, registerDaemonOfferHandler } from "./daemon-offers.js";
 import { DaemonTaskDownlinks, type DaemonSteerMessage } from "./daemon-downlinks.js";
 import { registerDaemonRuntimeDownlinks } from "./daemon-runtime-downlinks.js";
 import {
@@ -114,7 +117,7 @@ import {
   responseToFeishuImage,
 } from "@connectors/feishu/outbound-images.js";
 import {
-  buildSteerInjectionPrompt,
+  buildSteerInjectionPrompt, withSteerIdentity,
   steerMessageText,
   materializeTaskSteerAttachments,
   DEFAULT_FORCE_ANSWER_GRACE_MS,
@@ -1280,6 +1283,18 @@ export class MultiremiDaemon {
   private inflight = new Set<Promise<void>>();
   private activeTaskIds = new Set<string>();
   private activeTaskAborts = new Set<AbortController>();
+  private readonly taskAbortsById = new Map<string, AbortController>();
+  private readonly restartExecutions = new Map<string, RestartExecution>();
+  private readonly restartTraceIdentities = new Map<string, { state: TraceTranslatorCheckpoint; trace_head: number }>();
+  private readonly executionGenerations = new Map<string, number>();
+  private readonly resumedUsageRuns = new Map<string, string>();
+  private restartRecoveryCandidates = new Set<string>();
+  private readonly restartProviderClosed = new Set<string>();
+  private readonly expiredRestartTasks = new Set<string>();
+  private readonly restartDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly resumedRestartIds = new Set<string>();
+  private restartJournal: PlannedRestartJournal | null = null;
+  private restartTransfer: PlannedRestartTransfer | null = null;
   private claimsPaused = false;
   /**
    * Server-driven platform drain. Like a local update claim pause, a drain
@@ -1622,7 +1637,7 @@ export class MultiremiDaemon {
         }));
     }
     // Co-resident lanes share a client whose construction-time caps may be empty.
-    this.protocolClient.advertiseCaps(["input_unread"]);
+    this.protocolClient.advertiseCaps(["input_unread", "turn.restart"]);
     // PR 6 §5.3: this lane keeps Chat processes alive for background tasks; it parks only when the server echoes the cap.
     if (this.options.asyncTasks) this.protocolClient.advertiseCaps(["lane.background"]);
     this.parkedLanes = new ParkedLanes({
@@ -1690,7 +1705,7 @@ export class MultiremiDaemon {
             this.options.runtimeId, this.sshMeshManager.getHeartbeatStatus(),
             { ackGeneration: this.appliedDrainGeneration, activeTaskCount: this.protocolClient.processActiveTaskCount(), scope: "daemon", activeTaskIds: [...this.activeTaskIds] },
             capabilities.supports_bot_menu === true,
-            Boolean(capabilities.feishu_concierge_protocol), this.pollAbort.signal,
+            Boolean(capabilities.feishu_concierge_protocol), this.pollAbort.signal, [], capabilities.planned_restart,
           );
           for (const task of ack.cancelled_tasks ?? []) {
             if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") {
@@ -1726,6 +1741,35 @@ export class MultiremiDaemon {
         }
       },
     };
+    // Requests are derived from persisted server handoffs, never a local timer.
+    this.protocolClient.registerFrameHandler("turn.restart", frame => {
+      const p = frame.payload;
+      if (!frame.rt || frame.rt !== this.options.runtimeId || typeof p.attempt_id !== "string"
+        || typeof p.turn_id !== "string" || typeof p.handoff_id !== "string"
+        || !Number.isSafeInteger(p.generation) || Number(p.generation) < 0) return;
+      const abort = this.taskAbortsById.get(p.attempt_id);
+      if (!abort || this.restartExecutions.has(p.attempt_id)) return;
+      this.restartExecutions.set(p.attempt_id, { workspace_id: this.options.workspaceId ?? "local",
+        daemon_id: this.options.daemonId ?? this.options.runtimeName, runtime_id: frame.rt,
+        turn_id: p.turn_id, attempt_id: p.attempt_id, handoff_id: p.handoff_id, generation: Number(p.generation) });
+      // At the deadline a currently running tool may be cancelled and replayed.
+      // runAgent's finally awaits provider.close(), flushes trace and ends reports
+      // before handleTask can create the prepared journal record.
+      abort.abort();
+      // Provider cancellation/close is cooperative. If it never settles there
+      // can be no checkpoint receipt: terminate the process as a crash, so the
+      // replacement takes MUL-45 recovery rather than reviving unsafe state.
+      const deadline = setTimeout(() => {
+        this.expiredRestartTasks.add(p.attempt_id as string);
+        this.restartDeadlines.delete(p.attempt_id as string);
+        this.restartExecutions.delete(p.attempt_id as string);
+        this.forceStopProcesses();
+        this.requestRestart();
+        this.onStopTimeout();
+      }, this.stopTimeoutMs);
+      deadline.unref?.();
+      this.restartDeadlines.set(p.attempt_id, deadline);
+    });
     this.protocolClient.addLane(this.protocolLane);
     registerDaemonOfferHandler(this.protocolClient, {
       runtimeId: () => this.options.runtimeId,
@@ -1770,7 +1814,7 @@ export class MultiremiDaemon {
           this.attemptSlashCommands.delete(taskId);
           this.ensureTrace().close(taskId, status, error);
         },
-      }));
+      }, taskId => this.executionGenerations.get(taskId) ?? 0));
   }
 
   async checkExternalWorkspaceMembership(workspaceId: string, externalId: string): Promise<boolean> {
@@ -1893,6 +1937,7 @@ export class MultiremiDaemon {
   private runtimeCapabilities(): DaemonRuntimeCapabilities {
     const concierge = this.feishuConcierge !== null;
     return {
+      planned_restart: 1,
       supports_batch_import: true,
       supports_directory_scan: true,
       supports_skill_directory: true,
@@ -1993,6 +2038,8 @@ export class MultiremiDaemon {
     this.parkedLanes?.disable(null);
     this.parkedLanesClosing = null;
     const outbox = this.ensureOutbox();
+    this.plannedRestartTransfer();
+    this.restartRecoveryCandidates = new Set(this.restartJournal!.entries().map(entry => entry.execution.handoff_id));
     this.startRepoCheckoutServer();
     try {
       await this.registerCurrentRuntime();
@@ -2030,6 +2077,7 @@ export class MultiremiDaemon {
       }
 
       this.protocolClient?.startLane(this.protocolLane);
+      await this.resumePlannedRestarts();
       this.nextPluginDesiredAt = Date.now() + PLUGIN_DESIRED_FORCED_REFRESH_MS;
       this.onceTaskAccepted = false;
       while (!this.stopped) {
@@ -2043,6 +2091,7 @@ export class MultiremiDaemon {
             this.nextPluginDesiredAt = Date.now() + PLUGIN_DESIRED_FORCED_REFRESH_MS;
             await this.reconcileRuntimeAgentPlugins(this.options.runtimeId!, null, { force: true });
           }
+          await this.resumePlannedRestarts();
           await this.waitForNextTick();
         } catch (err) {
           // A transient server/network blip (e.g. the server restarting) must not
@@ -2114,6 +2163,9 @@ export class MultiremiDaemon {
         this.traceTransport = null;
         await releaseDaemonTrace(this.protocolClient);
       }
+      this.restartJournal?.close();
+      this.restartJournal = null;
+      this.restartTransfer = null;
       this.stopRepoCheckoutServer();
       // Every task has drained, so no Antigravity server still needs the gateway.
       if (this.ownsAntigravityShim) {
@@ -2477,8 +2529,11 @@ export class MultiremiDaemon {
     // Admission is deliberately non-durable: a timed-out running report must
     // never replay after this executor has given up and queued failed.
     const platformDeadline = drainDeadline === undefined ? Infinity : Date.parse(drainDeadline);
-    const admissionEnd = Math.min(Date.now() + 30_000,
-      Number.isNaN(platformDeadline) ? Date.now() : platformDeadline);
+    const admissionNow = Date.now();
+    // An expired drain that was safely checkpointed must still be able to
+    // confirm installation; future deadlines retain the existing smaller budget.
+    const admissionEnd = Number.isNaN(platformDeadline) ? admissionNow : Math.min(admissionNow + 30_000,
+      platformDeadline > admissionNow ? platformDeadline : admissionNow + 30_000);
     while (true) {
       try {
         await this.client.reportRuntimeUpdateResult(runtimeId, requestId, { status: "running" },
@@ -2759,6 +2814,7 @@ export class MultiremiDaemon {
     signal: AbortSignal = this.pollAbort.signal,
   ): Promise<void> {
     const supervisor = this.feishuConcierge;
+    let sending = false;
     try {
       if (!supervisor) throw new Error("Feishu concierge is unavailable");
       const resolveImage = createFeishuImageResolver({
@@ -2785,10 +2841,22 @@ export class MultiremiDaemon {
       await deliverFeishuOutbound(delivery, {
         signal,
         prepareMention: openId => this.client.prepareFeishuBotOutboundMention(runtimeId, delivery.id, delivery.claimToken, openId),
-        send: options => supervisor.sendOutbound({ ...delivery, body }, options),
-        report: input => this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, input),
+        send: async options => {
+          sending = true;
+          return supervisor.sendOutbound({ ...delivery, body }, options);
+        },
+        report: async input => {
+          try { await this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, input); }
+          catch (error) {
+            if (input.status === "sent") throw new FeishuDeliveryError(redactFeishuBotError(error), true, true);
+            throw error;
+          }
+        },
       });
     } catch (error) {
+      // A missing transport acknowledgement may hide a committed send. Keep
+      // the sending lease so recovery uses the bounded stable-UUID path.
+      if (sending && error instanceof FeishuDeliveryError && error.ambiguous) throw error;
       await this.client.reportFeishuBotOutboundResult(runtimeId, delivery.id, {
         claimToken: delivery.claimToken,
         status: "failed",
@@ -3742,7 +3810,7 @@ export class MultiremiDaemon {
     const status = kind === "complete" ? "completed" : "failed";
     if (terminal && this.options.runtimeId) this.ensureTrace().track(taskId, this.options.runtimeId);
     // The completion fields describe the close that follows the enqueue.
-    this.ensureOutbox().enqueue(taskId, kind, { ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
+    this.ensureOutbox().enqueue(taskId, kind, { ...(this.executionGenerations.has(taskId) ? { generation: this.executionGenerations.get(taskId) } : {}), ...payload, runtime_id: payload.runtime_id ?? this.options.runtimeId,
       ...(terminal ? this.withSlashCommands(taskId, this.ensureTrace().completion(taskId, status)) : {}) });
     if (terminal) {
       this.attemptSlashCommands.delete(taskId);
@@ -3976,6 +4044,8 @@ export class MultiremiDaemon {
     log.info(`Claimed task ${task.id}`);
     const abort = new AbortController();
     this.activeTaskAborts.add(abort);
+    this.taskAbortsById.set(task.id, abort);
+    let checkpointRestart: RestartExecution | null = null;
     let serverTerminalStatus: Extract<MultiremiTaskStatus, "completed" | "failed" | "cancelled"> | null = null;
     const stopWatching = this.taskDownlinks.observeCancellation(task.id, (status) => {
       serverTerminalStatus = status;
@@ -3990,7 +4060,7 @@ export class MultiremiDaemon {
       }, timeoutMs)
       : null;
     let summary: RunSummary | null = null;
-    const usageRunId = randomUUID();
+    const usageRunId = this.resumedUsageRuns.get(task.id) ?? randomUUID();
     let observedUsage: TaskUsageSnapshot | null = null;
     const observedUsageUnits = new Map<string, TaskUsageUnit>();
     let resolvedWorkDir: ResolvedTaskWorkDir | null = null;
@@ -4215,7 +4285,7 @@ export class MultiremiDaemon {
       const startSignal = AbortSignal.any([abort.signal, this.pollAbort.signal]);
       startSignal.throwIfAborted();
       const startReply = await this.ensureOutbox().enqueueAndWait(task.id, "start", {
-        usage_run_id: usageRunId, runtime_id: this.options.runtimeId,
+        usage_run_id: usageRunId, runtime_id: this.options.runtimeId, ...(this.executionGenerations.has(task.id) ? { generation: this.executionGenerations.get(task.id) } : {}),
       }, this.options.requestTimeoutMs, startSignal);
       if (startReply.execution_authorized !== true) throw new Error("Task execution start does not authorize this run to execute");
       startSignal.throwIfAborted();
@@ -4298,12 +4368,26 @@ export class MultiremiDaemon {
         this.finalizeTaskProgress(progressSummarizer, serverTerminalStatus, undefined, task.id);
         return;
       }
+      const restart = this.restartExecutions.get(task.id);
+      if (restart && !timedOut) {
+        if (providerEntered && !this.restartProviderClosed.has(task.id)) return;
+        checkpointRestart = restart;
+        // runAgent has joined provider shutdown. Preserve the same visible
+        // attempt; a checkpoint failure leaves ordinary crash recovery intact.
+        this.enqueueTaskReport(task.id, "session_pin", {
+          sessionId: err instanceof RunAgentError ? err.sessionId : task.sessionId,
+          workDir: err instanceof RunAgentError ? err.workDir : resolvedWorkDir?.workDir ?? task.workDir,
+        });
+        await progressSummarizer?.closeWithoutSummary();
+        progressSummarizer = null;
+        return;
+      }
       // stop() closes the lane before draining providers. SIGTERM may also
       // terminate ACP children, so Cancelled/EOF here is runtime interruption,
       // not an Agent failure. Keep the report durable: replay must create the
       // retry even when startup orphan recovery skips pending terminal rows.
-      const runtimeInterrupted = !timedOut && (err instanceof RunAgentError
-        ? err.runtimeInterrupted : this.pollAbort.signal.aborted && isShutdownInterruption(err));
+      const runtimeInterrupted = !timedOut && (this.expiredRestartTasks.has(task.id) || (err instanceof RunAgentError
+        ? err.runtimeInterrupted : this.pollAbort.signal.aborted && isShutdownInterruption(err)));
       const cause = err instanceof RunAgentError ? err.cause : err;
       const failureReason = runtimeInterrupted ? "runtime_recovery" : cause instanceof LocalDirectoryError
         ? cause.failureReason
@@ -4340,6 +4424,43 @@ export class MultiremiDaemon {
         finishTracking();
       }
       releaseIssueWorkspaceLifecycle?.();
+      if (checkpointRestart) {
+        try {
+          await this.plannedRestartTransfer().suspend(checkpointRestart, async () => {
+            const drained = await this.ensureOutbox().waitForTaskDrain(task.id, AbortSignal.timeout(this.options.requestTimeoutMs));
+            if (drained !== "delivered") throw new Error(`Planned restart reports not acknowledged: ${drained}`);
+            await this.ensureTrace().streamer.flushTask(task.id, AbortSignal.timeout(this.options.requestTimeoutMs));
+            const result = await this.taskDownlinks.rpc("turn.restart.checkpoint", checkpointRestart! as unknown as Record<string, unknown>, this.options.requestTimeoutMs);
+            const checkpoint = result.checkpoint as PlannedRestartCheckpoint;
+            const consumed = foldStoredTrace(this.ensureTrace().store, task.id).fold.state().items.flatMap(item =>
+              item.type === "user_message" && item.steer?.consumed ? [item.steer.steer_id] : []);
+            const head = this.ensureTrace().store.head(task.id)?.head ?? 0;
+            const identities = this.restartTraceIdentities.get(task.id);
+            try {
+              if (!identities || identities.trace_head !== head) throw new Error("Trace identity snapshot not available at checkpoint head");
+              this.restartJournal!.saveTraceIdentities(checkpointRestart!, head, identities.state);
+            } catch (error) {
+              log.warn(`Task ${task.id}: optional trace identity snapshot omitted: ${error instanceof Error ? error.message : String(error)}`);
+            }
+            return { ...checkpoint, delivered_message_ids: [...new Set(consumed)], trace_head: head };
+          });
+          const deadline = this.restartDeadlines.get(task.id);
+          if (deadline) clearTimeout(deadline);
+          this.restartDeadlines.delete(task.id);
+          log.info(`Task ${task.id} planned restart checkpoint acknowledged`);
+        } catch (error) {
+          log.error(`Task ${task.id} planned restart checkpoint deferred: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (!checkpointRestart && (serverTerminalStatus || timedOut || !this.restartExecutions.has(task.id))) {
+        const deadline = this.restartDeadlines.get(task.id);
+        if (deadline) clearTimeout(deadline);
+        this.restartDeadlines.delete(task.id);
+      }
+      this.restartProviderClosed.delete(task.id);
+      this.expiredRestartTasks.delete(task.id);
+      this.taskAbortsById.delete(task.id);
+      this.restartExecutions.delete(task.id);
       this.activeTaskAborts.delete(abort);
       this.activeTaskIds.delete(task.id);
       if (!activeExecutionReleased) {
@@ -4347,8 +4468,70 @@ export class MultiremiDaemon {
       }
       stopWatching();
       this.taskDownlinks.release(task.id);
+      this.restartQuestions.delete(task.id);
+      this.restartTraceIdentities.delete(task.id);
       if (timeout) clearTimeout(timeout);
     }
+  }
+
+  private readonly pendingResumedTasks = new Map<string, ReturnType<typeof normalizeDaemonTurnOffer>>();
+
+  private async resumePlannedRestarts(): Promise<void> {
+    this.plannedRestartTransfer();
+    for (const entry of this.restartJournal!.entries()) {
+      if (this.stopped || !this.restartRecoveryCandidates.has(entry.execution.handoff_id) || this.resumedRestartIds.has(entry.execution.handoff_id)
+        || entry.execution.runtime_id !== this.options.runtimeId) continue;
+      try {
+        await this.restartTransfer!.resume(entry.execution.handoff_id);
+        const task = this.pendingResumedTasks.get(entry.execution.handoff_id)!;
+        this.pendingResumedTasks.delete(entry.execution.handoff_id);
+        this.resumedRestartIds.add(entry.execution.handoff_id);
+        const run = this.handleTask(task).finally(() => this.inflight.delete(run));
+        this.inflight.add(run);
+        void run.catch(error => log.error(`Resumed task ${task.id} failed: ${String(error)}`));
+      } catch (error) {
+        if (error instanceof DaemonProtocolRpcError && error.code === "stale_execution") this.restartRecoveryCandidates.delete(entry.execution.handoff_id);
+        log.warn(`Planned restart ${entry.execution.handoff_id} waiting: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+
+  private plannedRestartTransfer(): PlannedRestartTransfer {
+    if (this.restartTransfer) return this.restartTransfer;
+    this.restartJournal ??= new PlannedRestartJournal(this.outboxPath === ":memory:" ? ":memory:"
+      : join(dirname(this.legacyOutboxPath), `restart-${this.options.provider}-${createHash("sha256").update(this.legacyOutboxPath).digest("hex").slice(0, 16)}.db`));
+    return this.restartTransfer = new PlannedRestartTransfer(this.restartJournal, {
+      suspend: async entry => {
+        await this.taskDownlinks.rpc("turn.restart.suspend", { ...entry.execution, checkpoint: entry.checkpoint }, this.options.requestTimeoutMs);
+      },
+      resume: async entry => {
+        const identities = this.restartJournal!.traceIdentities(entry, reason => log.warn(`Task ${entry.execution.attempt_id}: ${reason}; using trace fold only`));
+        const result = await this.taskDownlinks.rpc("turn.restart.resume", { ...entry.execution, consumer_id: entry.consumer_id }, this.options.requestTimeoutMs);
+        const task = normalizeDaemonTurnOffer(result.task as Record<string, unknown>);
+        const generation = Number(result.generation);
+        if (generation !== entry.execution.generation + 1) throw new Error("Invalid restart generation");
+        this.executionGenerations.set(task.id, generation);
+        if (identities) this.restartTraceIdentities.set(task.id, { state: identities, trace_head: entry.checkpoint.trace_head });
+        this.resumedUsageRuns.set(task.id, entry.consumer_id);
+        this.ensureTrace().streamer.setExecutionGeneration(task.id, generation);
+        this.taskDownlinks.bindTurn({ ...task, generation });
+        const prior = foldStoredTrace(this.ensureTrace().store, task.id).fold.state();
+        const replay = new Set(prior.items.flatMap(item => item.type === "user_message" && item.steer && !item.steer.consumed ? [item.steer.steer_id] : []));
+        let firstReplay = true;
+        task.input_messages = task.input_messages.map(message => {
+          if (!replay.has(message.id)) return message;
+          const notice = firstReplay ? "以下消息在 Remi 更新前发出，可能已经收到过，处理过的请忽略。\n" : "";
+          firstReplay = false;
+          return { ...message, body_md: withSteerIdentity(message.body_md, message.id, notice) };
+        });
+        const questions = (result.recovered_questions ?? []) as UnifiedMessage[];
+        this.restartQuestions.set(task.id, questions);
+        for (const question of questions) this.taskDownlinks.registerDecision(question, task.id);
+        // No model may run until transfer.resume has persisted the local receipt.
+        this.pendingResumedTasks.set(entry.execution.handoff_id, task);
+        return { generation };
+      },
+    });
   }
 
   private async prepareTaskPluginRuntime(
@@ -4805,6 +4988,28 @@ export class MultiremiDaemon {
     ].map((value) => value?.trim()).filter((value): value is string => Boolean(value));
   }
 
+  private readonly restartQuestions = new Map<string, UnifiedMessage[]>();
+
+  private async createOrRecoverDecision(taskId: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const metadata = payload.metadata as Record<string, unknown>;
+    const candidates = this.restartQuestions.get(taskId) ?? [];
+    const recovered = candidates.find(message => {
+      const request = message.metadata.human_request as { payload?: Record<string, unknown> } | undefined;
+      return request?.payload && restartQuestionKey(request.payload) === restartQuestionKey(metadata);
+    });
+    if (!recovered && candidates.some(message => {
+      const request = message.metadata.human_request as { payload?: Record<string, unknown> } | undefined;
+      return request?.payload?.kind === metadata.kind;
+    })) throw new Error("Planned restart request changed; original question retained");
+    const messageId = recovered?.id ?? `question_${randomUUID()}`;
+    const waitId = randomUUID();
+    this.taskDownlinks.beginQuestionWait(taskId, messageId, waitId);
+    const result = await this.taskDownlinks.rpc("turn.decision", { ...payload, message_id: messageId, wait_id: waitId,
+      ...(recovered ? { recover_question_id: recovered.id } : {}) });
+    if (recovered) this.restartQuestions.set(taskId, this.restartQuestions.get(taskId)!.filter(message => message.id !== recovered.id));
+    return result;
+  }
+
   private attachHumanInputHandlers(
     provider: MultiremiTaskProvider,
     task: MultiremiTaskWithAgent,
@@ -4834,11 +5039,8 @@ export class MultiremiDaemon {
           // A child session's request names its subagent (PR 5 §1.3); the root's carries no field.
           const subagent = this.subagentRef(task.id, provider, trace, params.sessionId);
           // S2 creates the decision message and sets awaiting_human atomically.
-          const questionId = `question_${randomUUID()}`, waitId = randomUUID();
-          this.taskDownlinks.beginQuestionWait?.(task.id, questionId, waitId);
-          const result = await this.taskDownlinks.rpc("turn.decision", {
+          const result = await this.createOrRecoverDecision(task.id, {
             ...this.taskDownlinks.turnInput(task.id),
-            message_id: questionId, wait_id: waitId,
             dedupe_key: `permission:${task.id}:${randomUUID()}`,
             body_md: `Permission requested: ${toolTitle}`,
             options: params.options.map(option => ({ label: option.name, value: option.optionId, description: option.kind })),
@@ -4856,12 +5058,12 @@ export class MultiremiDaemon {
           const optionId = reply ? readResponseOptionId(reply.metadata)
             ?? readResponseOptionId(decisionReplyObject(reply)) ?? reply.body_md.trim() : null;
           const chosen = optionId ? params.options.find(option => option.optionId === optionId) ?? null : null;
-          if (traceItem) this.recordTrace(task.id, () => trace.permissionResolved(traceItem, {
+          if (traceItem && !this.restartExecutions.has(task.id)) this.recordTrace(task.id, () => trace.permissionResolved(traceItem, {
             option: chosen, outcome: chosen ? "selected" : reply || signal.aborted ? "cancelled" : "timeout",
             respondedBy: reply?.sender_id ?? null, replyMessageId: reply?.id ?? null,
           }));
           if (reply) {
-            if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: waitId });
+            if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: this.taskDownlinks.activeQuestionWaits().find(wait => wait.message_id === decision.id)?.wait_id });
             this.taskDownlinks.confirmDecisionReply(task.id, reply);
           }
           return chosen ? { outcome: "selected", optionId: chosen.optionId } : { outcome: "cancelled" };
@@ -4870,7 +5072,7 @@ export class MultiremiDaemon {
           log.warn(`Permission routing failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
           return { outcome: "cancelled" };
         } finally {
-          this.taskDownlinks.finishDecision(task.id);
+          if (!this.restartExecutions.has(task.id)) this.taskDownlinks.finishDecision(task.id);
         }
       });
     }
@@ -4895,11 +5097,8 @@ export class MultiremiDaemon {
           context = sliced.context;
         }
         const subagent = this.subagentRef(task.id, provider, trace, params.sessionId);
-        const questionId = `question_${randomUUID()}`, waitId = randomUUID();
-        this.taskDownlinks.beginQuestionWait?.(task.id, questionId, waitId);
-        const result = await this.taskDownlinks.rpc("turn.decision", {
+        const result = await this.createOrRecoverDecision(task.id, {
           ...this.taskDownlinks.turnInput(task.id),
-          message_id: questionId, wait_id: waitId,
           dedupe_key: `elicitation:${task.id}:${randomUUID()}`,
           body_md: [params.message, ...questions.map(({ question }) => question.question)].filter(Boolean).join("\n\n"),
           options: questions.flatMap(({ fieldKey, question }) => question.options.map(option => ({
@@ -4927,11 +5126,11 @@ export class MultiremiDaemon {
         }));
         const reply = await this.awaitDecisionReply(task.id, decision.id, signal, humanRequestTimeoutMs);
         const answers = reply && reply.metadata.question_closed !== true ? decisionReplyAnswers(reply, questions) : null;
-        if (traceItem) this.recordTrace(task.id, () => trace.questionResolved(traceItem, {
+        if (traceItem && !this.restartExecutions.has(task.id)) this.recordTrace(task.id, () => trace.questionResolved(traceItem, {
           answers, respondedBy: reply?.sender_id ?? null, replyMessageId: reply?.id ?? null,
         }));
         if (reply) {
-          if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: waitId });
+          if (reply.metadata.question_closed !== true) await this.taskDownlinks.rpc('turn.decision.consume', { ...this.taskDownlinks.turnInput(task.id), message_id: decision.id, reply_message_id: reply.id, wait_id: this.taskDownlinks.activeQuestionWaits().find(wait => wait.message_id === decision.id)?.wait_id });
           this.taskDownlinks.confirmDecisionReply(task.id, reply);
         }
         if (!answers) return { action: "cancel" };
@@ -4940,7 +5139,7 @@ export class MultiremiDaemon {
         log.warn(`Question routing failed for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
         return { action: "cancel" };
       } finally {
-        this.taskDownlinks.finishDecision(task.id);
+        if (!this.restartExecutions.has(task.id)) this.taskDownlinks.finishDecision(task.id);
       }
     });
 
@@ -4968,7 +5167,13 @@ export class MultiremiDaemon {
   private async awaitDecisionReply(taskId: string, messageId: string, signal: AbortSignal,
     timeoutMs: number): Promise<UnifiedMessage | null> {
     const waitSignal = AbortSignal.any([signal, this.pollAbort.signal]);
+    // Saved answers may precede this process and its bounded input projection.
+    const saved = await this.taskDownlinks.rpc("turn.decision.get", { ...this.taskDownlinks.turnInput(taskId), message_id: messageId });
+    if (this.restartExecutions.has(taskId)) return null;
+    if (saved.reply) return saved.reply as UnifiedMessage;
     const reply = await this.taskDownlinks.waitForDecisionReply(messageId, waitSignal, timeoutMs);
+    // Planned cancellation releases the callback, while the original Q stays live.
+    if (this.restartExecutions.has(taskId)) return null;
     if (reply) {
       // WS input is a bounded prompt projection. Fetch once after notification;
       // never interpret its unread_range prefix or folded body as an answer.
@@ -5388,6 +5593,8 @@ export class MultiremiDaemon {
     // One writer per attempt: ACP updates, permissions, questions and steers all
     // go through the translator, which flushes pending deltas before any other
     // fact, so the trace keeps their order (PR 2 §2).
+    const previousTrace = this.executionGenerations.has(task.id)
+      ? foldStoredTrace(this.ensureTrace().store, task.id).fold.state() : null;
     const trace = createTraceTranslator(createAdapter(config.agentType), (events) => {
       try {
         const stored = this.ensureTrace().append(task.id, this.options.runtimeId!, events);
@@ -5396,6 +5603,9 @@ export class MultiremiDaemon {
         log.warn(`Failed to append trace events for task ${task.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }, {
+      ...(previousTrace?.turn ? { resume: { turn: previousTrace.turn, items: previousTrace.items,
+        runtime: this.restartTraceIdentities.get(task.id)?.state } } : {}),
+      onResumeWarning: message => log.warn(`Task ${task.id}: ${message}`),
       // Legacy (untyped) provider failures arrive as message text: keep secrets
       // out of the trace, and keep the failure its own message for the legacy
       // failure check below (it reads the round's last item).
@@ -5490,12 +5700,13 @@ export class MultiremiDaemon {
         // ADR 0023: Remi's part of the AGENTS.md in effect, for the transcript's session notes. Never the local context.
         instructions: promptArtifact.instructions,
       });
+      if (previousTrace?.turn && this.resumedUsageRuns.has(task.id)) trace.restarted(this.executionGenerations.get(task.id)!);
       signal.throwIfAborted();
       steerFeed.start();
       let prompt = promptArtifact.prompt;
       // ADR 0023: a steer is the new messages, labelled as the turn input labels them.
       const steerPrompt = (messages: Parameters<typeof buildSteerInjectionPrompt>[0]) =>
-        buildSteerInjectionPrompt(messages, { agentId: agent.id, alwaysLabel: !privateChat, provider: agent.provider });
+        buildSteerInjectionPrompt(messages.map(message => ({ ...message, content: withSteerIdentity(message.content, message.id) })), { agentId: agent.id, alwaysLabel: !privateChat, provider: agent.provider });
 
       // Every steer batch flows through here exactly once: injected into the
       // running prompt (`native`), sent as the next prompt (`reprompt`), or —
@@ -6000,6 +6211,19 @@ export class MultiremiDaemon {
       } else {
         await provider.close?.();
       }
+      if (this.restartExecutions.has(task.id)) {
+        // The bridge and all output sources have stopped. Close its work, keep
+        // server-owned waits, and save identities only: no activity survives.
+        this.recordTrace(task.id, () => trace.plannedRestart());
+        this.recordTrace(task.id, () => trace.flush());
+        try {
+          this.restartTraceIdentities.set(task.id, { state: trace.checkpoint(),
+            trace_head: this.ensureTrace().store.head(task.id)?.head ?? 0 });
+        } catch (error) {
+          log.warn(`Task ${task.id}: optional trace identity snapshot unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      this.restartProviderClosed.add(task.id);
       this.liveUpdateProviders.delete(provider);
     }
   }

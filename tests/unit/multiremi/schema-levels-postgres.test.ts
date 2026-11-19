@@ -1,3 +1,4 @@
+import { verifyPlannedRestartSchemaUpgrade } from "../../fixtures/planned-restart-schema-upgrade.js";
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,28 +30,31 @@ describe.skipIf(!adminUrl)('schema protocol on real PostgreSQL', () => {
   it('enrolls and reopens the production migration chain on PostgreSQL', () => {
     expect(readSchemaLevels(db)).toEqual({ expandLevel: 0, contractLevel: 0 });
     runMigrations(db); runMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 2, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: 3, contractLevel: 0 });
   }, 30_000);
   it('adds A3 live terms to an enrolled level 1 database and preserves old reader compatibility', () => {
     db.exec('DROP TABLE multiremi_live_terms');
-    db.exec('DELETE FROM multiremi_schema_steps WHERE level=2');
+    db.exec('DELETE FROM multiremi_schema_steps WHERE level>=2');
     db.exec('UPDATE multiremi_schema_meta SET expand_level=1');
     runStartupMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 2, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: 3, contractLevel: 0 });
     expect(db.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name='multiremi_live_terms'").get()).not.toBeNull();
     expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 1, maxLevel: 1 })).not.toThrow();
     console.info('A3 startup expand: level 1 -> 2, live terms table exists; previous B1 reader interval [1,1] remains compatible');
   });
   it('refuses contracted schemas before historical migrations execute', () => {
-    db.exec('UPDATE multiremi_schema_meta SET expand_level=3, contract_level=3');
+    db.exec('UPDATE multiremi_schema_meta SET expand_level=4, contract_level=4');
     try {
       let refusal: Error | undefined;
       try { runStartupMigrations(db); } catch (error) { refusal = error as Error; }
-      expect(refusal?.message).toContain('contract_level=3 exceeds code maxLevel=2');
+      expect(refusal?.message).toContain('contract_level=4 exceeds code maxLevel=3');
       console.info(`startup guard: ${refusal?.message}`);
     }
-    finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=2'); }
+    finally { db.exec('UPDATE multiremi_schema_meta SET contract_level=0, expand_level=3'); }
   });
+  it('upgrades level 2 planned restart schema atomically and preserves old drains on PostgreSQL', () => {
+    verifyPlannedRestartSchemaUpgrade(db);
+  }, 30_000);
   it('production maintenance CLI refuses undeclared contract and retains the floor', () => {
     db.close();
     const childHome = mkdtempSync(join(tmpdir(), 'mul173-contract-cli-'));

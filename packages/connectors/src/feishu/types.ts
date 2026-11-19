@@ -33,6 +33,8 @@ export type FeishuMediaInfo = {
 
 /** Raw Feishu message event from WebSocket / EventDispatcher. */
 export type FeishuMessageEvent = {
+  /** Local history replay marker, never sent to Feishu. */
+  recovery_source?: "history";
   sender: {
     sender_id: {
       open_id?: string;
@@ -44,6 +46,7 @@ export type FeishuMessageEvent = {
   };
   message: {
     message_id: string;
+    create_time?: string;
     root_id?: string;
     parent_id?: string;
     chat_id: string;

@@ -148,6 +148,9 @@ export const DAEMON_UPLINK_BEST_EFFORT_FRAMES = [
 /** Non-trace-stream daemon -> server RPC requests, paired with a `res` by `id`. */
 export const DAEMON_UPLINK_RPC_FRAMES = [
   "concierge.status_report",
+  "turn.restart.checkpoint",
+  "turn.restart.suspend",
+  "turn.restart.resume",
   "turn.input",
   "turn.decision",
   "turn.decision.get",
@@ -177,6 +180,7 @@ export const DAEMON_DOWNLINK_EVENT_FRAMES = [
   "turn.message",
   "input_unread",
   "turn.wrap_up",
+  "turn.restart",
   "runtime.update",
   "runtime.command",
   "runtime.model_list",
@@ -335,6 +339,8 @@ export type DaemonProtocolReply = DaemonProtocolOkReply | DaemonProtocolErrorRep
 
 /** Per-runtime capability fields use the same names and versions as the HTTP heartbeat. */
 export interface DaemonRuntimeCapabilities {
+  /** Version 1 accepts turn.restart and persists same-attempt checkpoints. Missing means unsupported. */
+  planned_restart?: number;
   external_chats?: number;
   external_chat_models?: number;
   supports_batch_import?: boolean;
@@ -911,6 +917,10 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   "task_not_found",
   "authority_revoked",
   "invalid_report",
+  "stale_execution",
+  "invalid_checkpoint",
+  "drain_not_active",
+  "resume_fenced",
   "cli_update_not_admitted",
   "cli_update_not_runnable",
   "report_shape_retired",
@@ -1052,6 +1062,8 @@ export const DAEMON_PROTOCOL_CAPS = [
   "offer",
   /** daemon accepts unified turn inputs and reports replies as messages. */
   "turn.message",
+  /** Same-attempt checkpoint, journal and restart RPCs. */
+  "turn.restart",
   "input_unread",
   /** daemon answers `trace.read` for its hot tasks. */
   "trace.read",

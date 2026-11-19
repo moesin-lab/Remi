@@ -702,6 +702,7 @@ export function controlPlaneConciergeHost(deps: {
           ensureTopicWorkspace: (sessionKey, topicId) => daemon.ensureTopicWorkspace(sessionKey, topicId),
           credentials: {
             appId: config.app_id,
+            recoveryChats: config.recovery_chats,
             appSecret: config.app_secret,
             domain: config.domain,
           },
@@ -850,6 +851,7 @@ export async function sendReceiptLane(handle: FeishuChannelHandle, delivery: Mul
 export async function sendResultCardLane(handle: FeishuChannelHandle, delivery: MultiremiFeishuBotOutboundDelivery,
   options?: FeishuOutboundOptions, daemon?: Pick<MultiremiDaemon, "subscribeTrace" | "getFeishuBotTaskSnapshot">): Promise<{ messageId: string }> {
   options?.signal.throwIfAborted();
+  if (delivery.presentation?.resultMessageId) return { messageId: delivery.presentation.resultMessageId };
   let mentionOpenId = delivery.mention?.resolvedOpenId;
   if (delivery.mention && mentionOpenId === undefined) {
     if (!options?.prepareMention) throw new Error("Feishu mention checkpoint is unavailable");

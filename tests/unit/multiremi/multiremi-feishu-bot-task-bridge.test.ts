@@ -1,3 +1,8 @@
+import { FeishuInboundRecovery, recoverFeishuHistory, feishuHistoryEvent, feishuRecoveryPath } from "@connectors/feishu/inbound-recovery.js";
+import { processFeishuMessageEvent } from "@connectors/feishu/receive.js";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createResponsibleTestIssue } from './helpers.js';
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { mutateExecutionFixture, sentTask } from "./unified-test-paths.js";
@@ -68,6 +73,61 @@ function requireAllowlist(store: MultiremiStore, agentId: string) {
 }
 
 describe("Feishu bot standard Task bridge", () => {
+  it("recovers known-chat history through the same server delivery ids after a restart", async () => {
+    const { store, config } = scaffold();
+    const seed = store.submitFeishuBotMessage("local", "rt_bot", { revision: config.revision,
+      externalSessionKey: "oc_gap:thread:om_seed", externalMessageId: "om_seed", chatType: "group", chatId: "oc_gap",
+      threadId: "om_seed", senderOpenId: "ou_member", text: "Seed known chat", deliveryMode: "native_cot_v1" });
+    expect(store.getFeishuBotDaemonConfig("local", "rt_bot")!.recovery_chats)
+      .toContainEqual({ chat_id: "oc_gap", chat_type: "group" });
+    const root = mkdtempSync(join(tmpdir(), "feishu-history-")), path = join(root, "input.json"), now = Date.now();
+    const delivered = new Map<string, Set<string>>();
+    const client = { request: async () => ({ data: { users: [{ name: "Member" }] } }) } as any;
+    let loseAcknowledgement = true;
+    const deliver = async (event: NonNullable<ReturnType<typeof feishuHistoryEvent>>) => {
+      const parsed = await processFeishuMessageEvent(client, event, "ou_bot", { durableIntake: true,
+        authorizeSender: async () => true, onDenied: async () => { throw new Error("Unexpected denial"); } });
+      if (!parsed) return;
+      const result = store.submitFeishuBotMessage("local", "rt_bot", { revision: config.revision,
+        externalSessionKey: `${parsed.chatId}:thread:${parsed.rootId ?? parsed.messageId}`,
+        externalMessageId: parsed.messageId, chatType: parsed.chatType, chatId: parsed.chatId,
+        threadId: parsed.rootId ?? parsed.messageId, senderOpenId: parsed.senderOpenId,
+        text: parsed.text, deliveryMode: "native_cot_v1" });
+      const ids = delivered.get(parsed.messageId) ?? new Set<string>(); ids.add(result.taskId); delivered.set(parsed.messageId, ids);
+      if (loseAcknowledgement) { loseAcknowledgement = false; throw new Error("daemon stopped after server committed"); }
+    };
+    const item = (id: string, at: number) => ({ message_id: id, create_time: String(at), msg_type: "text",
+      sender: { id_type: "open_id", id: "ou_member", sender_type: "user" },
+      body: { content: JSON.stringify({ text: "@_user_1 Keep working" }) },
+      mentions: [{ key: "@_user_1", id: "ou_bot", id_type: "open_id", name: "Remi" }] });
+    const history = [item("om_gap_2", now - 1000), item("om_gap_1", now - 2000), item("om_too_old", now - 700_000)];
+    const list = async () => ({ code: 0, data: { items: history, has_more: true, page_token: "older" } });
+    const warnings: string[] = [];
+    try {
+      let journal = new FeishuInboundRecovery(path, () => now);
+      journal.rememberChat("oc_gap", "group");
+      await expect(recoverFeishuHistory({ journal, list, deliver, now, maxPages: 1, warn: (_, reason) => warnings.push(reason) }))
+        .rejects.toThrow("daemon stopped");
+      expect(Object.keys(JSON.parse(readFileSync(path, "utf8")).pending)).toEqual(["om_gap_1"]);
+      journal = new FeishuInboundRecovery(path, () => now);
+      await recoverFeishuHistory({ journal, list, deliver, now, maxPages: 1, warn: (_, reason) => warnings.push(reason) });
+      // The live WS copy races the backfill but still resolves to the same Task.
+      await journal.accept({ ...feishuHistoryEvent(history[0]!, "oc_gap", "group")!, recovery_source: undefined }, deliver);
+      expect([...delivered.keys()]).toEqual(["om_gap_1", "om_gap_2"]);
+      expect([...delivered.values()].map(ids => ids.size)).toEqual([1, 1]);
+      expect(new Set([...delivered.values()].flatMap(ids => [...ids])).size).toBe(2);
+      expect(warnings).toContain("history_page_limit");
+      expect(warnings).toContain("history_message_outside_window");
+      const state = JSON.parse(readFileSync(path, "utf8"));
+      expect(state.pending).toEqual({});
+      expect(state.chats.oc_gap.through).toBe(now - 1000);
+      expect(state.skipped.length).toBeGreaterThan(0);
+      expect(feishuRecoveryPath("app-a")).not.toBe(feishuRecoveryPath("app-b"));
+      expect(feishuRecoveryPath("app-a")).not.toBe(feishuRecoveryPath("app-a", "lark"));
+      expect(seed.taskId).not.toBe([...delivered.values()][0]!.values().next().value);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("replays a secondary bot's background doorbell on its original connector", () => {
     const { store, config: defaultConfig } = scaffold();
     store.reportFeishuBotRuntimeStatus("local", "rt_bot", { appliedRevision: defaultConfig.revision, state: "online" });

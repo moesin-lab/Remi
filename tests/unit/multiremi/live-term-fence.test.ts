@@ -115,7 +115,7 @@ test("a resumed slot stops all configured background services and only activatio
       headers: { Authorization: 'Bearer test' },
     })).json();
     expect(status.term).toBe("1");
-    expect(status.schema).toEqual({ expandLevel: 2, contractLevel: 0, compatibility: { minLevel: 2, maxLevel: 2 } });
+    expect(status.schema).toEqual({ expandLevel: 3, contractLevel: 0, compatibility: { minLevel: 3, maxLevel: 3 } });
     const old = captured!;
     store.activateBackgroundTerm("B", () => {});
     let effects = 0;

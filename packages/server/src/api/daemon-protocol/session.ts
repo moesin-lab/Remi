@@ -251,6 +251,7 @@ export class DaemonProtocolSession {
    * server derive `lane.background_stop` / `_release` for this socket.
    */
   supportsLaneBackground = false;
+  supportsPlannedRestart = false;
   supportsInputUnread = false;
 
   private readonly options: DaemonSessionOptions;
@@ -752,6 +753,7 @@ export class DaemonProtocolSession {
     this.supportsWikiFetch = hasDaemonCapability(parsed.hello.caps, "wiki.fetch");
     const welcomeCaps = negotiateWelcomeCaps(parsed.hello.caps, this.options.welcomeCaps);
     this.supportsLaneBackground = hasDaemonCapability(welcomeCaps, "lane.background");
+    this.supportsPlannedRestart = hasDaemonCapability(welcomeCaps, "turn.restart");
     this.supportsInputUnread = hasDaemonCapability(welcomeCaps, "input_unread");
     this.advertisedRuntimeIdList = parsed.hello.runtimes.map((runtime) => runtime.runtime_id);
     this.runtimeIdList = serving;

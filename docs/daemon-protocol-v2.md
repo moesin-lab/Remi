@@ -1313,3 +1313,57 @@ publish. Unscoped legacy requests cannot execute on the new host.
 the shared menu. Missing legacy identity mappings are reported as
 `unresolvedLegacyTargetCount` without preventing shared menu publication.
 See [IM platform management](dev/im-platforms.md#机器人菜单) for persistence and UI scope.
+
+### 计划内重启的混合版本门槛
+
+hello / welcome 通过 `hasDaemonCapability` 协商注册表中的命名能力 `turn.restart`（introduced `0.2.96`，无别名，不提高准入版本），且
+`hello.runtimes[].capabilities.planned_restart` 与心跳能力中的 `planned_restart: 1`
+表示 daemon 已实现 `turn.restart`、磁盘 journal 与同 attempt 恢复协议。缺失或未知版本按不支持处理，
+每次 socket hello/heartbeat 均覆盖旧能力，防止降级后遗留支持标记。
+服务端分别保存命名能力协商结果 `planned_restart_negotiated` 与有效协议版本
+`planned_restart`，只有两者同时满足才创建 checkpoint 或下发 `turn.restart`；
+下发时还检查当前 socket 的协商结果。HTTP heartbeat（包括升级探针）只能保留支持或降为 0，
+不能把 0 提升为 1；缺字段或未知版本撤销支持，必须由 socket hello/heartbeat 重新协商才能恢复。
+manual、deploy、CLI update 的 drain 到期时，只有支持的 runtime 请求安全点 checkpoint；
+旧 daemon 回退到 MUL-45 的中断与自动重试，消耗原有重试预算，不创建 requested checkpoint。
+更新仍等待旧进程的零活跃 ACK，再进入安装；不会因无法确认新帧而永久停留在 requested。
+
+### 计划内重启的原生等待
+
+checkpoint 的可选 `question_ids` 只引用该 attempt 的原生等待，正文与答案仍由服务端保存。
+挂起确认后，`reconcileRuntimeWaits` 不因新进程暂未登记回调而分离这些 Q。
+恢复 CAS 原子设置新 generation 的绑定标记；provider 重做相同请求时，`turn.decision`
+携带 `recover_question_id` 和新 nonce，核对 checkpoint、来源、generation 与请求内容后重绑原 Q。
+已保存答案通过 `turn.decision.get` 取回；未重绑标记或旧 nonce 都不能确认消费。
+请求内容变化时拒绝该回调并保留原 Q，不创建第二个 Q。显式关闭优先，
+没有确认 checkpoint 的中断继续走原崩溃恢复。恢复响应在 CAS 后重建输入，保留期间新增的消息。
+
+计划内重启时 steer 按 at-least-once 恢复，优先保证不丢。`injected` 只表示桥接收了输入，
+模型随后输出也不能证明已消费。daemon 为每条注入内容携带 `[Remi steer id: <原消息id>]`；
+只有 provider 的 `user_message_chunk` 回显该原 ID，trace 才把对应 steer 标为 `consumed: true`。
+该确认进入已刷盘 trace 与 checkpoint 的 `delivered_message_ids` 后，恢复的 offer/resync/下行
+才排除它；正文的完整范围读取门槛保持不变。
+
+其余消息仍从原日志恢复，保持顺序并在首次 prompt 带原 steer ID，加上系统说明：
+“以下消息在 Remi 更新前发出，可能已经收到过，处理过的请忽略。”
+trace 按原 steer ID 更新同一个条目，服务端消息也不另建副本。没有带 ID 消费回显的 provider
+会保守重投；窗口内模型可能看到同一消息两次。桥进程跨重启存活与 exactly-once 不在本单范围。
+
+
+### 计划内重启的 trace 连续性
+
+桥及其输出源关闭后，daemon 刷盘 trace，把尚未结束的工具、原生子代理和后台任务
+统一收口为 `stopped`；后台任务的 `stop_reason` 为 `cancelled`。原 Q/权限请求继续等待。
+恢复请求按原 Q 的 message_id 复用 trace fold 中仍等待的同类型条目，保留原 ID 和开始时间，
+只重绑新工具 ID；答复更新原条目，不新增等待卡。此恢复不依赖可选标识快照。
+恢复只保留条目标识、alias/session 路由、失败与 steer 标识及 ID 计数器，
+不恢复工具执行、活动计数或自主轮义务。被中断的工具调用由新桥重做。
+
+这些标识可选保存在 daemon 本地 journal 的独立快照中，绑定 execution、generation、
+`trace_head` 并校验 SHA-256，最大 512 KiB，不保存工具输入输出正文。
+缺失、摘要错误、绑定不符或旧格式都告警并仅用已有 trace fold 恢复，不阻塞同 attempt 续接。
+同一个原生 agent ID 继续使用原条目；缺少快照时仅能恢复 canonical agent ID 路由，
+无法推回只存在于旧桥内存中的 alias。
+
+新执行段在旧活动收口后追加一条「Remi 已更新」，按 generation 使用固定 ID 去重。
+正常崩溃重试不追加该条目。Turn 历史沿用原 Turn/attempt，trace 的事件序号继续递增。

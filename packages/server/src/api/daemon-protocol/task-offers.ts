@@ -33,7 +33,8 @@ export function daemonTurnOfferPayload(execution: Record<string, unknown>, input
 export async function prepareTaskOffer(store: MultiremiStore, task: MultiremiTaskWithAgent,
   project: ProjectKnowledgeServiceContract, repository: RepositoryWikiServiceContract,
   supportsWikiFetch = false,
-  input: DaemonTurnInput = store.getDaemonTurnBridge().offerInput(task)): Promise<Record<string, unknown> | null> {
+  input: DaemonTurnInput = store.getDaemonTurnBridge().offerInput(task),
+  expectedStatus: "dispatched" | "resumable" = "dispatched"): Promise<Record<string, unknown> | null> {
   // Validate canonical input before preparing the execution context and access token.
   daemonTurnOfferPayload({}, input);
   const remotes = new Set(task.repos.map(repo => canonicalRepositoryRemote(repo.url)));
@@ -47,7 +48,8 @@ export async function prepareTaskOffer(store: MultiremiStore, task: MultiremiTas
     undefined, supportsWikiFetch);
   invalidateRequestReadCache();
   const current = store.getTaskIdentity(task.id);
-  if (current?.status !== "dispatched" || current.runtimeId !== task.runtimeId) return null;
+  const allowed = expectedStatus === "resumable" ? ["running", "awaiting_human"] : ["dispatched"];
+  if (!current || !allowed.includes(current.status) || current.runtimeId !== task.runtimeId) return null;
   const response = daemonTaskClaimResponse(store, hydrated, store.getTaskTriggerMetadata(task));
   useTaskSessionInput(store, task, response);
   const runtime = store.getRuntimeLite(task.runtimeId!);
@@ -332,7 +334,13 @@ export class DaemonTaskOffers {
       currentBackgroundTerm()?.assertCurrent();
       invalidateRequestReadCache();
       const current = store.getTaskIdentity(task.id);
-      if (!payload || current?.status !== "dispatched" || current.runtimeId !== runtimeId) return;
+      if (current?.status !== "dispatched" || current.runtimeId !== runtimeId) return;
+      if (!payload) {
+        // Preparation can decline an offer after claiming it. No frame was
+        // sent, so release the claim rather than strand an unoffered dispatch.
+        this.rescind(runtimeId, pump, task.id);
+        return;
+      }
       if (this.session(runtimeId) !== session) { this.rescind(runtimeId, pump, task.id); return; }
       const budgeted = fitTaskOfferToBudget(payload, runtimeId, undefined, session.supportsWikiFetch);
       console.info(JSON.stringify({ event: "daemon_offer_budget", task_id: task.id, runtime_id: runtimeId, ...budgeted.report }));

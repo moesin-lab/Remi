@@ -1,4 +1,5 @@
 import { registerDaemonReportHandlers } from "@multiremi/api/daemon-protocol/report-handlers.js";
+import { registerTaskInputRpcs } from "@multiremi/api/daemon-protocol/task-input-rpcs.js";
 import { expect, it } from "bun:test";
 import { pendingTurnBackendTests } from "./pending-turn-test-backends.js";
 import type { PlannedRestartCheckpoint } from "@multiremi/store/planned-restarts.js";
@@ -327,6 +328,38 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     expect(x.planned().protectsFromOrphanRecovery(x.task.id)).toBe(false);
     expect(x.f.store.recoverOrphans(x.scope.runtimeId, [])).toEqual({ orphaned: 1, retried: 0 });
     expect(x.f.store.getTask(x.task.id)?.status).toBe("failed");
+  });
+
+  it("rejects an oversized canonical recovery before authorization and recovers only that attempt", async () => {
+    const x = setup(3), bridge = x.f.store.getDaemonTurnBridge();
+    // Each original native request fits a frame, but their complete recovery does not.
+    for (let i = 0; i < 2; i++) {
+      expect(bridge.rpc("turn.decision", { turn_id: x.offer.turn_id, attempt_id: x.task.id,
+        dedupe_key: `large-q-${i}`, wait_id: `large-q-wait-${i}`, body_md: "Choose",
+        options: [], metadata: { kind: "question", padding: "x".repeat(600_000),
+          questions: [{ fieldKey: "choice", question: { question: "Choose", options: [{ label: "A" }] } }] } }, x.scope).ok).toBe(true);
+    }
+    const h = x.request();
+    const checkpoint = x.planned().checkpointReferences(x.task.id, x.scope);
+    expect(checkpoint.question_ids).toHaveLength(2);
+    x.planned().suspend(x.task.id, h.handoff_id, 0, checkpoint, x.scope);
+    x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+    const handlers = new Map<string, any>();
+    const layer = { registerRpcHandler: (type: string, fn: any) => handlers.set(type, fn),
+      authorizeRuntimeForTest: async () => ({ ok: true }) };
+    registerTaskInputRpcs(layer as any, x.f.store, () => {}, bridge, async () => ({ turn_id: h.turn_id, attempt_id: x.task.id }));
+    const consumer = "oversized-resume-consumer";
+    const payload = { turn_id: h.turn_id, attempt_id: x.task.id, handoff_id: h.handoff_id, consumer_id: consumer };
+    const invoke = () => handlers.get("turn.restart.resume")({ rt: x.scope.runtimeId, payload },
+      { runtimeIds: [x.scope.runtimeId], daemonId: x.scope.daemonId, ownerAccessToken: null });
+    expect(await invoke()).toMatchObject({ ok: false, code: "capacity", retryable: false });
+    expect(x.f.store.getTaskUsageRunRuntime(x.task.id, consumer)).toBeNull();
+    expect(x.planned().get(x.task.id)?.consumer_id).toBeNull();
+    expect(x.planned().protectsFromOrphanRecovery(x.task.id)).toBe(false);
+    expect(x.f.store.getTask(x.task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
+    expect(Number(x.f.db.query("SELECT COUNT(*) AS n FROM multiremi_turn_attempts WHERE turn_id=?").get(h.turn_id).n)).toBe(2);
+    expect(await invoke()).toMatchObject({ ok: false, code: "stale_execution" });
+    expect(x.f.store.recoverOrphans(x.scope.runtimeId, [])).toEqual({ orphaned: 0, retried: 0 });
   });
 
   it("keeps existing crash policy when no acknowledged checkpoint exists", () => {

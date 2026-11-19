@@ -3,7 +3,7 @@ import { createResponsibleTestIssue, createHistoricalTestIssue, acceptTestIssueD
 import { taskOfferResponse } from "../../fixtures/task-offer.js";
 // Autopilot run state, cron scheduling and trigger claiming, the failure-rate
 // auto-pause, analytics, and webhook delivery.
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,7 +14,10 @@ import { MultiremiStore } from "@multiremi/store.js";
 import { StoreContext } from "@multiremi/store/context.js";
 import { configureRepositoryWikiAutomation, createStore, db, metricValue, resetMultiremiTestEnv } from "./helpers.js";
 
-afterEach(resetMultiremiTestEnv);
+afterEach(() => {
+  setSystemTime();
+  resetMultiremiTestEnv();
+});
 
 describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   for (const rollback of [false, true]) {
@@ -324,6 +327,9 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
   });
 
   it("claims due schedule triggers and recovers lost next_run_at like Go", () => {
+    // sync() includes a due tick. Keep creation, sync, and manual ticks on the
+    // same instant so crossing a */5 boundary cannot create an extra run.
+    setSystemTime(new Date("2026-10-05T00:00:04.999Z"));
     const store = createStore();
     const agent = store.createAgent({ name: "Codex", provider: "codex" });
     const autopilot = createResponsibleTestAutopilot(store, {
@@ -343,6 +349,7 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     const scheduler = new MultiremiScheduler({ store, pollIntervalMs: 60_000 });
     scheduler.sync();
     expect(scheduler.scheduledIds()).not.toContain(autopilot.id);
+    expect(store.listAutopilotRuns(autopilot.id)).toHaveLength(0);
 
     db!.run("UPDATE multiremi_autopilot_triggers SET next_run_at = ? WHERE id = ?", [
       new Date(Date.now() - 1_000).toISOString(),
@@ -367,6 +374,36 @@ describe("Multiremi store — autopilots, schedules, and webhooks", () => {
     db!.run("UPDATE multiremi_autopilot_triggers SET next_run_at = NULL WHERE id = ?", [trigger.id]);
     expect(store.recoverLostScheduleTriggers()).toBe(1);
     expect(store.getAutopilotTrigger(trigger.id)!.nextRunAt).toBeString();
+    scheduler.stop();
+  });
+
+  it("reproduces the extra sync run when the old setup crosses a five-second boundary", () => {
+    setSystemTime(new Date("2026-10-05T00:00:04.999Z"));
+    const store = createStore();
+    const agent = store.createAgent({ name: "Boundary Codex", provider: "codex" });
+    const autopilot = createResponsibleTestAutopilot(store, {
+      title: "Boundary scheduled triage",
+      assigneeId: agent.id,
+      triggerKind: "manual",
+    });
+    const trigger = store.createAutopilotTrigger(autopilot.id, {
+      kind: "schedule",
+      cronExpression: "*/5 * * * * *",
+      timezone: "UTC",
+    });
+    expect(trigger.nextRunAt).toBe("2026-10-05T00:00:05.000Z");
+    const scheduler = new MultiremiScheduler({ store, pollIntervalMs: 60_000 });
+
+    // Model the old wall-clock setup taking 1 ms between creation and sync.
+    setSystemTime(new Date("2026-10-05T00:00:05.000Z"));
+    scheduler.sync();
+    expect(store.listAutopilotRuns(autopilot.id)).toHaveLength(1);
+    db!.run("UPDATE multiremi_autopilot_triggers SET next_run_at = ? WHERE id = ?", [
+      new Date(Date.now() - 1_000).toISOString(), trigger.id,
+    ]);
+    expect(scheduler.tickDueTriggers()).toHaveLength(1);
+    expect(scheduler.tickDueTriggers()).toEqual([]);
+    expect(store.listAutopilotRuns(autopilot.id)).toHaveLength(2);
     scheduler.stop();
   });
 

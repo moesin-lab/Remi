@@ -7,6 +7,7 @@ import { dirname, join, resolve, delimiter, relative, isAbsolute, basename } fro
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import { isIPv4 } from 'node:net';
+import { canonicalSchemaLevel } from '../packages/platform-updater/src/schema-fingerprint.mjs';
 import { loadCiImages } from './ci-images.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -713,6 +714,10 @@ function validateReleaseArtifactInput(url, expectedSha256) {
 
 function profileSchema(ref) {
   if (!/^[a-f0-9]{40}$/iu.test(ref || '')) throw new Error('Data schema requires an immutable commit');
+  let declaration;
+  try { declaration = execute('git', ['show', `${ref}:packages/server/src/store/schema-compatibility.json`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], preserveWhitespace: true }); }
+  catch { /* Pre-protocol release: verify its historical source stream. */ }
+  if (declaration !== undefined) return createHash('sha256').update(canonicalSchemaLevel(JSON.parse(declaration))).digest('hex');
   const inputs = readJson(join(repository, 'packages/platform-updater/src/data-schema-inputs.json'));
   const source = inputs.map(path => execute('git', ['show', `${ref}:${path}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], preserveWhitespace: true })).join('').replaceAll('\r\n', '\n');
   if (!source) throw new Error('Data schema source is unavailable');

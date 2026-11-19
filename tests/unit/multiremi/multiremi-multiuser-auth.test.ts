@@ -1,3 +1,5 @@
+import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { InMemoryTraceStore } from "@multiremi/worker/trace-store.js";
 import { commandItem } from "./trace-budget-fixtures.js";
@@ -23,7 +25,7 @@ afterEach(() => {
 function seedDeployment(): MultiremiStore {
   const store = freshStore();
   store.ensureLocalWorkspace(); // local workspace + owner member (user id "local")
-  store.migrate(); // re-run migration on the now-populated db to tag the owner
+  runMigrations((store as unknown as { db: SqlDatabase }).db, { historicalMaintenance: true }); // re-run migration on the now-populated db to tag the owner
   return store;
 }
 
@@ -76,7 +78,7 @@ describe("Multiremi multi-user auth", () => {
     store.updateCurrentUser({ name: "朱欣文", email: "zhuxinwen@corp.com" });
 
     // "Deploy" the multi-user migration onto the existing database.
-    store.migrate();
+    runMigrations((store as unknown as { db: SqlDatabase }).db, { historicalMaintenance: true });
     expect(store.getUser("local")?.externalId).toBe(OWNER_OPEN_ID);
 
     // A (hehuajie) logs in via Feishu -> matched to the existing owner by open_id.

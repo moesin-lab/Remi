@@ -1,3 +1,4 @@
+import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
@@ -13,7 +14,7 @@ import type { InboxAccess } from './inbox/inbox-visibility.js';
 import type { QuestionCardCredential } from "@multiremi/store/question-card-token.js";
 import type { RuntimeConnectionProfile } from "@multiremi/contracts/runtime-connection";
 import { afterCommit, type SqlDatabase, openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
-import { runMigrations } from "@multiremi/store/migrations.js";
+import { runStartupMigrations as runMigrations } from "@multiremi/store/migrations.js";
 import { invalidatingDatabase } from "@multiremi/store/request-read-cache.js";
 import { daemonRuntimeId, isTerminalStatus, parseJson } from "@multiremi/store/helpers.js";
 import { agentRoleAtLeast } from "@multiremi/store/agent-role.js";
@@ -76,7 +77,7 @@ import type {
 import { UsageRepo } from "@multiremi/store/repos/usage-repo.js";
 import { UsageAccountingRepo, type UsageReportInput } from "@multiremi/store/repos/usage-accounting-repo.js";
 import { writeUsageSnapshot } from "@multiremi/store/usage-accounting.js";
-import { ensureUsageAccountingStartup } from "@multiremi/store/usage-migration.js";
+import { ensureUsageAccountingStartup, startUsageAccountingBackfill } from "@multiremi/store/usage-migration.js";
 import type { TaskUsageSnapshot, SetUsagePriceInput, UsagePrice, UsageReport } from "@multiremi/contracts/usage-accounting.js";
 import { SquadsRepo } from "@multiremi/store/repos/squads-repo.js";
 import { ProjectsRepo, type ProjectInstructionsWriteContext } from "@multiremi/store/repos/projects-repo.js";
@@ -745,6 +746,20 @@ runMigrations(this.db);
   }
 
   /** Required cutover gate; call after schema migration and before API/jobs. */
+  private usageBackfill: ReturnType<typeof startUsageAccountingBackfill> | null = null;
+  usageAccountingBackfillReady() { return this.usageBackfill === null; }
+
+  querySchemaCompatibility() { return querySchemaCompatibility(this.db); }
+
+  startUsageAccountingBackfill() {
+    const worker = startUsageAccountingBackfill(this.db);
+    this.usageBackfill = worker;
+    void worker.done.then(() => {
+      if (this.usageBackfill === worker && worker.failure === undefined) this.usageBackfill = null;
+    });
+    return worker;
+  }
+
   ensureUsageAccountingStartup(): void {
     ensureUsageAccountingStartup(this.db);
   }

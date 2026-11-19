@@ -587,6 +587,7 @@ export function assertWakeInvariantMatrix(db: SqlDatabase): void {
     }
     expect(invalid).toEqual([]);
   }
+  runMigrations(db, { historicalMaintenance: true });
   const store = new MultiremiStore(db);
   const next = store.createTask({ agentId: "agt_chat_migration", workspaceId: "local",
     chatSessionId: "chat_matrix_null_no_push_null", prompt: "Cold start after explicit unbind without pushes" });

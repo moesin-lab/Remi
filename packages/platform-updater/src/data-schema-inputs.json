@@ -23,6 +23,5 @@
   "packages/server/src/store/unified-model-migration.ts",
   "packages/server/src/store/unified-model-schema.ts",
   "packages/server/src/store/usage-accounting.ts",
-  "packages/server/src/store/usage-migration.ts",
-  "packages/server/src/store/planned-restart-schema.ts"
+  "packages/server/src/store/usage-migration.ts"
 ]

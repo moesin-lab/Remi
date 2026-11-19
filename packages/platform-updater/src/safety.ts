@@ -1,3 +1,4 @@
+import { canonicalSchemaLevel } from './schema-fingerprint.mjs';
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { access, chmod, copyFile, lstat, mkdir, open, readdir, readFile, realpath, rename, stat, statfs } from "node:fs/promises";
@@ -9,7 +10,11 @@ import migrationInputs from "./data-schema-inputs.json";
 /** Include data migrations and the local helpers that change their behavior. */
 export const DATA_SCHEMA_INPUTS: readonly string[] = migrationInputs;
 
+export const SCHEMA_READ_COMMAND = ['sh', '-c', `if [ -f /app/packages/server/src/store/schema-compatibility.json ]; then cat /app/packages/server/src/store/schema-compatibility.json; else cat ${DATA_SCHEMA_INPUTS.map(path => '/app/' + path).join(' ')}; fi`];
+
 export async function readMigrationSource(root: string): Promise<string> {
+  try { return await readFile(join(root, 'packages/server/src/store/schema-compatibility.json'), 'utf8'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   return (await Promise.all(DATA_SCHEMA_INPUTS.map((path) => readFile(join(root, path), "utf8")))).join("");
 }
 
@@ -30,6 +35,9 @@ export interface BackupConfig {
 export class RecoveryRequiredError extends Error {}
 
 export function migrationFingerprint(source: string): string {
+  let declaration: any;
+  try { declaration = JSON.parse(source); } catch { /* Historical source stream. */ }
+  if (declaration && typeof declaration === 'object' && 'format' in declaration) source = canonicalSchemaLevel(declaration);
   return createHash("sha256").update(source.replace(/\r\n/g, "\n")).digest("hex");
 }
 

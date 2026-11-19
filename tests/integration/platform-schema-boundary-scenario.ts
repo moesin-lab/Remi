@@ -2,19 +2,19 @@
 import { expect } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { ContainerApplicationDriver } from '@remi-platform/updater/application-driver.js';
+import { ContainerApplicationDriver, writeApplicationBootstrap } from '@remi-platform/updater/application-driver.js';
 import { assertSchemaContract, SchemaContractRefusedError } from '@remi-platform/updater/schema-contract.js';
 import { BunCommandRunner, type CommandOptions } from '@remi-platform/updater/types.js';
-import type { MultiremiPlatformRelease, PlatformSchemaContractFailure } from '@multiremi/contracts';
+import type { MultiremiPlatformRelease } from '@multiremi/contracts';
 
 const BASE = '0aa459ba2d841940b694d4b144a96421b85cf12d';
 const repository = resolve(import.meta.dir, '../..');
 const evidencePath = resolve(repository, 'schema-boundary-evidence/evidence.json');
 const shapeQuery = "SELECT table_schema||'.'||table_name||'.'||column_name||':'||data_type||':'||udt_name||':'||is_nullable FROM information_schema.columns WHERE table_schema='public' ORDER BY 1";
-const migration = 'const {openMultiremiDatabase}=await import("./packages/server/src/store/db/postgres.ts"); const {MultiremiStore}=await import("./packages/server/src/store/store.ts"); const db=openMultiremiDatabase(); try { new MultiremiStore(db); } finally { db.close(); } process.exit(0);';
+const migration = 'const {openMultiremiDatabase}=await import("./packages/server/src/store/db/postgres.ts"); const {runMigrations}=await import("./packages/server/src/store/migrations.ts"); const {MultiremiStore}=await import("./packages/server/src/store/store.ts"); const db=openMultiremiDatabase(); try { runMigrations(db, {historicalMaintenance:true}); new MultiremiStore(db); } finally { db.close(); } process.exit(0);';
 
 export async function runSchemaBoundaryScenario(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'remi-schema-boundary-'));
@@ -103,9 +103,8 @@ export async function runSchemaBoundaryScenario(): Promise<void> {
       docker(['run', '--rm', '--pull=never', '--label', label, '--network', 'none', '--mount', `type=volume,src=${volume},dst=/program`, 'oven/bun:1.3.14', 'sh', '-c', `mkdir -p /program/releases/${id}/api && tar -C /program/releases/${id}/api -xf -`].toSpliced(1, 0, '-i'), archive);
       docker(['run', '--rm', '--pull=never', '--label', label, '--network', 'none', '--mount', `type=volume,src=${volume},dst=/program`, '--mount', `type=bind,src=${source},dst=/input,readonly`, 'oven/bun:1.3.14', 'cp', '-a', '/input/node_modules', `/program/releases/${id}/api/node_modules`]);
     }
-    const bootstrap = join(scratch, 'bootstrap'); mkdirSync(bootstrap);
-    copyFileSync(join(repository, 'packages/platform-updater/src/container-runtime.mjs'), join(bootstrap, 'runtime.mjs'));
-    copyFileSync(join(repository, 'packages/platform-updater/src/data-schema-inputs.json'), join(bootstrap, 'data-schema-inputs.json'));
+    const bootstrap = join(scratch, 'bootstrap');
+    await writeApplicationBootstrap(bootstrap);
     const runner = new BunCommandRunner();
     const driver = new ContainerApplicationDriver({ kind: 'docker_compose', composeFile: join(scratch, 'compose.yml'), envFile: join(scratch, 'compose.env'), stateDir: scratch, apiHealthUrl: '', webHealthUrl: '' }, {
       run: async (executable: string, args: string[], options?: CommandOptions) => {
@@ -116,13 +115,19 @@ export async function runSchemaBoundaryScenario(): Promise<void> {
       },
     });
     const release = (version: string, ref: string): MultiremiPlatformRelease => ({ version, ref, publishedAt: null, releaseUrl: null, manifestUrl: null, apiImage: null, webImage: null });
-    let refusal: PlatformSchemaContractFailure | undefined;
+    let preparationRefused = false;
     const rehearsal = driver as unknown as { rehearse(installation: Record<string, string>, backup: string, previous: { id: string; release: MultiremiPlatformRelease }, target: { id: string; release: MultiremiPlatformRelease }, operationId: string): Promise<void> };
     try {
       await rehearsal.rehearse({ project: name, volume, bootstrap, apiImage: 'oven/bun:1.3.14', postgresImage: 'pgvector/pgvector:pg17' }, backup,
         { id: 'previous', release: release('0.2.90', BASE) }, { id: 'target', release: release('candidate', String(evidence.target)) }, 'pop_boundary');
-    } catch (error) { expect(error).toBeInstanceOf(SchemaContractRefusedError); refusal = (error as SchemaContractRefusedError).failure; }
-    expect(refusal?.reason).toBe('schema_contract_refused'); expect(refusal?.stage).toBe('target'); evidence.refusal = refusal;
+    } catch (error) {
+      // B1 refuses legacy enrollment before any candidate DDL. Do not silently
+      // treat arbitrary migration/bootstrap failures as this expected boundary.
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('requires offline schema preparation (remi db prepare)');
+      preparationRefused = true; evidence.preparationRefusal = (error as Error).message;
+    }
+    expect(preparationRefused).toBe(true);
     // Rehearsal cannot change the live (still isolated) source database or files.
     expect(shape('boundary')).toEqual(before); expect(rows('boundary', oldTables)).toEqual(beforeRows);
     expect(digest(join(home, 'archives/legacy.zip'))).toBe(archiveHash);
@@ -135,11 +140,12 @@ export async function runSchemaBoundaryScenario(): Promise<void> {
     expect(removed).toHaveLength(50);
     expect(removedByTable).toEqual({ 'public.multiremi_issue_workspaces': 3, 'public.multiremi_session_archive_requests': 8, 'public.multiremi_session_archives': 24, 'public.multiremi_task_traces': 7, 'public.multiremi_trace_backfill_progress': 8 });
     for (const stage of ['target', 'previous'] as const) {
+      expect(() => assertSchemaContract(before, after, { stage, currentVersion: '0.2.90', targetVersion: 'candidate' })).toThrow(SchemaContractRefusedError);
       try { assertSchemaContract(before, after, { stage, currentVersion: '0.2.90', targetVersion: 'candidate' }); }
       catch (error) {
         const failure = (error as SchemaContractRefusedError).failure;
         expect(failure).toMatchObject({ stage, affectedColumnCount: 50, removedTables: { total: 3 }, removedColumns: { total: 10 }, changedColumns: { total: 0 } });
-        if (stage === 'target') expect(failure).toEqual(refusal!);
+        if (stage === 'target') evidence.refusal = failure;
       }
     }
     expect(sql('boundary', `SELECT sha256||'|'||relative_path FROM multiremi_legacy_session_archives WHERE id='arc_fixture'`)).toBe(`${archiveHash}|archives/legacy.zip`);

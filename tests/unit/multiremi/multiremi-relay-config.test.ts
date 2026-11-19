@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { useEndpointEncryptionKey } from "../../helpers/endpoint-encryption.js";
 useEndpointEncryptionKey();
 import { afterEach, describe, expect, it } from "bun:test";
@@ -123,6 +124,7 @@ describe("relay config store", () => {
     legacy.exec("ALTER TABLE multiremi_gateway_models DROP COLUMN native_catalog_status");
     legacy.run(`INSERT INTO multiremi_gateway_models(workspace_id,engine,models,source_revision,updated_at)
       VALUES('local','codex',?,4,?)`, [JSON.stringify([{ id: "legacy-inventory", label: "Legacy" }]), new Date().toISOString()]);
+    runMigrations(legacy, { historicalMaintenance: true });
     const upgraded = new MultiremiStore(legacy);
     expect(upgraded.getGatewayModels("local", "codex")?.models[0].id).toBe("legacy-inventory");
     expect(upgraded.getGatewayModels("local", "codex")?.nativeCatalogStatus).toBeUndefined();

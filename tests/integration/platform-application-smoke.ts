@@ -109,7 +109,8 @@ Bun.serve({hostname:'0.0.0.0',port:6120,async fetch(r,s){
   await save(join(root, 'Dockerfile.web'), `FROM ${nodeBase}\nUSER root\nRUN rm -rf /app && mkdir /app\nWORKDIR /app\nCOPY web /app\nUSER node\nCMD ["node","frontend/apps/web/server.js"]\n`);
   if (internal) {
     await mkdir(join(root, 'supervisor'));
-    for (const name of ['supervisor.mjs', 'container-runtime.mjs', 'data-schema-inputs.json']) await cp(join(repository, 'packages/platform-updater/src', name), join(root, 'supervisor', name));
+    for (const name of ['supervisor.mjs', 'slot-supervisor.mjs', 'container-runtime.mjs', 'schema-fingerprint.mjs', 'data-schema-inputs.json']) await cp(join(repository, 'packages/platform-updater/src', name), join(root, 'supervisor', name));
+    await cp(join(repository, 'packages/edge/src'), join(root, 'supervisor/edge'), { recursive: true });
     await cp(join(repository, 'deploy/docker/host-write-fence.ts'), join(root, 'supervisor/host-write-fence.ts'));
     const setup = `\nCOPY supervisor /usr/local/lib/remi\nRUN mkdir -p /remi-control /remi-program /remi-seed /tmp/remi-next-cache && chown 1000:1000 /remi-control /remi-program /remi-seed /tmp/remi-next-cache\nENV REMI_APPLICATION_BASE_VERSION=1.0.0 REMI_APPLICATION_BASE_REF=${'1'.repeat(40)}\nUSER 1000:1000\n`;
     await save(join(root, 'Dockerfile.api'), `FROM ${apiBaseImage}\nWORKDIR /app\nCOPY api /app\n${setup}CMD ["bun","/usr/local/lib/remi/supervisor.mjs"]\n`);

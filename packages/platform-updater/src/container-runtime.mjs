@@ -1,5 +1,6 @@
 // This file is embedded in the host updater. It runs with Bun (management/API)
 // or Node (Web launcher) inside the existing base images, without a Docker socket.
+import { schemaLevelFingerprint } from './schema-fingerprint.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { cp, lstat, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, statfs, symlink } from 'node:fs/promises';
@@ -29,6 +30,7 @@ async function atomic(path, value) {
   try { await directory.sync(); } finally { await directory.close(); }
 }
 async function fingerprint(root, inputs = DATA_SCHEMA_INPUTS) {
+  if (inputs === DATA_SCHEMA_INPUTS) return schemaLevelFingerprint(root);
   const source = (await Promise.all(inputs.map(path => readFile(root + '/' + path, 'utf8')))).join('').replaceAll('\r\n', '\n');
   return createHash('sha256').update(source).digest('hex');
 }
@@ -208,16 +210,17 @@ export async function rehearseStoreMigration(apiRoot, archive, scratch, options 
   const child = spawn(options.executable || 'bun', ['--eval',
     "const {openMultiremiDatabase}=await import('./packages/server/src/store/db/postgres.ts');const {MultiremiStore}=await import('./packages/server/src/store/store.ts');const db=openMultiremiDatabase();try{new MultiremiStore(db)}finally{await db.close()}"],
   { cwd: apiRoot, stdio: ['ignore', 'ignore', 'pipe'], env: { ...(options.env || process.env), HOME: scratch, MULTIREMI_HOME: scratch + '/home', MULTIREMI_MIGRATION_REPORT_DIR: reportDirectory } });
-  let missingBeforeReport = false, stderrTail = '';
+  let missingBeforeReport = false, requiresPreparation = false, stderrTail = '';
   child.stderr.on('data', chunk => {
     stderrTail = (stderrTail + chunk.toString()).slice(-4096);
     if (stderrTail.includes('Unified migration before report missing')) missingBeforeReport = true;
+    if (stderrTail.includes('Historical schema preparation required:')) requiresPreparation = true;
   });
   // A hung candidate migration must not strand API/Web offline indefinitely.
   // Only this disposable rehearsal process is killed; no provider runs here.
   const timeout = setTimeout(() => child.kill('SIGKILL'), 5 * 60_000);
   try {
-    await new Promise((ok, fail) => { child.on('error', fail); child.on('exit', code => code === 0 ? ok() : fail(new Error(missingBeforeReport ? 'Migration rehearsal: Unified migration before report missing from current api-home backup; restore the persistent migration reports before retrying' : 'Migration rehearsal failed or timed out'))); });
+    await new Promise((ok, fail) => { child.on('error', fail); child.on('exit', code => code === 0 ? ok() : fail(new Error(requiresPreparation ? 'Migration rehearsal: historical schema preparation required; stop all writers and run remi db prepare before retrying' : missingBeforeReport ? 'Migration rehearsal: Unified migration before report missing from current api-home backup; restore the persistent migration reports before retrying' : 'Migration rehearsal failed or timed out'))); });
   } finally { clearTimeout(timeout); }
 }
 

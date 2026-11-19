@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 /**
  * PR 2 (ADR 0019): `20261015_turn_attempt_trace_summary` adds the trace summary
  * columns to `multiremi_turn_attempts` on both migration chains. A fresh schema
@@ -66,7 +67,8 @@ for (const backend of backends) {
         for (const column of COLUMNS) db.exec(`ALTER TABLE multiremi_turn_attempts DROP COLUMN ${column}`);
         expect(columnTypes(db)).toEqual({});
 
-        // Two starts: the first adds the columns, the second finds the migration applied.
+        // Historical repair is maintenance; subsequent starts are idempotent.
+        runMigrations(db, { historicalMaintenance: true });
         new MultiremiStore(db);
         new MultiremiStore(db);
         const reopened = new MultiremiStore(db);

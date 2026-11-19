@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { requestMessageBody, taskRequestPath, sentTask } from "./unified-test-paths.js";
@@ -25,6 +26,7 @@ describe("Feishu sender allowlist Issue authorization", () => {
     expect(fixture.config.senderAccessPolicy).toBe("agent");
     // Reopen this in-memory fixture as a store that has not run the enforcement migration yet.
     db!.exec("DELETE FROM multiremi_schema_migrations WHERE id = 'feishu_sender_allowlist_enforced_v1'");
+    runMigrations(db!, { historicalMaintenance: true });
     const upgraded = new MultiremiStore(db!);
     expect(upgraded.getFeishuBotConfig("local")?.senderAccessPolicy).toBe("allowlist");
     expect(upgraded.listFeishuBotSenders("local")[0]?.allowed).toBe(false);

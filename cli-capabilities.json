@@ -4,6 +4,7 @@
   "max_planned_routes": 0,
   "domains": [
     "context",
+    "db",
     "workspace",
     "account",
     "member",
@@ -44,6 +45,42 @@
     "lark"
   ],
   "commands": {
+    "db.schema": {
+      "command": "remi db schema",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "read",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "db.prepare": {
+      "command": "remi db prepare",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "destructive",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "db.contract": {
+      "command": "remi db contract",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "destructive",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "context.get": {
       "command": "remi context",
       "aliases": [],

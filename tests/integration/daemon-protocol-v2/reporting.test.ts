@@ -1,3 +1,4 @@
+import { ensureUsageAccountingStartup } from "@multiremi/store/usage-migration.js";
 import { turnCompletion } from "../../fixtures/turn-report.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
@@ -15,6 +16,9 @@ async function fixture(options: Parameters<typeof DaemonProtocolHarness.create>[
   const h = await DaemonProtocolHarness.create({ outboxBackoffMs: [5],
     onReady: daemon => { (daemon as any).claimsPaused = true; }, ...options });
   fixtures.push(h);
+  // Background jobs are disabled in this harness; prepare legacy audit tables
+  // explicitly for the complete before/after usage-ledger assertions.
+  ensureUsageAccountingStartup(h.db);
   return h;
 }
 function outbox(h: DaemonProtocolHarness): MultiremiTaskReportOutbox { return (h.daemon as any).ensureOutbox(); }

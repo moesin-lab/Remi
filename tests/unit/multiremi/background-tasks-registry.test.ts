@@ -18,6 +18,7 @@
  */
 import { afterAll, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { notifyBrowserWorkspaceEvent } from "@multiremi/api/realtime.js";
@@ -85,6 +86,7 @@ for (const backend of backends) {
         db.exec("DROP TABLE multiremi_background_tasks");
         db.exec("ALTER TABLE multiremi_turn_attempts DROP COLUMN running_background_tasks");
         expect(hasTable(db)).toBe(false);
+        runMigrations(db, { historicalMaintenance: true });
         new MultiremiStore(db);
         const reopened = new MultiremiStore(db);
         expect(hasTable(db)).toBe(true);

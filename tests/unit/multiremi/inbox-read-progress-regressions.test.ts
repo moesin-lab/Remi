@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { createResponsibleTestIssue } from './helpers.js';
 import { expect, it } from 'bun:test';
 import { pendingTurnBackendTests } from './pending-turn-test-backends.js';
@@ -41,6 +42,7 @@ pendingTurnBackendTests('MUL-506 actual reader and provider checkpoints', fixtur
     f.db.exec('ALTER TABLE multiremi_turns DROP COLUMN trigger_message_id');
     // A historical-schema restart gets a fresh PostgreSQL connection too: cached
     // SELECT * plans from the modern view cannot survive this synthetic column reorder.
+    runMigrations(f.db, { historicalMaintenance: true });
     if (f.databaseUrl) f.reopen();
     else new MultiremiStore(f.db);
     const migrated = fixture();

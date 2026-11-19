@@ -18,7 +18,9 @@ if (!/^\d+\.\d+\.\d+$/.test(manifest.version) || !/^[a-f0-9]{40}$/.test(manifest
 for (const image of [manifest.apiImage, manifest.webImage]) if (!/@sha256:[a-f0-9]{64}$/.test(image)) throw new Error('Bundle builds require immutable API/Web image digests');
 manifest.dataSchema = await schemaFingerprint(fileURLToPath(new URL('../', import.meta.url)));
 const review = manifest.rollbackReview;
-const rollbackSafeFrom = rollbackPolicy(manifest, review);
+const evidencePath = process.env.PLATFORM_SCHEMA_ROLLBACK_EVIDENCE;
+const evidence = evidencePath ? JSON.parse(await readFile(evidencePath, 'utf8')) : undefined;
+const rollbackSafeFrom = rollbackPolicy(manifest, review, evidence);
 const application = { format: 1, supervisor: 1, rollbackSafeFrom, assets: {} };
 const output = resolve(outputDirectory);
 await mkdir(output, { recursive: true });

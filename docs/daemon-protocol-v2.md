@@ -1328,6 +1328,34 @@ manual、deploy、CLI update 的 drain 到期时，只有支持的 runtime 请�
 旧 daemon 回退到 MUL-45 的中断与自动重试，消耗原有重试预算，不创建 requested checkpoint。
 更新仍等待旧进程的零活跃 ACK，再进入安装；不会因无法确认新帧而永久停留在 requested。
 
+### 手动计划内重启的操作顺序
+
+1. 用 `remi daemon drain --daemon-id <id> --deadline 2m` 建立手动排空，
+   用 `remi daemon drain status --daemon-id <id>` 查询进度。
+   检查在途 attempt 的 checkpoint 已确认（`suspended`）且 daemon 活跃数为零；
+   `expiry_action=planned_restart` 只表示期限策略，不能代替 checkpoint 确认。
+   不支持协商能力的旧 daemon 仍走中断后重试，不能作为同 attempt 续接验收。
+2. 保持 drain，重启 daemon，确认新进程已注册、能力协商成功且本地 restart journal 可读。
+   手动 drain 持久存在；此时 `resume_fenced` 是预期保护，避免候选确认前开始执行。
+3. 完成新进程检查后显式执行 `remi daemon undrain --daemon-id <id>`。无需在新 daemon 启动前解除 fence。
+   CLI 更新由其更新流程负责解除自有 fence；平台维护模式也必须先结束排空。
+4. 确认同一 attempt 的 generation 增加、收到持久 `task.start`，provider 续接并最终完成；
+   attempt 数不变，没有 `lost`/`failed`，trace 保留同一轮和“Remi 已更新”条目。
+
+续接 CAS 提交后保持 `resuming`，直到对应 consumer 的持久 `task.start` 提交才变为
+`running`。`suspended` 保留孤儿恢复保护；`resuming` 从 CAS 提交起有固定 5 分钟的
+start 确认宽限期。RPC 超时或回复丢失后，daemon 用原 consumer 重试，复用同一 generation
+和授权，不消耗 attempt，也不延长宽限期。恢复扫描或 offer 安全扫描发现未 start 的 receipt 期限已过时，在 workspace/lane 锁下撤销旧执行授权并交回 MUL-45 崩溃恢复；遵循既有
+重试上限，不把丢失 journal/consumer 的真实崩溃永久隐藏为运行中。已确认 start 的执行不走该宽限期回收；心跳或同 consumer 重试不会延长期限。
+期限已过的迟到 start、执行报告和输入在同一生命周期锁下返回 `stale_execution`；撤销记录
+保留的新 generation 不授予执行权，也不再豁免孤儿恢复。
+等待续接时轮询间隔为 `max(1 秒, pollIntervalMs)`，不等待普通空闲时的十分钟刷新。
+续接 offer 使用普通任务的大小预算；原生 Q 保持完整。完整恢复包在 CAS 锁内、执行授权
+提交前校验，无法装入帧则回滚新 generation/Q 准备，返回不可重试的 `capacity`，撤销该
+handoff 并仅将这一 attempt 交回既有崩溃恢复。原 consumer 重放时若当前恢复包也已无法
+下发，同样撤销未 start 的授权。不会无限重投同一个不可下发包，也不截断原 Q 或答案。
+容量失败后的正常重试仍可保留原会话，但不承诺计划内的同 attempt 续接。
+
 ### 计划内重启的原生等待
 
 checkpoint 的可选 `question_ids` 只引用该 attempt 的原生等待，正文与答案仍由服务端保存。

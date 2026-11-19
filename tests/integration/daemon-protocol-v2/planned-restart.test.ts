@@ -15,7 +15,7 @@ useMigratedIntegrationDatabases();
 
 // Real daemon/provider lifetime, disk outbox/journal and authenticated v2 RPCs.
 // Candidate update acceptance is exercised separately with the MUL-27 harness.
-for (const kind of ["task", "autopilot"] as const) test(`${kind} joins provider shutdown before preparing and acknowledging the same-attempt checkpoint`, async () => {
+for (const kind of ["task", "autopilot", "lost response", "large context"] as const) test(`${kind} joins provider shutdown before preparing and acknowledging the same-attempt checkpoint`, async () => {
   let entered = false;
   let resumed = false;
   let providerClosed = false;
@@ -74,10 +74,43 @@ for (const kind of ["task", "autopilot"] as const) test(`${kind} joins provider 
     expect(h.ledger.some(e => e.type === "turn.restart.checkpoint")).toBe(true);
     expect(h.ledger.some(e => e.type === "turn.restart.suspend")).toBe(true);
     await h.stopDaemon();
-    h.store.undrainDaemon("local", daemonId);
+    const originalResume = (h.layer as any).rpcHandlers.get("turn.restart.resume");
+    let dropped = false;
+    let fenced = false;
+    let failed = false;
+    h.layer.registerRpcHandler("turn.restart.resume", async (frame, session) => {
+      const reply = await originalResume(frame, session);
+      if (reply.code === "resume_fenced") fenced = true;
+      if (kind === "lost response" && reply.ok && dropped && !failed) {
+        failed = true;
+        throw new Error("Injected resume server failure after lost reply");
+      }
+      if (kind === "lost response" && reply.ok && !dropped) {
+        dropped = true;
+        return session.deferReply(frame.id!, new Promise(() => {}));
+      }
+      return reply;
+    });
+    if (kind === "large context") h.store.updateAgent(agent.id, { instructions: "Resume context ".repeat(100_000) });
+    // The real operator sequence keeps the manual fence through replacement.
     await h.recreateDaemon();
+    await waitFor(() => fenced, "resume fenced while drain survives");
+    expect(h.store.plannedRestarts().get(task.id)?.state).toBe("suspended");
+    expect(resumed).toBe(false);
+    h.store.undrainDaemon("local", daemonId);
+    if (kind === "lost response") {
+      await waitFor(() => dropped, "first resume response lost", 10_000);
+      expect(h.store.plannedRestarts().get(task.id)?.state).toBe("resuming");
+      expect(h.store.recoverOrphans(runtimeId)).toEqual({ orphaned: 0, retried: 0 });
+      h.clock.advance(30_001);
+      await waitFor(() => failed, "retry receives server_error", 10_000);
+      expect(h.store.recoverOrphans(runtimeId)).toEqual({ orphaned: 0, retried: 0 });
+      expect(h.store.plannedRestarts().get(task.id)?.state).toBe("resuming");
+    }
     await waitFor(() => h.store.getTask(task.id)?.status === "completed", "same attempt finished after replacement", 10_000);
+    expect(h.store.plannedRestarts().get(task.id)?.state).toBe("running");
     expect(resumed).toBe(true);
+    if (kind === "lost response") expect(failed).toBe(true);
     if (run) expect(h.store.getAutopilotRun(run.id)?.status).toBe("completed");
     expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1, maxAttempts, result: "complete resumed answer" });
     expect(h.ledger.some(e => e.type === "turn.restart.resume")).toBe(true);
@@ -118,7 +151,7 @@ test("live report, input and trace boundaries reject suspended and obsolete gene
       p: { task_id: task.id, summary: "late progress", generation } });
     await expect(progress(0)).rejects.toMatchObject({ code: "stale_execution" });
     await expect(h.client.rpc("turn.input", { ...input, message_ids: [], generation: 0 }, runtimeId))
-      .rejects.toMatchObject({ code: "stale_attempt" });
+      .rejects.toMatchObject({ code: "stale_execution" });
     const append = (generation: number) => h.client.rpc("trace.append", { task_id: task.id, generation, closed: false,
       events: [{ seq: 1, ts: new Date().toISOString(), type: "turn.started", turn: { status: "running" } }] }, runtimeId);
     await expect(append(0)).rejects.toMatchObject({ code: "stale_execution" });
@@ -136,7 +169,7 @@ test("live report, input and trace boundaries reject suspended and obsolete gene
       p: { task_id: task.id, generation: 0, error: "old provider died" } })).rejects.toMatchObject({ code: "stale_execution" });
     await expect(h.client.event({ t: "turn.complete", seq: ++seq, rt: runtimeId,
       p: { ...input, generation: 0, reply: { body_md: "old reply", message_kind: "final" } } }))
-      .rejects.toMatchObject({ code: "stale_attempt" });
+      .rejects.toMatchObject({ code: "stale_execution" });
     expect(h.store.getTask(task.id)?.status).toBe("running");
   } finally { await h.dispose(); }
 }, 20_000);

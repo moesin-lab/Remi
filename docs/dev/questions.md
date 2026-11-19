@@ -47,7 +47,7 @@ Issue Q 的人工阶段不指定成员，`current_handler` 为 null：通过入�
 隔离数据库的 `MUL-40 recovers historical continuation` 回归覆盖两种历史形态；
 这些检查不代表已经对线上会话执行恢复。
 
-原生等待有进程内 nonce，随 `hello.runtimes[].active_question_waits` 和 `runtime.ready` 的清单声明。短暂断线保留同一 nonce；新进程没有旧回调清单，服务端在恢复普通孤儿任务前分离该等待并取消旧 attempt 权限。若答案已保存，自动安排唯一新消费者。数据库中的 `running` 或 `awaiting_human` 只用于检查 attempt 仍有效，不能证明退出进程的回调存在；兼容入口没有 nonce 时直接为 `detached/native_wait_unverified`，正常答复走受控续接，不回填不存在的回调。保存答复与实际消费是两个不同状态。
+原生等待有进程内 nonce，随 `hello.runtimes[].active_question_waits` 和 `runtime.ready` 的清单声明。短暂断线保留同一 nonce；崩溃后的新进程没有旧回调清单，服务端在恢复普通孤儿任务前分离该等待并取消旧 attempt 权限。若答案已保存，自动安排唯一新消费者。数据库中的 `running` 或 `awaiting_human` 只用于检查 attempt 仍有效，不能证明退出进程的回调存在；兼容入口没有 nonce 时直接为 `detached/native_wait_unverified`，正常答复走受控续接，不回填不存在的回调。保存答复与实际消费是两个不同状态。
 
 带来源 attempt 的原生 Q（包括 Chat-owned 自动化）先校验其实际 Turn、会话、工作区、提问 Agent 和 execution scope 与原消息一致；来源损坏时显示 `detached/source_workspace_changed`，不恢复回调。历史业务 decision 可保存在父会话或不同 scope，继续按真实来源 attempt 的专用关系校验，不要求与载体消息同 lane。当前 run-only 自动化拥有真实 Chat，按 Chat 路由处理，不再依赖旧 run 行的 turn_id 推断责任。
 
@@ -116,3 +116,5 @@ Inbox 的 `?item=<Q>&question=<Q>` 专属定位，只读取 Question API，不�
 [`responsibility-http-integration.test.ts`](../../tests/unit/remi/responsibility-http-integration.test.ts)
 使用 Web 的 ApiClient 和真实鉴权 HTTP 路由，验证共享人工答复、修订与原等待消费引用，
 以及处理 Agent 可定点读 Q、仍不能通读来源消息和 Turn 的边界；组件测试验证续接消息入口和消费记录的按需读取。
+
+计划内重启使用已确认的 checkpoint 引用原生待答 Q，不复制正文或答案。挂起及恢复绑定期间，空回调清单不会分离这些 Q；恢复 CAS 在同一事务中把原 Q 绑定到新 generation。provider 重做同一权限或人工请求时，服务端校验请求内容、原 Q 与 checkpoint 的关系后，用新 nonce 重新绑定；原 Q id、答复和路由历史保留，旧 nonce 不能消费。恢复前已保存的答案由原 Q 查询取回。显式关闭仍优先；没有已确认 checkpoint 的中断仍按崩溃处理。

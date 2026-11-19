@@ -3,6 +3,7 @@
  * Events update local state; a coalesced, serialized queue patches the message.
  * The historical class name is retained for connector and adapter callers.
  */
+import { feishuMessageRequest } from "./message-request.js";
 import type { Client } from "@larksuiteoapi/node-sdk";
 import type { FeishuDomain } from "./types.js";
 import type { ToolEntry } from "./tool-formatters.js";
@@ -104,9 +105,9 @@ export class FeishuStreamingSession {
     const card = buildInitialCardJson(options);
     this.header = card.header;
     const data = { msg_type: "interactive" as const, content: JSON.stringify(card) };
-    const sent = options?.replyToMessageId
-      ? await this.client.im.message.reply({ path: { message_id: options.replyToMessageId }, data: { ...data, reply_in_thread: true } })
-      : await this.client.im.message.create({ params: { receive_id_type: receiveIdType }, data: { ...data, receive_id: receiveId } });
+    const sent = await feishuMessageRequest("Feishu card create", () => options?.replyToMessageId
+      ? this.client.im.message.reply({ path: { message_id: options.replyToMessageId }, data: { ...data, reply_in_thread: true } })
+      : this.client.im.message.create({ params: { receive_id_type: receiveIdType }, data: { ...data, receive_id: receiveId } }));
     if (sent.code !== 0 || !sent.data?.message_id) throw new Error(`Send card failed: ${sent.msg}`);
     this.state = { messageId: sent.data.message_id, currentText: "", currentStatus: "" };
     this.startTime = Date.now();

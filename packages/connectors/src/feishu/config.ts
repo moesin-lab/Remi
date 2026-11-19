@@ -1,6 +1,7 @@
 export type FeishuDomainName = "feishu" | "lark" | "bytedance";
 
 export interface FeishuChannelConfig {
+  recoveryChats?: Array<{ chat_id: string; chat_type: "p2p" | "group" }>;
   appId: string;
   appSecret: string;
   domain?: FeishuDomainName;

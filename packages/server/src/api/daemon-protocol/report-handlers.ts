@@ -1,3 +1,4 @@
+import { PlannedRestartError } from "@multiremi/store/planned-restarts.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import { UsageValidationError, validateUsageSnapshot } from "@multiremi/store/usage-accounting.js";
 import { isDeepStrictEqual } from "node:util";
@@ -215,7 +216,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
         if (fields) fields.final_reply_md = reply.body_md;
         const result = await turns.complete({ payload: p as unknown as DaemonTurnCompletePayload, completionFields: fields,
           traceEventCount: completionTraceEventCount(p.trace, string(p.attempt_id)) },
-        { runtimeId, daemonId: session.daemonId, workspaceId: store.getRuntimeLite(runtimeId)!.workspaceId ?? "local", userId: session.ownerAccessToken?.userId, inputUnread: session.supportsInputUnread });
+        { runtimeId, daemonId: session.daemonId, workspaceId: store.getRuntimeLite(runtimeId)!.workspaceId ?? "local", userId: session.ownerAccessToken?.userId, inputUnread: session.supportsInputUnread, generation: p.generation as number | undefined });
         if (result.ok === true && fields?.trace) onTraceClosed?.(string(p.attempt_id), fields.trace.head, runtimeId);
         return result;
       }
@@ -243,107 +244,112 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
           } else task = authorizeReportTask(store, session, taskId, frame.rt);
         } else task = authorizeReportTask(store, session, taskId, frame.rt);
         const authority = { runtimeId: reportingRuntimeId ?? task.runtimeId!, workspaceId: task.workspaceId,
-          daemonId: session.daemonId, userId: session.ownerAccessToken?.userId };
+          daemonId: session.daemonId, userId: session.ownerAccessToken?.userId, generation: p.generation as number | undefined };
         const isCompletion = frame.type === "task.fail";
         const fields = isCompletion ? completionFields(p, taskId) : null;
         const traceEventCount = isCompletion ? completionTraceEventCount(p.trace, taskId) : undefined;
-        switch (frame.type) {
-          case "task.start": {
-            const runId = typeof p.usage_run_id === "string" ? p.usage_run_id : undefined;
-            let outcome: "started" | "replayed";
-            try { outcome = store.startTaskFromDaemon(taskId, authority, runId); }
-            catch (error) { if (error instanceof UsageValidationError) reject("authority_revoked"); throw error; }
-            const permission = runId ? { execution_authorized: store.isTaskUsageExecutionAuthorized(taskId, runId, authority.runtimeId) } : {};
-            if (outcome === "replayed") return { ok: true, code: "start_replayed", ...permission };
-            if (runId) return { ok: true, ...permission };
-            break;
-          }
-          case "task.prompt":
-            if (!["bootstrap", "delta"].includes(string(p.mode)) || typeof p.prompt !== "string" || typeof p.sha256 !== "string"
-              || (p.instructions !== undefined && typeof p.instructions !== "string")) reject();
-            try {
-              store.recordTaskPrompt(taskId, { mode: p.mode as "bootstrap" | "delta", prompt: p.prompt as string, sha256: p.sha256 as string,
-                ...(typeof p.instructions === "string" ? { instructions: p.instructions } : {}) });
+        const apply = () => {
+          switch (frame.type) {
+            case "task.start": {
+              const runId = typeof p.usage_run_id === "string" ? p.usage_run_id : undefined;
+              let outcome: "started" | "replayed";
+              try { outcome = store.startTaskFromDaemon(taskId, authority, runId); }
+              catch (error) { if (error instanceof UsageValidationError) reject("authority_revoked"); throw error; }
+              const permission = runId ? { execution_authorized: store.isTaskUsageExecutionAuthorized(taskId, runId, authority.runtimeId) } : {};
+              if (outcome === "replayed") return { ok: true, code: "start_replayed", ...permission };
+              if (runId) return { ok: true, ...permission };
+              break;
             }
-            catch { reject(); }
-            break;
-          case "task.session_pin":
-            if (!nullable(p.session_id) && !nullable(p.work_dir)) reject();
-            store.pinTaskSession(taskId, nullable(p.session_id), nullable(p.work_dir));
-            break;
-          case "task.progress": {
-            const summary = string(p.summary);
-            const step = typeof p.step === "number" ? p.step : undefined;
-            const total = typeof p.total === "number" ? p.total : undefined;
-            // An identical replay must not repeat a DB write or task notification.
-            if (task.progressSummary === summary
-              && task.progressStep === (step ?? null) && task.progressTotal === (total ?? null)) break;
-            if (!terminal(task.status) || p.final === true) store.reportProgress(taskId, summary, step, total,
-              { allowTerminal: p.final === true });
-            break;
-          }
-          case "task.usage": {
-            if (p.usageSnapshot !== undefined) {
-              try { store.reportTaskUsageSnapshot(taskId, validateUsageSnapshot(p.usageSnapshot), authority); }
+            case "task.prompt":
+              if (!["bootstrap", "delta"].includes(string(p.mode)) || typeof p.prompt !== "string" || typeof p.sha256 !== "string"
+                || (p.instructions !== undefined && typeof p.instructions !== "string")) reject();
+              try {
+                store.recordTaskPrompt(taskId, { mode: p.mode as "bootstrap" | "delta", prompt: p.prompt as string, sha256: p.sha256 as string,
+                  ...(typeof p.instructions === "string" ? { instructions: p.instructions } : {}) });
+              }
+              catch { reject(); }
+              break;
+            case "task.session_pin":
+              if (!nullable(p.session_id) && !nullable(p.work_dir)) reject();
+              store.pinTaskSession(taskId, nullable(p.session_id), nullable(p.work_dir));
+              break;
+            case "task.progress": {
+              const summary = string(p.summary);
+              const step = typeof p.step === "number" ? p.step : undefined;
+              const total = typeof p.total === "number" ? p.total : undefined;
+              // An identical replay must not repeat a DB write or task notification.
+              if (task.progressSummary === summary
+                && task.progressStep === (step ?? null) && task.progressTotal === (total ?? null)) break;
+              if (!terminal(task.status) || p.final === true) store.reportProgress(taskId, summary, step, total,
+                { allowTerminal: p.final === true });
+              break;
+            }
+            case "task.usage": {
+              if (p.usageSnapshot !== undefined) {
+                try { store.reportTaskUsageSnapshot(taskId, validateUsageSnapshot(p.usageSnapshot), authority); }
+                catch (error) { if (error instanceof UsageValidationError) reject(); throw error; }
+                break;
+              }
+              const usage = daemonTaskUsageEntries(p.usage);
+              // The ingestion boundary performs replay checks and rejects JSON
+              // drift against its protected historical source checkpoint.
+              try { store.reportTaskUsage(taskId, usage); }
               catch (error) { if (error instanceof UsageValidationError) reject(); throw error; }
               break;
             }
-            const usage = daemonTaskUsageEntries(p.usage);
-            // The ingestion boundary performs replay checks and rejects JSON
-            // drift against its protected historical source checkpoint.
-            try { store.reportTaskUsage(taskId, usage); }
-            catch (error) { if (error instanceof UsageValidationError) reject(); throw error; }
-            break;
-          }
-          case "task.workspace": {
-            const runtimeId = string(p.runtime_id);
-            if (!task.issueId) reject("task_not_found");
-            if (runtimeId !== task.runtimeId) reject("authority_revoked");
-            if (!nullable(p.root_path) || typeof p.branch_name !== "string" || !p.status) reject();
-            const repos = Array.isArray(p.repos) ? p.repos as Array<Record<string, unknown>> : [];
-            const mapped: MultiremiIssueWorkspaceRepo[] = repos.map(repo => ({
-              repoUrl: string(repo.repo_url).trim(), repoName: string(repo.repo_name).trim(),
-              worktreePath: string(repo.worktree_path).trim(), branchName: string(repo.branch_name ?? p.branch_name).trim(),
-              baseRef: string(repo.base_ref).trim(), baseCommit: nullable(repo.base_commit),
-              status: (repo.status ?? (repo.dirty ? "dirty" : "ready")) as "ready" | "dirty" | "error",
-              dirty: repo.dirty === true, error: nullable(repo.error),
-            }));
-            const input = { issueId: task.issueId, runtimeId, rootPath: string(p.root_path).trim(),
-              branchName: p.branch_name.trim(), status: p.status as MultiremiIssueWorkspaceStatus, repos: mapped, lastTaskId: taskId };
-            const current = terminal(task.status) ? store.getIssueWorkspace(task.issueId) : null;
-            if (current?.lastTaskId === taskId && current.runtimeId === runtimeId
-              && current.rootPath === input.rootPath && current.branchName === input.branchName
-              && current.status === input.status && isDeepStrictEqual(current.repos, mapped)) break;
-            try { store.reportIssueWorkspace(input); }
-            catch { reject(); }
-            break;
-          }
+            case "task.workspace": {
+              const runtimeId = string(p.runtime_id);
+              if (!task.issueId) reject("task_not_found");
+              if (runtimeId !== task.runtimeId) reject("authority_revoked");
+              if (!nullable(p.root_path) || typeof p.branch_name !== "string" || !p.status) reject();
+              const repos = Array.isArray(p.repos) ? p.repos as Array<Record<string, unknown>> : [];
+              const mapped: MultiremiIssueWorkspaceRepo[] = repos.map(repo => ({
+                repoUrl: string(repo.repo_url).trim(), repoName: string(repo.repo_name).trim(),
+                worktreePath: string(repo.worktree_path).trim(), branchName: string(repo.branch_name ?? p.branch_name).trim(),
+                baseRef: string(repo.base_ref).trim(), baseCommit: nullable(repo.base_commit),
+                status: (repo.status ?? (repo.dirty ? "dirty" : "ready")) as "ready" | "dirty" | "error",
+                dirty: repo.dirty === true, error: nullable(repo.error),
+              }));
+              const input = { issueId: task.issueId, runtimeId, rootPath: string(p.root_path).trim(),
+                branchName: p.branch_name.trim(), status: p.status as MultiremiIssueWorkspaceStatus, repos: mapped, lastTaskId: taskId };
+              const current = terminal(task.status) ? store.getIssueWorkspace(task.issueId) : null;
+              if (current?.lastTaskId === taskId && current.runtimeId === runtimeId
+                && current.rootPath === input.rootPath && current.branchName === input.branchName
+                && current.status === input.status && isDeepStrictEqual(current.repos, mapped)) break;
+              try { store.reportIssueWorkspace(input); }
+              catch { reject(); }
+              break;
+            }
 
-          case "task.activity": {
-            // Best effort (PR 5): no seq, no reply; a lost or rejected frame is
-            // replaced by the daemon's next change or periodic refresh.
-            const count = p.running_subagents;
-            const counted = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= MAX_RUNNING_SUBAGENTS;
-            if (!counted(count)) reject();
-            // PR 6: optional; an older daemon omits it, and a missing value is not a 0.
-            const background = p.running_background_tasks;
-            if (background !== undefined && !counted(background)) reject();
-            if (p.runtime_id != null && p.runtime_id !== task.runtimeId) reject("authority_revoked");
-            store.recordTaskActivity(taskId, { runningSubagents: count as number,
-              ...(background === undefined ? {} : { runningBackgroundTasks: background as number }) });
-            break;
+            case "task.activity": {
+              // Best effort (PR 5): no seq, no reply; a lost or rejected frame is
+              // replaced by the daemon's next change or periodic refresh.
+              const count = p.running_subagents;
+              const counted = (value: unknown) => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= MAX_RUNNING_SUBAGENTS;
+              if (!counted(count)) reject();
+              // PR 6: optional; an older daemon omits it, and a missing value is not a 0.
+              const background = p.running_background_tasks;
+              if (background !== undefined && !counted(background)) reject();
+              if (p.runtime_id != null && p.runtime_id !== task.runtimeId) reject("authority_revoked");
+              store.recordTaskActivity(taskId, { runningSubagents: count as number,
+                ...(background === undefined ? {} : { runningBackgroundTasks: background as number }) });
+              break;
+            }
+            case "task.fail":
+              store.failTaskFromDaemon(taskId, {
+                error: string(p.error) || "Task failed", traceEventCount,
+                sessionId: nullable(p.session_id), workDir: nullable(p.work_dir), failureReason: nullable(p.failure_reason), completionFields: fields }, authority);
+              break;
+            default: reject();
           }
-          case "task.fail":
-            store.failTaskFromDaemon(taskId, {
-              error: string(p.error) || "Task failed", traceEventCount,
-              sessionId: nullable(p.session_id), workDir: nullable(p.work_dir), failureReason: nullable(p.failure_reason), completionFields: fields }, authority);
-            break;
-          default: reject();
-        }
-        if (isCompletion && fields?.trace) {
-          onTraceClosed?.(taskId, fields.trace.head, task.runtimeId!);
-        }
-        return { ok: true };
+          if (isCompletion && fields?.trace) {
+            onTraceClosed?.(taskId, fields.trace.head, task.runtimeId!);
+          }
+          return { ok: true };
+        };
+        // Accepted usage runs retain accounting authority after execution handoff.
+        return frame.type === "task.usage" || frame.type === "task.fail" ? apply()
+          : store.plannedRestarts().withExecution(taskId, p.generation, authority, apply);
       }
       const runtimeId = frame.rt ?? string(p.runtime_id);
       authorizeReportRuntime(store, session, runtimeId);
@@ -482,6 +488,7 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
       if (error instanceof Error && "code" in error && (error.code === "cli_update_not_admitted" || error.code === "cli_update_not_runnable")) {
         return { ok: false, code: error.code, retryable: false };
       }
+      if (error instanceof PlannedRestartError) return { ok: false, code: error.code, retryable: false };
       if (error instanceof TaskDaemonReportError) return { ok: false, code: error.code, retryable: error.retryable };
       if (error instanceof ReportRejection) return { ok: false, code: error.code, retryable: false };
       throw error;

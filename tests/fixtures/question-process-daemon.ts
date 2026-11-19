@@ -59,7 +59,7 @@ if (input.mode === 'source') {
   downlinks.bindTurn(input.offer);
   const daemon = Object.create(MultiremiDaemon.prototype);
   Object.assign(daemon, { options: { approvalMode: 'ask', humanRequestTimeoutMs: 120_000, runtimeId: input.rt },
-    pollAbort: new AbortController(), ensureTrace: () => ({ append: () => {} }), taskDownlinks: downlinks });
+    restartExecutions: new Map(), restartQuestions: new Map(), pollAbort: new AbortController(), ensureTrace: () => ({ append: () => {} }), taskDownlinks: downlinks });
   let question!: (params: ElicitationCreateParams) => Promise<ElicitationResult>;
   const provider = { setElicitationHandler: (handler: typeof question) => { question = handler; } } as MultiremiTaskProvider;
   daemon.attachHumanInputHandlers(provider, input.attempt, new AbortController().signal, () => 1);

@@ -160,6 +160,8 @@ export interface TraceUserMessageItem extends TraceItemBase {
   background_tasks?: TraceUserMessageDoorbell[];
   steer: {
     steer_id: string;
+    /** Explicit provider user-message echo carrying this id; injected alone is insufficient. */
+    consumed?: true;
     kind: string;
     /** `result.via !== "none"`. */
     injected: boolean;
@@ -739,7 +741,7 @@ export function isTraceItem(value: unknown): value is TraceItem {
         && Array.isArray(v.attachments)
         && v.attachments.every((a) => isRow(a) && typeof a.id === "string" && isNullableString(a.name))
         && (steer === null || (isRow(steer) && typeof steer.steer_id === "string" && typeof steer.kind === "string"
-          && typeof steer.injected === "boolean" && isNullableString(steer.author_type) && isNullableString(steer.author_id)
+          && isOptionalTrue(steer.consumed) && typeof steer.injected === "boolean" && isNullableString(steer.author_type) && isNullableString(steer.author_id)
           && (steer.result === undefined || isTraceSteerResult(steer.result))))
         && (v.background_tasks === undefined
           || (Array.isArray(v.background_tasks) && v.background_tasks.every(isTraceUserMessageDoorbell)))

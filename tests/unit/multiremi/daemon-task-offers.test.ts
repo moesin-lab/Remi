@@ -457,6 +457,21 @@ describe("A-3 task offers", () => {
     } finally { release(); await h.layer.drain(); claim.mockRestore(); }
   });
 
+  it("requeues a declined preparation and retries the same attempt after cooldown", async () => {
+    let decline = true;
+    const h = fixture(async task => decline ? null : { id: task.id });
+    const task = h.task();
+    await h.hello();
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", offeredAt: null, acceptedAt: null });
+    expect(h.offered()).toHaveLength(0);
+    decline = false;
+    h.clock.advance(DAEMON_OFFER_COOLDOWN_MS - 1); await h.layer.drain();
+    expect(h.offered()).toHaveLength(0);
+    h.clock.advance(1); await h.layer.drain();
+    expect(h.offered().map(frame => frame.p.attempt_id)).toEqual([task.id]);
+    expect(h.store.listTurnAttempts(h.store.getTurnForAttempt(task.id)!.id)).toHaveLength(1);
+  });
+
   it("requeues a failed preparation and does not leave the runtime waiting for an unsent offer", async () => {
     let failed = true;
     const h = fixture(async task => { if (failed) throw new Error("fixture preparation failure"); return { id: task.id }; });

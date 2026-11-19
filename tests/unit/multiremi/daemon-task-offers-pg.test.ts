@@ -27,7 +27,7 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
     await admin?.unsafe(`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
     await admin?.end();
   });
-  function fixture(prepare?: (task: { id: string; prompt: string }) => Promise<Record<string, unknown>>) {
+  function fixture(prepare?: (task: { id: string; prompt: string }) => Promise<Record<string, unknown> | null>) {
     const id = `rt_pg_offer_${++serial}`;
     store.registerRuntime({ id, name: id, daemonId: id, provider: "claude", workspaceId: "local", status: "online", maxConcurrency: 1,
       metadata: { parallel_agent_execution: 1 } });
@@ -36,7 +36,7 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
     const layer = new DaemonProtocolLayer({ store });
     const offers = new DaemonTaskOffers({ store, layer, clock, prepare: async task => {
       const execution = prepare ? await prepare(task) : { runtime_id: task.runtimeId };
-      return daemonTurnOfferPayload(execution, store.getDaemonTurnBridge().offerInput(task));
+      return execution ? daemonTurnOfferPayload(execution, store.getDaemonTurnBridge().offerInput(task)) : null;
     } });
     const frames: Record<string, any>[] = [];
     const session = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return text.length; }, close() {} }, { masterToken: true, accessToken: null });
@@ -47,6 +47,27 @@ describe.skipIf(!adminUrl)("A-3 task offers on real PostgreSQL", () => {
     return { id, agentId: agent.id, clock, layer, session, offers, frames, send, hello, close,
       task: (prompt = "no-op") => store.createTask({ agentId: agent.id, prompt, maxAttempts: 1 }) };
   }
+  it("keeps recovered retries queued when preparation declines, then offers the same retry after cooldown", async () => {
+    let decline = true;
+    const h = fixture(async task => decline ? null : { id: task.id });
+    try {
+      const issue = createResponsibleTestIssue(store, { title: "Recover without an offer", assigneeType: "agent", assigneeId: h.agentId });
+      const task = store.createTask({ agentId: h.agentId, issueId: issue.id, prompt: "recover", maxAttempts: 3 });
+      expect(store.claimTask(h.id)?.id).toBe(task.id);
+      store.startTask(task.id);
+      await h.hello();
+      await h.send("runtime.ready", { active_task_ids: [] }, { rt: h.id });
+      expect(store.getTask(task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
+      const retry = store.listTasks().find(candidate => candidate.parentTaskId === task.id)!;
+      expect(retry).toMatchObject({ status: "queued", attempt: 2, maxAttempts: 3, offeredAt: null, dispatchedAt: null });
+      expect(h.frames.filter(frame => frame.t === "task.offer")).toHaveLength(0);
+      decline = false;
+      h.clock.advance(30_000); await h.layer.drain();
+      expect(h.frames.filter(frame => frame.t === "task.offer").map(frame => frame.p.attempt_id)).toEqual([retry.id]);
+      expect(store.listTurnAttempts(store.getTurnForAttempt(task.id)!.id)).toHaveLength(2);
+    } finally { await h.close(); }
+  });
+
   it("migrates both timestamp columns and holds accepted dispatches until disconnect", async () => {
     const h = fixture();
     try {

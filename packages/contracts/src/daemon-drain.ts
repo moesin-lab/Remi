@@ -12,7 +12,7 @@ export interface DaemonDrainStatus {
   forced_at: string | null;
   remaining_tasks: number;
   awaiting_daemon_ack: boolean;
-  expiry_action: "runtime_recovery" | "fail_update";
+  expiry_action: "planned_restart";
 }
 export function parseDaemonDrainDuration(value: string): number {
   if (typeof value !== "string") throw new Error("deadline must be a duration string (e.g. 5m)");

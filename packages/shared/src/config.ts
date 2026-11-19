@@ -9,6 +9,7 @@ export const SESSIONS_FILE = join(REMI_HOME, "sessions.json");
 export const PID_FILE = join(REMI_HOME, "remi.pid");
 
 export interface FeishuConfig {
+  recoveryChats?: Array<{ chat_id: string; chat_type: "p2p" | "group" }>;
   appId: string;
   appSecret: string;
   port: number;

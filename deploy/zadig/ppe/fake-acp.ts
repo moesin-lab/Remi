@@ -12,13 +12,16 @@ function streamSeconds(prompt: string): number | null {
   if (seconds < 60 || seconds > 120) throw new Error("ppe_invalid_stream_duration");
   return seconds;
 }
-async function streamTrace(seconds: number, emit: (text: string) => void, cancelled: () => boolean): Promise<string> {
+export async function streamTrace(seconds: number, emit: (text: string) => void, cancelled: () => boolean): Promise<string> {
   const start = performance.now();
   let sequence = 0;
   while (performance.now() - start < seconds * 1000) {
     if (cancelled()) throw new Error("ppe_cancelled");
     emit(`MUL-172 trace ${++sequence} elapsed_ms=${Math.floor(performance.now() - start)}\n`);
-    await new Promise(resolve => setTimeout(resolve, Math.min(1000, seconds * 1000 - (performance.now() - start))));
+    // Emitting the final chunk can cross the deadline after the loop check.
+    const remainingMs = seconds * 1000 - (performance.now() - start);
+    if (remainingMs <= 0) break;
+    await new Promise(resolve => setTimeout(resolve, Math.min(1000, remainingMs)));
   }
   if (cancelled()) throw new Error("ppe_cancelled");
   return `MUL-172 stream completed: ${sequence} chunks over ${Math.floor(performance.now() - start)} ms.`;
@@ -250,7 +253,7 @@ function providerRequest(probe: Probe, method: string, params: Record<string, un
 let sequence = 0;
 const sessions = new Set<string>();
 
-createInterface({ input: process.stdin }).on("line", (line) => {
+if (import.meta.main) createInterface({ input: process.stdin }).on("line", (line) => {
   let request: RpcRequest;
   try {
     request = JSON.parse(line) as RpcRequest;

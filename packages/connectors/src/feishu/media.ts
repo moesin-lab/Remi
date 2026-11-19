@@ -3,6 +3,7 @@
  * Adapted from OpenClaw feishu extension media.ts — removed runtime/account dependencies.
  */
 
+import { feishuMessageRequest } from "./message-request.js";
 import type * as Lark from "@larksuiteoapi/node-sdk";
 import { Readable } from "node:stream";
 import fs from "node:fs";
@@ -251,20 +252,20 @@ export async function sendImageFeishu(
   const content = JSON.stringify({ image_key: imageKey });
 
   if (replyToMessageId) {
-    const response = await client.im.message.reply({
+    const response = await feishuMessageRequest("Feishu message reply", () => client.im.message.reply({
       path: { message_id: replyToMessageId },
       data: { content, msg_type: "image", reply_in_thread: true, ...(idempotencyKey ? { uuid: idempotencyKey } : {}) },
-    });
+    }));
     if (response.code !== 0) {
       throw new Error(`Feishu image reply failed: ${response.msg || `code ${response.code}`}`);
     }
     return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
   }
 
-  const response = await client.im.message.create({
+  const response = await feishuMessageRequest("Feishu message create", () => client.im.message.create({
     params: { receive_id_type: receiveIdType },
     data: { receive_id: receiveId, content, msg_type: "image", ...(idempotencyKey ? { uuid: idempotencyKey } : {}) },
-  });
+  }));
   if (response.code !== 0) {
     throw new Error(`Feishu image send failed: ${response.msg || `code ${response.code}`}`);
   }
@@ -286,20 +287,20 @@ export async function sendFileFeishu(
   const content = JSON.stringify({ file_key: fileKey });
 
   if (replyToMessageId) {
-    const response = await client.im.message.reply({
+    const response = await feishuMessageRequest("Feishu message reply", () => client.im.message.reply({
       path: { message_id: replyToMessageId },
       data: { content, msg_type: msgType, reply_in_thread: true, ...(idempotencyKey ? { uuid: idempotencyKey } : {}) },
-    });
+    }));
     if (response.code !== 0) {
       throw new Error(`Feishu file reply failed: ${response.msg || `code ${response.code}`}`);
     }
     return { messageId: response.data?.message_id ?? "unknown", chatId: receiveId };
   }
 
-  const response = await client.im.message.create({
+  const response = await feishuMessageRequest("Feishu message create", () => client.im.message.create({
     params: { receive_id_type: receiveIdType },
     data: { receive_id: receiveId, content, msg_type: msgType, ...(idempotencyKey ? { uuid: idempotencyKey } : {}) },
-  });
+  }));
   if (response.code !== 0) {
     throw new Error(`Feishu file send failed: ${response.msg || `code ${response.code}`}`);
   }

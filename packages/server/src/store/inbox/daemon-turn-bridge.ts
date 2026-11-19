@@ -1,3 +1,4 @@
+import { PlannedRestarts, PlannedRestartError } from "../planned-restarts.js";
 import { attemptInputState,acknowledgeAttemptInput } from './attempt-input.js';
 import type { StoreContext,CommitEventQueue } from '../context.js';
 import { createCommitEventQueue } from '../context.js';
@@ -6,6 +7,7 @@ import type { MultiremiTaskWithAgent } from '@multiremi/contracts/types.js';
 import type { DaemonTaskCompletionFields } from '@multiremi/contracts/daemon-protocol.js';
 import type { UnifiedMessage,DecisionOption } from '@multiremi/contracts/unified-model.js';
 import { sendMessageWithinTransaction,getMessage,messageFromRow } from './send-message.js';
+import { plannedRestartDeliveredInputs } from './attempt-input.js';
 import { InputUnreadError, lockLane,acknowledgeInput,assertOfferedInputRead } from './lane-machine.js';
 import { deriveIssueStatusWithinTransaction } from './issue-status.js';
 import { patchDecisionRecord } from './decision-records.js';
@@ -16,7 +18,7 @@ import { TRIGGER_MESSAGE_INLINE_CHARS, expandHint, replayInputHint } from '@mult
 import { readBackgroundDoorbell } from '@shared/background-tasks.js';
 
 // Structurally identical to S3's transport interface, without coupling the store to API routers.
-export interface DaemonTurnScope {runtimeId:string;daemonId:string;workspaceId:string;userId?:string|null;inputUnread?:boolean}
+export interface DaemonTurnScope {runtimeId:string;daemonId:string;workspaceId:string;userId?:string|null;inputUnread?:boolean;generation?:number}
 export type DaemonTurnRpc='turn.input'|'turn.decision'|'turn.decision.get'|'turn.decision.expire'|'turn.decision.consume';
 export interface DaemonTurnInput {turn_id:string;attempt_id:string;input_from_seq:number;input_to_seq:number;input_messages:UnifiedMessage[]}
 export interface DaemonTurnCompletePayload {turn_id:string;attempt_id:string;input_to_seq:number;reply:{body_md:string;message_kind:'reply'|'final'};session_id?:string|null;work_dir?:string|null;input_unread_fallback?:boolean}
@@ -31,6 +33,7 @@ const invalidTurnReports=new Set([
   'Message sender belongs to another workspace','Message recipient belongs to another workspace',
 ]);
 function turnRejectionCode(error:unknown,attemptId:string,runtimeId:string):'stale_attempt'|'input_gap'|'turn_input_pending'|'invalid_report'|null {
+  if(error instanceof PlannedRestartError)return 'stale_attempt';
   if(!(error instanceof Error))return null;
   if ('retryable' in error && error.retryable === false && 'code' in error
     && ['authority_revoked','task_not_found'].includes(String(error.code))) return 'stale_attempt';
@@ -52,12 +55,15 @@ export class DaemonTurnBridge {
     if(!row||row.current_attempt_id!==attemptId||row.workspace_id!==scope.workspaceId||row.runtime_id!==scope.runtimeId||runtime?.daemonId!==scope.daemonId
       ||!terminal&&!['running','awaiting_human'].includes(row.status)
         &&!(sentInput&&row.status==='pending'&&row.offered_at&&['offered','accepted'].includes(row.attempt_status)))throw new Error('stale_attempt');
-    lockLane(this.ctx,row.session_id,row.agent_id,row.execution_scope);return row;
+    lockLane(this.ctx,row.session_id,row.agent_id,row.execution_scope);new PlannedRestarts(this.ctx).assertExecutionWithinTransaction(attemptId,scope.generation);return row;
   }
   private messages(sessionId:string,from:number,to:number):UnifiedMessage[]{return this.ctx.db.query("SELECT * FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND deleted_at IS NULL AND visibility='shown' ORDER BY seq").all(sessionId,from,to).map(messageFromRow);}
-  private inputMessages(turn:any,from:number,to:number):UnifiedMessage[] {
-    const messages=this.messages(turn.session_id,from,to);
-    const attempt=this.ctx.db.query('SELECT session_id,attempt_no,input_trigger_ack FROM multiremi_turn_attempts WHERE id=?').get(turn.current_attempt_id);
+  private inputMessages(turn:any,from:number,to:number,window?:UnifiedMessage[]):UnifiedMessage[] {
+    const attempt=this.ctx.db.query(`SELECT a.session_id,a.attempt_no,a.input_trigger_ack,r.checkpoint AS restart_checkpoint
+      FROM multiremi_turn_attempts a LEFT JOIN multiremi_planned_restarts r
+        ON r.attempt_id=a.id AND r.state='running' AND r.generation>0 WHERE a.id=?`).get(turn.current_attempt_id);
+    const delivered=plannedRestartDeliveredInputs(attempt.restart_checkpoint);
+    const messages=(window??this.messages(turn.session_id,from,to)).filter(message=>!delivered.has(message.id));
     // A cold provider needs the original task even when the reader has already
     // acknowledged it. Supply it separately from the unread interval.
     if(Number(attempt.attempt_no)>1&&!attempt.session_id&&!attempt.input_trigger_ack){
@@ -102,7 +108,8 @@ export class DaemonTurnBridge {
       if(!turn)throw new Error('stale_attempt');lockLane(this.ctx,turn.session_id,turn.agent_id,turn.execution_scope);
       const from=this.cursor(turn),to=this.ctx.conversationLog().getConversationLogHead(turn.session_id)?.headSeq??from;
       this.ctx.db.run('UPDATE multiremi_turn_attempts SET projection_to_seq=CASE WHEN COALESCE(projection_to_seq,0)<? THEN ? ELSE projection_to_seq END WHERE id=?',[to,to,attempt.id]);
-      return {turn_id:turn.id,attempt_id:attempt.id,input_from_seq:from,input_to_seq:to,input_messages:this.project(this.inputMessages(turn,from,to),turn,from,to)};
+      const window=this.messages(turn.session_id,from,to);
+      return {turn_id:turn.id,attempt_id:attempt.id,input_from_seq:from,input_to_seq:to,input_messages:this.project(this.inputMessages(turn,from,to,window),turn,from,to,window)};
     });
   }
   snapshot(scope:DaemonTurnScope,activeAttemptIds:ReadonlySet<string>) {
@@ -134,11 +141,12 @@ export class DaemonTurnBridge {
         DO UPDATE SET updated_at=multiremi_session_lanes.updated_at`,[at,at,...args]);
       const rows=this.ctx.db.query(`SELECT t.*,a.id AS snapshot_attempt_id,
         a.input_ack_seq,a.input_read_seq,a.session_id AS provider_session_id,
-        l.cursor_seq AS lane_cursor,COALESCE(h.head_seq,0) AS snapshot_head
+        l.cursor_seq AS lane_cursor,COALESCE(h.head_seq,0) AS snapshot_head,r.checkpoint AS restart_checkpoint
         FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id
         JOIN multiremi_session_lanes l ON l.session_id=t.session_id AND l.reader_type='agent'
           AND l.reader_id=t.agent_id AND l.execution_scope=t.execution_scope
         LEFT JOIN multiremi_conversation_heads h ON h.session_id=t.session_id
+        LEFT JOIN multiremi_planned_restarts r ON r.attempt_id=a.id AND r.state='running' AND r.generation>0
         WHERE ${where}`).all(...args);
       if(!rows.length)return {messages,wrapUps};
       const selected=rows.map(row=>String(row.snapshot_attempt_id));
@@ -168,8 +176,9 @@ export class DaemonTurnBridge {
       for(const row of rows){
         const id=String(row.snapshot_attempt_id),head=Number(row.snapshot_head);
         const from=Number(row.input_ack_seq??(row.provider_session_id?row.lane_cursor:0)??0);
+        const delivered=plannedRestartDeliveredInputs(row.restart_checkpoint);
         const read=Number(row.input_read_seq??from),window=windows.get(id)??[];
-        const interrupts=window.filter(m=>m.wake_applied==='now'&&m.to_agent_id===row.agent_id
+        const interrupts=window.filter(m=>!delivered.has(m.id)&&m.wake_applied==='now'&&m.to_agent_id===row.agent_id
           &&(m.metadata.execution_scope??'')===row.execution_scope&&m.seq>Number(row.wake_seq));
         for(const message of this.project(interrupts,row,from,head,window,read))messages.push({turn_id:row.id,attempt_id:id,message});
         if(row.wrap_up_requested_at)wrapUps.push({turn_id:row.id,attempt_id:id,requested_at:row.wrap_up_requested_at});
@@ -185,7 +194,7 @@ export class DaemonTurnBridge {
   }
   rpc(type:DaemonTurnRpc,payload:Record<string,unknown>,scope:DaemonTurnScope):Record<string,unknown> {
     try{return this.transaction(events=>{
-      const turn=this.authorized(String(payload.turn_id),String(payload.attempt_id),scope,false,type==='turn.input');
+      const turn=this.authorized(String(payload.turn_id),String(payload.attempt_id),{...scope,generation:payload.generation as number|undefined},false,type==='turn.input');
       if(type==='turn.input'){
         // Re-project under the same current-attempt authority; never advance a receipt.
         if(payload.resync===true)return {ok:true,input:this.offerInput(this.ctx.tasks().getTaskWithAgent(turn.current_attempt_id)!)};
@@ -213,6 +222,12 @@ export class DaemonTurnBridge {
       }
       if(type==='turn.decision'){
         if(typeof payload.body_md!=='string'||typeof payload.dedupe_key!=='string'||!Array.isArray(payload.options))throw new Error('invalid_report');
+        if (typeof payload.recover_question_id === 'string') {
+          if (typeof payload.wait_id !== 'string' || !payload.wait_id) throw new Error('invalid_report');
+          const message = new Questions(this.ctx).rebindPlannedRestartWithinTransaction(payload.recover_question_id,
+            turn.current_attempt_id, Number(payload.generation), payload.wait_id, payload.metadata as Record<string, unknown>, events);
+          return { ok: true, message, meta: { deduped: true } };
+        }
         const timeout=Number(payload.timeout_ms??0),expires=timeout>0?new Date(Date.now()+timeout).toISOString():null;
         const result=new Questions(this.ctx).createWithinTransaction({id: typeof payload.message_id === 'string' ? payload.message_id : undefined, session_id:turn.session_id,sender:{type:'agent',id:turn.agent_id},source_turn_id:turn.id,to:{type:'none'},
           body_md:payload.body_md,message_kind:'decision',wake_requested:'now',dedupe_key:payload.dedupe_key,options:payload.options as DecisionOption[],

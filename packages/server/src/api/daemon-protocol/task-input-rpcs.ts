@@ -1,5 +1,4 @@
 import { PlannedRestartError } from "@multiremi/store/planned-restarts.js";
-import { DAEMON_FRAME_MAX_BYTES, DAEMON_OFFER_BUDGET_BYTES } from "@multiremi/contracts/daemon-protocol.js";
 import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import type { MultiremiStore } from "@multiremi/store/store.js";
 import type { DaemonProtocolLayer } from "./index.js";
@@ -7,7 +6,7 @@ import type { DaemonParsedFrame } from "./frames.js";
 import type { DaemonProtocolSession } from "./session.js";
 import { daemonAgentPluginDesiredResponse } from "../wire/agent-plugins.js";
 import type { DaemonTurnBridge, DaemonTurnRpc } from "./turn-bridge.js";
-import { fitTaskOfferToBudget } from "./offer-budget.js";
+import { fitRestartResumeToBudget } from "./offer-budget.js";
 
 const denied = (code = "invalid_report") => ({ ok: false, code, retryable: false });
 
@@ -87,17 +86,8 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
       });
       if (!store.isTaskUsageExecutionAuthorized(task.id, p.consumer_id, frame.rt!)) return denied("stale_execution");
       const questions = (receipt.checkpoint?.question_ids ?? []).map(id => store.getMessage(id)).filter(Boolean);
-      // Resume is a full offer too. Unbudgeted context can silently exceed the
-      // socket frame cap after the CAS, leaving the daemon waiting for a reply.
-      const questionBytes = Buffer.byteLength(JSON.stringify(questions));
-      const budget = Math.min(DAEMON_OFFER_BUDGET_BYTES, DAEMON_FRAME_MAX_BYTES - questionBytes - 4096);
-      if (budget <= 0) return denied("capacity");
-      const prepared = fitTaskOfferToBudget({ ...offer, ...turns.offerInput(task) }, frame.rt!, budget);
-      const reply = { ok: true, generation: receipt.generation, task: prepared.response, recovered_questions: questions };
-      // Protected offer fields and canonical questions cannot always be trimmed.
-      // Reserve envelope space and fail explicitly instead of dropping the frame.
-      if (Buffer.byteLength(JSON.stringify(reply)) > DAEMON_FRAME_MAX_BYTES - 4096) return denied("capacity");
-      return reply;
+      return fitRestartResumeToBudget({ ...offer, ...turns.offerInput(task) }, questions, receipt.generation, frame.rt!)
+        ?? denied("capacity");
     } catch (error) {
       if (error instanceof PlannedRestartError) return denied(error.code);
       throw error;

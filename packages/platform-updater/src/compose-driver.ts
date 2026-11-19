@@ -10,7 +10,7 @@ import { type PlatformDrainGate } from "./drain.js";
 import { resolveHealthTimeoutMs, waitForHealthyUrl } from "./health-check.js";
 import { validateComposeStartupBudgets } from "./startup-budget.js";
 import type { CommandRunner, PlatformDeploymentDriver, PlatformInspection } from "./types.js";
-import { assertCompatible, atomicJson, checkBackup, createBackup, DATA_SCHEMA_INPUTS, migrationFingerprint, preflightResult, readRecoveryJournal, RecoveryRequiredError, type BackupConfig } from "./safety.js";
+import { assertCompatible, atomicJson, checkBackup, createBackup, SCHEMA_READ_COMMAND, migrationFingerprint, preflightResult, readRecoveryJournal, RecoveryRequiredError, type BackupConfig } from "./safety.js";
 
 interface ComposeConfig {
   backup?: BackupConfig;
@@ -149,7 +149,7 @@ export class DockerComposeDriver implements PlatformDeploymentDriver {
         if (!current?.apiImage || !current.webImage) throw new Error("Register the current release manifest before updating");
         parseComposeManifest(current);
         assertCompatible(current, current);
-        const source = await this.compose(["exec", "-T", "api", "cat", ...DATA_SCHEMA_INPUTS.map((path) => `/app/${path}`)]);
+        const source = await this.compose(["exec", "-T", "api", ...SCHEMA_READ_COMMAND]);
         if (source.exitCode !== 0 || migrationFingerprint(source.stdout) !== current.dataSchema) throw new Error("Current release data schema does not match the running API");
       }],
     ] as const) {
@@ -239,7 +239,7 @@ export class DockerComposeDriver implements PlatformDeploymentDriver {
       await this.writeImageEnv(originalEnv, manifest.apiImage, manifest.webImage, stagedEnv);
       const pulled = await this.compose(["pull", ...this.pullServices], stagedEnv);
       if (pulled.exitCode !== 0) throw new Error("Image pull failed; current services are unchanged");
-      const targetSource = await this.runner.run("docker", ["run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--entrypoint", "cat", manifest.apiImage, ...DATA_SCHEMA_INPUTS.map((path) => `/app/${path}`)]);
+      const targetSource = await this.runner.run("docker", ["run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--entrypoint", SCHEMA_READ_COMMAND[0]!, manifest.apiImage, ...SCHEMA_READ_COMMAND.slice(1)]);
       if (targetSource.exitCode !== 0 || migrationFingerprint(targetSource.stdout) !== manifest.dataSchema) throw new Error("Target image data schema does not match its manifest");
       // Images are staged; only the container switch needs a drained platform.
       // waitUntilDrained throws (with the drain already released) on timeout or

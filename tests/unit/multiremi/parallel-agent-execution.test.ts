@@ -47,6 +47,7 @@ describe("parallel agent execution", () => {
     const queued = h.createTask({ agentId: leader.id, issueId: issue.id, prompt: "continue" });
     legacy.run("UPDATE multiremi_tasks SET session_id='old_provider', work_dir='/tmp/old' WHERE id=?", [queued.id]);
     const events = legacy.query("SELECT * FROM multiremi_session_events WHERE session_id = ? ORDER BY seq").all(session);
+    runMigrations(legacy, { historicalMaintenance: true });
     const upgraded = new MultiremiStore(legacy);
     expect(upgraded.getSessionAgentLane(session, leader.id)).toMatchObject({
       generation: 2, providerSessionId: null, workDir: null, cursorSeq: 2,

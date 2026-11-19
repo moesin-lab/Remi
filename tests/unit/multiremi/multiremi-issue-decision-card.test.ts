@@ -24,7 +24,7 @@ import {
 import { registerIssueDecisionCardFixture as registerIssueDecisionCardInteraction, resetQuestionCardHostFixtures } from "../connectors/question-card-host-fixture.js";
 import { FEISHU_ISSUE_DECISION_CARD_CAPABILITY } from "@multiremi/contracts/types.js";
 import { MultiremiDaemonClient } from "@multiremi/worker/client.js";
-import { bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { restoreMul412Baseline828291b9Schema, tableColumns } from "./mul412-schema-fixture.js";
 import { historicalWriters } from "./unified-model-test-backends.js";
@@ -301,8 +301,8 @@ describe("MUL-412 issue decision cards", () => {
     expect(tableColumns(db!, "multiremi_feishu_bot_outbound_deliveries")).not.toContain("decision_id");
     expect(tableColumns(db!, "multiremi_issues")).not.toContain("parent_done_grant_at");
 
-    // Each construction runs the complete current migration. The second run is
-    // the idempotency pass required by the upgrade gate.
+    // Offline prepare repairs the historical fixture; starts are idempotent.
+    runMigrations(db!, { historicalMaintenance: true });
     new MultiremiStore(db!);
     new MultiremiStore(db!);
     expect(tableColumns(db!, "multiremi_message_decision_records")).toContain("reminder_sent_at");

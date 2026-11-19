@@ -23,6 +23,7 @@ describe("drained Chat migration cannot restore private Issue lineage", () => {
         // MUL-493 requires draining before cutover; no legacy worker survives it.
         db!.run("UPDATE multiremi_tasks SET status='cancelled'");
         bootstrapPreUnifiedSchema(db!);
+        runMigrations(db!, { historicalMaintenance: true });
         const store = new MultiremiStore(db!);
         // Explicitly use the legacy native test Runtime; endpoint readiness has separate coverage.
         store.updateAgent("agt_chat_migration", { executionGroupId: null });
@@ -67,6 +68,7 @@ describe("drained Chat migration cannot restore private Issue lineage", () => {
     expect(() => runMigrations(db!)).toThrow("Unified model migration refused");
     db!.run("UPDATE multiremi_tasks SET status = 'cancelled'");
     bootstrapPreUnifiedSchema(db!);
+    runMigrations(db!, { historicalMaintenance: true });
     const store = new MultiremiStore(db!);
     // Explicitly use the legacy native test Runtime; endpoint readiness has separate coverage.
     store.updateAgent("agt_chat_migration", { executionGroupId: null });

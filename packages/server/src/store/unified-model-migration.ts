@@ -621,6 +621,16 @@ export function reconcileUnifiedModel(db: SqlDatabase, before?: UnifiedModelRepo
   return report;
 }
 
+/** Cheap evidence check for already enrolled schemas; no reconciliation scan. */
+export function assertUnifiedMigrationReports(reportDir: string): void {
+  if (!existsSync(join(reportDir, `${UNIFIED_MODEL_MIGRATION}-after.json`))) {
+    if (!existsSync(join(reportDir, `${UNIFIED_MODEL_MIGRATION}-before.json`))) {
+      throw new Error('Unified migration before report missing: restore the persistent report directory');
+    }
+    throw new Error('Unified migration after report missing: restore the persistent report directory or run offline preparation');
+  }
+}
+
 /** A single cutover transaction; rejected preflight never mutates model data. */
 export function runUnifiedModelMigration(db: SqlDatabase, options: { reportDir?: string } = {}): UnifiedModelReport {
   const reportDir = resolveMigrationReportDirectory(options.reportDir);

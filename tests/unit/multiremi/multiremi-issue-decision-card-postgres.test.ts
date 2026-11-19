@@ -20,7 +20,7 @@ import {
 import { registerIssueDecisionCardFixture as registerIssueDecisionCardInteraction } from "../connectors/question-card-host-fixture.js";
 import { MultiremiDaemonClient } from "@multiremi/worker/client.js";
 import { restoreMul412Baseline828291b9Schema, tableColumns } from "./mul412-schema-fixture.js";
-import { bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
 import { historicalWriters } from "./unified-model-test-backends.js";
 
 const PG_ADMIN_URL = process.env.MULTIREMI_TEST_POSTGRES_URL
@@ -237,6 +237,7 @@ describe.skipIf(!available)("MUL-412 decision cards on Postgres", () => {
     expect(tableColumns(upgradeDb, "multiremi_feishu_bot_outbound_deliveries")).not.toContain("decision_id");
     expect(tableColumns(upgradeDb, "multiremi_issues")).not.toContain("parent_done_grant_at");
 
+    runMigrations(upgradeDb, { historicalMaintenance: true });
     new MultiremiStore(upgradeDb);
     new MultiremiStore(upgradeDb);
     expect(tableColumns(upgradeDb, "multiremi_message_decision_records")).toContain("reminder_sent_at");

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { createHistoricalDatabase, db, resetMultiremiTestEnv } from "./helpers.js";
 import { seedLegacyChatIssueClassificationFixture } from "./chat-issue-migration-fixture.js";
@@ -47,6 +47,7 @@ function scaffold(scenario: "unknown_legacy_group" | "p2p_thread_and_key" | "gro
     now, now, now]);
   bootstrapPreUnifiedSchema(db!);
   db!.run("UPDATE multiremi_tasks SET status='cancelled' WHERE status IN ('running','dispatched','awaiting_human')");
+  runMigrations(db!, { historicalMaintenance: true });
   const store = new MultiremiStore(db!);
   // Explicitly use the legacy native test Runtime; endpoint readiness has separate coverage.
   store.updateAgent("agt_chat_migration", { executionGroupId: null });

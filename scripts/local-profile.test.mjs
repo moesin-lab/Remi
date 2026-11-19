@@ -56,6 +56,7 @@ childProcess.spawnSync = (command, args, options = {}) => {
   }) + '\n');
   if (command === 'git' && args[0] === 'rev-parse') return succeed(process.env.TEST_COMMIT + '\n');
   if (command === 'git' && args[0] === 'fetch') return succeed();
+  if (command === 'git' && args[0] === 'show' && args[1].endsWith(':packages/server/src/store/schema-compatibility.json')) return { status: 128, stdout: '', stderr: 'historical file absent' };
   if (command === 'git' && args[0] === 'show') return succeed(process.env.TEST_FAIL === 'schema_changed' && args[1].startsWith(process.env.TEST_NEW_COMMIT) ? 'changed migration\n' : 'test migration\n');
   if (command === 'git' && args[0] === 'remote') return succeed('https://github.com/example/remi.git');
   if (command === 'gh') return succeed(JSON.stringify({ artifacts: [] }));
@@ -157,6 +158,7 @@ function fixture(t) {
   mkdirSync(join(source, 'deploy/docker'), { recursive: true });
   mkdirSync(join(source, 'packages/platform-updater/src'), { recursive: true });
   copyFileSync(join(repository, 'packages/platform-updater/src/data-schema-inputs.json'), join(source, 'packages/platform-updater/src/data-schema-inputs.json'));
+  copyFileSync(join(repository, 'packages/platform-updater/src/schema-fingerprint.mjs'), join(source, 'packages/platform-updater/src/schema-fingerprint.mjs'));
   writeFileSync(script, scriptSource);
   copyFileSync(join(repository, 'scripts/ci-images.mjs'), join(source, 'scripts/ci-images.mjs'));
   copyFileSync(join(repository, 'scripts/proxy-command.mjs'), join(source, 'scripts/proxy-command.mjs'));

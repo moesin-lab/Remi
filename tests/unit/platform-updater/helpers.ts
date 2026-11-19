@@ -14,7 +14,7 @@ export function testBackup(root: string): BackupConfig {
 }
 
 export function safetyCommand(command: string, args: string[], options?: CommandOptions): CommandResult | null {
-  if (args.includes("/app/packages/server/src/store/migrations.ts")) return { exitCode: 0, stdout: "test migrations", stderr: "" };
+  if (args.some(arg => arg.includes("/app/packages/server/src/store/migrations.ts"))) return { exitCode: 0, stdout: "test migrations", stderr: "" };
   if (command === "test-dump") { writeFileSync(options!.stdoutFile!, "database snapshot"); return { exitCode: 0, stdout: "", stderr: "" }; }
   if (args.includes("config") && args.includes("--format")) return { exitCode: 0, stdout: JSON.stringify({ name: "test-project", services: { api: {}, web: {} } }), stderr: "" };
   if (args[0] === "info") return { exitCode: 0, stdout: "linux", stderr: "" };

@@ -1,6 +1,8 @@
-import { randomUUID } from "node:crypto";
-import { ensurePlannedRestarts } from "./planned-restart-schema.js";
-import { LIVE_TERM_SCHEMA } from "./live-term-fence.js";
+import { assertSchemaBeforeExpand, readSchemaLevels, SCHEMA_COMPATIBILITY } from "./schema-levels.js";
+import { runSchemaExpands } from "./schema-migration-runner.js";
+import { SCHEMA_MIGRATIONS } from "./schema-migrations.js";
+import { PACKAGE_VERSION as SCHEMA_RELEASE } from "@shared/package-version.js";
+import { ensureDaemonDrainIdentity, ensurePlannedRestarts } from "./planned-restart-schema.js";
 import { migrateExecutionEndpoints } from "./execution-endpoint-migration.js";
 import { migrateLegacyExecutionProfiles } from "@multiremi/store/execution-profile-migration.js";
 import { ensureTurnListIndexes } from './turn-list-indexes.js';
@@ -10,7 +12,7 @@ import { widenAttemptCounters,separateLaneProviderProgress } from './inbox/attem
 import { migrateAttemptInput } from './inbox/attempt-input.js';
 import { createMemberInboxReadProjection } from './inbox/member-records.js';
 import { createAutopilotRunReadProjection } from './autopilot-run-records.js';
-import { runUnifiedModelMigration, unifiedModelPreflight, UnifiedModelPreflightError, collectUnifiedBeforeReport, writeUnifiedModelReport } from "./unified-model-migration.js";
+import { assertUnifiedMigrationReports, runUnifiedModelMigration, unifiedModelPreflight, UnifiedModelPreflightError, collectUnifiedBeforeReport, writeUnifiedModelReport } from "./unified-model-migration.js";
 import { foldLegacyWorkspacePrompts } from "../prompts/workspace-settings.js";
 import { joinProjectInstructions } from "@multiremi/contracts/remi-rules.js";
 import { BACKGROUND_TASKS_ATTEMPT_COLUMNS, BACKGROUND_TASKS_MIGRATION, BACKGROUND_TASKS_SCHEMA, CHAT_FOLLOW_UP_QUEUE_LANE_COLUMNS, CHAT_FOLLOW_UP_QUEUE_MIGRATION, CHAT_FOLLOW_UP_QUEUE_SCHEMA, UNIFIED_LANE_SWEEP_INDEX, UNIFIED_MODEL_MIGRATION } from "./unified-model-schema.js";
@@ -74,7 +76,7 @@ const LOCAL_RECORDS_MIGRATION = "20261013_local_records_recyclable_workspaces";
 // instead of creating a duplicate. Overridable via MULTIREMI_OWNER_OPEN_ID.
 const DEFAULT_OWNER_OPEN_ID = "ou_e6b7ffc662b392317275b817295c0b44";
 
-export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseDialect } = {}): void {
+export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseDialect; historicalMaintenance?: boolean; requireEnrolled?: boolean } = {}): void {
   const reportDir = resolveMigrationReportDirectory();
   // Refuse an unwritable report directory before creating the SQLite lock file.
   prepareMigrationReportDirectory(reportDir);
@@ -83,10 +85,20 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
   // is a no-op). It releases on throw as well as on return, so a failed
   // migration cannot strand it.
   const migrate = () => withModernSqliteAlterTable(db, resolveSqlDialect(db, options.dialect), () => advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () => {
+    assertSchemaBeforeExpand(db);
+    // Enrollment certifies the frozen historical chain completed. Reopening
+    // an enrolled database must never replay rebuilds or historical backfills.
+    if (!options.historicalMaintenance && readSchemaLevels(db).expandLevel >= 1) {
+      assertUnifiedMigrationReports(reportDir);
+      runSchemaExpands(db, SCHEMA_MIGRATIONS, SCHEMA_RELEASE, SCHEMA_COMPATIBILITY);
+      return;
+    }
     // The directory may have become unwritable while waiting for the lock.
     prepareMigrationReportDirectory(reportDir);
-    db.exec(LIVE_TERM_SCHEMA);
     const tables=existingTableNames(db);
+    if (options.requireEnrolled && readSchemaLevels(db).expandLevel === 0 && [...tables].some(table => table.startsWith('multiremi_'))) {
+      throw new Error('Historical schema preparation required: stop all API slots and workers, run remi db prepare, then restart. Historical rebuilds and backfills never run during a slot startup.');
+    }
     if (tables.has("multiremi_turn_attempts")) addColumnIfMissing(db, "multiremi_turn_attempts", "execution_connection TEXT");
     if(tables.has("multiremi_users"))backfillOwnerExternalId(db);
     if (tables.has("multiremi_feishu_bot_configs")) {
@@ -105,7 +117,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
       addColumnIfMissing(db, "multiremi_execution_groups", "connection_mode TEXT NOT NULL DEFAULT 'legacy'");
       addColumnIfMissing(db, "multiremi_execution_groups", "model_policy TEXT NOT NULL DEFAULT '{}'");
     }
-    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);ensurePlannedRestarts(db);return;}
+    if(tables.has('multiremi_schema_migrations') && db.query('SELECT id FROM multiremi_schema_migrations WHERE id=?').get(UNIFIED_MODEL_MIGRATION)){migrateChatOwnedSessions(db,resolveSqlDialect(db,options.dialect),false);migrateDualOwnedSessions(db,resolveSqlDialect(db,options.dialect));runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);db.exec(UNIFIED_LANE_SWEEP_INDEX);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);ensurePlannedRestarts(db);runSchemaExpands(db, SCHEMA_MIGRATIONS, SCHEMA_RELEASE, SCHEMA_COMPATIBILITY);return;}
     // Inspect the existing snapshot before bootstrap migrations can touch it.
     const checks=unifiedModelPreflight(db);
     if(checks.some(c=>!c.ok)){
@@ -115,6 +127,7 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     runMigrationsForDialect(db,resolveSqlDialect(db,options.dialect));
     runUnifiedModelMigration(db,{reportDir:process.env.MULTIREMI_MIGRATION_REPORT_DIR});
     separateLaneProviderProgress(db);foldAgentReadState(db);createMemberInboxReadProjection(db);foldDecisionRecords(db);createDecisionReadProjections(db);migrateAttemptInput(db);widenAttemptCounters(db);ensureTurnListIndexes(db);ensureQuestionQueryIndexes(db);ensureUsageAccountingSchema(db);migrateFeishuMultipleBots(db);ensureBotMenuScope(db);migrateLocalRecords(db);addTurnAttemptTraceSummary(db);migrateChatFollowUpQueue(db);ensureClaimIndexes(db);addTurnAttemptSubagents(db);addBackgroundTasks(db);addTaskPromptInstructions(db);mergePromptHalves(db);addLaneSlashCommands(db);addChatSessionIds(db);migrateEndpointConfiguration(db);addAutopilotDeliveryTarget(db);enforceFeishuSenderAllowlist(db);ensureDaemonDrains(db);ensureRuntimeUpdateBuildIdentity(db);ensurePlannedRestarts(db);
+    runSchemaExpands(db, SCHEMA_MIGRATIONS, SCHEMA_RELEASE, SCHEMA_COMPATIBILITY);
   }));
   // SQLite schema rebuilds toggle foreign_keys outside their transactions.
   // Hold a separate SQLite writer lock across that entire sequence so another
@@ -129,6 +142,11 @@ export function runMigrations(db: SqlDatabase, options: { dialect?: SqlDatabaseD
     if (lock.inTransaction) lock.exec('ROLLBACK');
     lock.close();
   }
+}
+
+/** Production entry: populated pre-protocol databases require offline preparation. */
+export function runStartupMigrations(db: SqlDatabase): void {
+  runMigrations(db, { requireEnrolled: true });
 }
 
 /** Historical schema bootstrap used by offline migration fixtures, never a runtime read path. */
@@ -6757,7 +6775,6 @@ function ensureDaemonDrains(db: SqlDatabase): void {
       PRIMARY KEY (workspace_id, daemon_id)
     );
   `);
-  addColumnIfMissing(db, "multiremi_daemon_drains", "drain_id TEXT");
   const now = new Date().toISOString();
   const deadline = new Date(Date.now() + 300_000).toISOString();
   db.run(`INSERT INTO multiremi_daemon_drains
@@ -6767,10 +6784,7 @@ function ensureDaemonDrains(db: SqlDatabase): void {
     WHERE u.scope = 'cli' AND u.status IN ('pending', 'running', 'restarting', 'verifying')
     GROUP BY COALESCE(r.workspace_id, 'local'), COALESCE(r.daemon_id, r.id)
     ON CONFLICT (workspace_id, daemon_id) DO NOTHING`, [now, deadline]);
-  for (const row of db.query("SELECT workspace_id,daemon_id FROM multiremi_daemon_drains WHERE drain_id IS NULL").all()) {
-    db.run("UPDATE multiremi_daemon_drains SET drain_id=? WHERE workspace_id=? AND daemon_id=? AND drain_id IS NULL",
-      [randomUUID(), row.workspace_id, row.daemon_id]);
-  }
+  ensureDaemonDrainIdentity(db);
 }
 
 /** Expand only; old requests retain nullable identity and do not become automatic. */

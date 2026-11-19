@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 import { expect, it } from 'bun:test';
 import { QueuedMessageError } from '@multiremi/store/inbox/queued-messages.js';
 import { QUEUE_MAX_LIVE_ITEMS } from '@multiremi/contracts/queued-message.js';
@@ -475,6 +476,7 @@ pendingTurnBackendTests('ADR 0020 Chat follow-up queue', fixture => {
     f.db.exec('DROP TABLE multiremi_queued_messages');
     for (const column of ['queue_paused_at', 'queue_pause_reason']) f.db.exec(`ALTER TABLE multiremi_session_lanes DROP COLUMN ${column}`);
     f.db.run('DELETE FROM multiremi_schema_migrations WHERE id=?', [CHAT_FOLLOW_UP_QUEUE_MIGRATION]);
+    runMigrations(f.db, { historicalMaintenance: true });
     const upgraded = new MultiremiStore(f.db);
     const columns = (f.db.query('PRAGMA table_info(multiremi_session_lanes)').all() as Array<{ name: string }>).map(column => column.name);
     expect(columns).toEqual(expect.arrayContaining(['queue_paused_at', 'queue_pause_reason']));

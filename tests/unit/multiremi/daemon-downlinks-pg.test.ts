@@ -60,7 +60,7 @@ describe.skipIf(!adminUrl)("A-4 pending state machines on real PostgreSQL", () =
     const runtime = store.registerRuntime({ name: "Legacy menu publisher", provider: "codex", workspaceId: "local", metadata: { feishu_bot_menu: true } });
     const request = store.createBotMenuPublishRequest(runtime.id, { workspaceId: "local", config: { default: [{ name: "Preserved" }] }, dryRun: true });
     db.exec("ALTER TABLE multiremi_bot_menu_publish_requests DROP COLUMN bot_id");
-    runMigrations(db);
+    runMigrations(db, { historicalMaintenance: true });
     runMigrations(db);
     expect(store.getBotMenuPublishRequest(runtime.id, request.id)).toMatchObject({
       botId: "default", status: "pending", config: { default: [{ name: "Preserved" }] },

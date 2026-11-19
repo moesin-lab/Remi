@@ -23,7 +23,7 @@ describe("20261019_merge_prompt_halves (ADR 0023)", () => {
     })]);
     db!.run("DELETE FROM multiremi_schema_migrations WHERE id = '20261019_merge_prompt_halves'");
 
-    runMigrations(db! as never);
+    runMigrations(db! as never, { historicalMaintenance: true });
 
     const settings = JSON.parse((db!.query("SELECT settings FROM multiremi_workspaces WHERE id = 'local'").get() as { settings: string }).settings);
     expect(settings).toMatchObject({
@@ -41,7 +41,7 @@ describe("20261019_merge_prompt_halves (ADR 0023)", () => {
 
     // Applied once: a later run does not append again.
     db!.run("UPDATE multiremi_projects SET delta_instructions = 'Late delta' WHERE id = ?", [project.id]);
-    runMigrations(db! as never);
+    runMigrations(db! as never, { historicalMaintenance: true });
     expect(db!.query("SELECT instructions FROM multiremi_projects WHERE id = ?").get(project.id))
       .toEqual({ instructions: "Bootstrap rule\n\nDelta rule" });
   });
@@ -56,7 +56,7 @@ describe("20261019_merge_prompt_halves (ADR 0023)", () => {
     db!.run("UPDATE multiremi_workspaces SET settings = ? WHERE id = 'local'", [JSON.stringify({
       prompt_bootstrap_appendix: "c".repeat(8_000), prompt_delta_appendix: "d".repeat(8_000), prompt_revision: 1 })]);
     db!.run("DELETE FROM multiremi_schema_migrations WHERE id = '20261019_merge_prompt_halves'");
-    runMigrations(db! as never);
+    runMigrations(db! as never, { historicalMaintenance: true });
 
     const merged = store.getProject(project.id)!;
     expect([...merged.instructions].length).toBe(8_002);
@@ -123,7 +123,7 @@ describe.skipIf(!PG_ADMIN_URL)("ADR 0023 migrations on PostgreSQL", () => {
     pg.run("UPDATE multiremi_workspaces SET settings = ? WHERE id = 'local'", [JSON.stringify({
       prompt_bootstrap_appendix: `${LEGACY_DEFAULT_WORKSPACE_BOOTSTRAP_PROMPT}\n\nWorkspace rule`, prompt_delta_appendix: "Every turn rule", prompt_revision: 2 })]);
     pg.run("DELETE FROM multiremi_schema_migrations WHERE id = '20261019_merge_prompt_halves'");
-    runMigrations(pg as never);
+    runMigrations(pg as never, { historicalMaintenance: true });
     const settings = JSON.parse((pg.query("SELECT settings FROM multiremi_workspaces WHERE id = 'local'").get() as { settings: string }).settings);
     expect(settings).toMatchObject({ prompt_appendix: "Workspace rule\n\nEvery turn rule", prompt_appendix_revision: 2, prompt_delta_appendix: "Every turn rule" });
     expect(pg.query("SELECT instructions, delta_instructions FROM multiremi_projects WHERE id = ?").get(project.id))

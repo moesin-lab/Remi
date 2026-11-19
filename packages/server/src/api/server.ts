@@ -1119,7 +1119,6 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     ? (peerUrl ? createPeerChannel({ url: peerUrl, secret: peerSecret }) : null)
     : options.peerChannel;
   const store = options.store ?? new MultiremiStore();
-  store.ensureUsageAccountingStartup();
   // The Hub fill and stream auth share this pool; only the server-created one is ours to close.
   const readPool = options.readPool ?? (process.env.NODE_ENV === "test" || !isPostgresConfigured()
     ? null
@@ -1327,6 +1326,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
       runtimeWorkspace: runtimeWorkspaceLookup() }),
   });
   const transportSockets = new Set<Bun.ServerWebSocket<MultiremiWebSocketData>>();
+  let usageBackfill: ReturnType<MultiremiStore['startUsageAccountingBackfill']> | undefined;
   let liveTerm: LiveTermFence | undefined;
   const activateTerm = () => {
     // Phase A covers the unsplit all-role topology. Read-only candidates and
@@ -1344,6 +1344,9 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   };
   const startJobs = () => withBackgroundTerm(liveTerm, () => {
     liveTerm?.assertCurrent();
+    // Usage migration writes are only allowed in the A3 live activation context.
+    // Read-only candidates and split roles have no singleton term.
+    if (backgroundJobs && liveTerm) usageBackfill ??= store.startUsageAccountingBackfill();
     offers.start();
     scheduler?.start();
     scmPolling?.start();
@@ -1364,7 +1367,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const stopped = await Promise.race([Promise.allSettled([
-        offers.stop(), daemonProtocol.drain(),
+        offers.stop(), daemonProtocol.drain(), usageBackfill?.stop().then(() => { usageBackfill = undefined; }),
         scheduler?.stop(), scmPolling?.stop(), messaging?.stop(), issueTitleScheduler?.stop(),
         store.stopNotificationDeliverySweeper(), bodyHtmlBackfill?.stop(),
         backgroundJobs ? repositoryWiki.stopStorageWorker?.() : undefined,
@@ -1425,7 +1428,7 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
           try {
             if (!slot.authorized(req, socketAddress)) return Response.json({ error: "forbidden" }, { status: 403 });
             const action = url.pathname.slice("/internal/slot/".length);
-            if (action === "status" && req.method === "GET") return Response.json(slot.status());
+            if (action === "status" && req.method === "GET") return Response.json({ ...slot.status(), schema: store.querySchemaCompatibility() });
             if (!["activate", "release", "exit"].includes(action)) return new Response(null, { status: 404 });
             if (req.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
             try {

@@ -1,3 +1,4 @@
+import { runMigrations } from "@multiremi/store/migrations.js";
 /**
  * PR 5: `20261017_turn_attempt_subagents` adds `running_subagents` and
  * `late_subagents` to `multiremi_turn_attempts` on both migration chains. A
@@ -66,7 +67,8 @@ for (const backend of backends) {
         db.exec("ALTER TABLE multiremi_execution_binding_states DROP COLUMN model_catalog");
         expect(columnTypes(db)).toEqual({});
 
-        // Two starts: the first adds the columns, the second finds the migration applied.
+        // Historical repair is maintenance; subsequent starts are idempotent.
+        runMigrations(db, { historicalMaintenance: true });
         new MultiremiStore(db);
         new MultiremiStore(db);
         const reopened = new MultiremiStore(db);

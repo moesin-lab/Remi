@@ -12,7 +12,7 @@ import { MessageProviderError } from "@multiremi/contracts/messaging.js";
 import { MessageProviderRegistry } from "@multiremi/messaging/index.js";
 import type { SqlDatabase } from "@multiremi/store/db/postgres.js";
 import { StoreContext } from "@multiremi/store/context.js";
-import { bootstrapPreUnifiedSchema } from "@multiremi/store/migrations.js";
+import { bootstrapPreUnifiedSchema, runMigrations } from "@multiremi/store/migrations.js";
 import { FeishuIngestRepo } from "@multiremi/store/repos/feishu-ingest-repo.js";
 import type { IngestedFeishuMessageInput } from "@multiremi/store/repos/feishu-ingest-repo.js";
 import { MultiremiStore } from "@multiremi/store/store.js";
@@ -169,6 +169,7 @@ function migratedStore(): { store: MultiremiStore; sourceId: string } {
   });
   db!.run("DELETE FROM multiremi_schema_migrations WHERE id = ?", [MESSAGING_CORE_MIGRATION]);
   bootstrapPreUnifiedSchema(db as unknown as SqlDatabase);
+  runMigrations(database, { historicalMaintenance: true });
   const store = new MultiremiStore(database);
   return { store, sourceId: source.id };
 }

@@ -8,7 +8,7 @@ import type {
 } from "@multiremi/contracts";
 import type { PlatformDrainGate } from "./drain.js";
 import type { CommandRunner, PlatformDeploymentDriver, PlatformInspection } from "./types.js";
-import { assertCompatible, DATA_SCHEMA_INPUTS, migrationFingerprint, preflightResult, RecoveryRequiredError } from "./safety.js";
+import { assertCompatible, DATA_SCHEMA_INPUTS, SCHEMA_READ_COMMAND, migrationFingerprint, preflightResult, RecoveryRequiredError } from "./safety.js";
 
 interface LocalProfileConfig {
   repository: string;
@@ -77,7 +77,7 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
       ["current_release", async () => {
         const current = await this.readCurrentRelease();
         assertCompatible(current, current ?? {});
-        const result = await this.compose(["exec", "-T", "api", "cat", ...DATA_SCHEMA_INPUTS.map(path => `/app/${path}`)]);
+        const result = await this.compose(["exec", "-T", "api", ...SCHEMA_READ_COMMAND]);
         if (result.exitCode !== 0 || !result.stdout || migrationFingerprint(result.stdout) !== current?.dataSchema) throw new Error("Current profile schema does not match the running API");
       }],
     ] as const) {
@@ -181,13 +181,18 @@ export class LocalProfileDriver implements PlatformDeploymentDriver {
       const release = releaseFromDeployment(active);
       if (!release.dataSchema) {
         if (!this.schemas.has(release.ref)) {
-          const chunks: string[] = [];
-          for (const path of DATA_SCHEMA_INPUTS) {
-            const result = await this.runner.run("git", ["show", `${release.ref}:${path}`], { cwd: this.config.repository });
-            if (result.exitCode !== 0 || !result.stdout) throw new Error("Current profile schema is unavailable");
-            chunks.push(result.stdout);
+          const descriptor = await this.runner.run('git', ['show', `${release.ref}:packages/server/src/store/schema-compatibility.json`], { cwd: this.config.repository });
+          if (descriptor.exitCode === 0 && descriptor.stdout) {
+            this.schemas.set(release.ref, migrationFingerprint(descriptor.stdout));
+          } else {
+            const chunks: string[] = [];
+            for (const path of DATA_SCHEMA_INPUTS) {
+              const result = await this.runner.run("git", ["show", `${release.ref}:${path}`], { cwd: this.config.repository });
+              if (result.exitCode !== 0 || !result.stdout) throw new Error("Current profile schema is unavailable");
+              chunks.push(result.stdout);
+            }
+            this.schemas.set(release.ref, migrationFingerprint(chunks.join("")));
           }
-          this.schemas.set(release.ref, migrationFingerprint(chunks.join("")));
         }
         release.dataSchema = this.schemas.get(release.ref)!;
       }

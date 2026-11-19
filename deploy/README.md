@@ -494,9 +494,9 @@ Before first use, save the actual installed release manifest as
 the current systemd release. Both current and target need a `dataSchema`
 fingerprint from `node scripts/platform-data-schema.mjs <release-source-root>`.
 The release workflow publishes this value. The updater compares both metadata
-and actual API migration source plus its data-transform/storage helpers (listed
-in `packages/platform-updater/src/data-schema-inputs.json`). Changes to migration
-dependencies must update that list too. Unknown fingerprints block updates.
+and actual API schema levels declared in `packages/server/src/store/schema-compatibility.json`.
+New schema changes must increment the declared level. Legacy archives retain
+source fingerprint verification via `data-schema-inputs.json`. Unknown fingerprints block updates.
 Application releases with different fingerprints additionally require a reviewed
 `application.rollbackSafeFrom` declaration in both the feed and archive and a
 successful target/previous migration rehearsal. Existing columns must remain
@@ -507,6 +507,14 @@ Never copy a new fingerprint onto old code. Explicit image and systemd executors
 retain their stricter equal-fingerprint requirement.
 
 #### Release rollback review
+
+A trusted successful mixed-version check can generate `rollbackSafeFrom` automatically.
+Supply its exact-target `rollback-evidence.json` using `PLATFORM_SCHEMA_ROLLBACK_EVIDENCE`
+when invoking `package-platform-application.mjs`. Packaging validates the target
+SHA/schema, previous release identity, complete core probes and release ordering.
+The current publication workflow does not download this artifact automatically;
+the release manager must provide it explicitly. See [schema checks](../docs/dev/schema-migrations.md).
+Without automatic evidence, use the historical manual-review fallback below.
 
 Before platform publication, the release manager identifies the **previous
 published platform release** (not the previous main commit), downloads its
@@ -529,7 +537,7 @@ if automatic publication already ran, rerun that workflow for the same tag after
 review. The workflow downloads the named stable Release manifest and packaging
 checks its version/schema against the attestation and binds it to the target SHA.
 The attachment and embedded `rollbackReview` preserve the review evidence.
-Without an attachment, packaging emits `application.rollbackSafeFrom: []`;
+Without automatic evidence or an attachment, packaging emits `application.rollbackSafeFrom: []`;
 a changed fingerprint still blocks updates. Invalid declarations fail publication.
 The release manager must verify this is the previous published platform version;
 no compatibility is inferred from Git history. Declaration changes require renewed

@@ -111,6 +111,11 @@ test("a resumed slot stops all configured background services and only activatio
   try {
     await server.slotStartup;
     expect(server.slot!.term).toBe("1");
+    const status = await (await fetch(`http://127.0.0.1:${server.port}/internal/slot/status`, {
+      headers: { Authorization: 'Bearer test' },
+    })).json();
+    expect(status.term).toBe("1");
+    expect(status.schema).toEqual({ expandLevel: 3, contractLevel: 0, compatibility: { minLevel: 3, maxLevel: 3 } });
     const old = captured!;
     store.activateBackgroundTerm("B", () => {});
     let effects = 0;

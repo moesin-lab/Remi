@@ -35,7 +35,6 @@ import { DaemonProtocolClient } from "@multiremi/worker/daemon-protocol-client.j
 import { MultiremiDaemonHttpError } from "@multiremi/worker/client.js";
 import { locksForRole, startHubRoleGuard } from "@multiremi/api/hub/hub-role-guard.js";
 import { evaluateStartupEnv, resolveStartupApiRole } from "@multiremi/config/startup-env.js";
-import { prepareUsageAccountingStartup } from "@multiremi/store/usage-migration.js";
 import { openMultiremiDatabase } from "@multiremi/store/db/postgres.js";
 import { createLogger, setLogLevel } from "@shared/logger.js";
 
@@ -232,9 +231,6 @@ async function serve(options: CliOptions): Promise<void> {
     closeDatabase = () => database.close();
     try {
       const store = new MultiremiStore(database); // Constructor releases the schema migration lock.
-      await prepareUsageAccountingStartup(database, {
-        onBatch: batch => log.info("usage_startup_migration", batch),
-      });
       server = startMultiremiServer({ store, port, hostname: host, authToken: token, apiRoleConfiguration, slotConfiguration });
     } catch (error) {
       database.close();

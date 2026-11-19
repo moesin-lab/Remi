@@ -26,11 +26,11 @@ else if (command === 'cp') {
   const destination = args.at(-1), source = args.at(-2);
   if (source === 'api:/app/.') {
     const inputs = JSON.parse(await (await import('node:fs/promises')).readFile(join(process.env.PACKAGE_SOURCE, 'packages/platform-updater/src/data-schema-inputs.json')));
-    for (const path of [...inputs, 'deploy/docker/Dockerfile.api', 'deploy/docker/api-entrypoint.sh']) {
+    for (const path of [...inputs, 'packages/server/src/store/schema-compatibility.json', 'deploy/docker/Dockerfile.api', 'deploy/docker/api-entrypoint.sh']) {
       mkdirSync(dirname(join(destination, path)), { recursive: true });
       copyFileSync(join(process.env.PACKAGE_SOURCE, path), join(destination, path));
     }
-    if (process.env.PACKAGE_MISMATCH) writeFileSync(join(destination, inputs[0]), 'mismatched image source');
+    if (process.env.PACKAGE_MISMATCH) writeFileSync(join(destination, 'packages/server/src/store/schema-compatibility.json'), JSON.stringify({format:1,expandLevel:99,contractLevel:0,minLevel:1,maxLevel:99}));
   } else if (source === 'web:/app/.') {
     mkdirSync(join(destination, 'frontend/apps/web'), { recursive: true });
     writeFileSync(join(destination, 'frontend/apps/web/server.js'), '// fixture');

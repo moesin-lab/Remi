@@ -9,7 +9,7 @@ import { createResponsibleTestIssue, createStore, db, resetMultiremiTestEnv } fr
 afterEach(resetMultiremiTestEnv);
 
 const migrationId = "20261008_dual_owned_sessions";
-const migrateAgain = () => runMigrations(db! as unknown as SqlDatabase);
+const migrateAgain = () => runMigrations(db! as unknown as SqlDatabase, { historicalMaintenance: true });
 const count = (table: string, field: string, id: string) =>
   Number((db!.query(`SELECT COUNT(*) AS count FROM ${table} WHERE ${field} = ?`).get(id) as { count: number }).count);
 
@@ -287,6 +287,7 @@ describe("Session dual ownership store", () => {
       )!.sql });
       expect(historicalDb.query("PRAGMA foreign_key_list(multiremi_tasks)").all().some((fk: any) => fk.from === "chat_session_id")).toBe(false);
 
+      runMigrations(historicalDb, { historicalMaintenance: true });
       const current = new MultiremiStore(historicalDb);
       expect(current.deleteChatSession(chat.id)).toBe(true);
       expect(current.getTask(task.id)?.chatSessionId).toBe(chat.id);

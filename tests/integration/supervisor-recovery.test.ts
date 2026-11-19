@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { mkdtemp, mkdir, writeFile, rm, readFile, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, readFile, symlink, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { startEdge } from '../../packages/edge/src/index.js';
@@ -12,11 +12,12 @@ async function until(check: () => boolean | Promise<boolean>, timeout = 5000) {
   while (Date.now() < deadline) { if (await check()) return; await Bun.sleep(20); }
   throw new Error('State wait timed out');
 }
-async function fixture() {
+type RecoveryResources = { root: string; edge: ReturnType<typeof startEdge>; controller: SlotSupervisor; ports: number[] };
+async function fixture(beforeReconcile?: (resources: RecoveryResources) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'remi-recovery-'));
   const reservations = [0, 1].map(() => Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('') }));
   const ports = reservations.map(s => s.port!);
-  for (const s of reservations) await s.stop(true);
+  // Keep the slot listeners reserved while edge selects its own ephemeral port.
   const edge = startEdge({ hostname: '127.0.0.1', port: 0, holdMaxMs: 60000, log: () => {} });
   for (const id of ['old', 'new']) {
     await mkdir(join(root, id));
@@ -30,7 +31,18 @@ async function fixture() {
       args: [resolve('tests/fixtures/supervisor-slot.ts')], version: id!, env: { ...process.env, REMI_TEST_TERM_FILE: join(root, 'term') } };
   }, { ports, standbyWait: 800, activateWait: 800, confirmWait: 50 });
   const desired = { mode: 'run' as const, releaseId: 'old', revision: 'initial' };
-  await controller.reconcile(desired);
+  try {
+    for (const s of reservations) await s.stop(true);
+    await beforeReconcile?.({ root, edge, controller, ports });
+    await controller.reconcile(desired);
+  } catch (error) {
+    // The caller's finally cannot run until fixture() returns. In particular,
+    // a failed initial launch must not leave edge's health probe running into
+    // later tests that replace global fetch.
+    await controller.stop();
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
   return { root, edge, ports, controller, desired, attempts: () => attempts,
     failLaunch: (value: typeof launchError) => { launchError = value; },
     async crash() { process.kill(-controller.snapshot().childPid!, 'SIGKILL'); await until(() => !controller.snapshot().childPid); },
@@ -44,6 +56,34 @@ async function fixture() {
     async close() { await controller.stop(); await rm(root, { recursive: true, force: true }); },
   };
 }
+
+test('recovery: initial launch failure cleans up edge probes and fixture files', async () => {
+  let created!: RecoveryResources;
+  let edgeUrl = '';
+  try {
+    await expect(fixture(async resources => {
+      created = resources;
+      edgeUrl = `http://127.0.0.1:${resources.edge.server.port}`;
+      expect(resources.ports).not.toContain(resources.edge.server.port);
+      // Force the failure before fixture() can hand cleanup to its caller.
+      await writeFile(join(resources.root, 'old/behavior.json'), JSON.stringify({ immediateExit: true }));
+    })).rejects.toThrow('Slot exited before readiness');
+    expect(created.controller.snapshot().childPid).toBeNull();
+    await expect(access(created.root)).rejects.toThrow();
+    await expect(fetch(edgeUrl, { signal: AbortSignal.timeout(1000) })).rejects.toThrow();
+    // A leaked edge would probe its registered backend during the next interval.
+    let probes = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = Object.assign((...args: Parameters<typeof fetch>) => {
+      probes++;
+      return originalFetch(...args);
+    }, originalFetch);
+    try { await Bun.sleep(1100); expect(probes).toBe(0); }
+    finally { globalThis.fetch = originalFetch; }
+  } finally {
+    if (created) { await created.controller.stop(); await rm(created.root, { recursive: true, force: true }); }
+  }
+});
 
 test('recovery: neverStandby candidate plus old process group death restores active old slot', async () => {
   const f = await fixture();

@@ -47,7 +47,7 @@ export function createReusableStoreDatabase(dialect: "sqlite" | "postgres", post
   let database: SqlDatabase | undefined;
   let created = false;
   const name = `reusable_store_${randomUUID().replaceAll("-", "")}`;
-  const stats = { fixture: options.fixture, dialect, databaseCreates: 0, storeInitializations: 0, migrationRuns: 0, resets: 0, connections: 0, setupMs: 0, resetMs: 0 };
+  const stats = { fixture: options.fixture, dialect, databaseCreates: 0, storeInitializations: 0, migrationRuns: 0, resets: 0, connections: 0, setupMs: 0, resetMs: 0, databaseCreateMs: 0, connectionMs: 0, migrationMs: 0, storeConstructionMs: 0, baselineMs: 0 };
   let checkBackgroundBeforeClose = () => {};
   let stopBackground = () => {};
   let hasActiveBackground = () => false;
@@ -77,22 +77,40 @@ export function createReusableStoreDatabase(dialect: "sqlite" | "postgres", post
       if (!['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
         throw new Error(`${label} requires a localhost PostgreSQL test URL`);
       }
+      const connectionStarted = performance.now();
       admin = new PostgresSyncDatabase(url.toString());
+      stats.connectionMs += performance.now() - connectionStarted;
       stats.connections++;
+      const createStarted = performance.now();
       admin.exec(`CREATE DATABASE ${quote(name)}`);
+      stats.databaseCreateMs += performance.now() - createStarted;
       created = true;
       stats.databaseCreates++;
       url.pathname = `/${name}`;
+      const databaseConnectionStarted = performance.now();
       database = new PostgresSyncDatabase(url.toString());
+      stats.connectionMs += performance.now() - databaseConnectionStarted;
     } else {
       database = openSqliteDatabase() as unknown as SqlDatabase;
     }
     stats.connections++;
     const db = database;
-    const store = new MultiremiStore(db, {
+    // A local subclass measures the real migration entrance without patching the
+    // shared prototype or changing production Store behavior. Construction time
+    // below excludes migration time, so the reported phases do not overlap.
+    class TimedStore extends MultiremiStore {
+      override migrate(): void {
+        const started = performance.now();
+        try { super.migrate(); } finally { stats.migrationMs += performance.now() - started; }
+      }
+    }
+    const storeStarted = performance.now();
+    const store = new TimedStore(db, {
       notificationSenders: options.notificationSenders,
       notificationSendTimeoutMs: options.notificationSendTimeoutMs,
     });
+    stats.storeConstructionMs = performance.now() - storeStarted - stats.migrationMs;
+    const baselineStarted = performance.now();
     stats.storeInitializations++;
     stats.migrationRuns++;
     store.ensureLocalWorkspace();
@@ -280,6 +298,7 @@ export function createReusableStoreDatabase(dialect: "sqlite" | "postgres", post
     // it. Subscribers/SQL rows may be discarded only after the idle check has
     // already failed the case; running background work must settle first.
     checkBackgroundBeforeClose = assertNoBackgroundWork;
+    stats.baselineMs = performance.now() - baselineStarted;
     stats.setupMs = performance.now() - setupStarted;
     return { db, transactionDatabase, store, reset, stats, close, dispose, assertIdle, assertClean,
       databaseUrl: dialect === "postgres" ? (() => { const url = new URL(postgresUrl!); url.pathname = `/${name}`; return url.toString(); })() : undefined };

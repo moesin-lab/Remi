@@ -243,7 +243,7 @@ export class PlannedRestarts {
         WHERE p.runtime_id=? AND p.state='resuming' AND p.updated_at<=?
         AND a.status IN ('running','waiting_local_directory','awaiting_human')`)
         .all(runtimeId, new Date(Date.now() - PLANNED_RESTART_START_GRACE_MS).toISOString());
-      for (const row of expired) this.ctx.tasks().recoverOrphans(runtimeId, [], row.attempt_id);
+      for (const row of expired) this.ctx.tasks().recoverOrphanAttempt(runtimeId, row.attempt_id);
     })();
   }
 
@@ -275,7 +275,7 @@ export class PlannedRestarts {
         && !(handoff.state === "resuming" && handoff.consumer_id === consumerId))) throw new PlannedRestartError("stale_execution");
       this.revokeWithinTransaction(attemptId);
       // Recover only this absent execution, never other tasks on this runtime.
-      this.ctx.tasks().recoverOrphans(scope.runtimeId, [], attemptId);
+      this.ctx.tasks().recoverOrphanAttempt(scope.runtimeId, attemptId);
     })();
   }
 

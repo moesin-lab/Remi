@@ -6471,6 +6471,10 @@ runMigrations(this.db);
     return this.tasks.reportTaskUsage(taskId, usage);
   }
 
+  recoverOrphanAttempt(runtimeId: string, attemptId: string): { orphaned: number; retried: number } {
+    return this.tasks.recoverOrphanAttempt(runtimeId, attemptId);
+  }
+
   recoverOrphans(runtimeId: string, activeTaskIds?: readonly string[]): { orphaned: number; retried: number } {
     return this.tasks.recoverOrphans(runtimeId, activeTaskIds);
   }

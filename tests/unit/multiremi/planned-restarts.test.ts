@@ -36,6 +36,31 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     return { f, scope, task, offer, checkpoint, planned, request, suspend };
   }
 
+  function healthyPeer(x: ReturnType<typeof setup>) {
+    x.f.store.updateRuntime(x.scope.runtimeId, { maxConcurrency: 2 });
+    const agent = x.f.store.createAgent({ name: "Healthy peer", provider: "codex", runtimeId: x.scope.runtimeId });
+    const task = x.f.store.createTask({ agentId: agent.id, prompt: "Keep running", maxAttempts: 1 });
+    expect(x.f.store.claimTask(x.scope.runtimeId)?.id).toBe(task.id);
+    x.f.store.startTask(task.id);
+    x.f.store.reportTaskUsageSnapshot(task.id, { version: 2, runId: "healthy-peer-consumer", revision: 0, complete: false, units: [] }, x.scope);
+    const snapshot = () => ({ task: x.f.store.getTask(task.id),
+      execution: x.f.db.query("SELECT * FROM multiremi_usage_task_scopes WHERE task_id=?").get(task.id) });
+    const before = snapshot();
+    expect(before.task).toMatchObject({ status: "running", attempt: 1, maxAttempts: 1 });
+    return () => expect(snapshot()).toEqual(before);
+  }
+
+  it("periodic resume expiry recovers only the target and preserves a healthy peer", () => {
+    const x = setup(3), assertPeer = healthyPeer(x), h = x.suspend();
+    x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+    x.planned().resume(x.task.id, h.handoff_id, "expired-target-consumer", x.scope, () => {});
+    x.f.db.run("UPDATE multiremi_planned_restarts SET updated_at='2000-01-01T00:00:00.000Z' WHERE attempt_id=?", [x.task.id]);
+    x.planned().recoverExpiredResumes(x.scope.runtimeId);
+    expect(x.f.store.getTask(x.task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
+    expect(Number(x.f.db.query("SELECT COUNT(*) AS n FROM multiremi_turn_attempts WHERE turn_id=?").get(h.turn_id).n)).toBe(2);
+    assertPeer();
+  });
+
   it("keeps unread long confirmed steer in the canonical completeness window", () => {
     const x = setup(), bridge = x.f.store.getDaemonTurnBridge();
     const long = x.f.store.createTaskSteerMessage({ taskId: x.task.id, kind: "steer", content: "x".repeat(9000) });
@@ -331,7 +356,7 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
   });
 
   it("rejects an oversized canonical recovery before authorization and recovers only that attempt", async () => {
-    const x = setup(3), bridge = x.f.store.getDaemonTurnBridge();
+    const x = setup(3), assertPeer = healthyPeer(x), bridge = x.f.store.getDaemonTurnBridge();
     // Each original native request fits a frame, but their complete recovery does not.
     for (let i = 0; i < 2; i++) {
       expect(bridge.rpc("turn.decision", { turn_id: x.offer.turn_id, attempt_id: x.task.id,
@@ -359,7 +384,7 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     expect(x.f.store.getTask(x.task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
     expect(Number(x.f.db.query("SELECT COUNT(*) AS n FROM multiremi_turn_attempts WHERE turn_id=?").get(h.turn_id).n)).toBe(2);
     expect(await invoke()).toMatchObject({ ok: false, code: "stale_execution" });
-    expect(x.f.store.recoverOrphans(x.scope.runtimeId, [])).toEqual({ orphaned: 0, retried: 0 });
+    assertPeer();
   });
 
   it("keeps existing crash policy when no acknowledged checkpoint exists", () => {

@@ -5764,7 +5764,15 @@ ${placementAfter.sql}
     })();
   }
 
-  recoverOrphans(runtimeId: string, activeTaskIds?: readonly string[], onlyAttemptId?: string): { orphaned: number; retried: number } {
+  recoverOrphans(runtimeId: string, activeTaskIds?: readonly string[]): { orphaned: number; retried: number } {
+    return this.recoverOrphansScoped(runtimeId, activeTaskIds);
+  }
+
+  recoverOrphanAttempt(runtimeId: string, attemptId: string): { orphaned: number; retried: number } {
+    return this.recoverOrphansScoped(runtimeId, [], attemptId);
+  }
+
+  private recoverOrphansScoped(runtimeId: string, activeTaskIds?: readonly string[], onlyAttemptId?: string): { orphaned: number; retried: number } {
     const initialRuntime = this.ctx.runtimes().getRuntime(runtimeId);
     if (!initialRuntime) throw new Error(`Runtime not found: ${runtimeId}`);
     const workspaceId = initialRuntime.workspaceId ?? "local";
@@ -5778,9 +5786,9 @@ ${placementAfter.sql}
       const orphanRows = this.ctx.db.query(
         `SELECT * FROM multiremi_turn_execution_records WHERE runtime_id = ?
          AND status IN (${activeTaskIds ? "'running', 'waiting_local_directory', 'awaiting_human'" : "'dispatched', 'running', 'waiting_local_directory', 'awaiting_human'"})
-         ${onlyAttemptId ? "AND id = ?" : ""}
+         ${onlyAttemptId !== undefined ? "AND id = ?" : ""}
          ${activeTaskIds?.length ? `AND id NOT IN (${activeTaskIds.map(() => "?").join(", ")})` : ""}`,
-      ).all(runtimeId, ...(onlyAttemptId ? [onlyAttemptId] : []), ...(activeTaskIds ?? [])) as Row[];
+      ).all(runtimeId, ...(onlyAttemptId !== undefined ? [onlyAttemptId] : []), ...(activeTaskIds ?? [])) as Row[];
       const restarts = new PlannedRestarts(this.ctx);
       const recoverableRows = orphanRows.filter(row => {
         restarts.expireUnstartedResumeWithinTransaction(String(row.id));

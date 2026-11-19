@@ -2186,10 +2186,12 @@ export class MultiremiDaemon {
   }
 
 
-  /** Business pushes wake this wait; the timer retains the ten-minute RPC fallback. */
+  /** Business pushes wake this wait; pending restart receipts also need bounded retries. */
   private async waitForNextTick(retryMs?: number): Promise<void> {
     if (this.stopped) return;
-    const delayMs = retryMs ?? Math.max(0, this.nextPluginDesiredAt - Date.now());
+    const pendingRestart = [...this.restartRecoveryCandidates].some(id => !this.resumedRestartIds.has(id));
+    const idleMs = Math.max(0, this.nextPluginDesiredAt - Date.now());
+    const delayMs = retryMs ?? (pendingRestart ? Math.min(idleMs, Math.max(1_000, this.options.pollIntervalMs)) : idleMs);
     await new Promise<void>(resolveWait => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | null = null;

@@ -1,3 +1,5 @@
+Display copy: trailing spaces stripped; mutate.py reproduces the exact patches. Original byte-preserving logs are attached in the Issue review message.
+
 ===== command =====
 PATH="$HOME/.bun/bin:$PATH" MULTIREMI_TEST_POSTGRES_URL=postgresql://postgres@127.0.0.1:55484/postgres bun run test tests/unit/multiremi/routing-matrix-database.test.ts
 
@@ -40,7 +42,7 @@ if mode!='restore':
 --- a/tests/unit/multiremi/routing-matrix-database.test.ts
 +++ b/tests/unit/multiremi/routing-matrix-database.test.ts
 @@ -6,6 +6,7 @@
- 
+
  for (const dialect of ["sqlite", "postgres"] as const) {
    describe.skipIf(dialect === "postgres" && !process.env.MULTIREMI_TEST_POSTGRES_URL)(`routing matrix fixture (${dialect})`, () => {
 +    let sharedDatabase: { name: string; url: string } | undefined;
@@ -177,7 +179,7 @@ REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"
 REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":254.10331699999915,"resetMs":53.5001229999998,"databaseCreateMs":0.000888999999006046,"connectionMs":44.600280000000566,"migrationMs":33.4641730000003,"storeConstructionMs":13.570639000001393,"baselineMs":162.38237500000105,"case":"refuses request caches, live subscriptions, open transactions and schema changes","bodyMs":61.561077000002115,"cleanupMs":0.07272499999999127,"totalMs":315.73800800000026}
 (pass) routing matrix fixture (postgres) > refuses request caches, live subscriptions, open transactions and schema changes [315.91ms]
 REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":420.32676600000013,"resetMs":0,"databaseCreateMs":0.0010469999997440027,"connectionMs":42.18156600000111,"migrationMs":49.358893000000535,"storeConstructionMs":22.466244999999617,"baselineMs":306.2063760000001,"case":"does not retain afterCommit callbacks from a rolled-back probe","bodyMs":2.7993600000008882,"cleanupMs":0.05853899999965506,"totalMs":423.1857120000004}
-136 | 
+136 |
 137 |     if (dialect === "postgres") {
 138 |       measuredIt("does not retain afterCommit callbacks from a rolled-back probe", fixture => {
 139 |         try {
@@ -259,12 +261,12 @@ Ran 8 tests across 1 file. [13.59s]
 
 
 ===== database-state.txt =====
-                                                           version                                                            
+                                                           version
 ------------------------------------------------------------------------------------------------------------------------------
  PostgreSQL 17.12 (Debian 17.12-1.pgdg12+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
 (1 row)
 
- datname 
+ datname
 ---------
 (0 rows)
 

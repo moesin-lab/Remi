@@ -32,8 +32,8 @@ const invalidTurnReports=new Set([
   'Source turn does not belong to the sender workspace',
   'Message sender belongs to another workspace','Message recipient belongs to another workspace',
 ]);
-function turnRejectionCode(error:unknown,attemptId:string,runtimeId:string):'stale_attempt'|'input_gap'|'turn_input_pending'|'invalid_report'|null {
-  if(error instanceof PlannedRestartError)return 'stale_attempt';
+function turnRejectionCode(error:unknown,attemptId:string,runtimeId:string):'stale_execution'|'stale_attempt'|'input_gap'|'turn_input_pending'|'invalid_report'|null {
+  if(error instanceof PlannedRestartError)return 'stale_execution';
   if(!(error instanceof Error))return null;
   if ('retryable' in error && error.retryable === false && 'code' in error
     && ['authority_revoked','task_not_found'].includes(String(error.code))) return 'stale_attempt';
@@ -52,10 +52,12 @@ export class DaemonTurnBridge {
     this.ctx.lockWorkspaceRuntimeLifecycle(scope.workspaceId);
     const row=this.ctx.db.query('SELECT t.*,a.runtime_id,a.status AS attempt_status,a.offered_at,a.projection_to_seq AS offered_to FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id WHERE t.id=? AND a.id=?').get(turnId,attemptId);
     const runtime=this.ctx.runtimes().getRuntimeLite(scope.runtimeId);
-    if(!row||row.current_attempt_id!==attemptId||row.workspace_id!==scope.workspaceId||row.runtime_id!==scope.runtimeId||runtime?.daemonId!==scope.daemonId
-      ||!terminal&&!['running','awaiting_human'].includes(row.status)
-        &&!(sentInput&&row.status==='pending'&&row.offered_at&&['offered','accepted'].includes(row.attempt_status)))throw new Error('stale_attempt');
-    lockLane(this.ctx,row.session_id,row.agent_id,row.execution_scope);new PlannedRestarts(this.ctx).assertExecutionWithinTransaction(attemptId,scope.generation);return row;
+    if(!row||row.workspace_id!==scope.workspaceId||row.runtime_id!==scope.runtimeId||runtime?.daemonId!==scope.daemonId)throw new Error('stale_attempt');
+    lockLane(this.ctx,row.session_id,row.agent_id,row.execution_scope);
+    new PlannedRestarts(this.ctx).assertExecutionWithinTransaction(attemptId,scope.generation);
+    if(row.current_attempt_id!==attemptId||!terminal&&!['running','awaiting_human'].includes(row.status)
+      &&!(sentInput&&row.status==='pending'&&row.offered_at&&['offered','accepted'].includes(row.attempt_status)))throw new Error('stale_attempt');
+    return row;
   }
   private messages(sessionId:string,from:number,to:number):UnifiedMessage[]{return this.ctx.db.query("SELECT * FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND deleted_at IS NULL AND visibility='shown' ORDER BY seq").all(sessionId,from,to).map(messageFromRow);}
   private inputMessages(turn:any,from:number,to:number,window?:UnifiedMessage[]):UnifiedMessage[] {

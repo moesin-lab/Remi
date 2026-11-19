@@ -9,6 +9,9 @@ import { nowIso } from "@multiremi/ids.js";
 import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 export type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 
+// Fixed grace from the resume CAS, never extended by retries or heartbeat activity.
+export const PLANNED_RESTART_START_GRACE_MS = 5 * 60_000;
+
 export interface PlannedRestartScope { workspaceId: string; runtimeId: string; daemonId: string }
 export interface PlannedRestartHandoff {
   attempt_id: string;
@@ -148,6 +151,7 @@ export class PlannedRestarts {
       if (typeof consumerId !== "string" || consumerId.length < 16 || consumerId.length > 256) throw new PlannedRestartError("stale_execution");
       const handoff = this.get(attemptId);
       if (!handoff || handoff.handoff_id !== handoffId) throw new PlannedRestartError("stale_execution");
+      if (handoff.state === "resuming" && this.resumeExpired(attemptId)) throw new PlannedRestartError("stale_execution");
       if (["resuming", "running"].includes(handoff.state) && handoff.consumer_id === consumerId) return handoff;
       if (handoff.state !== "suspended") throw new PlannedRestartError("stale_execution");
       // Manual fences survive replacement. Undrain is explicit; a CLI owner
@@ -175,7 +179,17 @@ export class PlannedRestarts {
       if ((generation ?? 0) !== 0) throw new PlannedRestartError("stale_execution");
       return;
     }
+    // A revoked receipt is a tombstone, never an execution grant, even if a
+    // caller guesses its new generation. Expiry also fences late starts before
+    // the next safety sweep has applied the ordinary crash policy.
+    if ((current.state === "running" && current.consumer_id === null)
+      || (current.state === "resuming" && this.resumeExpired(current.attempt_id))) throw new PlannedRestartError("stale_execution");
     if (!["requested", "resuming", "running"].includes(current.state) || current.generation !== (generation ?? 0)) throw new PlannedRestartError("stale_execution");
+  }
+
+  private resumeExpired(attemptId: string): boolean {
+    const row = this.ctx.db.query("SELECT updated_at FROM multiremi_planned_restarts WHERE attempt_id=?").get(attemptId);
+    return !!row && Date.now() - Date.parse(row.updated_at) >= PLANNED_RESTART_START_GRACE_MS;
   }
 
   /** Transport writes serialize with resume CAS, including the live trace sink. */
@@ -215,6 +229,40 @@ export class PlannedRestarts {
         input_ack_seq: Number(attempt.input_ack_seq ?? 0), trace_head: 0, delivered_message_ids: [],
         question_ids: new Questions(this.ctx).plannedRestartWaits(attemptId).map(message => message.id) };
     })();
+  }
+
+  /** The offer safety sweep also handles a replacement that connected once
+   * without a usable journal and will never issue another runtime.ready. */
+  recoverExpiredResumes(runtimeId: string): void {
+    const runtime = this.ctx.runtimes().getRuntimeLite(runtimeId);
+    if (!runtime) return;
+    this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(runtime.workspaceId ?? "local");
+      const expired = this.ctx.db.query(`SELECT p.attempt_id FROM multiremi_planned_restarts p
+        JOIN multiremi_turn_execution_records a ON a.id=p.attempt_id
+        WHERE p.runtime_id=? AND p.state='resuming' AND p.updated_at<=?
+        AND a.status IN ('running','waiting_local_directory','awaiting_human')`)
+        .all(runtimeId, new Date(Date.now() - PLANNED_RESTART_START_GRACE_MS).toISOString());
+      for (const row of expired) this.ctx.tasks().recoverOrphans(runtimeId, [], row.attempt_id);
+    })();
+  }
+
+  /** Called only for an absent attempt under recoverOrphans' workspace lock. */
+  expireUnstartedResumeWithinTransaction(attemptId: string): void {
+    if (!this.ctx.db.inTransaction) throw new Error("Resume expiry requires a lifecycle transaction");
+    const row = this.ctx.db.query("SELECT * FROM multiremi_planned_restarts WHERE attempt_id=?").get(attemptId);
+    if (!row || row.state !== "resuming" || Date.now() - Date.parse(row.updated_at) < PLANNED_RESTART_START_GRACE_MS) return;
+    this.lock(attemptId, { workspaceId: row.workspace_id, runtimeId: row.runtime_id, daemonId: row.daemon_id });
+    // The workspace/lane locks serialize this revocation with task.start and
+    // resume. Keep accounting history, but revoke execution before crash retry.
+    this.revokeWithinTransaction(attemptId);
+  }
+
+  private revokeWithinTransaction(attemptId: string): void {
+    this.ctx.db.run("UPDATE multiremi_planned_restarts SET state='running',generation=generation+1,consumer_id=NULL,updated_at=? WHERE attempt_id=?",
+      [nowIso(), attemptId]);
+    this.ctx.db.run("UPDATE multiremi_usage_task_scopes SET active_run_id=NULL WHERE task_id=?", [attemptId]);
+    this.ctx.db.run("UPDATE multiremi_access_tokens SET revoked_at=? WHERE type='task' AND task_id=? AND revoked_at IS NULL", [nowIso(), attemptId]);
   }
 
   /** No checkpoint acknowledgement => ordinary crash policy, including a requested handoff. */

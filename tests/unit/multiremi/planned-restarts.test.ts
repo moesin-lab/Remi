@@ -162,7 +162,7 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
       expect(generation).toBe(1); expect(checkpoint).toEqual(x.checkpoint); authorized++;
     });
     const resumed = resume();
-    expect(resumed).toMatchObject({ generation: 1, state: "running", consumer_id: "consumer-00000001" });
+    expect(resumed).toMatchObject({ generation: 1, state: "resuming", consumer_id: "consumer-00000001" });
     expect(resume()).toEqual(resumed);
     expect(() => x.planned().resume(x.task.id, h.handoff_id, "consumer-00000002", x.scope, () => {})).toThrow("stale_execution");
     expect(authorized).toBe(1);
@@ -207,6 +207,7 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     const x = setup(), first = x.suspend();
     x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
     x.planned().resume(x.task.id, first.handoff_id, "consumer-00000001", x.scope, () => {});
+    x.planned().withExecution(x.task.id, 1, x.scope, () => {}, "consumer-00000001");
     const second = x.request();
     expect(second.handoff_id).not.toBe(first.handoff_id);
     expect(second.generation).toBe(1);
@@ -242,6 +243,24 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
       { ...x.scope, runtimeId: "another-runtime" },
     ]) expect(() => x.planned().suspend(x.task.id, h.handoff_id, 0, x.checkpoint, scope)).toThrow("stale_execution");
     expect(x.planned().get(x.task.id)).toEqual(h);
+  });
+
+  it("protects a committed resume with a lost reply until the same consumer starts", () => {
+    const x = setup(), h = x.suspend();
+    x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+    const consumer = "lost-response-consumer";
+    let authorizations = 0;
+    const resume = () => x.planned().resume(x.task.id, h.handoff_id, consumer, x.scope, () => { authorizations++; });
+    expect(resume().state).toBe("resuming");
+    expect(x.f.store.recoverOrphans(x.scope.runtimeId)).toEqual({ orphaned: 0, retried: 0 });
+    expect(resume().generation).toBe(1);
+    expect(authorizations).toBe(1);
+    x.planned().withExecution(x.task.id, 1, x.scope, () => {}, "another-consumer");
+    expect(x.planned().protectsFromOrphanRecovery(x.task.id)).toBe(true);
+    expect(() => x.planned().withExecution(x.task.id, 0, x.scope, () => {}, consumer)).toThrow("stale_execution");
+    x.planned().withExecution(x.task.id, 1, x.scope, () => {}, consumer);
+    expect(x.planned().get(x.task.id)?.state).toBe("running");
+    expect(x.planned().protectsFromOrphanRecovery(x.task.id)).toBe(false);
   });
 
   it("keeps existing crash policy when no acknowledged checkpoint exists", () => {

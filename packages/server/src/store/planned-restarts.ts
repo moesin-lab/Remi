@@ -137,7 +137,7 @@ export class PlannedRestarts {
 
   /**
    * Consume the checkpoint CAS and authorize the fresh usage run in ONE
-   * transaction. There is no committed resuming lease to strand on a crash.
+   * transaction. The resuming receipt remains protected until the daemon acknowledges task.start.
    * A duplicate response for the same consumer returns its committed generation.
    */
   resume(attemptId: string, handoffId: string, consumerId: string, scope: PlannedRestartScope,
@@ -148,7 +148,7 @@ export class PlannedRestarts {
       if (typeof consumerId !== "string" || consumerId.length < 16 || consumerId.length > 256) throw new PlannedRestartError("stale_execution");
       const handoff = this.get(attemptId);
       if (!handoff || handoff.handoff_id !== handoffId) throw new PlannedRestartError("stale_execution");
-      if (handoff.state === "running" && handoff.consumer_id === consumerId) return handoff;
+      if (["resuming", "running"].includes(handoff.state) && handoff.consumer_id === consumerId) return handoff;
       if (handoff.state !== "suspended") throw new PlannedRestartError("stale_execution");
       // Manual fences survive replacement. Undrain is explicit; a CLI owner
       // must finish candidate verification before any resumed execution.
@@ -158,7 +158,6 @@ export class PlannedRestarts {
         WHERE attempt_id=? AND handoff_id=? AND state='suspended'`, [consumerId, generation, nowIso(), attemptId, handoffId]);
       new Questions(this.ctx).preparePlannedRestartResume(attemptId, handoff.handoff_id, generation, handoff.checkpoint?.question_ids ?? []);
       authorize(generation, handoff.checkpoint!);
-      this.ctx.db.run("UPDATE multiremi_planned_restarts SET state='running',updated_at=? WHERE attempt_id=?", [nowIso(), attemptId]);
       return this.get(attemptId)!;
     })();
   }
@@ -176,11 +175,11 @@ export class PlannedRestarts {
       if ((generation ?? 0) !== 0) throw new PlannedRestartError("stale_execution");
       return;
     }
-    if (!["requested", "running"].includes(current.state) || current.generation !== (generation ?? 0)) throw new PlannedRestartError("stale_execution");
+    if (!["requested", "resuming", "running"].includes(current.state) || current.generation !== (generation ?? 0)) throw new PlannedRestartError("stale_execution");
   }
 
   /** Transport writes serialize with resume CAS, including the live trace sink. */
-  withExecution<T>(attemptId: string, generation: unknown, scope: PlannedRestartScope, write: () => T): T {
+  withExecution<T>(attemptId: string, generation: unknown, scope: PlannedRestartScope, write: () => T, startConsumer?: string): T {
     return this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(scope.workspaceId);
       if (generation !== undefined && (!Number.isSafeInteger(generation) || Number(generation) < 0)) throw new PlannedRestartError("stale_execution");
@@ -195,7 +194,14 @@ export class PlannedRestarts {
         // Absence stays valid until commit; avoid an identical second SELECT.
         this.assertExecution(null, generation as number | undefined);
       }
-      return write();
+      const result = write();
+      // A resume response can be lost after its CAS commits. Only the durable
+      // start from that exact consumer proves the daemon received execution.
+      if (current?.state === "resuming" && startConsumer === current.consumer_id) {
+        this.ctx.db.run("UPDATE multiremi_planned_restarts SET state='running',updated_at=? WHERE attempt_id=? AND state='resuming' AND consumer_id=?",
+          [nowIso(), attemptId, startConsumer]);
+      }
+      return result;
     })();
   }
 

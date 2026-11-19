@@ -61,7 +61,7 @@ export class DaemonTurnBridge {
   private inputMessages(turn:any,from:number,to:number,window?:UnifiedMessage[]):UnifiedMessage[] {
     const attempt=this.ctx.db.query(`SELECT a.session_id,a.attempt_no,a.input_trigger_ack,r.checkpoint AS restart_checkpoint
       FROM multiremi_turn_attempts a LEFT JOIN multiremi_planned_restarts r
-        ON r.attempt_id=a.id AND r.state='running' AND r.generation>0 WHERE a.id=?`).get(turn.current_attempt_id);
+        ON r.attempt_id=a.id AND r.state IN ('resuming','running') AND r.generation>0 WHERE a.id=?`).get(turn.current_attempt_id);
     const delivered=plannedRestartDeliveredInputs(attempt.restart_checkpoint);
     const messages=(window??this.messages(turn.session_id,from,to)).filter(message=>!delivered.has(message.id));
     // A cold provider needs the original task even when the reader has already
@@ -146,7 +146,7 @@ export class DaemonTurnBridge {
         JOIN multiremi_session_lanes l ON l.session_id=t.session_id AND l.reader_type='agent'
           AND l.reader_id=t.agent_id AND l.execution_scope=t.execution_scope
         LEFT JOIN multiremi_conversation_heads h ON h.session_id=t.session_id
-        LEFT JOIN multiremi_planned_restarts r ON r.attempt_id=a.id AND r.state='running' AND r.generation>0
+        LEFT JOIN multiremi_planned_restarts r ON r.attempt_id=a.id AND r.state IN ('resuming','running') AND r.generation>0
         WHERE ${where}`).all(...args);
       if(!rows.length)return {messages,wrapUps};
       const selected=rows.map(row=>String(row.snapshot_attempt_id));

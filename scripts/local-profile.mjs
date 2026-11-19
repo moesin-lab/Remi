@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import { isIPv4 } from 'node:net';
 import { canonicalSchemaLevel } from '../packages/platform-updater/src/schema-fingerprint.mjs';
+import { assertDeploymentSchema, readDeploymentSchema } from '../packages/platform-updater/src/schema-preflight.mjs';
 import { loadCiImages } from './ci-images.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1294,6 +1295,14 @@ async function runAction(profile, action, flags, root) {
     try {
       if (profile === 'dev') compose(root, 'build', 'api', 'web');
       else prepareDeploymentImages(root, flags);
+      if (previous) {
+        withImageIdentities(previous); // Confirm rollback images before any downtime.
+        const candidate = readJson(join(root, 'deployment.json'));
+        const target = JSON.parse(capture('docker', ['run', '--rm', '--network', 'none', '--entrypoint', '/bin/sh', candidate.apiImage,
+          '-ec', 'if [ -f /app/packages/server/src/store/schema-compatibility.json ]; then cat /app/packages/server/src/store/schema-compatibility.json; else printf null; fi']));
+        const schema = await readDeploymentSchema(sql => capture('docker', composeArgs(root, 'exec', '-T', 'postgres', 'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'multiremi', '-d', 'multiremi', '-c', sql)));
+        assertDeploymentSchema(target, schema);
+      }
     } catch (error) {
       for (const [name, contents] of oldFiles) writeFileSync(join(root, name), contents);
       throw error;
@@ -1314,7 +1323,18 @@ async function runAction(profile, action, flags, root) {
     }
     try { compose(root, 'up', '-d', '--wait', '--wait-timeout', '240'); }
     catch (error) {
-      console.error('Start failed; data volumes were retained. Check API migration logs before deciding how to roll back.');
+      console.error('Start failed; data volumes were retained.');
+      if (previous) {
+        try {
+          compose(root, 'stop', 'web', 'api');
+          for (const [name, contents] of oldFiles) writeFileSync(join(root, name), contents);
+          compose(root, 'up', '-d', '--wait', '--wait-timeout', '240');
+          await verifyProfileHealth(profile);
+          console.error(`Previous release ${previous.ref} restored; current database and API home retained.`);
+        } catch (rollbackError) {
+          throw new Error(`Deployment failed: ${error.message}; automatic container rollback failed: ${rollbackError.message}. Data retained; manual recovery required. Backup: ${saved || 'none'}`);
+        }
+      }
       if (saved) console.error(`Pre-deploy backup: ${saved}. Startup failure alone does not establish that migrations ran.`);
       throw error;
     }

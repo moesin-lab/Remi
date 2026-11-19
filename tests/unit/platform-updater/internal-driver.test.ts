@@ -53,11 +53,12 @@ async function fixture() {
   }
   await writeJson(join(config.control, 'rehearsal/status.json'), { protocol: 1, isolated: true, heartbeatAt: Date.now() });
   const calls: string[] = [], events: string[] = [];
-  const state = { backupFails: false, rehearsalFails: false, healthFails: false, switchFails: false, failure: undefined as PlatformSchemaContractFailure | undefined };
+  const state = { backupFails: false, rehearsalFails: false, healthFails: false, switchFails: false, schemaMissing: false, failure: undefined as PlatformSchemaContractFailure | undefined };
   const driver = new InternalApplicationDriver(config, { async run(command, args, options) {
     calls.push(command);
     expect(options?.env?.PGPASSWORD).toBe('fixture-password');
     expect(args.join(' ')).not.toContain('fixture-password');
+    if (command === 'psql') return { exitCode: 0, stdout: args.at(-1)!.includes('json_agg') ? '[{"singleton":1,"expand_level":3,"contract_level":0}]' : JSON.stringify({ historical: true, metadata: !state.schemaMissing }), stderr: '' };
     if (options?.stdoutFile) {
       events.push('backup');
       if (state.backupFails) return { exitCode: 1, stdout: '', stderr: 'failed' };
@@ -269,7 +270,7 @@ describe('socket-free internal application updates', () => {
     const f = await fixture(); f.preflight();
     await expect(f.driver.execute(f.operation, f.report, { ...READY_GATE, async waitUntilDrained() { throw new Error('active task'); } })).rejects.toThrow('active task');
     expect(f.events.some(event => event.endsWith(':stop'))).toBe(false);
-    expect(f.calls).toEqual([]);
+    expect(f.calls.every(command => command === 'psql')).toBe(true);
     expect(await readJson(join(f.config.control, 'write-fence.json'))).toBeNull();
   });
   it.each(['identity', 'runtime', 'migration policy'])('rejects a cached archive advertised with a different %s before stopping children', async mismatch => {
@@ -291,7 +292,7 @@ describe('socket-free internal application updates', () => {
     await expect(f.driver.finalize('pop_other')).rejects.toBeInstanceOf(RecoveryRequiredError);
     await f.driver.finalize(f.operation.id);
     expect(await f.driver.pendingFinalization()).toBeNull();
-    expect(f.calls.every(command => ['pg_dump', 'pg_restore', 'tar'].includes(command))).toBe(true);
+    expect(f.calls.every(command => ['psql', 'pg_dump', 'pg_restore', 'tar'].includes(command))).toBe(true);
   });
   it.each(['backupFails', 'rehearsalFails'] as const)('recovers the old program on %s without restoring live data', async failure => {
     const f = await fixture(); f.preflight(); f.state[failure] = true;
@@ -347,4 +348,23 @@ describe('socket-free internal application updates', () => {
     await new PlatformUpdaterClient('http://fixture-api', 'test-master', 'test-updater').keepAlive('docker_compose');
     expect(body).toEqual({ driver: 'docker_compose' });
   });
+});
+
+it('internal updater rejects unenrolled history in preflight without stopping supervisors', async () => {
+  const f = await fixture(); f.state.schemaMissing = true;
+  const result = await f.driver.preflightForRelease({ ...f.manifest, dataSchema: 'e'.repeat(64) });
+  expect(result.ready).toBe(false);
+  expect(result.checks.find(check => check.code === 'schema_preparation')?.message).toContain('remi db prepare');
+  expect(f.events.some(event => event.includes(':stop'))).toBe(false);
+});
+it('internal execution checks the staged target before drain or supervisor probe', async () => {
+  const f = await fixture(); f.preflight(); f.state.schemaMissing = true;
+  const path = join(f.config.root, 'releases', f.selection.id, 'api/packages/server/src/store/schema-compatibility.json');
+  await writeFile(path, JSON.stringify({ format: 1, expandLevel: 3, contractLevel: 0, minLevel: 3, maxLevel: 3 }));
+  // verifyFiles independently binds the descriptor to the manifest; use a valid new identity.
+  f.manifest.dataSchema = await schemaFingerprint(join(f.config.root, 'releases', f.selection.id, 'api'));
+  await writeJson(join(f.config.state, 'current.json'), { ...f.selection, release: f.manifest });
+  await writeJson(join(f.config.root, 'releases', f.selection.id, 'complete.json'), f.manifest);
+  await expect(f.driver.execute(f.operation, f.report, READY_GATE)).rejects.toThrow('remi db prepare');
+  expect(f.events.some(event => event.includes(':stop'))).toBe(false);
 });

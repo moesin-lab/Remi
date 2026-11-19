@@ -1,3 +1,4 @@
+import { PlannedRestarts } from "../planned-restarts.js";
 import { readCurrentTurnRow } from "@multiremi/store/execution-reads.js";
 import { readAttemptTurn, readTurnRow } from "@multiremi/store/execution-reads.js";
 import { withTurnChangeBatch } from "../turn-execution-records.js";
@@ -801,7 +802,7 @@ class InvalidChatTaskDestinationError extends ChatIssueTaskConflictError {
  */
 export class TaskSteerPendingError extends Error {}
 
-export interface TaskDaemonReportAuthority { runtimeId: string; workspaceId: string; daemonId: string; userId?: string | null }
+export interface TaskDaemonReportAuthority { runtimeId: string; workspaceId: string; daemonId: string; userId?: string | null; generation?: number }
 
 /** A reliable report must either change state, be a terminal replay, or remain pending. */
 export class TaskDaemonReportError extends Error {
@@ -5337,6 +5338,7 @@ ${placementAfter.sql}
       unreadInput = undefined;
       if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
       const current = daemonAuthority ? this.lockTaskDaemonReport(taskId, daemonAuthority) : this.getTask(taskId);
+      if (daemonAuthority) new PlannedRestarts(this.ctx).assertExecutionWithinTransaction(taskId, daemonAuthority.generation);
       const reportedTurn = input.expectedTurnId ? readCurrentTurnRow(this.ctx.db, taskId) : null;
       if (input.expectedTurnId && (!reportedTurn || reportedTurn.id !== input.expectedTurnId
         || reportedTurn.workspace_id !== daemonAuthority?.workspaceId)) throw new Error('stale_attempt');
@@ -5475,6 +5477,7 @@ ${placementAfter.sql}
     const failWithinTransaction = () => {
       if (!daemonAuthority) this.ctx.lockWorkspaceRuntimeLifecycle(initial.workspaceId);
       const current = daemonAuthority ? this.lockTaskDaemonReport(taskId, daemonAuthority) : this.getTask(taskId);
+      if (daemonAuthority) new PlannedRestarts(this.ctx).assertExecutionWithinTransaction(taskId, daemonAuthority.generation);
       if (current && daemonAuthority) {
         if (["completed", "failed", "cancelled"].includes(current.status)) return { task: current, followUps: null };
         if (current.status === "dispatched" && !current.offeredAt) throw new TaskDaemonReportError("server_error", true);
@@ -5777,7 +5780,8 @@ ${placementAfter.sql}
          AND status IN (${activeTaskIds ? "'running', 'waiting_local_directory', 'awaiting_human'" : "'dispatched', 'running', 'waiting_local_directory', 'awaiting_human'"})
          ${activeTaskIds?.length ? `AND id NOT IN (${activeTaskIds.map(() => "?").join(", ")})` : ""}`,
       ).all(runtimeId, ...(activeTaskIds ?? [])) as Row[];
-      if (!orphanRows.length) {
+      const recoverableRows = orphanRows.filter(row => !new PlannedRestarts(this.ctx).protectsFromOrphanRecovery(String(row.id)));
+      if (!recoverableRows.length) {
         return {
           failedTasks: [] as MultiremiTask[],
           retries: [] as MultiremiTask[],
@@ -5787,8 +5791,8 @@ ${placementAfter.sql}
       }
 
       const now = nowIso();
-      this.lockTaskIssueSessionsWithinWorkspaceLock(this.toTasks(orphanRows));
-      const orphanIds = orphanRows.map((row) => String(row.id));
+      this.lockTaskIssueSessionsWithinWorkspaceLock(this.toTasks(recoverableRows));
+      const orphanIds = recoverableRows.map((row) => String(row.id));
       const placeholders = orphanIds.map(() => "?").join(", ");
       runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records
          SET status = 'lost',

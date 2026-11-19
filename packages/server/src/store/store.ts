@@ -1,4 +1,5 @@
 import { querySchemaCompatibility } from './schema-levels.js';
+import { PlannedRestarts } from "./planned-restarts.js";
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
@@ -3512,6 +3513,8 @@ runMigrations(this.db);
     return this.runtimes.getRuntimeUpdateRequest(runtimeId, requestId);
   }
 
+  plannedRestarts(): PlannedRestarts { return new PlannedRestarts(this.ctx); }
+
   beginDaemonDrain(...args: Parameters<RuntimesRepo["beginDaemonDrain"]>) { return this.runtimes.beginDaemonDrain(...args); }
   undrainDaemon(...args: Parameters<RuntimesRepo["undrainDaemon"]>) { return this.runtimes.undrainDaemon(...args); }
   getDaemonDrainStatus(...args: Parameters<RuntimesRepo["getDaemonDrainStatus"]>) { return this.runtimes.getDaemonDrainStatus(...args); }
@@ -3685,7 +3688,7 @@ runMigrations(this.db);
   isTaskUsageExecutionAuthorized(taskId: string, runId: string, runtimeId: string): boolean {
     return !!this.ctx.db.query(`SELECT t.id FROM multiremi_turn_execution_records t JOIN multiremi_usage_task_scopes s ON s.task_id=t.id
       JOIN multiremi_usage_runs r ON r.task_id=t.id AND r.run_id=s.active_run_id
-      WHERE t.id=? AND t.runtime_id=? AND t.status='running' AND s.active_run_id=? AND r.complete=0`).get(taskId, runtimeId, runId);
+      WHERE t.id=? AND t.runtime_id=? AND t.status IN ('running','awaiting_human') AND s.active_run_id=? AND r.complete=0`).get(taskId, runtimeId, runId);
   }
 
   /** Deprecated transport replay check; never a reporting/statistics source. */
@@ -3761,6 +3764,9 @@ runMigrations(this.db);
     supportsDirectoryScan?: boolean;
     supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
+    /** Set only by the socket session after named-capability negotiation. */
+    plannedRestartNegotiated?: boolean;
+    plannedRestartProtocol?: number;
     supportsBotMenu?: boolean;
     botMenuProtocol?: number;
     supportsFeishuBotConfig?: boolean;

@@ -4,6 +4,7 @@
  */
 export const DAEMON_CAPABILITY_REGISTRY = {
   offer: { aliases: [], introduced: "0.2.82", contract: null },
+  "turn.restart": { aliases: [], introduced: "0.2.96", contract: null },
   "turn.message": { aliases: [], introduced: "0.2.90", contract: null },
   "input.unread": { aliases: ["input_unread"], introduced: "0.2.95", contract: null },
   "trace.read": { aliases: [], introduced: "0.2.82", contract: null },

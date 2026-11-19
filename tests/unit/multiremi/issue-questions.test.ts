@@ -65,6 +65,50 @@ function setup(f: PendingTurnTestFixture, sameOwner = false, busyOwner = false, 
 }
 
 pendingTurnBackendTests('one question through the responsibility chain', fixture => {
+  for (const kind of ['permission', 'question']) for (const answerAt of ['suspended', 'rebound']) {
+    it(`rebinds the original ${kind} after planned restart with its answer saved while ${answerAt}`, () => {
+      const h = setup(fixture(), false, false, kind, kind === 'permission'
+        ? [{ optionId: 'A', name: 'Allow once', kind: 'allow_once' }] : undefined);
+      const human = h.toHuman();
+      const restarts = h.store.plannedRestarts();
+      h.store.beginDaemonDrain('local', h.scope.daemonId, 'manual', 1_000);
+      const handoff = restarts.request(h.task.id, h.scope);
+      const checkpoint = restarts.checkpointReferences(h.task.id, h.scope);
+      expect(checkpoint.question_ids).toEqual([h.q.id]);
+      expect(() => restarts.suspend(h.task.id, handoff.handoff_id, 0, { ...checkpoint, question_ids: [] }, h.scope)).toThrow('invalid_checkpoint');
+      restarts.suspend(h.task.id, handoff.handoff_id, 0, checkpoint, h.scope);
+      const answer = () => h.store.answerQuestion(h.q.id, { expected_route_revision: human.route_revision,
+        response: kind === 'permission' ? { option_id: 'A' } : { answers: { approach: 'A' } } }, { type: 'member', id: 'mem_local_local' });
+      if (answerAt === 'suspended') answer();
+      h.store.reconcileQuestionWaits(h.runtime.id, []);
+      expect(h.store.getQuestion(h.q.id)?.wait_status).toBe('waiting');
+      expect(h.store.getTask(h.task.id)?.status).toBe(answerAt === 'suspended' ? 'running' : 'awaiting_human');
+      h.store.undrainDaemon('local', h.scope.daemonId);
+      restarts.resume(h.task.id, handoff.handoff_id, 'same-q-resume-consumer', h.scope, () => {});
+      h.store.reconcileQuestionWaits(h.runtime.id, []);
+      expect(h.store.getQuestion(h.q.id)?.wait_status).toBe('waiting');
+      const metadata = (h.store.getMessage(h.q.id)!.metadata.human_request as any).payload;
+      const payload = { turn_id: h.turn.id, attempt_id: h.task.id, generation: 1, recover_question_id: h.q.id,
+        message_id: 'unused-new-question', wait_id: 'replacement-native-callback', dedupe_key: 'rebind-q',
+        body_md: 'replayed native request', options: [], metadata };
+      expect(h.bridge.rpc('turn.decision', { ...payload, metadata: { ...metadata, kind: 'foreign' } }, h.scope))
+        .toMatchObject({ ok: false, code: 'question_restart_binding_changed' });
+      expect(h.bridge.rpc('turn.decision', { ...payload, generation: 0 }, h.scope).ok).toBe(false);
+      expect(h.bridge.rpc('turn.decision', payload, h.scope)).toMatchObject({ ok: true, message: { id: h.q.id } });
+      expect(h.bridge.rpc('turn.decision', payload, h.scope)).toMatchObject({ ok: true, message: { id: h.q.id } });
+      if (answerAt === 'rebound') answer();
+      const saved = h.store.getQuestion(h.q.id)!;
+      expect(h.bridge.rpc('turn.decision.consume', { turn_id: h.turn.id, attempt_id: h.task.id, generation: 1,
+        message_id: h.q.id, reply_message_id: saved.answer!.reply_message_id, wait_id: `wait_nonce_${h.task.id}` }, h.scope))
+        .toMatchObject({ ok: false, code: 'question_wait_binding_changed' });
+      expect(h.bridge.rpc('turn.decision.consume', { turn_id: h.turn.id, attempt_id: h.task.id, generation: 1,
+        message_id: h.q.id, reply_message_id: saved.answer!.reply_message_id, wait_id: payload.wait_id }, h.scope)).toEqual({ ok: true });
+      expect(h.store.getQuestion(h.q.id)).toMatchObject({ id: h.q.id, wait_status: 'consumed', answer_revision: 1 });
+      expect(h.db.query("SELECT id FROM multiremi_conversation_log WHERE task_id=? AND message_kind='decision'").all(h.turn.id)).toHaveLength(1);
+      expect(h.db.query('SELECT id FROM multiremi_turn_attempts WHERE turn_id=?').all(h.turn.id)).toHaveLength(1);
+    });
+  }
+
   it('accepts workspace permission review without a designated human and preserves native consumption and workspace isolation', async () => {
     const h = setup(fixture(), false, false, 'permission', [{ optionId: 'A', name: 'Allow once', kind: 'allow_once' }]);
     const human = h.toHuman();

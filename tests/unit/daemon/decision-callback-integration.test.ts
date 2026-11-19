@@ -79,7 +79,7 @@ async function setup({ store, db }: PendingTurnTestFixture, delegated = false, u
   client.addLane(lane);
   const daemon = Object.create(MultiremiDaemon.prototype);
   Object.assign(daemon, { options: { approvalMode: "ask", humanRequestTimeoutMs: 10_000, runtimeId: rt },
-    pollAbort: new AbortController(), ensureTrace: () => ({ append: () => {} }), taskDownlinks: inbox });
+    restartExecutions: new Map(), restartQuestions: new Map(), pollAbort: new AbortController(), ensureTrace: () => ({ append: () => {} }), taskDownlinks: inbox });
   let permission!: (params: RequestPermissionParams) => Promise<PermissionOutcome>;
   let question!: (params: ElicitationCreateParams) => Promise<ElicitationResult>;
   const provider = { setPermissionHandler: (h: typeof permission) => { permission = h; },

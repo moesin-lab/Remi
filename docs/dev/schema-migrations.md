@@ -23,10 +23,12 @@ SQLite 历史升级仍须由离线工具调用 `runMigrations(db, { historicalMa
 `multiremi_schema_steps` 记录步骤 ID、phase、level、首次发布版本和完成时间。
 缺少元数据表示历史 level 0；空行、非法值或损坏元数据拒绝启动，不自动重置。
 [声明文件](../../packages/server/src/store/schema-compatibility.json) 同时供运行时代码、打包与 updater 读取。
-当前 `{minLevel: 2, maxLevel: 2}`、expand 2、contract 0。
+当前 `{minLevel: 3, maxLevel: 3}`、expand 3、contract 0。
 level 1 是 schema 协议登记；level 2 为 A3 的 `multiremi_live_terms` 加法建表，
 同样在版本化 expand 事务内执行，已登记 level 1 的库启动也会补齐该表。
-旧代码允许更高 expand，contract floor 仍为 0；历史 DDL allowlist 不增加。
+level 3 为 planned restart 的表、索引及 daemon drain_id：先补 drain identity，再建 planned restart 表；
+历史两条入口仍保留 ensureDaemonDrains → ensurePlannedRestarts 顺序，已登记 level 2 库只走版本化 expand。
+旧代码允许更高 expand，contract floor 仍为 0；历史 DDL allowlist 与 legacy 指纹输入列表不增加。
 
 - `expand_level >= minLevel`：代码需要的加法结构已存在；旧库可以先执行本版 expand。
 - `contract_level <= maxLevel`：库没有移除代码仍依赖的结构。

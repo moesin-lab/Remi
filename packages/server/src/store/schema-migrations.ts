@@ -1,3 +1,4 @@
+import { ensureDaemonDrainIdentity, ensurePlannedRestarts } from "./planned-restart-schema.js";
 import { LIVE_TERM_SCHEMA } from './live-term-fence.js';
 import type { SchemaMigration } from './schema-migration-runner.js';
 
@@ -11,4 +12,8 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
   id: '20261118_live_term_fence', phase: 'expand', level: 2,
   expandRelease: '0.2.95', release: '0.2.95',
   run: db => { db.exec(LIVE_TERM_SCHEMA); },
+}, {
+  id: '20261119_planned_restarts', phase: 'expand', level: 3,
+  expandRelease: '0.2.95', release: '0.2.95',
+  run: db => { ensureDaemonDrainIdentity(db); ensurePlannedRestarts(db); },
 }];

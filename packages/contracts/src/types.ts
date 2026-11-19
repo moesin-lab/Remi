@@ -4840,6 +4840,8 @@ export interface MultiremiFeishuBotDirective {
 
 /** Runtime-scoped payload returned to the daemon. Contains decrypted secrets. */
 export interface MultiremiFeishuBotDaemonConfig {
+  /** Existing bot-scoped bindings/routes only; unseen chats are not discovered. */
+  recovery_chats?: Array<{ chat_id: string; chat_type: "p2p" | "group" }>;
   /** Older control planes omit this for the original bot. */
   bot_id?: string;
   workspace_id: string;

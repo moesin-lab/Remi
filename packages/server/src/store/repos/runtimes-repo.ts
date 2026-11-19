@@ -1,3 +1,4 @@
+import { PlannedRestarts } from "../planned-restarts.js";
 import { isBuildCommit } from "@shared/daemon-artifact-manifest.js";
 import { DEFAULT_DAEMON_DRAIN_MS, type DaemonDrainStatus, type DaemonDrainReason } from "@multiremi/contracts/daemon-drain.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
@@ -1660,9 +1661,9 @@ export class RuntimesRepo {
       if (!this.daemonDrainRuntimeRows(workspaceId, daemonId).length) throw new Error("daemon not found");
       const now = nowIso();
       // Idempotent requests cannot extend a drain indefinitely or replace a manual fence.
-      this.ctx.db.run(`INSERT INTO multiremi_daemon_drains (workspace_id, daemon_id, started_at, deadline, reason, update_request_id)
-        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, daemon_id) DO NOTHING`,
-        [workspaceId, daemonId, now, new Date(Date.now() + duration).toISOString(), reason, updateRequestId ?? null]);
+      this.ctx.db.run(`INSERT INTO multiremi_daemon_drains (workspace_id, daemon_id, started_at, deadline, reason, update_request_id, drain_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (workspace_id, daemon_id) DO NOTHING`,
+        [workspaceId, daemonId, now, new Date(Date.now() + duration).toISOString(), reason, updateRequestId ?? null, createId("drain")]);
     })();
     this.notifyDaemonDrainChanged(workspaceId);
     return this.getDaemonDrainStatus(workspaceId, daemonId);
@@ -1721,24 +1722,28 @@ export class RuntimesRepo {
         WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND scope = 'cli'
           AND status IN ('restarting', 'verifying')`).get(...ids)) return;
       if (Date.parse(String(drain.deadline)) > Date.now() || drain.forced_at) return;
-      if (drain.update_request_id) {
-        const remaining = this.getDaemonDrainStatus(workspaceId, daemonId).remaining_tasks;
-        if (!remaining) return;
-        const tasks = this.ctx.db.query(`SELECT id FROM multiremi_turn_execution_records
-          WHERE runtime_id IN (${ids.map(() => "?").join(",")})
-            AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`).all(...ids) as Row[];
-        this.ctx.db.run(`UPDATE multiremi_runtime_update_requests SET status = 'failed', error = ?, updated_at = ?
-          WHERE id = ? AND status IN ('pending', 'running')`,
-          [`CLI update drain deadline exceeded; remaining tasks: ${tasks.map(task => String(task.id)).join(", ") || "daemon-reported active tasks"} (${remaining})`, nowIso(), drain.update_request_id]);
-        this.handoffOrReleaseUpdateDrain(workspaceId, daemonId, String(drain.update_request_id), ids);
-        this.notifyDaemonDrainChanged(workspaceId);
-        return;
-      }
       if (!this.daemonDrainTaskCount(ids)) return;
       this.ctx.db.run(`UPDATE multiremi_daemon_drains SET forced_at = ? WHERE workspace_id = ? AND daemon_id = ?`,
         [nowIso(), workspaceId, daemonId]);
-      // Existing MUL-45 recovery supplies lost/runtime_recovery, retry budgets and notifications.
-      for (const id of ids) this.ctx.tasks().recoverOrphans(id);
+      const tasks = this.ctx.db.query(`SELECT id,runtime_id FROM multiremi_turn_execution_records
+        WHERE runtime_id IN (${ids.map(() => "?").join(",")})
+          AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`).all(...ids) as Row[];
+      // Capability is per runtime and refreshed on hello/heartbeat. Never send
+      // a new frame to a legacy daemon: it cannot acknowledge a checkpoint.
+      const legacyRuntimeIds = new Set<string>();
+      for (const task of tasks) {
+        const taskRuntimeId = String(task.runtime_id);
+        const capabilities = this.getRuntimeLite(taskRuntimeId)?.metadata;
+        if (capabilities?.planned_restart !== 1 || capabilities.planned_restart_negotiated !== true) {
+          legacyRuntimeIds.add(taskRuntimeId);
+          continue;
+        }
+        new PlannedRestarts(this.ctx).request(String(task.id), { workspaceId, daemonId, runtimeId: taskRuntimeId });
+      }
+      // Preserve MUL-45 crash/retry semantics for legacy hosts. Their normal
+      // cancellation downlink and zero-active ACK then release update admission.
+      for (const id of legacyRuntimeIds) this.ctx.tasks().recoverOrphans(id);
+      this.notifyDaemonDrainChanged(workspaceId);
     })();
   }
 
@@ -1753,9 +1758,9 @@ export class RuntimesRepo {
     if (sibling) {
       const duration = Number(process.env.MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS ?? DEFAULT_DAEMON_DRAIN_MS);
       if (!Number.isSafeInteger(duration) || duration < 1 || duration > 86_400_000) throw new Error("drain deadline must be between 1ms and 24h");
-      this.ctx.db.run(`UPDATE multiremi_daemon_drains SET update_request_id = ?, started_at = ?, deadline = ?
+      this.ctx.db.run(`UPDATE multiremi_daemon_drains SET update_request_id = ?, started_at = ?, deadline = ?, drain_id = ?
         WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`,
-        [String(sibling.id), nowIso(), new Date(Date.now() + duration).toISOString(), workspaceId, daemonId, ownerId]);
+        [String(sibling.id), nowIso(), new Date(Date.now() + duration).toISOString(), createId("drain"), workspaceId, daemonId, ownerId]);
     } else {
       this.ctx.db.run(`DELETE FROM multiremi_daemon_drains WHERE workspace_id = ? AND daemon_id = ? AND update_request_id = ?`,
         [workspaceId, daemonId, ownerId]);
@@ -1784,7 +1789,7 @@ export class RuntimesRepo {
       status: !drain ? "normal" : remaining || awaitingAck ? "draining" : drain.forced_at ? "drained_forced" : "drained",
       started_at: drain ? String(drain.started_at) : null, deadline: drain ? String(drain.deadline) : null,
       reason: drain?.reason as DaemonDrainReason ?? null, forced_at: drain?.forced_at ? String(drain.forced_at) : null,
-      remaining_tasks: remaining, awaiting_daemon_ack: awaitingAck, expiry_action: drain?.update_request_id ? "fail_update" : "runtime_recovery" };
+      remaining_tasks: remaining, awaiting_daemon_ack: awaitingAck, expiry_action: "planned_restart" };
   }
 
   private daemonDrainRuntimeRows(workspaceId: string, daemonId: string): Row[] {
@@ -1796,7 +1801,9 @@ export class RuntimesRepo {
   private daemonDrainTaskCount(ids: string[]): number {
     if (!ids.length) return 0;
     const row = this.ctx.db.query(`SELECT COUNT(*) AS count FROM multiremi_turn_execution_records
-      WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')`)
+      WHERE runtime_id IN (${ids.map(() => "?").join(",")}) AND status IN ('dispatched', 'running', 'waiting_local_directory', 'awaiting_human')
+        AND NOT EXISTS (SELECT 1 FROM multiremi_planned_restarts pr WHERE pr.attempt_id=multiremi_turn_execution_records.id
+          AND pr.state IN ('suspended','resuming'))`)
       .get(...ids) as { count: number };
     return Number(row.count);
   }
@@ -2501,6 +2508,9 @@ export class RuntimesRepo {
     supportsDirectoryScan?: boolean;
     supportsSkillDirectory?: boolean;
     agentPluginProtocol?: number;
+    /** Set only by the socket session after named-capability negotiation. */
+    plannedRestartNegotiated?: boolean;
+    plannedRestartProtocol?: number;
     supportsBotMenu?: boolean;
     botMenuProtocol?: number;
     supportsFeishuBotConfig?: boolean;
@@ -2518,6 +2528,11 @@ export class RuntimesRepo {
     // Capability flags a daemon re-advertises on every heartbeat. Collected once
     // so the three metadata-writing branches below stay in step.
     const metadataPatch: Record<string, unknown> = {};
+    if (options.plannedRestartNegotiated !== undefined) metadataPatch.planned_restart_negotiated = options.plannedRestartNegotiated;
+    if (options.plannedRestartProtocol !== undefined) {
+      const negotiated = options.plannedRestartNegotiated ?? runtime.metadata.planned_restart_negotiated === true;
+      metadataPatch.planned_restart = negotiated && options.plannedRestartProtocol === 1 ? 1 : 0;
+    }
     if (options.health !== undefined && JSON.stringify(runtime.metadata.health) !== JSON.stringify(options.health)) metadataPatch.health = options.health;
     if (options.supportsBatchImport !== undefined) metadataPatch.supports_batch_import = options.supportsBatchImport;
     if (options.supportsDirectoryScan !== undefined) metadataPatch.supports_directory_scan = options.supportsDirectoryScan;

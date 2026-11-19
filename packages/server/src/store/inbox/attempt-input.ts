@@ -59,3 +59,9 @@ export function acknowledgeAttemptInput(ctx: StoreContext, turn: any, toSeq: num
     ctx.db.run('UPDATE multiremi_turn_attempts SET input_ack_seq=?,input_read_seq=?,input_read_offset=?,input_trigger_ack=1 WHERE id=?',
         [Math.max(state.ack, toSeq), read, read > state.read ? 0 : state.offset, turn.current_attempt_id]);
 }
+
+/** Sparse receipts with explicit provider consumption, committed by restart CAS. */
+export function plannedRestartDeliveredInputs(value: unknown): Set<string> {
+    const checkpoint = (typeof value === 'string' ? JSON.parse(value) : value) as { delivered_message_ids?: string[] } | null;
+    return new Set(checkpoint?.delivered_message_ids ?? []);
+}

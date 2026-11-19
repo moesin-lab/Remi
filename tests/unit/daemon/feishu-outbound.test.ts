@@ -1,11 +1,45 @@
 import { describe, expect, it } from "bun:test";
 import { deliverFeishuOutbound } from "@multiremi/worker/feishu-outbound.js";
 import { MultiremiDaemon } from "@multiremi/daemon.js";
+import { FeishuDeliveryError } from "@shared/feishu-delivery-error.js";
 
 const delivery = { id: "fbo_1", taskId: "tsk_1", claimToken: "claim_1", chatId: "oc_1", threadId: "om_root",
   replyToMessageId: "om_root", body: "", bodyOrigin: "agent" as const, idempotencyKey: "fbo_1" };
 
 describe("proactive delivery execution", () => {
+  it("keeps an uncertain send lease but releases certain pre-send and provider refusals", async () => {
+    const daemon = Object.create(MultiremiDaemon.prototype) as any;
+    const reports: any[] = [];
+    const input = { ...delivery, taskId: undefined, body: "reply" };
+    Object.assign(daemon, { options: { serverUrl: "https://remi.example.test" },
+      client: { reportFeishuBotOutboundResult: async (_runtime: string, _delivery: string, report: any) => { reports.push(report); } },
+      feishuConcierge: { sendOutbound: async () => { throw new FeishuDeliveryError("response lost after message creation", true, true); } },
+    });
+    await expect(daemon.handleFeishuBotOutbound("rt_1", input, new AbortController().signal)).rejects.toMatchObject({ ambiguous: true });
+    expect(reports).toEqual([]);
+    daemon.feishuConcierge = null; // Certain local failure before any creation call.
+    await daemon.handleFeishuBotOutbound("rt_1", input, new AbortController().signal);
+    expect(reports.at(-1)).toMatchObject({ status: "failed", retryable: true });
+    daemon.feishuConcierge = { sendOutbound: async () => { throw new FeishuDeliveryError("explicit refusal", true, false); } };
+    await daemon.handleFeishuBotOutbound("rt_1", input, new AbortController().signal);
+    expect(reports.at(-1)).toMatchObject({ status: "failed", retryable: true });
+    expect(reports).toHaveLength(2);
+  });
+
+  it("keeps the lease after a successful create loses its sent report", async () => {
+    const daemon = Object.create(MultiremiDaemon.prototype) as any;
+    const reports: any[] = [];
+    Object.assign(daemon, { options: { serverUrl: "https://remi.example.test" },
+      feishuConcierge: { sendOutbound: async () => ({ messageId: "om_created" }) },
+      client: { reportFeishuBotOutboundResult: async (_runtime: string, _id: string, report: any) => {
+        reports.push(report); throw new Error("sent report acknowledgement lost");
+      } },
+    });
+    await expect(daemon.handleFeishuBotOutbound("rt_1", { ...delivery, taskId: undefined, body: "reply" }, new AbortController().signal))
+      .rejects.toMatchObject({ ambiguous: true });
+    expect(reports).toEqual([expect.objectContaining({ status: "sent", externalMessageId: "om_created" })]);
+  });
+
   it("renews a binary delivery lease while upload is pending without a task ID", async () => {
     const reports: any[] = [];
     let unblock!: () => void;

@@ -354,6 +354,7 @@ export class MultiremiDaemonClient {
     supportsFeishuConcierge = false,
     signal?: AbortSignal,
     bindingAcks: RuntimeExecutionBindingAck[] = [],
+    plannedRestartProtocol = 0,
   ): Promise<MultiremiDaemonHeartbeatConfigAck> {
     let resp: Partial<MultiremiDaemonHeartbeatConfigAck>;
     try {
@@ -361,6 +362,7 @@ export class MultiremiDaemonClient {
         runtime_id: runtimeId,
         execution_profile_protocol: 1,
         runtime_binding_acks: bindingAcks,
+        planned_restart: plannedRestartProtocol,
         supports_batch_import: true,
         supports_directory_scan: true,
         supports_skill_directory: true,

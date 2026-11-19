@@ -107,10 +107,11 @@ SQLite，避免 Bun 1.3.14 默认 20 条 query 缓存之外的语句等到 GC �
 CLI 更新在 runtimes-repo 创建带 requestId 的持久化 daemon drain，等待期间请求
 保持 pending；`daemon.drain` 状态显示排空进度，无需新增请求状态。默认期限沿用
 MUL-68 的 5 分钟，`MULTIREMI_DAEMON_DRAIN_TIMEOUT_MS` 可覆盖，避免引入两套期限。
-服务端排空后才下发更新，HTTP heartbeat 与 WebSocket 下行均携带持久化的原 deadline；daemon 对接受任务的竞态暂停各
-provider 接单，在剩余期限内等待。到期仍繁忙时更新失败，错误列出剩余任务，
-解除该更新持有的 drain，已有轮次继续运行，不执行 runtime recovery。
-人工和部署 drain 保持原有超时回收契约，不能被更新接管或释放。
+服务端排空后才下发更新，HTTP heartbeat 与 WebSocket 下行携带持久化 deadline。
+manual/deploy/CLI update 到期对已协商 `turn.restart` 且上报 `capabilities.planned_restart: 1` 的 runtime 发出计划内 checkpoint 请求；
+缺失或不支持该能力的旧 daemon 回退到 MUL-45 中断/自动重试，不创建无法确认的 requested 记录。
+能力随 socket hello/heartbeat 重报并清除旧值。只有服务端确认挂起且 daemon
+报告本地执行归零，才允许更新。人工/部署 drain 不被更新接管或释放。
 
 准入在 workspace lifecycle 锁内串行：同一物理 daemon 同时最多一个 CLI 请求离开
 pending。有 update owner 时只有该 owner 可准入；人工/部署 drain 没有 owner 时，
@@ -132,7 +133,8 @@ HTTP heartbeat 和 WS 下行仅在 drain 的 `update_request_id` 等于本请求
 
 running 准入确认使用非持久化同步 HTTP result，兼容没有准入逻辑的旧服务端；终态仍走
 持久化 outbox。接受后才安装。超时、断线、5xx 等结果未知时，每 250ms 幂等重试，
-窗口取平台剩余 drain 期限与 30 秒的较小值（旧服务端无 deadline 时取 30 秒），每次请求
+准入确认最多 30 秒；尚未到期时仍取剩余期限较小值，checkpoint 后已过期的 drain
+得到新的 30 秒准入窗口，每次请求
 也受该窗口的 AbortSignal 限制。30 秒限制避免无执行者长时间占用更新围栏，同时允许短暂
 网络恢复。窗口耗尽后仅投递一次带 admission confirmation deadline exceeded 原因的 failed，
 随后释放本地暂停。没有 running outbox 记录可在放弃后 replay；已到达服务端但响应丢失的
@@ -160,11 +162,79 @@ daemon 会把不可重试 WS 错误持久化为分区 blocked；平台升级后�
 
 下载或校验失败的终态立即释放本次 requestId 的 drain；重启期间 drain 保持持久化，
 新进程完成版本注册和启动自检、确认 completed 后释放。恢复旧版本确认 rolled_back
-同样释放。owner 进入终态（含排空超时）时，若同一物理 daemon 仍有 pending CLI 更新，
+同样释放。owner 进入终态时，若同一物理 daemon 仍有 pending CLI 更新，
 则把 drain 交接给最早创建的请求，并从交接时刻重新计算期限；没有 pending sibling 才释放。
 人工/部署 drain 不参与交接。进入 restarting/verifying 后排空期限不干扰新进程确认，仍由更新验证期限管理。
-`daemon.drain` 的 `expiry_action=fail_update` 区分更新围栏和人工/部署的 `runtime_recovery`。
+`daemon.drain` 的 `expiry_action=planned_restart` 表示三种来源共用 checkpoint 交接。
 
 验证入口：`tests/unit/multiremi/daemon-drain.test.ts`、
 `tests/unit/daemon/cli-update-coordinator.test.ts`、`tests/unit/daemon/cli-update-lifecycle.test.ts`、
 `tests/unit/daemon/update-admission.test.ts`（真实 HTTP result、协议 report handler 和磁盘 outbox）。
+
+## MUL-31：同 attempt 计划内重启交接
+
+[planned-restarts.ts](../../packages/server/src/store/planned-restarts.ts) 提供独立于
+Turn/attempt 状态的计划内交接记录。[共享 schema](../../packages/server/src/store/planned-restart-schema.ts)
+在 SQLite 和 PostgreSQL 的迁移入口添加表，不改写已有尝试；旧 drain 回填独立 `drain_id`，
+重复 begin 保留身份与期限，更新 owner 交接产生新身份。时间戳不承担唯一身份，避免同一时刻
+undrain 后重新 drain 接受旧 checkpoint。
+
+`request` 校验当前 attempt、workspace/runtime/daemon 和持久化 drain；`suspend` 只接受同一
+fence/generation 的 checkpoint，重放必须有相同摘要。checkpoint 只保存 provider session/work_dir、
+trace head 与输入 receipt 引用，不保存凭据、消息正文或 translator 内存。输入确认水位必须与
+服务端一致，delivered ID 必须属于同一会话且已投影；写 checkpoint 不推进确认水位。
+
+`resume` 在 workspace→lane 锁与单一事务内消费 checkpoint、递增 generation 并运行调用方的
+新执行段授权；授权抛错时整个恢复回滚，另一消费者仍可接手。相同消费者可重读已提交结果，
+另一消费者被拒绝。manual/deploy drain 需要先 undrain，CLI owner 的 fence 与平台维护 fence
+同样阻止恢复。generation 检查必须在执行写入的同一事务、持有上述锁时调用。
+
+这些原语已接入 daemon 的挂起和恢复路径。新进程只对账启动时已有的 journal；当前
+进程不会消费自己刚挂起的记录。`turn.restart.resume` 在同一 CAS 事务内登记稳定 consumer
+对应的新 usage run，响应携带恢复执行上下文；本地 resumed receipt 提交后才派发 provider。
+manual/deploy 需显式 undrain；CLI 更新需版本确认释放围栏后恢复。只有服务端 suspended /
+resuming 记录豁免 orphan 和排空任务计数，本地 prepared 不授予豁免。
+
+Q 重绑定、权限/人工等待、未投递 steer 的跨重启对账和飞书补收仍未完成；不能据本节
+推断这些范围已经可用。真实 provider、飞书与隔离候选更新需各自验收。
+
+存储验证入口：`bun run test tests/unit/multiremi/planned-restarts.test.ts`，覆盖双 dialect fixture
+（PG 需显式配置）、SQLite 真正 close/open 和双连接消费者、重放、陈旧 generation/fence、
+取消竞争、摘要损坏与事务回滚。它不替代假 provider 的真正进程替换验收。
+
+### daemon 挂起：provider 关闭、报告/trace 确认与 journal
+
+[planned-restart-journal.ts](../../packages/server/src/worker/planned-restart-journal.ts) 提供
+`PlannedRestartJournal` 与 `PlannedRestartTransfer`，checkpoint 类型共用于
+[contracts](../../packages/contracts/src/planned-restart.ts) 和服务端。journal 以 SQLite WAL /
+`synchronous=FULL` 写入，文件 owner-only。`suspend` 等待调用方安全点回调完成后才写
+`prepared`，服务端 checkpoint 提交确认后才写 `acknowledged`；回调必须停止 provider 输出并
+排空报告/trace，失败不生成挂起证据。同一 handoff 的并发停止合并；不同执行身份或 checkpoint
+重放冲突拒绝，摘要损坏、未知字段与非法水位拒绝。
+
+恢复时先重放未确认的 checkpoint，再用首次本地提交时生成的稳定 consumer 调用服务端
+resume CAS；丢失恢复响应后仍重用该 consumer，避免重复授权。同 attempt 的 journal 与
+服务端 DB 真正关库重开、恢复响应丢失后的单次授权由存储联测覆盖；新进程重读 journal
+由子进程测试覆盖。本地 `resumed` receipt 不能代替服务端权威，恢复仍调用服务端 CAS，
+不能据本地文件复活已取消的执行。
+
+`taskInputSnapshot` 为已经持久化的 requested handoff 下发 `turn.restart`。daemon 在期限中断点
+abort 当前执行，等待 `runAgent` 的 provider close/trace flush 与工作目录收尾，然后等待 outbox
+和 trace 上传 ACK。`turn.restart.checkpoint` 在服务端锁下返回 session/work_dir/input 水位引用；
+daemon 写 prepared journal 后，通过 `turn.restart.suspend` 提交同一 handoff/generation 的 checkpoint，
+收到提交 ACK 才写 acknowledged。该路径不发送 fail，不关闭轮卡 trace。未确认交接仍遵循普通
+crash 恢复，不能根据本地文件降低 drain 计数。provider 不响应取消/close 或交接未能在 daemon stop budget 内确认时，终止该进程并按崩溃处理；
+没有挂起确认的记录继续由 MUL-45 标 lost 并重试，可能消耗一次 attempt。
+
+服务端任务报告（用量除外）、turn input/decision/completion 与 trace.append 在执行写入同一事务内
+校验 generation，并与恢复 CAS 共用 workspace→lane 锁。suspended 拒绝执行写入；恢复后旧代与
+遗漏 generation 的帧拒绝。已绑定 usage run 的迟到实际用量保留原会计授权。普通未交接执行继续
+兼容缺省 generation=0。daemon 对恢复后的报告、输入和 trace 上传带新 generation，
+持久化 outbox 在入队时保存它，不能在迟到发送时改成当前代。translator 从本地 trace fold
+保留原 Turn 和已用 item ID，恢复不重复写 turn.started，并添加「Remi 已更新」条目。
+原生子代理/后台任务的完整 translator 内存重绑定仍待后续范围。
+
+验证入口含 `bun run test tests/unit/daemon/planned-restart-journal.test.ts` 与
+`bun run test tests/integration/daemon-protocol-v2/planned-restart.test.ts`。后者运行真实 daemon、
+Bun socket、磁盘 outbox/journal 和假 provider，验证 provider 关闭前没有 checkpoint、真实 RPC 提交
+和 ACK 后 journal，以及旧代报告/输入/trace 拒绝。它不替代 MUL-27 的候选二进制更新验收。

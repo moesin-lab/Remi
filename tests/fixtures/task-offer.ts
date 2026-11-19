@@ -57,9 +57,16 @@ export async function receiveTaskOffer(store: MultiremiStore, runtimeId: string,
   } finally { layer.closeAll(); layer.stop(); await layer.drain(); }
 }
 
+// Exercise the real hello/runtime.ready recovery handlers without dispatching
+// their newly queued retries. A null prepare callback does not prevent claims:
+// the pump calls claimTask before prepare, leaving that retry dispatched.
+class RecoveryOnlyTaskOffers extends DaemonTaskOffers {
+  override kick(): void {}
+}
+
 export async function reconcileRuntimeReady(store: MultiremiStore, runtimeId: string, activeTaskIds: string[] = []): Promise<Record<string, any>[]> {
   const layer = new DaemonProtocolLayer({ store });
-  const offers = new DaemonTaskOffers({ store, layer, prepare: async () => null, autostart: false });
+  const offers = new RecoveryOnlyTaskOffers({ store, layer, prepare: async () => null, autostart: false });
   const runtime = store.getRuntime(runtimeId);
   const frames: Record<string, any>[] = [];
   const session = layer.openSession({ send: text => { frames.push(JSON.parse(text)); return text.length; }, close() {} },

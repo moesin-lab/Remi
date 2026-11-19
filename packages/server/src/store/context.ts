@@ -892,6 +892,7 @@ export interface RuntimesSurface {
   }): MultiremiDaemonHeartbeatAck;
   runtimeCanRunAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean;
   runtimeCanRouteAgent(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean;
+  agentModelPolicyReason(agent: MultiremiAgent): string | null;
   runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean;
 }
 

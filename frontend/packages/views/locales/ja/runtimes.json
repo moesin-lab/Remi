@@ -812,7 +812,9 @@
     "catalog_needs_machines": "マシンを割り当てるとモデルを検出します",
     "ready_summary": "{{ready}}/{{total}} 適用済み",
     "selected_machines": "{{selected}}/{{total}} 選択中",
-    "retry": "再試行"
+    "retry": "再試行",
+    "model_blocklist": "ブロックするモデル（完全一致 ID、1 行に 1 つ。許可リストより優先）",
+    "no_default_model": "グループの既定モデルは未設定"
   },
   "storage": {
     "card_aria": "{{name}} のストレージ",

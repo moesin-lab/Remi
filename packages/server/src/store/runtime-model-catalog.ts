@@ -1,3 +1,4 @@
+import { type ExecutionModelPolicy, executionModelPolicyReason } from "@multiremi/contracts/execution-endpoint.js";
 import type { MultiremiRuntime, MultiremiRuntimeModel, MultiremiRuntimeModelThinking } from "@multiremi/contracts/types.js";
 import { runtimeConnectionModels, type RuntimeConnectionProfile, type RuntimeBindingModelCatalog } from "@multiremi/contracts/runtime-connection";
 import { commonThinkingLevels, modelThinkingLevels } from "@multiremi/contracts/model-thinking.js";
@@ -12,7 +13,7 @@ export function executionEndpointGroupCatalog(
 ): FleetProviderModelsResponse {
   const providers = [...group.runtimeIds].sort().map(runtimeId => {
     const catalog = snapshot(runtimeId);
-    const allowed = catalog?.models.filter(model => !group.modelPolicy.models || group.modelPolicy.models.includes(model.id)) ?? [];
+    const allowed = catalog?.models.filter(model => !executionModelPolicyReason(group.modelPolicy, model.id)) ?? [];
     const selected = group.modelPolicy.model || allowed.find(model => model.default)?.id || allowed[0]?.id;
     return { provider: group.provider, online_runtime_count: 0,
       model_catalog_status: catalog?.status ?? "unknown" as const,
@@ -22,7 +23,16 @@ export function executionEndpointGroupCatalog(
   if (group.modelPolicy.model && !result.models.some(model => model.id === group.modelPolicy.model)) {
     result.models = result.models.map(model => ({ ...model, default: false }));
   }
-  return result;
+  return { ...result, blocked_models: group.modelPolicy.blocked_models ?? [] };
+}
+
+/** Legacy catalogs retain their old behavior until an explicit block policy is added. */
+export function blockExecutionGroupCatalog(catalog: FleetProviderModelsResponse, policy: ExecutionModelPolicy): FleetProviderModelsResponse {
+  if (!policy.blocked_models?.length) return catalog;
+  const models = catalog.models.filter(model => !executionModelPolicyReason(policy, model.id));
+  const selected = models.find(model => model.default)?.id ?? models[0]?.id;
+  return { ...catalog, blocked_models: policy.blocked_models,
+    models: models.map(model => ({ ...model, default: model.id === selected })) };
 }
 
 /** Minimal data source shared by API catalogs and dispatch capability checks. */
@@ -123,6 +133,7 @@ export interface FleetModelResponse {
 }
 
 export interface FleetProviderModelsResponse {
+  blocked_models?: string[];
   provider: string;
   online_runtime_count: number;
   models: FleetModelResponse[];

@@ -812,7 +812,9 @@
     "catalog_needs_machines": "分配机器后自动探测可用模型",
     "ready_summary": "{{ready}}/{{total}} 已就绪",
     "selected_machines": "已选 {{selected}}/{{total}}",
-    "retry": "重试"
+    "retry": "重试",
+    "model_blocklist": "屏蔽模型（精确 ID，每行一个；优先于放行名单）",
+    "no_default_model": "未配置组默认模型"
   },
   "storage": {
     "card_aria": "{{name}} 的存储",

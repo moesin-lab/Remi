@@ -14,6 +14,82 @@ useEndpointEncryptionKey();
 afterEach(resetMultiremiTestEnv);
 
 pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
+  it("blocks exact IDs across catalog, API selection, enqueue and claim while preserving frozen work", async () => {
+    const { store } = fixture();
+    const endpoint = store.saveExecutionEndpoint("local", { name: "Policy gateway", connection, api_key: key });
+    const runtime = store.registerRuntime({ name: "Policy Codex", provider: "codex", metadata: { execution_endpoints: 1, codex_profiles: 1 } });
+    const input = { name: "Policy group", provider: "codex", endpoint_id: endpoint.id, runtime_ids: [runtime.id] };
+    const group = store.saveExecutionGroup("local", input);
+    const ack = () => {
+      const binding = store.getRuntimeExecutionBindings(runtime.id)[0]!;
+      store.recordRuntimeExecutionBindingAcks(runtime.id, [{ ...binding, status: "ready", model_catalog: { status: "ready",
+        models: ["blocked", "allowed", "Blocked"].map(id => ({ id, label: id, provider: "codex", default: id === "blocked" })) } }]);
+    };
+    ack();
+    const agent = store.createAgent({ name: "Saved", provider: "codex", executionGroupId: group.id, model: "blocked" });
+    const claimedTask = store.createTask({ agentId: agent.id, prompt: "Already claimed" });
+    expect(store.claimTask(runtime.id)?.id).toBe(claimedTask.id);
+    const queuedTask = store.createTask({ agentId: agent.id, prompt: "Not claimed" });
+    store.saveExecutionGroup("local", { ...input, model_policy: { blocked_models: ["blocked", "future"] } }, group.id);
+    ack();
+    const catalog = executionGroupModelCatalog(store, "local", group.id, "local")[0]!;
+    expect(catalog.models.map(model => model.id)).toEqual(["allowed", "Blocked"]);
+    expect(catalog.models.find(model => model.default)?.id).toBe("allowed");
+    expect(catalog.blocked_models).toEqual(["blocked", "future"]);
+    expect(store.getAgent(agent.id)?.model).toBe("blocked");
+    expect(() => store.createTask({ agentId: agent.id, prompt: "New" })).toThrow("model blocked by policy");
+    expect(store.claimTask(runtime.id)).toBeNull();
+    expect(store.getTask(queuedTask.id)?.status).toBe("queued");
+    store.refreshQueuedCapabilityWaitReasons(Date.now() + 180_000);
+    expect(store.getTask(queuedTask.id)?.waitReason).toContain("model_blocked_by_policy");
+    expect(store.getTask(claimedTask.id)?.executionModel).toBe("blocked");
+    expect(store.getTask(claimedTask.id)?.codexProfile?.model).toBe("blocked");
+    const app = createMultiremiApp({ store });
+    const invalidDefault = await app.request(`/api/execution-groups/${group.id}`, { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...input, model_policy: { model: "blocked", blocked_models: ["blocked"] } }) });
+    expect(invalidDefault.status).toBe(400);
+    expect(await invalidDefault.json()).toMatchObject({ code: "model_blocked_by_policy", field: "model_policy.model" });
+    const saved = await (await app.request(`/api/agents/${agent.id}`)).json();
+    expect(saved.model_policy_reason).toBe("model_blocked_by_policy");
+    const denied = await app.request("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Cannot select", provider: "codex", execution_group_id: group.id, model: "blocked" }) });
+    expect(denied.status).toBe(400);
+    expect(await denied.json()).toMatchObject({ code: "model_blocked_by_policy" });
+    const frozen = store.getTask(claimedTask.id)!;
+    store.cancelTask(claimedTask.id);
+    const retry = store.createTask({ agentId: agent.id, prompt: "Retry frozen execution", runtimeId: runtime.id,
+      executionModel: frozen.executionModel, executionConnection: frozen.executionConnection,
+      codexProfile: frozen.codexProfile, executionFingerprint: frozen.executionFingerprint, pluginSnapshot: frozen.pluginSnapshot });
+    const retryClaim = store.claimTask(runtime.id);
+    expect(retryClaim?.id).toBe(retry.id);
+    expect(retryClaim?.executionModel).toBe("blocked");
+    store.cancelTask(retry.id);
+    const auto = store.createAgent({ name: "Automatic", provider: "codex", executionGroupId: group.id });
+    const next = store.createTask({ agentId: auto.id, prompt: "Automatic default" });
+    const claim = store.claimTask(runtime.id);
+    expect(claim?.id).toBe(next.id);
+    expect(claim?.executionModel).toBe("allowed");
+    expect(claim?.codexProfile?.model).toBe("allowed");
+    store.saveExecutionGroup("local", { ...input, model_policy: { blocked_models: [] } }, group.id);
+    ack();
+    store.refreshQueuedCapabilityWaitReasons(Date.now() + 180_000);
+    expect(store.getTask(queuedTask.id)?.waitReason).toBeNull();
+  });
+
+  it("retains blocks through legacy profile updates and rejects a blocked legacy default atomically", () => {
+    const { store } = fixture();
+    const profile = store.saveExecutionProfile("local", { name: "Legacy", provider: "codex",
+      profile: { name: "legacy", base_url: connection.base_url, auth_mode: "api_key", env_key: "", model: "keep" }, api_key: key });
+    const endpoint = store.saveExecutionEndpoint("local", { name: "Converted", connection, api_key: key }, profile.id);
+    const group = store.saveExecutionGroup("local", { name: "Blocked group", provider: "codex", endpoint_id: endpoint.id,
+      runtime_ids: [], model_policy: { model: "keep", blocked_models: ["hide"] } });
+    store.saveExecutionProfile("local", { name: "Edited", provider: "codex", profile: { ...profile.profile, model: "keep" } }, profile.id);
+    expect(store.getExecutionGroup(group.id)?.modelPolicy.blocked_models).toEqual(["hide"]);
+    expect(() => store.saveExecutionProfile("local", { name: "Bad", provider: "codex", profile: { ...profile.profile, model: "hide" } }, profile.id))
+      .toThrow("default model is blocked");
+    expect(store.getExecutionGroup(group.id)?.modelPolicy.model).toBe("keep");
+  });
+
   it("retains good inventory on failure, ignores superseded revisions and keeps drafts unsaved", async () => {
     const { store } = fixture();
     const endpoint = store.saveExecutionEndpoint("local", { name: "Catalog", connection, api_key: key });

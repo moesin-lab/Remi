@@ -1,3 +1,4 @@
+import { ExecutionModelPolicyError } from "@multiremi/contracts/execution-endpoint.js";
 import type { Context, Hono } from "hono";
 import type { RouterDeps } from "./deps.js";
 import { parseEndpointConnection, type EndpointProtocol } from "@multiremi/contracts/execution-endpoint.js";
@@ -42,6 +43,7 @@ export function registerExecutionConfigRoutes(
   const failure = (c: Context, error: unknown) =>
     c.json(
       {
+        ...(error instanceof ExecutionModelPolicyError ? { code: error.code, field: error.field } : {}),
         error:
           error instanceof Error
             ? error.message

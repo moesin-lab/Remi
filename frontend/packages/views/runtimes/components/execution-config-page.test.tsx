@@ -82,9 +82,10 @@ it("stores model policy on the group without mutating its shared endpoint", asyn
   await user.click(within(await screen.findByRole("article", { name: "Codex team" })).getByRole("button", { name: "Edit" }));
   fireEvent.change(screen.getByLabelText("Model ID"), { target: { value: "fast" } });
   fireEvent.change(screen.getByLabelText(/Allowed models/), { target: { value: "fast\nlarge" } });
+  fireEvent.change(screen.getByLabelText(/Blocked models/), { target: { value: "large\nfuture" } });
   await user.click(screen.getByRole("button", { name: "Save group" }));
   await waitFor(() => expect(api.saveExecutionGroup).toHaveBeenCalledWith("ws", "g1", expect.objectContaining({
-    endpoint_id: "p1", model_policy: { model: "fast", models: ["fast", "large"] },
+    endpoint_id: "p1", model_policy: { model: "fast", models: ["fast", "large"], blocked_models: ["large", "future"] },
   })));
   expect(api.saveExecutionEndpoint).not.toHaveBeenCalled();
 });

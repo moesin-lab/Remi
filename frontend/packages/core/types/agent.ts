@@ -752,6 +752,7 @@ export interface RuntimeModelsResult {
  * no capacity at the moment (tasks would queue).
  */
 export interface FleetProviderModels {
+  blocked_models?: string[];
   provider: string;
   /** A ready Codex catalog is the authoritative set of selectable models. */
   model_catalog_status?: "ready" | "error" | "unknown";

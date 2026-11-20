@@ -247,6 +247,8 @@ Keep that tag unchanged; recovery does not prepare or publish a new version.
 
 ## Internal Compose updater
 
+已有历史 level 0 数据库首次升级 B1 必须先按 [离线升级手册](../docs/deploy/b1-schema-upgrade.md)停写、备份并执行目标版 `remi db prepare`。release preflight 在停服务前检查 schema 登记状态，目标包验真后再次检查声明及 contract floor；不满足时拒绝更新，不自动执行历史 prepare，也不恢复生产数据库备份。
+
 [compose.internal-updates.yml](docker/compose.internal-updates.yml) extends the
 standard [local Compose topology](docker/compose.local.yml). It works with Linux
 containers on Windows Docker Desktop, macOS Docker Desktop and Linux. It does

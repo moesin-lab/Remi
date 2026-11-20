@@ -3343,6 +3343,10 @@ runMigrations(this.db);
     return this.runtimes.listRuntimes();
   }
 
+  listRuntimesLiteForWorkspace(workspaceId: string): MultiremiRuntime[] {
+    return this.runtimes.listRuntimesLiteForWorkspace(workspaceId);
+  }
+
   listRuntimesForWorkspace(workspaceId: string): MultiremiRuntime[] {
     return this.runtimes.listRuntimesForWorkspace(workspaceId);
   }
@@ -6468,6 +6472,10 @@ runMigrations(this.db);
 
   reportTaskUsage(taskId: string, usage: TaskUsageEntry[]): MultiremiTask {
     return this.tasks.reportTaskUsage(taskId, usage);
+  }
+
+  recoverOrphanAttempt(runtimeId: string, attemptId: string): { orphaned: number; retried: number } {
+    return this.tasks.recoverOrphanAttempt(runtimeId, attemptId);
   }
 
   recoverOrphans(runtimeId: string, activeTaskIds?: readonly string[]): { orphaned: number; retried: number } {

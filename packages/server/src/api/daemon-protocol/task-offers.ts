@@ -161,7 +161,10 @@ export class DaemonTaskOffers {
     const sweep = this.bindGeneration(() => {
       if (this.stopped) return;
       for (const session of this.options.layer.registry.listSessions()) {
-        for (const rt of session.runtimeIds) this.kick(rt, true);
+        for (const rt of session.runtimeIds) {
+          this.options.store.plannedRestarts().recoverExpiredResumes(rt);
+          this.kick(rt, true);
+        }
       }
       this.sweepTimer = this.clock.setTimeout(sweep, sweepMs);
       (this.sweepTimer as ReturnType<typeof setTimeout>).unref?.();

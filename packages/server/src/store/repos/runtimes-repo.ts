@@ -639,6 +639,14 @@ export class RuntimesRepo {
     return row;
   }
 
+  /** Directory availability needs identity/liveness, without historical usage or model hydration. */
+  listRuntimesLiteForWorkspace(workspaceId: string): MultiremiRuntime[] {
+    const rows = this.ctx.db.query(`SELECT * FROM multiremi_runtimes
+      WHERE COALESCE(workspace_id, 'local') = ?
+      ORDER BY updated_at DESC, id DESC`).all(workspaceId) as Row[];
+    return rows.map(row => withRuntimeLiveness(toRuntime(row)));
+  }
+
   listRuntimes(): MultiremiRuntime[] {
     const rows = this.ctx.db.query(
       `SELECT runtime.*, profile.display_name AS daemon_display_name

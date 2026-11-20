@@ -11,7 +11,7 @@ let root: string;
 afterEach(() => {
   if (savedHome === undefined) delete process.env.REMI_HOME;
   else process.env.REMI_HOME = savedHome;
-  if (root) rmSync(root, { recursive: true, force: true });
+  if (root) removeRuntimeStaging(root);
 });
 
 function fixture(options: { fail?: boolean; executableVersion?: string; symlinkHome?: boolean } = {}) {
@@ -147,5 +147,36 @@ for (const [platform, code] of [["linux", "EBUSY"], ["win32", "EACCES"]]) {
       attempts++; throw failure;
     }, wait: () => { throw new Error("must not wait"); } })).toThrow(failure);
     expect(attempts).toBe(1);
+  });
+}
+
+for (const scenario of ["released", "exhausted", "permanent"] as const) {
+  test(`installation cleanup ${scenario} releases the lock and preserves the existing bundle`, () => {
+    const f = fixture();
+    const installFailure = new Error("unsupported bridge");
+    const cleanupFailure = Object.assign(new Error("cleanup failed"), {
+      code: scenario === "permanent" ? "EACCES" : "EBUSY",
+    });
+    const delays: number[] = [];
+    let attempts = 0;
+    let stage = "";
+    expect(() => installRuntimeBundle("codex", f.tools, () => { throw installFailure; }, undefined, (path) => {
+      stage = path;
+      removeRuntimeStaging(path, {
+        platform: "win32",
+        remove: (target) => {
+          attempts++;
+          if (scenario !== "released" || attempts < 3) throw cleanupFailure;
+          rmSync(target, { recursive: true, force: true });
+        },
+        wait: (ms) => { delays.push(ms); },
+      });
+    })).toThrow(scenario === "released" ? installFailure : cleanupFailure);
+    expect(attempts).toBe(scenario === "released" ? 3 : scenario === "exhausted" ? 6 : 1);
+    expect(delays).toEqual(scenario === "released" ? [100, 200] : scenario === "exhausted" ? [100, 200, 300, 400, 500] : []);
+    expect(stage).not.toBe("");
+    expect(existsSync(stage)).toBe(scenario !== "released");
+    expect(existsSync(join(root, "acp", "bundles", ".install-codex.lock"))).toBe(false);
+    expect(readFileSync(join(f.destination, "previous-install"), "utf8")).toBe("keep this working install");
   });
 }

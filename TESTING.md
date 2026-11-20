@@ -42,6 +42,11 @@ ERROR 的 JSONL 保留异常 name、message 和 stack。
 前者在真实 SQL 边界确定性地安排另一个已提交 INSERT，覆盖首次查询后出现同一主键的用户且保留胜者资料；
 它不模拟多进程或网络，按集成夹具配置运行 SQLite 或 PostgreSQL。后者继续以真实 PostgreSQL 上的
 10 个新库、每库两个 API 进程检查冷启动和迁移锁争用，不调整超时或轮数。
+工作区冷启动回归：`bun run test tests/integration/local-workspace-bootstrap.test.ts`。
+在真实缺行 SELECT 返回边界暂停首个进程，同步等待第二个进程完成生产 Store 初始化后才继续，
+分别固定 local workspace 与 operator member 的竞争交错；SQLite 使用临时文件，配置
+`MULTIREMI_TEST_POSTGRES_URL` 时使用独立 PostgreSQL 数据库，两侧都检查唯一身份和胜者配置保留。
+workspace 尚不存在时使用主键冲突忽略并重读；member 创建复用已有生命周期行锁并在锁内重读。
 `supervisor-recovery` 的 slot 端口保留到 edge 监听完成，初始化失败也必须清理 edge 探针和目录，
 其失败清理回归观察一个完整探针周期，避免探针污染后续 skill import 的全局 fetch mock。
 

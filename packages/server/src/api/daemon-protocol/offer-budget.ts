@@ -256,3 +256,17 @@ export function fitTaskOfferToBudget(response: Payload, runtimeId: string, budge
   const bytes = taskOfferBytes(response, runtimeId);
   return { response, report: { bytes, parts, steps } };
 }
+
+/** Resume carries a full offer plus canonical questions in one ordinary RPC frame. */
+export function fitRestartResumeToBudget(task: Payload, questions: unknown[], generation: number, runtimeId: string): Payload | null {
+  const envelopeBytes = 4096;
+  const questionBytes = Buffer.byteLength(JSON.stringify(questions));
+  const budget = Math.min(DAEMON_OFFER_BUDGET_BYTES, DAEMON_FRAME_MAX_BYTES - questionBytes - envelopeBytes);
+  if (budget <= 0) return null;
+  const prepared = fitTaskOfferToBudget(task, runtimeId, budget);
+  const reply = { ok: true, generation, task: prepared.response, recovered_questions: questions };
+  // Protected offer fields and canonical questions cannot always be trimmed.
+  // Fail explicitly instead of letting the socket silently discard the reply.
+  if (Buffer.byteLength(JSON.stringify(reply)) > DAEMON_FRAME_MAX_BYTES - envelopeBytes) return null;
+  return reply;
+}

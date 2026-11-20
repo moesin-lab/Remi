@@ -4483,6 +4483,15 @@ export class MultiremiDaemon {
     for (const entry of this.restartJournal!.entries()) {
       if (this.stopped || !this.restartRecoveryCandidates.has(entry.execution.handoff_id) || this.resumedRestartIds.has(entry.execution.handoff_id)
         || entry.execution.runtime_id !== this.options.runtimeId) continue;
+      const retry = this.restartJournal!.reserveResume(entry.execution.handoff_id);
+      if (retry === "waiting") continue;
+      if (retry === "expired") {
+        // Retain the exhausted journal as evidence, but never retry it, including
+        // after another daemon restart. It is not an execution grant.
+        this.restartRecoveryCandidates.delete(entry.execution.handoff_id);
+        log.error(`Planned restart ${entry.execution.handoff_id} recovery budget exhausted`);
+        continue;
+      }
       try {
         await this.restartTransfer!.resume(entry.execution.handoff_id);
         const task = this.pendingResumedTasks.get(entry.execution.handoff_id)!;
@@ -4492,7 +4501,14 @@ export class MultiremiDaemon {
         this.inflight.add(run);
         void run.catch(error => log.error(`Resumed task ${task.id} failed: ${String(error)}`));
       } catch (error) {
-        if (error instanceof DaemonProtocolRpcError && error.code === "stale_execution") this.restartRecoveryCandidates.delete(entry.execution.handoff_id);
+        if (error instanceof DaemonProtocolRpcError
+          && ["restart_terminal", "stale_execution", "authority_revoked", "capacity", "invalid_checkpoint", "invalid_report"].includes(error.code)) {
+          this.restartJournal!.remove(entry.execution.handoff_id);
+          this.restartRecoveryCandidates.delete(entry.execution.handoff_id);
+          this.pendingResumedTasks.delete(entry.execution.handoff_id);
+          log.info(`Planned restart ${entry.execution.handoff_id} terminated: ${error.code}`);
+          continue;
+        }
         log.warn(`Planned restart ${entry.execution.handoff_id} waiting: ${error instanceof Error ? error.message : String(error)}`);
       }
     }

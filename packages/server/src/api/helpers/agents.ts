@@ -1,5 +1,6 @@
+import { executionModelPolicyReason } from "@multiremi/contracts/execution-endpoint.js";
 import { runtimeConnectionModels } from "@multiremi/contracts/runtime-connection";
-import { executionEndpointGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
+import { executionEndpointGroupCatalog, blockExecutionGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { createLogger } from "@shared/logger.js";
 import { workspaceRuntimeModelCatalog, intersectExecutionGroupCatalogs, catalogAllowsModel, modelThinkingState, providerDeclaresReasoningLevels, runtimeTargetModelCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { GATEWAY_REASONING_LEVELS, manualThinkingResponse } from "@multiremi/store/runtime-model-catalog.js";
@@ -82,16 +83,16 @@ export function executionGroupModelCatalog(store: MultiremiStore, workspaceId: s
   if (group.connectionMode !== "legacy") return [executionEndpointGroupCatalog(group,
     runtimeId => store.getRuntimeBindingModelCatalog(groupId, runtimeId), runtimes.filter(runtime => runtime.status === "online").length)];
   const profile = group.managed ? store.getGroupExecutionProfile(groupId, workspaceId)?.profile ?? null : undefined;
-  if (profile && !runtimes.length) return [{
+  if (profile && !runtimes.length) return [blockExecutionGroupCatalog({
     provider: group.provider,
     models: runtimeConnectionModels(profile, group.provider, []),
     online_runtime_count: runtimes.filter((runtime) => runtime.status === "online").length,
     ...(!profile.model ? { model_catalog_status: "unknown" as const } : {}),
-  }];
+  }, group.modelPolicy)];
   const providers = runtimes.map((runtime) => runtimeTargetModelCatalog(store, workspaceId, runtime, profile, group.managed ? groupId : undefined)
     .find((entry) => entry.provider === group.provider));
   return intersectExecutionGroupCatalogs(group.provider, providers, runtimes.filter(runtime => runtime.status === "online").length,
-    Boolean(profile && !profile.model));
+    Boolean(profile && !profile.model)).map(catalog => blockExecutionGroupCatalog(catalog, group.modelPolicy));
 }
 
 export function executionGroupRequestOwner(c: Context, store: MultiremiStore, workspaceId: string): string | Response {
@@ -426,6 +427,9 @@ function validateAgentModelSelection(
   // Unrelated edits may resend the saved selection. Discovery must never force
   // users to replace a saved model/effort just to edit an Agent's metadata.
   if (input.preserveSavedSelection) return null;
+  const policyGroup = input.executionGroupId ? store.getExecutionGroup(input.executionGroupId, input.workspaceId) : null;
+  if (policyGroup && input.model && executionModelPolicyReason(policyGroup.modelPolicy, input.model) === "model_blocked_by_policy")
+    return c.json({ code: "model_blocked_by_policy", error: `model "${input.model}" blocked by policy` }, 400);
   const groupCatalog = !input.runtimeId && input.executionGroupId
     ? executionGroupModelCatalog(store, input.workspaceId, input.executionGroupId, input.ownerId ?? currentRequestUserId(c))[0]
     : undefined;
@@ -499,6 +503,9 @@ function validateAgentFallbackSelection(
   if (effectiveModel === input.fallbackModel) {
     return c.json({ error: "fallback_model must be different from the primary model" }, 400);
   }
+  const policyGroup = input.executionGroupId ? store.getExecutionGroup(input.executionGroupId, input.workspaceId) : null;
+  if (policyGroup && executionModelPolicyReason(policyGroup.modelPolicy, input.fallbackModel) === "model_blocked_by_policy")
+    return c.json({ code: "model_blocked_by_policy", error: `fallback_model "${input.fallbackModel}" blocked by policy` }, 400);
   if (profile && !(profile.models ?? [profile.model]).includes(input.fallbackModel)) {
     return c.json({
       code: "model_not_in_execution_catalog",

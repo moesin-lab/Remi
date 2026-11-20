@@ -1610,6 +1610,7 @@
         "status": "active",
         "max_concurrent_tasks": 3,
         "model": "",
+        "model_policy_reason": null,
         "fallback_model": "",
         "thinking_level": "",
         "fallback_thinking_level": "",
@@ -1650,6 +1651,7 @@
         "status": "active",
         "max_concurrent_tasks": 3,
         "model": "claude-opus-4",
+        "model_policy_reason": null,
         "fallback_model": "",
         "thinking_level": "",
         "fallback_thinking_level": "",
@@ -1747,6 +1749,7 @@
         "status": "archived",
         "max_concurrent_tasks": 3,
         "model": "claude-opus-4",
+        "model_policy_reason": null,
         "fallback_model": "",
         "thinking_level": "",
         "fallback_thinking_level": "",
@@ -1793,6 +1796,7 @@
         "status": "active",
         "max_concurrent_tasks": 3,
         "model": "claude-opus-4",
+        "model_policy_reason": null,
         "fallback_model": "",
         "thinking_level": "",
         "fallback_thinking_level": "",
@@ -1840,6 +1844,7 @@
           "status": "active",
           "max_concurrent_tasks": 6,
           "model": "",
+          "model_policy_reason": null,
           "fallback_model": "",
           "thinking_level": "",
           "fallback_thinking_level": "",
@@ -1927,7 +1932,8 @@
           "supervisor": false,
           "archivedAt": null,
           "createdAt": "<timestamp>",
-          "updatedAt": "<timestamp>"
+          "updatedAt": "<timestamp>",
+          "model_policy_reason": null
         }
       }
     },
@@ -1998,7 +2004,8 @@
           "supervisor": false,
           "archivedAt": null,
           "createdAt": "<timestamp>",
-          "updatedAt": "<timestamp>"
+          "updatedAt": "<timestamp>",
+          "model_policy_reason": null
         }
       }
     },
@@ -2045,7 +2052,8 @@
           "supervisor": false,
           "archivedAt": null,
           "createdAt": "<timestamp>",
-          "updatedAt": "<timestamp>"
+          "updatedAt": "<timestamp>",
+          "model_policy_reason": null
         },
         "importedSkillIds": [],
         "imported_skill_ids": [],
@@ -2118,7 +2126,8 @@
           "supervisor": false,
           "archivedAt": "<timestamp>",
           "createdAt": "<timestamp>",
-          "updatedAt": "<timestamp>"
+          "updatedAt": "<timestamp>",
+          "model_policy_reason": null
         }
       }
     },
@@ -5531,6 +5540,7 @@
           "status": "active",
           "max_concurrent_tasks": 6,
           "model": "claude-sonnet-4",
+          "model_policy_reason": null,
           "fallback_model": "",
           "thinking_level": "",
           "fallback_thinking_level": "",
@@ -5578,6 +5588,7 @@
         "status": "active",
         "max_concurrent_tasks": 6,
         "model": "claude-sonnet-4",
+        "model_policy_reason": null,
         "fallback_model": "",
         "thinking_level": "",
         "fallback_thinking_level": "",
@@ -16769,7 +16780,8 @@
           "supervisor": false,
           "archivedAt": null,
           "createdAt": "<timestamp>",
-          "updatedAt": "<timestamp>"
+          "updatedAt": "<timestamp>",
+          "model_policy_reason": null
         }
       }
     },

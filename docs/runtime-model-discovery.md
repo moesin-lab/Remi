@@ -20,6 +20,11 @@ not fabricate a model from a manually entered default or inherit global gateway 
 The selected model and connection are frozen on first claim. Unknown/failed catalogs
 block new tasks until a usable catalog is reported.
 
+Queue capability observation and queued fallback preflight use the claim-time
+snapshot check for frozen retries. A later group policy block does not create a
+capability wait or switch these retries to a fallback model; Runtime membership
+and authorization still apply.
+
 When a Codex endpoint includes complete native `models` metadata, discovery validates
 it with the actual Codex decoder. An ordinary `data` array does not imply reasoning
 support. The display-only legacy workspace overlay described below remains for older
@@ -233,3 +238,5 @@ into an endpoint and moves `default_model` into group policy. The Relay row reta
 endpoint reference for old consumers; new groups neither read nor inherit that row.
 
 执行端点可通过 `options.models_url` 指定目录地址，通过 `fetch_models: false` 禁止自动发现并使用 `manual_models`。Runtime 合并手动条目与发现结果；发现失败且配置手动条目时使用手动目录。服务器编辑器的检查缓存只供查看，不替代执行组成员的目录确认。Codex 禁用列表时也跳过原生扩展目录请求，不能由手工条目推断原生推理能力。详见[执行配置](dev/execution-configuration.md#第三方端点接入)。
+
+执行组的 `model_policy.blocked_models` 按精确 ID 在放行名单之后过滤成员目录；catalog、Agent 选型校验与任务调度共用 `executionModelPolicyReason`。响应的 `blocked_models` 保留屏蔽原因，即使模型已从可选列表移除或尚未发现，已保存的选项仍可解释。详见[执行配置](dev/execution-configuration.md)。

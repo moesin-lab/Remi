@@ -70,6 +70,7 @@ export function GroupForm({
   const [models, setModels] = useState(
     initial?.model_policy?.models?.join("\n") ?? "",
   );
+  const [blockedModels, setBlockedModels] = useState(initial?.model_policy?.blocked_models?.join("\n") ?? "");
   const [legacyConnection, setLegacyConnection] = useState(
     initial?.connection_mode === "legacy" && !initialEndpointId,
   );
@@ -119,6 +120,8 @@ export function GroupForm({
               ? { model: input.model_policy.model.trim() }
               : {}),
             ...(allowed.length ? { models: allowed } : {}),
+            ...(blockedModels.trim() || initial?.model_policy?.blocked_models?.length
+              ? { blocked_models: [...new Set(blockedModels.split(/[,\n]/).map(id => id.trim()).filter(Boolean))] } : {}),
           },
         });
       }}
@@ -283,7 +286,7 @@ export function GroupForm({
             className="group rounded-xl border bg-muted/10"
             open={
               !!initial?.model_policy?.model ||
-              !!initial?.model_policy?.models?.length
+              !!initial?.model_policy?.models?.length || !!initial?.model_policy?.blocked_models?.length
             }
           >
             <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3.5 py-2.5 text-xs font-medium text-foreground select-none [&::-webkit-details-marker]:hidden">
@@ -323,6 +326,10 @@ export function GroupForm({
                   value={models}
                   onChange={(e) => setModels(e.target.value)}
                 />
+              </label>
+              <label className="block space-y-1.5">
+                <span className="text-xs font-medium text-foreground">{t(($) => $.configuration.model_blocklist)}</span>
+                <Textarea rows={3} className="bg-background font-mono text-xs" value={blockedModels} onChange={e => setBlockedModels(e.target.value)} />
               </label>
               <p className="text-[11px] leading-relaxed text-muted-foreground">
                 {t(($) => $.configuration.model_selection_hint)}

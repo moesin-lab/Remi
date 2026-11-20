@@ -837,7 +837,9 @@
     "catalog_needs_machines": "Assign machines to discover available models",
     "ready_summary": "{{ready}}/{{total}} ready",
     "selected_machines": "{{selected}}/{{total}} selected",
-    "retry": "Retry"
+    "retry": "Retry",
+    "model_blocklist": "Blocked models (exact IDs, one per line; overrides allowlist)",
+    "no_default_model": "No group default configured"
   },
   "storage": {
     "card_aria": "Storage on {{name}}",

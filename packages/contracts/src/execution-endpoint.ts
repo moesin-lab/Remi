@@ -29,9 +29,14 @@ export interface ExecutionEndpointInput {
   connection: unknown;
   api_key?: unknown;
 }
+export class ExecutionModelPolicyError extends Error {
+  constructor(public readonly code: string, message: string, public readonly field?: string) { super(message); }
+}
 export interface ExecutionModelPolicy {
   model?: string;
   models?: string[];
+  /** Exact, case-sensitive IDs; takes precedence over models. */
+  blocked_models?: string[];
 }
 export interface ExecutionConnectionSnapshot {
   mode: "native" | "endpoint";
@@ -127,14 +132,26 @@ export function parseExecutionModelPolicy(value: unknown): ExecutionModelPolicy 
   if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("model_policy must be an object");
   const policy = value as ExecutionModelPolicy;
-  if (Object.keys(policy).some(key => key !== "model" && key !== "models")) throw new Error("Unsupported model policy field");
+  if (Object.keys(policy).some(key => key !== "model" && key !== "models" && key !== "blocked_models")) throw new Error("Unsupported model policy field");
   const valid = (id: unknown): id is string => typeof id === "string" && !!id.trim()
     && id === id.trim() && id.length <= 200 && !/[\x00-\x1f\x7f]/.test(id);
   if (policy.model !== undefined && policy.model !== "" && !valid(policy.model)) throw new Error("Invalid default model");
   if (policy.models !== undefined && (!Array.isArray(policy.models) || !policy.models.length || policy.models.length > 200
     || policy.models.some(id => !valid(id)) || new Set(policy.models).size !== policy.models.length
     || (policy.model && !policy.models.includes(policy.model)))) throw new Error("Model allowlist must contain unique IDs and the default model");
-  return { ...(policy.model ? { model: policy.model } : {}), ...(policy.models ? { models: policy.models } : {}) };
+  if (policy.blocked_models !== undefined && (!Array.isArray(policy.blocked_models) || policy.blocked_models.length > 200
+    || policy.blocked_models.some(id => !valid(id)) || new Set(policy.blocked_models).size !== policy.blocked_models.length))
+    throw new Error("model_policy.blocked_models must contain at most 200 unique model IDs");
+  if (policy.model && executionModelPolicyReason(policy, policy.model) === "model_blocked_by_policy")
+    throw new ExecutionModelPolicyError("model_blocked_by_policy", "model_policy.model: default model is blocked by policy", "model_policy.model");
+  return { ...(policy.blocked_models?.length ? { blocked_models: policy.blocked_models } : {}), ...(policy.model ? { model: policy.model } : {}), ...(policy.models ? { models: policy.models } : {}) };
+}
+
+/** Shared policy decision for catalogs, Agent validation and task eligibility. */
+export function executionModelPolicyReason(policy: ExecutionModelPolicy, model: string): "model_blocked_by_policy" | "model_not_allowed_by_policy" | null {
+  if (policy.blocked_models?.includes(model)) return "model_blocked_by_policy";
+  if (policy.models && !policy.models.includes(model)) return "model_not_allowed_by_policy";
+  return null;
 }
 
 /** Adapt a protocol endpoint at the group boundary; stored endpoints never own models or engines. */

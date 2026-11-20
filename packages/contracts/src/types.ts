@@ -71,6 +71,8 @@ export interface MultiremiAgentTemplate extends MultiremiAgentTemplateSummary {
 export type MultiremiAgentRole = "normal" | "maintainer" | "supervisor";
 
 export interface MultiremiAgent {
+  /** Computed from current group policy; never changes the stored model. */
+  model_policy_reason?: string | null;
   executionGroupId?: string | null;
   execution_group_id?: string | null;
   id: string;

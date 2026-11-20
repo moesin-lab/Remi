@@ -207,7 +207,8 @@
     "label": "Model",
     "default_provider": "Default (provider)",
     "discovery_failed": "discovery failed",
-    "clear_full": "Clear selection (use provider default)"
+    "clear_full": "Clear selection (use provider default)",
+    "blocked_by_policy": "This model is blocked by group policy. Select another model."
   },
   "tabs": {
     "activity": "Activity",

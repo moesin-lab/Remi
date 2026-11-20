@@ -1,8 +1,9 @@
+import { type ExecutionModelPolicy, executionModelPolicyReason } from "@multiremi/contracts/execution-endpoint.js";
 import { PlannedRestarts } from "../planned-restarts.js";
 import { isBuildCommit } from "@shared/daemon-artifact-manifest.js";
 import { DEFAULT_DAEMON_DRAIN_MS, type DaemonDrainStatus, type DaemonDrainReason } from "@multiremi/contracts/daemon-drain.js";
 import { BOT_MENU_PROTOCOL_VERSION } from "@multiremi/contracts/types.js";
-import { executionEndpointGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
+import { executionEndpointGroupCatalog, blockExecutionGroupCatalog } from "@multiremi/store/runtime-model-catalog.js";
 import { runTurnExecutionMutation } from "@multiremi/store/turn-execution-records.js";
 import { createLogger } from "@shared/logger.js";
 import { DAEMON_MIN_CLI_VERSION, DAEMON_PROTOCOL_VERSION, meetsDaemonMinCliVersion } from "@multiremi/contracts/daemon-protocol.js";
@@ -2833,14 +2834,16 @@ export class RuntimesRepo {
     if (group?.managed) {
       const profile = getGroupExecutionProfile(this.ctx.db, group.id, agent.workspaceId)?.profile ?? null;
       if (!profile || profile.model || !runtimeId) return profile;
-      const models = this.discoveredExecutionGroupCatalog(group, profile)?.models ?? [];
+      const models = (group.connectionMode !== "legacy"
+        ? executionEndpointGroupCatalog(group, id => new ExecutionBindingStatesRepo(this.ctx).getRuntimeBindingModelCatalog(group.id, id))
+        : this.discoveredExecutionGroupCatalog(group, profile))?.models ?? [];
       const selected = models.find(model => model.default) ?? models[0];
       return selected ? { ...profile, model: selected.id } : profile;
     }
     return runtimeId ? this.getRuntimeExecutionProfile(runtimeId, agent.provider) : null;
   }
 
-  private discoveredExecutionGroupCatalog(group: { id: string; provider: string; runtimeIds: string[] }, profile: RuntimeCodexProfile) {
+  private discoveredExecutionGroupCatalog(group: { id: string; provider: string; runtimeIds: string[]; modelPolicy?: ExecutionModelPolicy }, profile: RuntimeCodexProfile) {
     const states = new ExecutionBindingStatesRepo(this.ctx);
     const catalogs = [...group.runtimeIds].sort().map(id => states.getRuntimeBindingModelCatalog(group.id, id));
     if (!catalogs.length || catalogs.some(catalog => catalog?.status !== "ready")) return null;
@@ -2848,14 +2851,28 @@ export class RuntimesRepo {
       model_catalog_status: "ready" as const,
       models: runtimeConnectionModels(profile, group.provider, catalog!.models).map(runtimeModelCompatibilityResponse),
     }));
-    return intersectExecutionGroupCatalogs(group.provider, providers, 0, true)[0]!;
+    return blockExecutionGroupCatalog(intersectExecutionGroupCatalogs(group.provider, providers, 0, true)[0]!, group.modelPolicy ?? {});
+  }
+
+  agentModelPolicyReason(agent: MultiremiAgent): string | null {
+    if (!agent.executionGroupId) return null;
+    const policy = memoizeRequestRead(this.ctx.db, ["multiremi_execution_groups"],
+      `model-policy:${JSON.stringify([agent.workspaceId, agent.executionGroupId])}`, () => {
+        const row = this.ctx.db.query("SELECT model_policy FROM multiremi_execution_groups WHERE workspace_id=? AND id=?")
+          .get(agent.workspaceId, agent.executionGroupId!) as { model_policy: string } | null;
+        return row ? JSON.parse(row.model_policy) as ExecutionModelPolicy : null;
+      });
+    const model = agent.model || policy?.model;
+    return policy && model ? executionModelPolicyReason(policy, model) : null;
   }
 
   runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
+    if (this.agentModelPolicyReason(agent)) return false;
     const workspaces = new WorkspacesRepo(this.ctx);
     const group = agent.executionGroupId ? getExecutionGroup(this.ctx.db, agent.executionGroupId, agent.workspaceId) : null;
     const profileOverride = group?.managed ? this.getAgentExecutionProfile(runtime.id, agent) : undefined;
     if (profileOverride && !profileOverride.model) return false;
+    if (profileOverride?.model && group && executionModelPolicyReason(group.modelPolicy, agent.model || profileOverride.model) === "model_blocked_by_policy") return false;
     if (!agent.model && !agent.thinkingLevel && (!group || group.connectionMode === "legacy")) return true;
     const configured = group?.managed ? getGroupExecutionProfile(this.ctx.db, group.id, agent.workspaceId)?.profile : null;
     const catalog = group && group.connectionMode !== "legacy"

@@ -29,6 +29,7 @@ export interface UiReply {
   steerId?: string;
   daemonHookCalls?: number;
   daemonSessions?: number;
+  peerStats?: import("../../../packages/server/src/api/peer/peer-channel.js").PeerChannelStats;
   stopped?: boolean;
   error?: string;
 }

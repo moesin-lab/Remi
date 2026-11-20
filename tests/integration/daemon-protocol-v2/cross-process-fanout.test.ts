@@ -1,4 +1,5 @@
 import { createResponsibleTestIssue } from "../../unit/multiremi/helpers.js";
+import { waitForPeerIdle } from "../../fixtures/daemon-protocol-v2/peer-idle.js";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createPeerChannel, type PeerFetch } from "../../../packages/server/src/api/peer/peer-channel.js";
 import { DaemonProtocolHarness, startUiProcess, waitFor } from "./harness.js";
@@ -23,6 +24,7 @@ describe("MUL-419 ui to runtime fanout across OS processes", () => {
     const oldPublicUrl = process.env.MULTIREMI_PUBLIC_URL;
     process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 11).toString("base64");
     process.env.MULTIREMI_PUBLIC_URL = "https://remi.example.com";
+    let providerEntered = false;
     let releaseProvider!: () => void;
     const providerGate = new Promise<void>(resolve => { releaseProvider = resolve; });
     let uiPort: number | null = null;
@@ -33,7 +35,7 @@ describe("MUL-419 ui to runtime fanout across OS processes", () => {
         ? Promise.reject(new Error("ui peer not ready")) : fetch(url.replace(":0", `:${uiPort}`), init)) as PeerFetch });
     const h = await DaemonProtocolHarness.create({ apiRole: "runtime", peerChannel: peer, peerSecret: secret,
       daemonOptions: { providerFactory: () => ({
-        async *sendStream() { await providerGate;
+        async *sendStream() { providerEntered = true; await providerGate;
           yield { sessionUpdate: "agent_message_chunk", content: [{ type: "text", text: "fixture" }] } as any; },
         getLastResponse: () => ({ text: "fixture", sessionId: "fixture-session", usage: [], toolCalls: [] } as any),
         close: async () => {},
@@ -43,6 +45,8 @@ describe("MUL-419 ui to runtime fanout across OS processes", () => {
     let ui: Awaited<ReturnType<typeof startUiProcess>> | null = null;
     let host: WebSocket | null = null;
     let decisionTaskId: string | undefined;
+    let decisionRequestId: string | undefined;
+    let measuredStarted: number | undefined;
     try {
       await h.startDaemon(); await h.settleHeartbeat();
       const executorId = h.ledger.find(entry => entry.type === "hello")!.frame.p.runtimes[0].runtime_id as string;
@@ -81,9 +85,14 @@ describe("MUL-419 ui to runtime fanout across OS processes", () => {
         runtimeId: executorId })).taskId!;
       decisionTaskId = taskId;
       await waitFor(() => h.store.getTask(taskId)?.status === "running", "running decision task", 10_000);
+      // task.start commits before workspace/provider initialization finishes.
+      // Wait for the actual blocked provider, so setup cannot compete with the
+      // measured reply path on the runtime event loop.
+      await waitFor(() => providerEntered, "decision provider entry", 10_000);
       (h.daemon as any).taskDownlinks.beginDecision(taskId);
       (h.daemon as any).taskDownlinks.beginQuestionWait(taskId, `cross-process-question:${taskId}`, `cross-process-wait:${taskId}`);
       const requestId = (await ui.command({ op: "create_human_request", taskId })).requestId!;
+      decisionRequestId = requestId;
       (h.daemon as any).taskDownlinks.registerDecision(h.store.getMessage(requestId)!, taskId);
       const card = h.store.claimFeishuBotOutbound("local", "rt_bot_host")!;
       expect(card.kind).toBe("decision_card");
@@ -105,10 +114,15 @@ describe("MUL-419 ui to runtime fanout across OS processes", () => {
       expect(hostFrames.filter(frame => frame.t === "task.human_request.settled")).toHaveLength(0);
       if (status !== "responded") await new Promise<void>(resolve => {
         host!.addEventListener("close", () => resolve(), { once: true }); host!.close(); });
+      // Both processes already announced ready, but their setup notifications
+      // may still be queued/in flight. A protocol drain alone does not await
+      // the independent HTTP peer transport (including its startup retries).
+      await ui.command({ op: "drain_peer" });
+      await waitForPeerIdle(peer, "runtime setup peer acknowledgements");
       await h.settleHeartbeat();
       await h.layer.drain();
       const claims = spyOn(h.store, "claimTask");
-      const started = performance.now();
+      const started = measuredStarted = performance.now();
       expect((await ui.command(status === "responded" ? { op: "respond_human_request", requestId, humanToken: humanAccess.token }
         : { op: "expire_human_request", requestId, status })).requestId).toBe(requestId);
       if (status === "responded") await waitFor(() => h.received.some(frame => frame.t === "turn.message"
@@ -151,6 +165,21 @@ describe("MUL-419 ui to runtime fanout across OS processes", () => {
       expect(recovered.status).toBe(200);
       expect((await recovered.json() as any).request).toMatchObject({ id: requestId, status: status === 'responded' ? 'responded' : 'pending' });
       expect(recoveredFrames.filter(frame => frame.t === "task.human_request.settled" || frame.t === "turn.message")).toHaveLength(0);
+    } catch (error) {
+      const question = decisionRequestId ? h.store.getQuestion(decisionRequestId) : null;
+      const replyId = question?.recovery.reply_message_id;
+      const reply = replyId ? h.store.getMessage(replyId) : null;
+      console.error("decision fanout diagnostics", {
+        status, providerEntered, peer: peer.stats(),
+        uiPeer: await ui?.command({ op: "stats" }).then(stats => stats.peerStats).catch(() => undefined),
+        elapsedMs: measuredStarted === undefined ? undefined : performance.now() - measuredStarted,
+        task: decisionTaskId ? h.store.getTask(decisionTaskId)?.status : undefined,
+        question: question && { status: question.status, wait: question.wait_status, reason: question.wait_reason },
+        reply: reply && { id: reply.id, wake: reply.wake_applied, reason: reply.wake_reason },
+        frames: h.received.map(frame => ({ type: frame.t, replyTo: frame.p?.message?.reply_to_id })),
+        uiLogs: ui?.logs(),
+      });
+      throw error;
     } finally {
       if (decisionTaskId) (h.daemon as any).taskDownlinks.finishDecision(decisionTaskId);
       releaseProvider();

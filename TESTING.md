@@ -50,6 +50,14 @@ workspace 尚不存在时使用主键冲突忽略并重读；member 创建复用
 `supervisor-recovery` 的 slot 端口保留到 edge 监听完成，初始化失败也必须清理 edge 探针和目录，
 其失败清理回归观察一个完整探针周期，避免探针污染后续 skill import 的全局 fetch mock。
 
+跨进程决策扇出回归：`bun run test tests/integration/daemon-protocol-v2/cross-process-fanout.test.ts`。
+计时前等待 provider 真正进入阻塞的 `sendStream`，并等待 UI/runtime 两侧 peer 队列和在途批次全部获得 ACK；
+HTTP listener ready、任务 `running` 和 daemon protocol drain 各自都不足以证明这些准备工作完成。
+完整 UI 答复到 daemon `turn.message` 的 350 ms 预算与恰好一次断言保持不变。
+`bun run test tests/unit/multiremi/daemon-protocol-peer-idle.test.ts` 用受控 HTTP 失败与 ACK
+验证准备屏障不会把空队列中的冻结重试批次当成已完成。它不模拟真实网络故障或证明线上投递无丢失；
+集成失败会打印两侧 peer 计数、问题等待状态、回复唤醒状态和收到的帧，供区分延迟与投递竞态。
+
 ## 后端测试入口
 
 ```bash

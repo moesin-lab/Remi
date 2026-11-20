@@ -1,0 +1,327 @@
+Display copy: trailing spaces stripped; mutate.py reproduces the exact patches. Original byte-preserving logs are attached in the Issue review message.
+
+===== command =====
+PATH="$HOME/.bun/bin:$PATH" MULTIREMI_TEST_POSTGRES_URL=postgresql://postgres@127.0.0.1:55484/postgres bun run test tests/unit/multiremi/routing-matrix-database.test.ts
+
+
+===== mutate.py =====
+from pathlib import Path
+import difflib, sys
+p=Path('/tmp/mul304-reverse/tests/unit/multiremi/routing-matrix-database.test.ts')
+base=Path('/tmp/mul304-reverse-evidence/original.test.ts')
+if not base.exists(): base.write_bytes(p.read_bytes())
+s=base.read_text()
+mode=sys.argv[1]
+if mode=='fresh':
+ s=s.replace('if (template) {','if (false && template) {',1)
+elif mode=='shared':
+ s=s.replace('let template:', 'let sharedDatabase: { name: string; url: string } | undefined;\n    let template:',1)
+ s=s.replace('database = await template.createDatabase();', 'database = sharedDatabase ??= await template.createDatabase();',1)
+ s=s.replace('try { await template!.dropDatabase(database.name); }','try { /* mutation: hold the shared database until suite dispose */ }',1)
+elif mode!='restore': raise ValueError(mode)
+p.write_text(s)
+if mode!='restore':
+ Path('/tmp/mul304-reverse-evidence/'+mode+'.patch').write_text(''.join(difflib.unified_diff(base.read_text().splitlines(True),s.splitlines(True),fromfile='a/tests/unit/multiremi/routing-matrix-database.test.ts',tofile='b/tests/unit/multiremi/routing-matrix-database.test.ts')))
+
+
+===== fresh.patch =====
+--- a/tests/unit/multiremi/routing-matrix-database.test.ts
++++ b/tests/unit/multiremi/routing-matrix-database.test.ts
+@@ -38,7 +38,7 @@
+         let databaseCreateMs = 0;
+         let cleanupMs = 0;
+         try {
+-          if (template) {
++          if (false && template) {
+             const createStarted = performance.now();
+             database = await template.createDatabase();
+             databaseCreateMs = performance.now() - createStarted;
+
+
+===== shared.patch =====
+--- a/tests/unit/multiremi/routing-matrix-database.test.ts
++++ b/tests/unit/multiremi/routing-matrix-database.test.ts
+@@ -6,6 +6,7 @@
+
+ for (const dialect of ["sqlite", "postgres"] as const) {
+   describe.skipIf(dialect === "postgres" && !process.env.MULTIREMI_TEST_POSTGRES_URL)(`routing matrix fixture (${dialect})`, () => {
++    let sharedDatabase: { name: string; url: string } | undefined;
+     let template: ReturnType<typeof createPostgresStoreTemplate> | undefined;
+     if (dialect === "postgres") {
+       beforeAll(async () => {
+@@ -40,7 +41,7 @@
+         try {
+           if (template) {
+             const createStarted = performance.now();
+-            database = await template.createDatabase();
++            database = sharedDatabase ??= await template.createDatabase();
+             databaseCreateMs = performance.now() - createStarted;
+           }
+           fixture = createRoutingMatrixDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL, database);
+@@ -57,7 +58,7 @@
+             try {
+               if (database) {
+                 const dropStarted = performance.now();
+-                try { await template!.dropDatabase(database.name); }
++                try { /* mutation: hold the shared database until suite dispose */ }
+                 finally { cleanupMs += performance.now() - dropStarted; }
+               }
+             } finally {
+
+
+===== control-before.txt =====
+$ bun run scripts/run-tests.ts tests/unit/multiremi/routing-matrix-database.test.ts
+bun test v1.3.14 (0d9b296a)
+
+tests/unit/multiremi/routing-matrix-database.test.ts:
+[hermetic-env] stripped 20 inherited env var(s): CODEX_HOME, INVOCATION_ID, MULTIREMI_AGENT_NAME, MULTIREMI_ATTEMPT_ID, MULTIREMI_CONFIG, MULTIREMI_DAEMON_PORT, MULTIREMI_GIT_CREDENTIAL_TIMEOUT_MS, MULTIREMI_GIT_REPOSITORIES_JSON, MULTIREMI_ISSUE_ID, MULTIREMI_ISSUE_SESSION_ID, MULTIREMI_PROJECT_ID, MULTIREMI_SERVER_URL, MULTIREMI_STATE_DIR, MULTIREMI_TOKEN, MULTIREMI_TURN_ID, MULTIREMI_WORKSPACE_ID, MULTIREMI_WORKSPACE_ROOT, OPENAI_API_KEY, REMI_CLAUDE_AGENT_ACP_DIR, REMI_CODEX_AIDEN_LOCAL_KEY
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":2,"connections":1,"setupMs":1106.6225220000001,"resetMs":16.44673899999998,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1076.4800259999997,"storeConstructionMs":7.3781500000002325,"baselineMs":11.372858999999835,"case":"restores native seed values and removes committed cells without restarting the Store","bodyMs":106.3427630000001,"cleanupMs":0.4434489999998732,"totalMs":1213.408734}
+(pass) routing matrix fixture (sqlite) > restores native seed values and removes committed cells without restarting the Store [1214.08ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":1,"setupMs":1033.0982200000003,"resetMs":7.611337999999705,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1025.169889,"storeConstructionMs":1.384816000000228,"baselineMs":6.436153999999988,"case":"closes its connection when a cell fails","bodyMs":8.037168999999494,"cleanupMs":0.3583230000003823,"totalMs":1041.4937120000002}
+(pass) routing matrix fixture (sqlite) > closes its connection when a cell fails [1041.59ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":1133.384243,"resetMs":2.4258169999998245,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1125.4468060000004,"storeConstructionMs":1.3933479999996052,"baselineMs":6.425027000000227,"case":"refuses request caches, live subscriptions, open transactions and schema changes","bodyMs":3.715700000000197,"cleanupMs":0.1622029999998631,"totalMs":1137.262146}
+(pass) routing matrix fixture (sqlite) > refuses request caches, live subscriptions, open transactions and schema changes [1137.34ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":2,"connections":1,"setupMs":293.6518699999997,"resetMs":687.6200810000009,"databaseCreateMs":179.14846899999975,"connectionMs":50.688506000000416,"migrationMs":33.23878600000171,"storeConstructionMs":18.93896699999823,"baselineMs":190.59323700000095,"case":"restores native seed values and removes committed cells without restarting the Store","bodyMs":1187.9190560000025,"cleanupMs":907.0308909999985,"totalMs":2567.7502860000004}
+(pass) routing matrix fixture (postgres) > restores native seed values and removes committed cells without restarting the Store [2567.93ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":1,"setupMs":330.48034299999927,"resetMs":311.3220390000006,"databaseCreateMs":101.6435419999998,"connectionMs":59.74769600000036,"migrationMs":37.001399999999194,"storeConstructionMs":18.245789000002333,"baselineMs":215.3324360000006,"case":"closes its connection when a cell fails","bodyMs":311.7717909999992,"cleanupMs":148.8101630000001,"totalMs":892.7058389999984}
+(pass) routing matrix fixture (postgres) > closes its connection when a cell fails [893.03ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":291.7937120000006,"resetMs":67.86244299999998,"databaseCreateMs":89.0344210000003,"connectionMs":49.988734999999,"migrationMs":36.638458999999784,"storeConstructionMs":13.145383999999467,"baselineMs":191.8932850000001,"case":"refuses request caches, live subscriptions, open transactions and schema changes","bodyMs":78.28240100000039,"cleanupMs":132.2562489999982,"totalMs":591.3667829999995}
+(pass) routing matrix fixture (postgres) > refuses request caches, live subscriptions, open transactions and schema changes [591.60ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":1,"setupMs":282.12444400000095,"resetMs":322.22975899999983,"databaseCreateMs":84.54014600000119,"connectionMs":53.680105999999796,"migrationMs":36.113993000000846,"storeConstructionMs":11.949083999999857,"baselineMs":180.2890299999999,"case":"does not retain afterCommit callbacks from a rolled-back probe","bodyMs":333.7744849999981,"cleanupMs":144.53045099999872,"totalMs":844.969525999999}
+(pass) routing matrix fixture (postgres) > does not retain afterCommit callbacks from a rolled-back probe [845.11ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-template","dialect":"postgres","templateBuilds":1,"clones":4,"freshFallbacks":0,"databaseCreates":5,"templateMs":5098.788771,"createMs":453.82244499999615}
+(pass) rejects a remote PostgreSQL URL before creating any connection [0.98ms]
+
+ 8 pass
+ 0 fail
+ 34 expect() calls
+Ran 8 tests across 1 file. [14.11s]
+[test-home] residual paths: []
+
+
+===== fresh.txt =====
+$ bun run scripts/run-tests.ts tests/unit/multiremi/routing-matrix-database.test.ts
+bun test v1.3.14 (0d9b296a)
+
+tests/unit/multiremi/routing-matrix-database.test.ts:
+[hermetic-env] stripped 20 inherited env var(s): CODEX_HOME, INVOCATION_ID, MULTIREMI_AGENT_NAME, MULTIREMI_ATTEMPT_ID, MULTIREMI_CONFIG, MULTIREMI_DAEMON_PORT, MULTIREMI_GIT_CREDENTIAL_TIMEOUT_MS, MULTIREMI_GIT_REPOSITORIES_JSON, MULTIREMI_ISSUE_ID, MULTIREMI_ISSUE_SESSION_ID, MULTIREMI_PROJECT_ID, MULTIREMI_SERVER_URL, MULTIREMI_STATE_DIR, MULTIREMI_TOKEN, MULTIREMI_TURN_ID, MULTIREMI_WORKSPACE_ID, MULTIREMI_WORKSPACE_ROOT, OPENAI_API_KEY, REMI_CLAUDE_AGENT_ACP_DIR, REMI_CODEX_AIDEN_LOCAL_KEY
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":2,"connections":1,"setupMs":1182.362076,"resetMs":19.05404099999987,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1166.9610050000001,"storeConstructionMs":6.146978999999874,"baselineMs":8.572882000000163,"case":"restores native seed values and removes committed cells without restarting the Store","bodyMs":109.84266200000025,"cleanupMs":0.698748999999907,"totalMs":1292.903487}
+(pass) routing matrix fixture (sqlite) > restores native seed values and removes committed cells without restarting the Store [1293.40ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":1,"setupMs":1076.4213719999998,"resetMs":7.550141999999596,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1067.468413,"storeConstructionMs":1.6716289999997116,"baselineMs":7.127144000000044,"case":"closes its connection when a cell fails","bodyMs":7.9645100000007005,"cleanupMs":0.3229049999995368,"totalMs":1084.708787}
+(pass) routing matrix fixture (sqlite) > closes its connection when a cell fails [1084.79ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":1001.5191949999999,"resetMs":2.4719279999999344,"databaseCreateMs":0,"connectionMs":0,"migrationMs":993.2598819999998,"storeConstructionMs":1.2772890000001098,"baselineMs":6.892130000000179,"case":"refuses request caches, live subscriptions, open transactions and schema changes","bodyMs":4.1915560000006735,"cleanupMs":0.1673929999997199,"totalMs":1005.8781440000002}
+(pass) routing matrix fixture (sqlite) > refuses request caches, live subscriptions, open transactions and schema changes [1005.96ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":1,"storeInitializations":1,"migrationRuns":1,"resets":2,"connections":2,"setupMs":5213.800555,"resetMs":627.3626950000016,"databaseCreateMs":49.3048660000004,"connectionMs":111.37864700000137,"migrationMs":4881.132229000001,"storeConstructionMs":32.720714999997654,"baselineMs":139.1554019999985,"case":"restores native seed values and removes committed cells without restarting the Store","bodyMs":1301.3671639999975,"cleanupMs":901.2918240000035,"totalMs":7416.459543000001}
+(fail) routing matrix fixture (postgres) > restores native seed values and removes committed cells without restarting the Store [7416.71ms]
+  ^ this test timed out after 5000ms.
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":1,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":2,"setupMs":6084.249664999999,"resetMs":326.1865340000004,"databaseCreateMs":38.34279100000276,"connectionMs":91.00271400000202,"migrationMs":5694.037812999999,"storeConstructionMs":36.88785600000119,"baselineMs":223.85564599999998,"case":"closes its connection when a cell fails","bodyMs":326.71873400000186,"cleanupMs":146.25015899999926,"totalMs":6557.2185580000005}
+(fail) routing matrix fixture (postgres) > closes its connection when a cell fails [6557.40ms]
+  ^ this test timed out after 5000ms.
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":1,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":2,"setupMs":5220.915304999999,"resetMs":63.166238999994675,"databaseCreateMs":41.220814000000246,"connectionMs":89.01888899999904,"migrationMs":4905.635880999998,"storeConstructionMs":27.440742999999202,"baselineMs":157.45030600000246,"case":"refuses request caches, live subscriptions, open transactions and schema changes","bodyMs":74.51583899999969,"cleanupMs":137.0780190000005,"totalMs":5432.509162999999}
+(fail) routing matrix fixture (postgres) > refuses request caches, live subscriptions, open transactions and schema changes [5432.69ms]
+  ^ this test timed out after 5000ms.
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":1,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":2,"setupMs":5244.536317000002,"resetMs":426.74143200000253,"databaseCreateMs":34.952999000001,"connectionMs":84.83408599999893,"migrationMs":4909.3031630000005,"storeConstructionMs":21.540007000003243,"baselineMs":193.8062379999974,"case":"does not retain afterCommit callbacks from a rolled-back probe","bodyMs":440.1707469999965,"cleanupMs":150.29747000000498,"totalMs":5835.004534000003}
+(fail) routing matrix fixture (postgres) > does not retain afterCommit callbacks from a rolled-back probe [5835.18ms]
+  ^ this test timed out after 5000ms.
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-template","dialect":"postgres","templateBuilds":1,"clones":0,"freshFallbacks":0,"databaseCreates":1,"templateMs":6478.472954000001,"createMs":0}
+17 |         template = owner;
+18 |       });
+19 |       afterAll(async () => {
+20 |         if (!template) return;
+21 |         try {
+22 |           expect(template.stats()).toMatchObject({ templateBuilds: 1, clones: 4, freshFallbacks: 0 });
+                                        ^
+error: expect(received).toMatchObject(expected)
+
+  {
+-   "clones": 4,
++   "clones": 0,
++   "createMs": 0,
++   "databaseCreates": 1,
++   "dialect": "postgres",
++   "fixture": "routing-matrix-contract-template",
+    "freshFallbacks": 0,
+    "templateBuilds": 1,
++   "templateMs": 6478.472954000001,
+  }
+
+- Expected  - 1
++ Received  + 6
+
+      at <anonymous> (/tmp/mul304-reverse/tests/unit/multiremi/routing-matrix-database.test.ts:22:36)
+(fail) routing matrix fixture (postgres) > (unnamed) [38.18ms]
+(pass) rejects a remote PostgreSQL URL before creating any connection [0.69ms]
+
+ 4 pass
+ 5 fail
+ 35 expect() calls
+Ran 9 tests across 1 file. [35.73s]
+[test-home] residual paths: []
+error: script "test" exited with code 1
+
+
+===== shared.txt =====
+$ bun run scripts/run-tests.ts tests/unit/multiremi/routing-matrix-database.test.ts
+bun test v1.3.14 (0d9b296a)
+
+tests/unit/multiremi/routing-matrix-database.test.ts:
+[hermetic-env] stripped 20 inherited env var(s): CODEX_HOME, INVOCATION_ID, MULTIREMI_AGENT_NAME, MULTIREMI_ATTEMPT_ID, MULTIREMI_CONFIG, MULTIREMI_DAEMON_PORT, MULTIREMI_GIT_CREDENTIAL_TIMEOUT_MS, MULTIREMI_GIT_REPOSITORIES_JSON, MULTIREMI_ISSUE_ID, MULTIREMI_ISSUE_SESSION_ID, MULTIREMI_PROJECT_ID, MULTIREMI_SERVER_URL, MULTIREMI_STATE_DIR, MULTIREMI_TOKEN, MULTIREMI_TURN_ID, MULTIREMI_WORKSPACE_ID, MULTIREMI_WORKSPACE_ROOT, OPENAI_API_KEY, REMI_CLAUDE_AGENT_ACP_DIR, REMI_CODEX_AIDEN_LOCAL_KEY
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":2,"connections":1,"setupMs":1066.066387,"resetMs":17.35979599999996,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1048.078576,"storeConstructionMs":7.39420999999993,"baselineMs":9.786939999999959,"case":"restores native seed values and removes committed cells without restarting the Store","bodyMs":108.79827300000034,"cleanupMs":0.474411999999802,"totalMs":1175.3390720000002}
+(pass) routing matrix fixture (sqlite) > restores native seed values and removes committed cells without restarting the Store [1175.87ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":1,"setupMs":1014.4085650000002,"resetMs":10.256887000000006,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1004.3317040000002,"storeConstructionMs":1.5649789999997665,"baselineMs":8.3866280000002,"case":"closes its connection when a cell fails","bodyMs":10.96953399999984,"cleanupMs":0.3859059999999772,"totalMs":1025.764005}
+(pass) routing matrix fixture (sqlite) > closes its connection when a cell fails [1025.85ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":1026.4783599999996,"resetMs":2.4226149999999507,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1018.9970240000002,"storeConstructionMs":1.218366999999489,"baselineMs":6.123876999999993,"case":"refuses request caches, live subscriptions, open transactions and schema changes","bodyMs":3.8093040000003384,"cleanupMs":0.1742709999998624,"totalMs":1030.4619349999998}
+(pass) routing matrix fixture (sqlite) > refuses request caches, live subscriptions, open transactions and schema changes [1030.55ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":2,"connections":1,"setupMs":250.09349199999997,"resetMs":573.3196369999987,"databaseCreateMs":97.53961899999922,"connectionMs":40.91980100000001,"migrationMs":29.442316000000574,"storeConstructionMs":14.25722400000086,"baselineMs":165.28747000000112,"case":"restores native seed values and removes committed cells without restarting the Store","bodyMs":957.7658840000004,"cleanupMs":0.054562999999689055,"totalMs":1305.4535579999992}
+(pass) routing matrix fixture (postgres) > restores native seed values and removes committed cells without restarting the Store [1315.68ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":1,"setupMs":234.9606359999998,"resetMs":268.63662100000147,"databaseCreateMs":0.0007210000003396999,"connectionMs":38.179261000001134,"migrationMs":25.645720000000438,"storeConstructionMs":13.213913999999932,"baselineMs":157.77421400000094,"case":"closes its connection when a cell fails","bodyMs":269.01894800000264,"cleanupMs":0.0641299999988405,"totalMs":504.0444350000016}
+(pass) routing matrix fixture (postgres) > closes its connection when a cell fails [504.23ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":254.10331699999915,"resetMs":53.5001229999998,"databaseCreateMs":0.000888999999006046,"connectionMs":44.600280000000566,"migrationMs":33.4641730000003,"storeConstructionMs":13.570639000001393,"baselineMs":162.38237500000105,"case":"refuses request caches, live subscriptions, open transactions and schema changes","bodyMs":61.561077000002115,"cleanupMs":0.07272499999999127,"totalMs":315.73800800000026}
+(pass) routing matrix fixture (postgres) > refuses request caches, live subscriptions, open transactions and schema changes [315.91ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":420.32676600000013,"resetMs":0,"databaseCreateMs":0.0010469999997440027,"connectionMs":42.18156600000111,"migrationMs":49.358893000000535,"storeConstructionMs":22.466244999999617,"baselineMs":306.2063760000001,"case":"does not retain afterCommit callbacks from a rolled-back probe","bodyMs":2.7993600000008882,"cleanupMs":0.05853899999965506,"totalMs":423.1857120000004}
+136 |
+137 |     if (dialect === "postgres") {
+138 |       measuredIt("does not retain afterCommit callbacks from a rolled-back probe", fixture => {
+139 |         try {
+140 |           // The preceding case committed DDL; a new clone must not inherit it.
+141 |           expect(fixture.db.query("SELECT to_regclass('public.routing_schema_mutation') AS relation").get().relation).toBeNull();
+                                                                                                                            ^
+error: expect(received).toBeNull()
+
+Received: "routing_schema_mutation"
+
+      at <anonymous> (/tmp/mul304-reverse/tests/unit/multiremi/routing-matrix-database.test.ts:141:119)
+      at <anonymous> (/tmp/mul304-reverse/tests/unit/multiremi/routing-matrix-database.test.ts:53:11)
+(fail) routing matrix fixture (postgres) > does not retain afterCommit callbacks from a rolled-back probe [423.50ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-template","dialect":"postgres","templateBuilds":1,"clones":1,"freshFallbacks":0,"databaseCreates":2,"templateMs":4955.090702,"createMs":96.92523299999993}
+18 |         template = owner;
+19 |       });
+20 |       afterAll(async () => {
+21 |         if (!template) return;
+22 |         try {
+23 |           expect(template.stats()).toMatchObject({ templateBuilds: 1, clones: 4, freshFallbacks: 0 });
+                                        ^
+error: expect(received).toMatchObject(expected)
+
+  {
+-   "clones": 4,
++   "clones": 1,
++   "createMs": 96.92523299999993,
++   "databaseCreates": 2,
++   "dialect": "postgres",
++   "fixture": "routing-matrix-contract-template",
+    "freshFallbacks": 0,
+    "templateBuilds": 1,
++   "templateMs": 4955.090702,
+  }
+
+- Expected  - 1
++ Received  + 6
+
+      at <anonymous> (/tmp/mul304-reverse/tests/unit/multiremi/routing-matrix-database.test.ts:23:36)
+(fail) routing matrix fixture (postgres) > (unnamed) [898.16ms]
+(pass) rejects a remote PostgreSQL URL before creating any connection [0.83ms]
+
+ 7 pass
+ 2 fail
+ 33 expect() calls
+Ran 9 tests across 1 file. [12.27s]
+[test-home] residual paths: []
+error: script "test" exited with code 1
+
+
+===== control-after.txt =====
+$ bun run scripts/run-tests.ts tests/unit/multiremi/routing-matrix-database.test.ts
+bun test v1.3.14 (0d9b296a)
+
+tests/unit/multiremi/routing-matrix-database.test.ts:
+[hermetic-env] stripped 20 inherited env var(s): CODEX_HOME, INVOCATION_ID, MULTIREMI_AGENT_NAME, MULTIREMI_ATTEMPT_ID, MULTIREMI_CONFIG, MULTIREMI_DAEMON_PORT, MULTIREMI_GIT_CREDENTIAL_TIMEOUT_MS, MULTIREMI_GIT_REPOSITORIES_JSON, MULTIREMI_ISSUE_ID, MULTIREMI_ISSUE_SESSION_ID, MULTIREMI_PROJECT_ID, MULTIREMI_SERVER_URL, MULTIREMI_STATE_DIR, MULTIREMI_TOKEN, MULTIREMI_TURN_ID, MULTIREMI_WORKSPACE_ID, MULTIREMI_WORKSPACE_ROOT, OPENAI_API_KEY, REMI_CLAUDE_AGENT_ACP_DIR, REMI_CODEX_AIDEN_LOCAL_KEY
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":2,"connections":1,"setupMs":1097.212208,"resetMs":22.58006800000021,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1082.370652,"storeConstructionMs":6.013923999999861,"baselineMs":7.993461999999909,"case":"restores native seed values and removes committed cells without restarting the Store","bodyMs":124.88249200000041,"cleanupMs":0.6016539999998258,"totalMs":1222.6963540000002}
+(pass) routing matrix fixture (sqlite) > restores native seed values and removes committed cells without restarting the Store [1223.25ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":1,"setupMs":1043.7211699999998,"resetMs":8.328681999999844,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1035.265906,"storeConstructionMs":1.7618549999997413,"baselineMs":6.5399010000001,"case":"closes its connection when a cell fails","bodyMs":8.996777000000066,"cleanupMs":0.38617599999997765,"totalMs":1053.1041229999998}
+(pass) routing matrix fixture (sqlite) > closes its connection when a cell fails [1053.25ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":1092.533789,"resetMs":3.590335000000323,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1083.5657970000002,"storeConstructionMs":1.918847999999798,"baselineMs":6.911777999999686,"case":"refuses request caches, live subscriptions, open transactions and schema changes","bodyMs":5.446132999999463,"cleanupMs":0.2776240000002872,"totalMs":1098.2575459999998}
+(pass) routing matrix fixture (sqlite) > refuses request caches, live subscriptions, open transactions and schema changes [1098.38ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":2,"connections":1,"setupMs":243.68922200000088,"resetMs":620.211444999999,"databaseCreateMs":92.54027200000019,"connectionMs":38.41222199999902,"migrationMs":24.433890000000247,"storeConstructionMs":12.24533799999881,"baselineMs":168.39970600000015,"case":"restores native seed values and removes committed cells without restarting the Store","bodyMs":1039.0092919999988,"cleanupMs":902.3265740000006,"totalMs":2277.5653600000005}
+(pass) routing matrix fixture (postgres) > restores native seed values and removes committed cells without restarting the Store [2277.73ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":1,"setupMs":303.3221169999997,"resetMs":276.728387000001,"databaseCreateMs":87.89153699999952,"connectionMs":53.678546999999526,"migrationMs":32.09272100000089,"storeConstructionMs":13.101316999998744,"baselineMs":204.32139500000085,"case":"closes its connection when a cell fails","bodyMs":277.14035200000035,"cleanupMs":144.87958400000025,"totalMs":813.2335899999998}
+(pass) routing matrix fixture (postgres) > closes its connection when a cell fails [813.46ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":263.6642210000009,"resetMs":66.31899800000065,"databaseCreateMs":89.8433530000002,"connectionMs":50.81100499999957,"migrationMs":31.623874000000797,"storeConstructionMs":17.330112999999983,"baselineMs":163.81946900000003,"case":"refuses request caches, live subscriptions, open transactions and schema changes","bodyMs":71.68871199999921,"cleanupMs":132.44874300000083,"totalMs":557.6450290000012}
+(pass) routing matrix fixture (postgres) > refuses request caches, live subscriptions, open transactions and schema changes [557.83ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"postgres","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":1,"setupMs":271.6689920000008,"resetMs":388.2836720000014,"databaseCreateMs":93.40476200000012,"connectionMs":45.93783900000017,"migrationMs":32.808978000000934,"storeConstructionMs":10.43147499999941,"baselineMs":182.41211100000146,"case":"does not retain afterCommit callbacks from a rolled-back probe","bodyMs":400.1578580000005,"cleanupMs":147.0734399999983,"totalMs":912.3050519999997}
+(pass) routing matrix fixture (postgres) > does not retain afterCommit callbacks from a rolled-back probe [912.48ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-template","dialect":"postgres","templateBuilds":1,"clones":4,"freshFallbacks":0,"databaseCreates":5,"templateMs":5002.063936,"createMs":363.22432599999956}
+(pass) rejects a remote PostgreSQL URL before creating any connection [0.63ms]
+
+ 8 pass
+ 0 fail
+ 34 expect() calls
+Ran 8 tests across 1 file. [13.59s]
+[test-home] residual paths: []
+
+
+===== database-state.txt =====
+                                                           version
+------------------------------------------------------------------------------------------------------------------------------
+ PostgreSQL 17.12 (Debian 17.12-1.pgdg12+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14+deb12u1) 12.2.0, 64-bit
+(1 row)
+
+ datname
+---------
+(0 rows)
+
+
+
+===== pg15-incompatible.txt =====
+$ bun run scripts/run-tests.ts tests/unit/multiremi/routing-matrix-database.test.ts
+bun test v1.3.14 (0d9b296a)
+
+tests/unit/multiremi/routing-matrix-database.test.ts:
+[hermetic-env] stripped 20 inherited env var(s): CODEX_HOME, INVOCATION_ID, MULTIREMI_AGENT_NAME, MULTIREMI_ATTEMPT_ID, MULTIREMI_CONFIG, MULTIREMI_DAEMON_PORT, MULTIREMI_GIT_CREDENTIAL_TIMEOUT_MS, MULTIREMI_GIT_REPOSITORIES_JSON, MULTIREMI_ISSUE_ID, MULTIREMI_ISSUE_SESSION_ID, MULTIREMI_PROJECT_ID, MULTIREMI_SERVER_URL, MULTIREMI_STATE_DIR, MULTIREMI_TOKEN, MULTIREMI_TURN_ID, MULTIREMI_WORKSPACE_ID, MULTIREMI_WORKSPACE_ROOT, OPENAI_API_KEY, REMI_CLAUDE_AGENT_ACP_DIR, REMI_CODEX_AIDEN_LOCAL_KEY
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":2,"connections":1,"setupMs":1070.3282060000001,"resetMs":17.20833400000015,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1055.067195,"storeConstructionMs":6.127441999999974,"baselineMs":8.43890999999985,"case":"restores native seed values and removes committed cells without restarting the Store","bodyMs":103.24958400000014,"cleanupMs":0.4180919999998878,"totalMs":1173.9958820000002}
+(pass) routing matrix fixture (sqlite) > restores native seed values and removes committed cells without restarting the Store [1174.50ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":1,"connections":1,"setupMs":1098.850316,"resetMs":7.58161999999993,"databaseCreateMs":0,"connectionMs":0,"migrationMs":1090.3757699999999,"storeConstructionMs":1.4940149999999903,"baselineMs":6.858635999999933,"case":"closes its connection when a cell fails","bodyMs":8.147270000000162,"cleanupMs":0.3341059999997924,"totalMs":1107.331692}
+(pass) routing matrix fixture (sqlite) > closes its connection when a cell fails [1107.43ms]
+REMI_TEST_DB_FIXTURE_STATS {"fixture":"routing-matrix-contract-case","dialect":"sqlite","databaseCreates":0,"storeInitializations":1,"migrationRuns":1,"resets":0,"connections":1,"setupMs":958.9963229999998,"resetMs":2.47860799999944,"databaseCreateMs":0,"connectionMs":0,"migrationMs":951.1069809999999,"storeConstructionMs":1.3127010000002883,"baselineMs":6.442591999999877,"case":"refuses request caches, live subscriptions, open transactions and schema changes","bodyMs":3.76806600000009,"cleanupMs":0.21476400000028661,"totalMs":962.9791530000002}
+(pass) routing matrix fixture (sqlite) > refuses request caches, live subscriptions, open transactions and schema changes [963.09ms]
+499 |       // The size guardrail's message is user-facing: route handlers answer with
+500 |       // `c.json({ error: message })`, so appending SQL here would leak schema
+501 |       // details into an HTTP response body.
+502 |       if (err instanceof PostgresReplyTooLargeError || err instanceof DatabaseUnavailableError) throw err;
+503 |       if (err instanceof PgBridgeFailure) {
+504 |         throw new PgBridgeFailure(`${err.message}\n  SQL: ${sql.slice(0, 400)}`, err.abortsTransaction);
+                        ^
+error: postgres: syntax error at or near "JSON"
+  SQL: CREATE OR REPLACE FUNCTION multiremi_question_metadata_text(value TEXT, path TEXT[])
+    RETURNS TEXT LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS $$
+    DECLARE raw TEXT := value; part TEXT; tokens TEXT[]; found TEXT; key TEXT;
+      i INTEGER; j INTEGER; depth INTEGER;
+    BEGIN
+      BEGIN RETURN value::jsonb #>> path;
+      EXCEPTION WHEN data_exception THEN NULL;
+      END;
+      -- Val
+ abortsTransaction: true,
+
+      at exec (/tmp/mul304-reverse/packages/server/src/store/db/postgres.ts:504:19)
+      at execute (/tmp/mul304-reverse/packages/server/src/store/db/postgres.ts:604:26)
+      at run (/tmp/mul304-reverse/packages/server/src/store/db/postgres.ts:531:28)
+      at ensureQuestionQueryIndexes (/tmp/mul304-reverse/packages/server/src/store/inbox/question-indexes.ts:59:11)
+      at /tmp/mul304-reverse/packages/server/src/store/migrations.ts:120:956
+      at advisoryLock (/tmp/mul304-reverse/packages/server/src/store/db/postgres.ts:632:14)
+      at runStartupMigrations (/tmp/mul304-reverse/packages/server/src/store/migrations.ts:129:36)
+      at migrate (/tmp/mul304-reverse/packages/server/src/store/store.ts:1515:52)
+      at MultiremiStore (/tmp/mul304-reverse/packages/server/src/store/store.ts:1419:3)
+      at buildTemplate (/tmp/mul304-reverse/tests/helpers/postgres-store-template.ts:106:3)
+      at ensureTemplate (/tmp/mul304-reverse/tests/helpers/postgres-store-template.ts:128:7)
+      at warm (/tmp/mul304-reverse/tests/helpers/postgres-store-template.ts:139:10)
+      at /tmp/mul304-reverse/tests/unit/multiremi/routing-matrix-database.test.ts:15:13
+(fail) routing matrix fixture (postgres) > (unnamed) [4947.15ms]
+(pass) rejects a remote PostgreSQL URL before creating any connection [0.66ms]
+
+ 4 pass
+ 1 fail
+ 16 expect() calls
+Ran 5 tests across 1 file. [8.79s]
+[test-home] residual paths: []
+error: script "test" exited with code 1

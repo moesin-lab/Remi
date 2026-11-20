@@ -53,16 +53,20 @@ describe("shipped CLI command groups", () => {
     }
   });
 
-  it("prints group help with exit 0 for bare namespaces and preserves both help forms", async () => {
-    for (const path of groups) {
-      const entry = inventory.find((item) => item.path.join(" ") === path.join(" "));
-      // Executable parents such as context retain their own bare invocation.
-      if (entry && (entry.parse !== "passthrough" || entry.capability || entry.id.startsWith("legacy."))) continue;
+  // Keep each namespace's four real dispatcher calls under its own default
+  // deadline. Combining all groups made repeated full-inventory help rendering
+  // consume one timeout on busy CI runners, even without any child processes.
+  // These tests capture process globals, so they must remain sequential.
+  for (const path of groups) {
+    const entry = inventory.find((item) => item.path.join(" ") === path.join(" "));
+    // Executable parents such as context retain their own bare invocation.
+    if (entry && (entry.parse !== "passthrough" || entry.capability || entry.id.startsWith("legacy."))) continue;
+    it(`prints group help with exit 0 for ${path.join(" ")} and preserves both help forms`, async () => {
       const expected = { stdout: cliCommandHelp(path), stderr: "", code: 0 };
       expect(await capture(path), path.join(" ")).toEqual(expected);
       expect(await capture([...path, "--help"]), path.join(" ")).toEqual(expected);
       expect(await capture([...path, "-h"]), path.join(" ")).toEqual(expected);
       expect(await capture(["help", ...path]), path.join(" ")).toEqual(expected);
-    }
-  });
+    });
+  }
 });

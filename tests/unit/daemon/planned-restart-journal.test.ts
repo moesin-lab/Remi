@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution,
-  type PlannedRestartRemote } from "@multiremi/worker/planned-restart-journal.js";
+  RESTART_RECOVERY_LIMIT_MS, RESTART_RECOVERY_MAX_ATTEMPTS, type PlannedRestartRemote } from "@multiremi/worker/planned-restart-journal.js";
 import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 
 const execution: RestartExecution = { workspace_id: "ws_test", daemon_id: "daemon_test", runtime_id: "rt_test",
@@ -151,4 +151,37 @@ it("treats trace identities as optional and discards bad digest, head or generat
     }).resume(execution.handoff_id);
     expect(resumed.resumed_generation).toBe(1);
   }
+});
+
+
+it("persists capped exponential retry backoff and exhaustion across daemon process restarts", () => {
+  const path = join(root(), "retry.db");
+  let j = new PlannedRestartJournal(path);
+  try {
+    j.prepare(execution, checkpoint);
+    expect(j.reserveResume(execution.handoff_id, 0)).toBe("ready");
+    expect(j.reserveResume(execution.handoff_id, 999)).toBe("waiting");
+    j.close();
+    j = new PlannedRestartJournal(path);
+    expect(j.reserveResume(execution.handoff_id, 999)).toBe("waiting");
+    expect(j.reserveResume(execution.handoff_id, 1000)).toBe("ready");
+    expect(j.reserveResume(execution.handoff_id, 2999)).toBe("waiting");
+    for (let i = 2; i < RESTART_RECOVERY_MAX_ATTEMPTS; i++) {
+      expect(j.reserveResume(execution.handoff_id, 3000 + (i - 2) * 60_000)).toBe("ready");
+    }
+    expect(j.reserveResume(execution.handoff_id, RESTART_RECOVERY_MAX_ATTEMPTS * 60_000)).toBe("expired");
+    j.close();
+    j = new PlannedRestartJournal(path);
+    expect(j.reserveResume(execution.handoff_id, RESTART_RECOVERY_MAX_ATTEMPTS * 60_000)).toBe("expired");
+  } finally { j.close(); }
+});
+
+it("expires recovery by total deadline even when fewer RPCs were sent and removes terminal journals", () => {
+  const j = journal();
+  j.prepare(execution, checkpoint);
+  expect(j.reserveResume(execution.handoff_id, 0)).toBe("ready");
+  expect(j.reserveResume(execution.handoff_id, RESTART_RECOVERY_LIMIT_MS)).toBe("expired");
+  j.remove(execution.handoff_id);
+  expect(j.entries()).toEqual([]);
+  expect(j.traceIdentities({ execution, checkpoint } as any, () => {})).toBeNull();
 });

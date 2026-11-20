@@ -1395,3 +1395,19 @@ trace 按原 steer ID 更新同一个条目，服务端消息也不另建副本�
 
 新执行段在旧活动收口后追加一条「Remi 已更新」，按 generation 使用固定 ID 去重。
 正常崩溃重试不追加该条目。Turn 历史沿用原 Turn/attempt，trace 的事件序号继续递增。
+
+### 失效 handoff 与 daemon 续接预算
+
+resume 在准备 offer/输入/凭据前，在 workspace/lane 锁下核实 attempt 和 turn：
+`lost`、`completed`、`cancelled`、`failed` 或已有后继 attempt 时撤销 handoff，
+返回 `{ok:false, code:"restart_terminal", retryable:false}`。offer 准备期间终结的竞态
+也返回该应答。既有 `running + consumer_id=NULL` 的撤销 tombstone 在 Store 中投影为
+`terminated`；持久层沿用 level-3 编码并增加 generation、撤销 usage run/task token，
+不新增 schema 或需要手动执行的 SQL。offer 安全扫描自动清理历史失效行，包含 `running`
+记录；不需要 daemon 再次发起 resume。重复清理不再增加 generation。
+
+daemon 收到 `restart_terminal`、`stale_execution`、`authority_revoked`、`capacity` 或无效
+checkpoint/report 应答后，删除本地 handoff journal、trace identity 和重试记录，停止续接。
+临时失败及 `resume_fenced` 使用 1、2、4 秒递增至最多 60 秒的退避，最多 24 次且总时限
+30 分钟。预算和下一次时间在 RPC 前写入本地 SQLite，daemon 重启不重置预算。
+预算耗尽时停止续接并保留 journal 供诊断；不会把该记录当作执行授权。

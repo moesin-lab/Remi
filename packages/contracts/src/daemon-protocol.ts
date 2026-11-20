@@ -918,6 +918,7 @@ export const DAEMON_PROTOCOL_ERROR_CODES = [
   "authority_revoked",
   "invalid_report",
   "stale_execution",
+  "restart_terminal",
   "invalid_checkpoint",
   "drain_not_active",
   "resume_fenced",

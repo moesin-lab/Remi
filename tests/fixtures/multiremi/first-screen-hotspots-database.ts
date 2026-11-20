@@ -19,8 +19,12 @@ const liveClones = new Set<() => Promise<void>>();
  * runs the migration entrance before any probe is reset, and fixture scale,
  * goldens and statement/byte budgets are unchanged. Each call is still its own
  * database; see the two factories for the exclusions and the fresh fallback.
+ * The returned PostgreSQL stats accessor remains usable after suite cleanup.
  */
-export function useMigratedHotspotDatabases(): void {
+export function useMigratedHotspotDatabases() {
+  // Keep the suite owner available for consumers to assert clone/fallback counts
+  // even after our afterAll has disposed it and cleared the active file state.
+  let owner: ReturnType<typeof createPostgresStoreTemplate> | undefined;
   beforeAll(async () => {
     const state: NonNullable<typeof migrated> = {};
     const adminUrl = process.env.MULTIREMI_TEST_POSTGRES_URL;
@@ -29,6 +33,7 @@ export function useMigratedHotspotDatabases(): void {
       try { await template.prepare(); await template.warm(); }
       catch (error) { await template.dispose(); throw error; }
       state.template = template;
+      owner = template;
     }
     migrated = state;
   }, 30_000);
@@ -42,6 +47,7 @@ export function useMigratedHotspotDatabases(): void {
     }
     finally { console.info(`REMI_TEST_DB_FIXTURE_STATS ${JSON.stringify({ ...template.stats(), scope: "file" })}`); }
   });
+  return { postgresStats: () => owner?.stats() };
 }
 
 // An explicitly configured PG is required to work; never silently fall back.

@@ -73,13 +73,15 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
     if (!task || task.runtimeId !== frame.rt) return denied("authority_revoked");
     const scope = { runtimeId: frame.rt!, daemonId: session.daemonId, workspaceId: task.workspaceId };
     try {
+      if (store.plannedRestarts().reconcileTerminal(task.id, scope, p.handoff_id)) return denied("restart_terminal");
       const handoff = store.plannedRestarts().get(task.id);
       if (!handoff || handoff.handoff_id !== p.handoff_id || handoff.turn_id !== p.turn_id) return denied("stale_execution");
       if (handoff.state === "suspended" && store.getTaskUsageRunRuntime(task.id, p.consumer_id)) return denied("stale_execution");
       // Hydration/token creation can await, so prepare before the locked CAS.
       // The CAS rechecks attempt, daemon, drain and consumer authority afterwards.
       const offer = await prepareResume(task);
-      if (!offer) return denied("stale_execution");
+      if (!offer) return denied(store.plannedRestarts().reconcileTerminal(task.id, scope, p.handoff_id)
+        ? "restart_terminal" : "stale_execution");
       let reply: Record<string, any> | null = null;
       const delivery = (generation: number, checkpoint: PlannedRestartCheckpoint) => {
         const questions = (checkpoint.question_ids ?? []).map(id => store.getMessage(id)).filter(Boolean);
@@ -99,6 +101,8 @@ export function registerTaskInputRpcs(layer: DaemonProtocolLayer, store: Multire
       if (!reply) delivery(receipt.generation, receipt.checkpoint!);
       return reply;
     } catch (error) {
+      // Completion can win while asynchronous offer preparation is in flight.
+      if (store.plannedRestarts().reconcileTerminal(task.id, scope, p.handoff_id)) return denied("restart_terminal");
       if (error instanceof PlannedRestartError && error.code === "capacity") {
         try {
           store.plannedRestarts().rejectUndeliverableResume(task.id, p.handoff_id, p.consumer_id, scope);

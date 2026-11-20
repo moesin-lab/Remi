@@ -542,3 +542,73 @@ for (const snapshot of ["valid", "missing", "digest", "binding"] as const) test(
     expect(h.ledger.some(event => event.type === "task.fail")).toBe(false);
   } finally { await h.dispose(); }
 }, 25_000);
+
+for (const cleanup of ["resume", "sweep", "exhaustion"] as const) test(`stale lost attempt with a running handoff stops daemon recovery via ${cleanup}`, async () => {
+  let providerCalls = 0;
+  const h = await DaemonProtocolHarness.create({ providerFactory: () => ({
+    async *sendStream() { providerCalls++; yield {} as any; },
+    getLastResponse: () => ({ text: "", sessionId: "stale-session", usage: [], toolCalls: [] } as any),
+    close: async () => {},
+  }) });
+  try {
+    await h.startDaemon();
+    await h.settleHeartbeat();
+    const runtimeId = h.store.listRuntimes()[0]!.id;
+    const scope = { workspaceId: "local", runtimeId, daemonId: h.store.getRuntimeLite(runtimeId)!.daemonId! };
+    await h.stopDaemon();
+    const agent = h.store.createAgent({ name: "Stale restart", provider: "claude", runtimeId });
+    const issue = createResponsibleTestIssue(h.store, { title: "Stale retry", assigneeType: "agent", assigneeId: agent.id });
+    const task = h.store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Historical attempt", maxAttempts: 3 });
+    h.store.claimTask(runtimeId); h.store.startTask(task.id);
+    h.store.beginDaemonDrain("local", scope.daemonId);
+    const restarts = h.store.plannedRestarts();
+    const handoff = restarts.request(task.id, scope);
+    const checkpoint = restarts.checkpointReferences(task.id, scope);
+    restarts.suspend(task.id, handoff.handoff_id, 0, checkpoint, scope);
+    h.store.undrainDaemon("local", scope.daemonId);
+    const journalPath = readdirSync(h.root).find(name => name.startsWith("restart-") && name.endsWith(".db"))!;
+    const journal = new PlannedRestartJournal(join(h.root, journalPath));
+    try {
+      const entry = journal.prepare({ workspace_id: "local", daemon_id: scope.daemonId, runtime_id: runtimeId,
+        turn_id: handoff.turn_id, attempt_id: task.id, handoff_id: handoff.handoff_id, generation: 0 }, checkpoint);
+      journal.acknowledge(handoff.handoff_id);
+      restarts.resume(task.id, handoff.handoff_id, entry.consumer_id, scope, () => {});
+      restarts.withExecution(task.id, 1, scope, () => {}, entry.consumer_id);
+      expect(h.store.recoverOrphans(runtimeId, [])).toEqual({ orphaned: 1, retried: 1 });
+      expect(h.db.query("SELECT status FROM multiremi_turn_attempts WHERE id=?").get(task.id)).toMatchObject({ status: "lost" });
+      const successor = h.db.query("SELECT current_attempt_id FROM multiremi_turns WHERE id=?").get(handoff.turn_id) as { current_attempt_id: string };
+      // Match stable: the replacement attempt has already finished.
+      h.store.claimTask(runtimeId); h.store.startTask(successor.current_attempt_id);
+      h.store.completeTask(successor.current_attempt_id, { output: "Replacement finished" });
+      expect(restarts.get(task.id)?.state).toBe("running");
+      if (cleanup === "sweep") restarts.recoverExpiredResumes(runtimeId);
+    } finally { journal.close(); }
+    const before = h.ledger.filter(e => e.type === "turn.restart.resume").length;
+    if (cleanup === "exhaustion") {
+      h.layer.registerRpcHandler("turn.restart.resume", async () => ({ ok: false, code: "server_error", retryable: true }));
+      await h.startDaemon();
+      await waitFor(() => h.sockets.flatMap(socket => socket.frames).some(f => f.t === "res" && f.p?.code === "server_error"), "injected server failure");
+      await (h.daemon as any).resumePlannedRestarts();
+      expect(h.ledger.filter(e => e.type === "turn.restart.resume")).toHaveLength(before + 1);
+      const retryDb = openSqliteDatabase(join(h.root, journalPath));
+      try { retryDb.run("UPDATE planned_restart_retries SET attempts=24"); } finally { retryDb.close(); }
+      await (h.daemon as any).resumePlannedRestarts();
+      expect((h.daemon as any).restartRecoveryCandidates.has(handoff.handoff_id)).toBe(false);
+      await h.recreateDaemon();
+      await (h.daemon as any).resumePlannedRestarts();
+      expect(h.ledger.filter(e => e.type === "turn.restart.resume")).toHaveLength(before + 1);
+      expect((h.daemon as any).restartJournal.entries()).toHaveLength(1);
+      expect(providerCalls).toBe(0);
+      return;
+    }
+    await h.startDaemon();
+    await waitFor(() => (h.daemon as any).restartJournal.entries().length === 0, "terminal journal cleanup");
+    const requests = h.ledger.filter(e => e.type === "turn.restart.resume").slice(before);
+    expect(requests).toHaveLength(1);
+    expect(h.sockets.flatMap(socket => socket.frames).some(f => f.t === "res" && f.p?.code === "restart_terminal")).toBe(true);
+    expect(restarts.get(task.id)?.state).toBe("terminated");
+    for (let i = 0; i < 3; i++) await (h.daemon as any).resumePlannedRestarts();
+    expect(h.ledger.filter(e => e.type === "turn.restart.resume")).toHaveLength(before + 1);
+    expect(providerCalls).toBe(0);
+  } finally { await h.dispose(); }
+}, 30_000);

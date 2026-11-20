@@ -24,6 +24,9 @@ export interface RestartJournalEntry {
   resumed_generation: number | null;
 }
 
+export const RESTART_RECOVERY_LIMIT_MS = 30 * 60_000;
+export const RESTART_RECOVERY_MAX_ATTEMPTS = 24;
+
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 // Local storage format, independent of peer capability negotiation.
 function identityCheckpoint(traceHead: number): PlannedRestartCheckpoint {
@@ -73,6 +76,10 @@ export class PlannedRestartJournal {
         handoff_id TEXT PRIMARY KEY, payload TEXT NOT NULL, sha256 TEXT NOT NULL,
         consumer_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('prepared','acknowledged','resumed')),
         resumed_generation INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS planned_restart_retries (
+        handoff_id TEXT PRIMARY KEY, started_at INTEGER NOT NULL,
+        attempts INTEGER NOT NULL, next_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS planned_restart_trace_identities (
         handoff_id TEXT PRIMARY KEY, payload TEXT NOT NULL, sha256 TEXT NOT NULL
@@ -158,6 +165,30 @@ export class PlannedRestartJournal {
       const entry = this.get(handoffId);
       if (!entry || entry.state === "prepared" || generation !== entry.execution.generation + 1) throw new Error("Invalid planned restart resume receipt");
       this.db.run("UPDATE planned_restart_journal SET state='resumed',resumed_generation=? WHERE handoff_id=?", [generation, handoffId]);
+    })();
+  }
+
+  /** Reserve a retry before sending, so process crashes cannot reset the budget. */
+  reserveResume(handoffId: string, now = Date.now()): "ready" | "waiting" | "expired" {
+    return this.db.transaction(() => {
+      this.db.run(`INSERT INTO planned_restart_retries(handoff_id,started_at,attempts,next_at)
+        VALUES(?,?,0,?) ON CONFLICT(handoff_id) DO NOTHING`, [handoffId, now, now]);
+      const row = this.db.query("SELECT * FROM planned_restart_retries WHERE handoff_id=?").get(handoffId) as {
+        started_at: number; attempts: number; next_at: number;
+      };
+      if (now - row.started_at >= RESTART_RECOVERY_LIMIT_MS || row.attempts >= RESTART_RECOVERY_MAX_ATTEMPTS) return "expired";
+      if (now < row.next_at) return "waiting";
+      const delay = Math.min(60_000, 1000 * 2 ** Math.min(row.attempts, 6));
+      this.db.run("UPDATE planned_restart_retries SET attempts=attempts+1,next_at=? WHERE handoff_id=?", [now + delay, handoffId]);
+      return "ready";
+    })();
+  }
+
+  remove(handoffId: string): void {
+    this.db.transaction(() => {
+      this.db.run("DELETE FROM planned_restart_trace_identities WHERE handoff_id=?", [handoffId]);
+      this.db.run("DELETE FROM planned_restart_retries WHERE handoff_id=?", [handoffId]);
+      this.db.run("DELETE FROM planned_restart_journal WHERE handoff_id=?", [handoffId]);
     })();
   }
 

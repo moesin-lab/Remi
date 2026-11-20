@@ -1,3 +1,4 @@
+import { assertDeploymentSchema, readDeploymentSchema, PREPARE_REQUIRED } from './schema-preflight.mjs';
 import { SchemaContractRefusedError } from './schema-contract.js';
 import { isPlatformSchemaContractFailure, type PlatformSchemaContractFailure } from '@multiremi/contracts/platform-failure';
 import { createHash, randomUUID } from 'node:crypto';
@@ -138,7 +139,26 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
     const api = await this.status('api');
     const switching = process.env.REMI_SLOT_SWITCH === '1' && api?.slotSwitch
       && current.release.dataSchema === target.dataSchema;
-    return this.preflight(!switching);
+    const result = await this.preflight(!switching);
+    try {
+      const schema = await this.deploymentSchema();
+      if (schema.historical && schema.expandLevel === 0 && current.release.dataSchema !== target.dataSchema) throw new Error(PREPARE_REQUIRED);
+      result.checks.push({ code: 'schema_preparation', ok: true, message: 'Schema enrollment checked' });
+    } catch (error) {
+      result.checks.push({ code: 'schema_preparation', ok: false, message: error instanceof Error ? error.message : String(error) });
+    }
+    return preflightResult(result.checks);
+  }
+  private async deploymentSchema() {
+    return readDeploymentSchema(async (sql: string) => {
+      const result = await this.runner.run('psql', ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-c', sql]);
+      if (result.exitCode !== 0) throw new Error('Read-only schema preflight failed; services retained');
+      return result.stdout;
+    });
+  }
+  private async checkTargetSchema(target: Selection) {
+    const descriptor = await readJson(join(releaseDirectory(this.config.root, target.id), 'api/packages/server/src/store/schema-compatibility.json'));
+    assertDeploymentSchema(descriptor, await this.deploymentSchema());
   }
   async validateRelease(value: unknown) {
     const manifest = parseApplicationManifest(value);
@@ -343,6 +363,7 @@ export class InternalApplicationDriver implements PlatformDeploymentDriver {
       target = await this.stage(stagedManifest, operation.id);
     }
     await this.verifyFiles(releaseDirectory(this.config.root, target.id), target.release);
+    await this.checkTargetSchema(target);
     await this.probe(target);
     if (switching) {
       return this.switchSlots(operation, previous, target, report);

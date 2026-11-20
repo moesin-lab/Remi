@@ -1,0 +1,392 @@
+{
+  "runs": [
+    {
+      "runId": 44493686356,
+      "runUrl": "https://github.com/moesin-lab/Remi/actions/runs/44493686356",
+      "artifact": "backend-shard-2",
+      "artifactId": 14515064175,
+      "artifactSha": "f07dff0a76256bce2a577b9cd5ec9d76b68c2ed7",
+      "cases": [
+        {
+          "dialect": "postgres",
+          "case": "restores native seed values and removes committed cells without restarting the Store",
+          "fixture": "routing-matrix-contract-case",
+          "databaseCreates": 1,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 2,
+          "connections": 2,
+          "setupMs": 2578.833055999945,
+          "resetMs": 278.9463439999381,
+          "databaseCreateMs": 14.740436000050977,
+          "connectionMs": 47.31593600008637,
+          "migrationMs": 2432.9486480000196,
+          "storeConstructionMs": 14.234903000062332,
+          "baselineMs": 69.5315689999843,
+          "bodyMs": 481.27476100006606,
+          "cleanupMs": 127.76773500000127,
+          "totalMs": 3187.8755520000122
+        },
+        {
+          "dialect": "postgres",
+          "case": "closes its connection when a cell fails",
+          "fixture": "routing-matrix-contract-case",
+          "databaseCreates": 1,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 1,
+          "connections": 2,
+          "setupMs": 2562.2640660000034,
+          "resetMs": 131.60764400009066,
+          "databaseCreateMs": 14.849772000103258,
+          "connectionMs": 75.68457799998578,
+          "migrationMs": 2389.071454000077,
+          "storeConstructionMs": 13.759783999877982,
+          "baselineMs": 68.83596000005491,
+          "bodyMs": 131.73070199997164,
+          "cleanupMs": 121.07738000003155,
+          "totalMs": 2815.0721480000066
+        },
+        {
+          "dialect": "postgres",
+          "case": "refuses request caches, live subscriptions, open transactions and schema changes",
+          "fixture": "routing-matrix-contract-case",
+          "databaseCreates": 1,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 0,
+          "connections": 2,
+          "setupMs": 2563.1348759999964,
+          "resetMs": 28.398924000095576,
+          "databaseCreateMs": 14.827002000063658,
+          "connectionMs": 46.13610100012738,
+          "migrationMs": 2417.8137919999426,
+          "storeConstructionMs": 14.460590000031516,
+          "baselineMs": 69.81723799998872,
+          "bodyMs": 32.86889400007203,
+          "cleanupMs": 114.75548599998001,
+          "totalMs": 2710.7592560000485
+        },
+        {
+          "dialect": "postgres",
+          "case": "does not retain afterCommit callbacks from a rolled-back probe",
+          "fixture": "routing-matrix-contract-case",
+          "databaseCreates": 1,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 1,
+          "connections": 2,
+          "setupMs": 2543.5172739999834,
+          "resetMs": 129.67967600002885,
+          "databaseCreateMs": 14.19133599998895,
+          "connectionMs": 44.44949899998028,
+          "migrationMs": 2402.485779999988,
+          "storeConstructionMs": 14.39796899992507,
+          "baselineMs": 67.93970699992497,
+          "bodyMs": 133.75691100000404,
+          "cleanupMs": 119.08956500003114,
+          "totalMs": 2796.3637500000186
+        }
+      ],
+      "template": [],
+      "files": [
+        {
+          "path": "tests/unit/multiremi/routing-matrix-database.test.ts",
+          "seconds": 13.100864893999999,
+          "failures": 0
+        }
+      ]
+    },
+    {
+      "runId": 44494221188,
+      "runUrl": "https://github.com/moesin-lab/Remi/actions/runs/44494221188",
+      "artifact": "backend-shard-2",
+      "artifactId": 14517057388,
+      "artifactSha": "0d5cab63996a0ae6afd242bd103a6a730befdf33",
+      "cases": [
+        {
+          "fixture": "routing-matrix-contract-case",
+          "dialect": "postgres",
+          "databaseCreates": 0,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 2,
+          "connections": 1,
+          "setupMs": 165.46441600006074,
+          "resetMs": 421.21557999996,
+          "databaseCreateMs": 130.0313319999259,
+          "connectionMs": 30.04937899997458,
+          "migrationMs": 18.61795300000813,
+          "storeConstructionMs": 11.282582999905571,
+          "baselineMs": 105.41362899995875,
+          "case": "restores native seed values and removes committed cells without restarting the Store",
+          "bodyMs": 634.7224549999228,
+          "cleanupMs": 499.10716000013053,
+          "totalMs": 1429.32536300004
+        },
+        {
+          "fixture": "routing-matrix-contract-case",
+          "dialect": "postgres",
+          "databaseCreates": 0,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 1,
+          "connections": 1,
+          "setupMs": 195.63798300002236,
+          "resetMs": 209.8881200000178,
+          "databaseCreateMs": 98.01555900007952,
+          "connectionMs": 38.311743000056595,
+          "migrationMs": 20.716782000032254,
+          "storeConstructionMs": 18.689720999915153,
+          "baselineMs": 117.86725800007116,
+          "case": "closes its connection when a cell fails",
+          "bodyMs": 210.0648949999595,
+          "cleanupMs": 153.15267999994103,
+          "totalMs": 656.8711170000024
+        },
+        {
+          "fixture": "routing-matrix-contract-case",
+          "dialect": "postgres",
+          "databaseCreates": 0,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 0,
+          "connections": 1,
+          "setupMs": 175.8631479999749,
+          "resetMs": 27.656620999914594,
+          "databaseCreateMs": 112.44417000003159,
+          "connectionMs": 40.502717999974266,
+          "migrationMs": 13.34994799993001,
+          "storeConstructionMs": 10.275031000026502,
+          "baselineMs": 111.6732980000088,
+          "case": "refuses request caches, live subscriptions, open transactions and schema changes",
+          "bodyMs": 32.622639000066556,
+          "cleanupMs": 124.49584599991795,
+          "totalMs": 445.425802999991
+        },
+        {
+          "fixture": "routing-matrix-contract-case",
+          "dialect": "postgres",
+          "databaseCreates": 0,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 1,
+          "connections": 1,
+          "setupMs": 149.59081800002605,
+          "resetMs": 201.4484780000057,
+          "databaseCreateMs": 82.81530000001658,
+          "connectionMs": 32.8844870000612,
+          "migrationMs": 18.75003600004129,
+          "storeConstructionMs": 12.464566000038758,
+          "baselineMs": 85.3953750000801,
+          "case": "does not retain afterCommit callbacks from a rolled-back probe",
+          "bodyMs": 209.51464599987958,
+          "cleanupMs": 144.13482600008138,
+          "totalMs": 586.0555900000036
+        }
+      ],
+      "template": [
+        {
+          "fixture": "routing-matrix-contract-template",
+          "dialect": "postgres",
+          "templateBuilds": 1,
+          "clones": 4,
+          "freshFallbacks": 0,
+          "databaseCreates": 5,
+          "templateMs": 3024.1713600000367,
+          "createMs": 423.19797899993137
+        }
+      ],
+      "files": [
+        {
+          "path": "tests/unit/multiremi/routing-matrix-database.test.ts",
+          "seconds": 7.854526841999963,
+          "failures": 0
+        }
+      ]
+    },
+    {
+      "runId": 44494282518,
+      "runUrl": "https://github.com/moesin-lab/Remi/actions/runs/44494282518",
+      "artifact": "backend-shard-2",
+      "artifactId": 14518680142,
+      "artifactSha": "e80c06262d71408fa39d0e3844908129bfce3b9d",
+      "cases": [
+        {
+          "fixture": "routing-matrix-contract-case",
+          "dialect": "postgres",
+          "databaseCreates": 0,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 2,
+          "connections": 1,
+          "setupMs": 223.1490380000323,
+          "resetMs": 605.5553780001355,
+          "databaseCreateMs": 125.96347499999683,
+          "connectionMs": 35.66970800003037,
+          "migrationMs": 17.889070999925025,
+          "storeConstructionMs": 10.13580400007777,
+          "baselineMs": 159.25158499996178,
+          "case": "restores native seed values and removes committed cells without restarting the Store",
+          "bodyMs": 899.8636919999262,
+          "cleanupMs": 357.35421400005,
+          "totalMs": 1606.3304190000053
+        },
+        {
+          "fixture": "routing-matrix-contract-case",
+          "dialect": "postgres",
+          "databaseCreates": 0,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 1,
+          "connections": 1,
+          "setupMs": 194.35439700004645,
+          "resetMs": 282.09264000004623,
+          "databaseCreateMs": 92.69174799998291,
+          "connectionMs": 34.23738300008699,
+          "migrationMs": 19.176213999977335,
+          "storeConstructionMs": 10.334865000098944,
+          "baselineMs": 130.5558299999684,
+          "case": "closes its connection when a cell fails",
+          "bodyMs": 282.2277629999444,
+          "cleanupMs": 144.31851300003473,
+          "totalMs": 713.5924210000085
+        },
+        {
+          "fixture": "routing-matrix-contract-case",
+          "dialect": "postgres",
+          "databaseCreates": 0,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 0,
+          "connections": 1,
+          "setupMs": 218.2844369999366,
+          "resetMs": 41.74815599992871,
+          "databaseCreateMs": 89.63494200003333,
+          "connectionMs": 33.10962100001052,
+          "migrationMs": 18.567478999961168,
+          "storeConstructionMs": 9.951666999957524,
+          "baselineMs": 156.61048499995377,
+          "case": "refuses request caches, live subscriptions, open transactions and schema changes",
+          "bodyMs": 49.14176599995699,
+          "cleanupMs": 127.80427000008058,
+          "totalMs": 484.8654150000075
+        },
+        {
+          "fixture": "routing-matrix-contract-case",
+          "dialect": "postgres",
+          "databaseCreates": 0,
+          "storeInitializations": 1,
+          "migrationRuns": 1,
+          "resets": 1,
+          "connections": 1,
+          "setupMs": 193.6351119999308,
+          "resetMs": 279.8359080000082,
+          "databaseCreateMs": 89.8282589999726,
+          "connectionMs": 37.912728999974206,
+          "migrationMs": 20.332502999925055,
+          "storeConstructionMs": 8.21059200016316,
+          "baselineMs": 127.11669100006111,
+          "case": "does not retain afterCommit callbacks from a rolled-back probe",
+          "bodyMs": 287.040219000075,
+          "cleanupMs": 143.11346799996682,
+          "totalMs": 713.6170579999452
+        }
+      ],
+      "template": [
+        {
+          "fixture": "routing-matrix-contract-template",
+          "dialect": "postgres",
+          "templateBuilds": 1,
+          "clones": 4,
+          "freshFallbacks": 0,
+          "databaseCreates": 5,
+          "templateMs": 3585.840826999978,
+          "createMs": 398.0248990000691
+        }
+      ],
+      "files": [
+        {
+          "path": "tests/unit/multiremi/routing-matrix-database.test.ts",
+          "seconds": 9.633290546000003,
+          "failures": 0
+        }
+      ]
+    }
+  ],
+  "fullCI": [
+    {
+      "id": 44493686356,
+      "html_url": "https://github.com/moesin-lab/Remi/actions/runs/44493686356",
+      "head_sha": "f07dff0a76256bce2a577b9cd5ec9d76b68c2ed7",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "event": "workflow_dispatch",
+      "coverage": {
+        "artifactId": 14516907247,
+        "fullSuite": true,
+        "sha": "f07dff0a76256bce2a577b9cd5ec9d76b68c2ed7",
+        "files": 921,
+        "shards": 8,
+        "failures": 0
+      }
+    },
+    {
+      "id": 44494221188,
+      "html_url": "https://github.com/moesin-lab/Remi/actions/runs/44494221188",
+      "head_sha": "e80c06262d71408fa39d0e3844908129bfce3b9d",
+      "run_attempt": 2,
+      "status": "completed",
+      "conclusion": "success",
+      "event": "pull_request",
+      "coverage": {
+        "artifactId": 14518122241,
+        "fullSuite": true,
+        "sha": "0d5cab63996a0ae6afd242bd103a6a730befdf33",
+        "files": 921,
+        "shards": 8,
+        "failures": 0
+      }
+    },
+    {
+      "id": 44494282518,
+      "html_url": "https://github.com/moesin-lab/Remi/actions/runs/44494282518",
+      "head_sha": "e80c06262d71408fa39d0e3844908129bfce3b9d",
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "event": "workflow_dispatch",
+      "coverage": {
+        "artifactId": 14517343465,
+        "fullSuite": true,
+        "sha": "e80c06262d71408fa39d0e3844908129bfce3b9d",
+        "files": 921,
+        "shards": 8,
+        "failures": 0
+      }
+    }
+  ],
+  "initialCiFailure": {
+    "runId": 44494221188,
+    "attempt": 1,
+    "failedJobs": [
+      {
+        "id": 135464268205,
+        "name": "backend (1)",
+        "conclusion": "failure",
+        "url": "https://github.com/moesin-lab/Remi/actions/runs/44494221188/job/135464268205"
+      },
+      {
+        "id": 135481697685,
+        "name": "build",
+        "conclusion": "failure",
+        "url": "https://github.com/moesin-lab/Remi/actions/runs/44494221188/job/135481697685"
+      }
+    ],
+    "test": "tests/integration/multiremi-two-process.test.ts > concurrently cold-starts ui/runtime on 10 fresh databases with zero failures",
+    "error": "round 1: duplicate key value violates unique constraint multiremi_workspaces_pkey",
+    "scopeEvidence": "The test is the first file in backend shard 1. It uses tests/helpers/two-process.ts and child processes running production Store code; none import the changed reusable/routing/template helpers. Both the test and these production sources have zero diff in this PR. Target routing fixture cases run in a separate shard with its own PG service.",
+    "retry": "GitHub rerun-failed-jobs accepted after attempt 1 completed; no code or assertion changes."
+  }
+}

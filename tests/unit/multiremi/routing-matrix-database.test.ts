@@ -1,12 +1,79 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createRoutingMatrixDatabase } from "../../helpers/routing-matrix-database.js";
+import { createPostgresStoreTemplate } from "../../helpers/postgres-store-template.js";
 import { afterCommit } from "@multiremi/store/db/postgres.js";
 import { withRequestReadCache } from "@multiremi/store/request-read-cache.js";
 
 for (const dialect of ["sqlite", "postgres"] as const) {
   describe.skipIf(dialect === "postgres" && !process.env.MULTIREMI_TEST_POSTGRES_URL)(`routing matrix fixture (${dialect})`, () => {
-    it("restores native seed values and removes committed cells without restarting the Store", () => {
-      const fixture = createRoutingMatrixDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL);
+    let template: ReturnType<typeof createPostgresStoreTemplate> | undefined;
+    if (dialect === "postgres") {
+      beforeAll(async () => {
+        const owner = createPostgresStoreTemplate(process.env.MULTIREMI_TEST_POSTGRES_URL!, {
+          prefix: "mul304", fixture: "routing-matrix-contract-template",
+        });
+        try { await owner.prepare(); await owner.warm(); }
+        catch (error) { await owner.dispose(); throw error; }
+        template = owner;
+      });
+      afterAll(async () => {
+        if (!template) return;
+        try {
+          expect(template.stats()).toMatchObject({ templateBuilds: 1, clones: 4, freshFallbacks: 0 });
+        } finally {
+          try { await template.dispose(); }
+          finally { console.log("REMI_TEST_DB_FIXTURE_STATS " + JSON.stringify(template.stats())); }
+        }
+      });
+    }
+
+    // Captured by ci-backend.ts in each PG shard artifact as well as the log.
+    // Template warm-up is reported separately; clone, Store, body and cleanup
+    // all remain inside the unchanged default per-case timeout.
+    function measuredIt(name: string, body: (fixture: ReturnType<typeof createRoutingMatrixDatabase>) => void) {
+      it(name, async () => {
+        const started = performance.now();
+        let fixture: ReturnType<typeof createRoutingMatrixDatabase> | undefined;
+        let database: Awaited<ReturnType<NonNullable<typeof template>["createDatabase"]>> | undefined;
+        let databaseCreateMs = 0;
+        let cleanupMs = 0;
+        try {
+          if (template) {
+            const createStarted = performance.now();
+            database = await template.createDatabase();
+            databaseCreateMs = performance.now() - createStarted;
+          }
+          fixture = createRoutingMatrixDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL, database);
+          const close = fixture.close;
+          fixture.close = () => {
+            const closeStarted = performance.now();
+            try { close(); } finally { cleanupMs += performance.now() - closeStarted; }
+          };
+          body(fixture);
+        } finally {
+          try {
+            fixture?.close();
+          } finally {
+            try {
+              if (database) {
+                const dropStarted = performance.now();
+                try { await template!.dropDatabase(database.name); }
+                finally { cleanupMs += performance.now() - dropStarted; }
+              }
+            } finally {
+              const totalMs = performance.now() - started;
+              console.log("REMI_TEST_DB_FIXTURE_STATS " + JSON.stringify({
+                ...fixture?.stats, dialect, case: name, fixture: "routing-matrix-contract-case",
+                databaseCreateMs: databaseCreateMs + (fixture?.stats.databaseCreateMs ?? 0),
+                bodyMs: totalMs - databaseCreateMs - (fixture?.stats.setupMs ?? 0) - cleanupMs,
+                cleanupMs, totalMs,
+              }));
+            }
+          }
+        }
+      });
+    }
+    measuredIt("restores native seed values and removes committed cells without restarting the Store", fixture => {
       try {
         const baseline = fixture.db.query("SELECT * FROM multiremi_workspaces ORDER BY id").all();
         const store = fixture.reset();
@@ -31,8 +98,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       }
     });
 
-    it("closes its connection when a cell fails", () => {
-      const fixture = createRoutingMatrixDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL);
+    measuredIt("closes its connection when a cell fails", fixture => {
       const closeDatabase = fixture.db.close.bind(fixture.db);
       let closes = 0;
       fixture.db.close = () => { closes++; closeDatabase(); };
@@ -49,8 +115,7 @@ for (const dialect of ["sqlite", "postgres"] as const) {
       expect(closes).toBe(1);
     });
 
-    it("refuses request caches, live subscriptions, open transactions and schema changes", () => {
-      const fixture = createRoutingMatrixDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL);
+    measuredIt("refuses request caches, live subscriptions, open transactions and schema changes", fixture => {
       try {
         expect(() => withRequestReadCache(() => fixture.reset())).toThrow("request read caches");
         const unsubscribe = fixture.store.subscribeConversationLog({ onEntry() {} });
@@ -69,9 +134,10 @@ for (const dialect of ["sqlite", "postgres"] as const) {
     });
 
     if (dialect === "postgres") {
-      it("does not retain afterCommit callbacks from a rolled-back probe", () => {
-        const fixture = createRoutingMatrixDatabase(dialect, process.env.MULTIREMI_TEST_POSTGRES_URL);
+      measuredIt("does not retain afterCommit callbacks from a rolled-back probe", fixture => {
         try {
+          // The preceding case committed DDL; a new clone must not inherit it.
+          expect(fixture.db.query("SELECT to_regclass('public.routing_schema_mutation') AS relation").get().relation).toBeNull();
           let delivered = 0;
           expect(() => fixture.db.transaction(() => {
             afterCommit(fixture.db, () => delivered++);

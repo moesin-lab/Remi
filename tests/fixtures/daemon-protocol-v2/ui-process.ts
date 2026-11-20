@@ -1,4 +1,5 @@
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
+import { waitForPeerIdle } from "./peer-idle.js";
 import { createInterface } from "node:readline";
 import { startMultiremiServer } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
@@ -83,8 +84,13 @@ for await (const line of createInterface({ input: process.stdin })) {
       const steer = store.createTaskSteerMessage({ taskId: command.taskId!, kind: "steer",
         content: "cross-process steer" });
       reply({ op: command.op, steerId: steer.id });
+    } else if (command.op === "drain_peer") {
+      // The control response is a barrier for all setup batches, including a
+      // frozen retry batch. Ready only means the HTTP listener is available.
+      await waitForPeerIdle(peer, "ui setup peer drain timed out");
+      reply({ op: command.op });
     } else if (command.op === "stats") {
-      reply({ op: command.op, daemonHookCalls, daemonSessions: daemonSessions() });
+      reply({ op: command.op, daemonHookCalls, daemonSessions: daemonSessions(), peerStats: peer.stats() });
     } else if (command.op === "stop") {
       server.stop(true);
       await Bun.sleep(25);

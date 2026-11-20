@@ -192,3 +192,60 @@ attribution and sampled pg_stat_activity during the lag; an idle snapshot
 after recovery cannot identify the SQL or bridge stage that stalled earlier.
 Any additional index must use the B1 additive expand mechanism. No schema,
 polling cadence, stable configuration or live data changed in this follow-up.
+
+## Fixed-window collection and latest deployment evidence
+
+Owner reports platform and daemon on `1565ee296`, deployed 2026-11-20
+16:29–16:41 UTC with #154. The 16:44–16:47 minute summaries show 12–188
+requests/minute, 0–1 slow requests, zero 5xx, DB busy 4.6–10%, 2.2k–4.3k
+queries/minute and maximum event-loop lag 185–1015ms. The 188-request minute
+had one slow request and approximately 1s lag. This is encouraging but still
+moderate load, not the requested heavier-load acceptance. The reconnect minute
+at 16:41 retained 5.9s lag. The removed resume retry loop is a plausible major
+contributor; these observations do not identify a blocking SQL/call stack or
+prove #144's independent production effect. No additional live measurements
+were made by this execution container.
+
+Use [`MUL-279-scan-snapshot.sql`](MUL-279-scan-snapshot.sql) twice via the existing
+operations entry, at the beginning and end of a fixed window (for example one
+hour). `PG_CONTAINER`, `PG_USER` and `PG_DATABASE` below are operator-provided
+identifiers, not credentials; use the existing container's authentication.
+Never use `docker cp`. From the directory containing the attached files:
+
+```sh
+docker exec -i "$PG_CONTAINER" psql -X -qAt -v ON_ERROR_STOP=1 \
+  -U "$PG_USER" -d "$PG_DATABASE" < MUL-279-scan-snapshot.sql > before.json
+# At the end of the measured window, in a new session:
+docker exec -i "$PG_CONTAINER" psql -X -qAt -v ON_ERROR_STOP=1 \
+  -U "$PG_USER" -d "$PG_DATABASE" < MUL-279-scan-snapshot.sql > after.json
+python3 MUL-279-scan-delta.py before.json after.json > delta.json
+```
+
+The SQL opens and rolls back a short read-only transaction with a 5s statement
+limit, reads built-in counters for the seven reported hot tables, and performs
+no statistics resets, extension changes, DDL, ANALYZE or application writes.
+The offline script reports exact counter differences, rates per minute and
+tuples per sequential scan. It rejects changed database identity, server restart,
+database statistics reset, relation replacement, disabled collection, reversed
+timestamps and decreasing counters. PostgreSQL exposes no per-table reset
+timestamp here: a per-table reset followed by sufficient activity could escape
+the decreasing-counter check. Record whether any statistics resets occurred.
+Live-tuple counts are estimates; scan counts are not statement/request counts.
+Counter flush delay also affects short windows. These files do not replace
+EXPLAIN, statement latency ranking or route/frame attribution.
+
+Alongside both snapshots record source host/container, deployed API/daemon SHA,
+UTC window, active-agent count and API route/frame mix; collect each minute's
+request/slow/5xx/db_busy/db_queries/lag_max columns plus readyz latency. Comparing
+counter rates across windows with different traffic cannot establish a speedup.
+Attribution must use route/frame evidence in the same window. No one-hour delta
+is claimed yet: only the owner's earlier cumulative table counters are available.
+
+On 2026-11-20T16:50:56Z the SCM API reported current head `ff096b1fa` pending:
+[Release build check 44776332864](https://github.com/moesin-lab/Remi/actions/runs/44776332864)
+had queued/running jobs, while Developer context succeeded. Backend PG test
+logs and representative PG EXPLAIN remain unavailable. The installed `remi`
+wrapper lacks the checks command; this observation used the repository CLI
+with Bun 1.3.14. The local UID namespace maps only UID 0; switching to a PG
+service user failed with `setresuid: Invalid argument`. No local PG server was
+started and no security or production configuration was changed.

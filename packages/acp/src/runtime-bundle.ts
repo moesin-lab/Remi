@@ -122,6 +122,7 @@ export function installRuntimeBundle(
   tools: { node: string; npm: string },
   prepareBridge: (bridge: string) => void,
   versions: RuntimeVersions = releaseRuntimeVersions(provider),
+  cleanup = removeRuntimeStaging,
 ): void {
   const destination = runtimeBundlePrefix(provider, versions);
   mkdirSync(dirname(destination), { recursive: true });
@@ -162,7 +163,7 @@ export function installRuntimeBundle(
       throw error;
     }
   } finally {
-    try { if (stage) removeRuntimeStaging(stage); }
+    try { if (stage) cleanup(stage); }
     finally { rmSync(lock, { recursive: true, force: true }); }
   }
 }

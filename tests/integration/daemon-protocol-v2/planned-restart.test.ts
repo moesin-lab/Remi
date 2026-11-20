@@ -15,7 +15,7 @@ useMigratedIntegrationDatabases();
 
 // Real daemon/provider lifetime, disk outbox/journal and authenticated v2 RPCs.
 // Candidate update acceptance is exercised separately with the MUL-27 harness.
-for (const kind of ["task", "autopilot"] as const) test(`${kind} joins provider shutdown before preparing and acknowledging the same-attempt checkpoint`, async () => {
+for (const kind of ["task", "autopilot", "lost response", "large context"] as const) test(`${kind} joins provider shutdown before preparing and acknowledging the same-attempt checkpoint`, async () => {
   let entered = false;
   let resumed = false;
   let providerClosed = false;
@@ -74,10 +74,43 @@ for (const kind of ["task", "autopilot"] as const) test(`${kind} joins provider 
     expect(h.ledger.some(e => e.type === "turn.restart.checkpoint")).toBe(true);
     expect(h.ledger.some(e => e.type === "turn.restart.suspend")).toBe(true);
     await h.stopDaemon();
-    h.store.undrainDaemon("local", daemonId);
+    const originalResume = (h.layer as any).rpcHandlers.get("turn.restart.resume");
+    let dropped = false;
+    let fenced = false;
+    let failed = false;
+    h.layer.registerRpcHandler("turn.restart.resume", async (frame, session) => {
+      const reply = await originalResume(frame, session);
+      if (reply.code === "resume_fenced") fenced = true;
+      if (kind === "lost response" && reply.ok && dropped && !failed) {
+        failed = true;
+        throw new Error("Injected resume server failure after lost reply");
+      }
+      if (kind === "lost response" && reply.ok && !dropped) {
+        dropped = true;
+        return session.deferReply(frame.id!, new Promise(() => {}));
+      }
+      return reply;
+    });
+    if (kind === "large context") h.store.updateAgent(agent.id, { instructions: "Resume context ".repeat(100_000) });
+    // The real operator sequence keeps the manual fence through replacement.
     await h.recreateDaemon();
+    await waitFor(() => fenced, "resume fenced while drain survives");
+    expect(h.store.plannedRestarts().get(task.id)?.state).toBe("suspended");
+    expect(resumed).toBe(false);
+    h.store.undrainDaemon("local", daemonId);
+    if (kind === "lost response") {
+      await waitFor(() => dropped, "first resume response lost", 10_000);
+      expect(h.store.plannedRestarts().get(task.id)?.state).toBe("resuming");
+      expect(h.store.recoverOrphans(runtimeId)).toEqual({ orphaned: 0, retried: 0 });
+      h.clock.advance(30_001);
+      await waitFor(() => failed, "retry receives server_error", 10_000);
+      expect(h.store.recoverOrphans(runtimeId)).toEqual({ orphaned: 0, retried: 0 });
+      expect(h.store.plannedRestarts().get(task.id)?.state).toBe("resuming");
+    }
     await waitFor(() => h.store.getTask(task.id)?.status === "completed", "same attempt finished after replacement", 10_000);
+    expect(h.store.plannedRestarts().get(task.id)?.state).toBe("running");
     expect(resumed).toBe(true);
+    if (kind === "lost response") expect(failed).toBe(true);
     if (run) expect(h.store.getAutopilotRun(run.id)?.status).toBe("completed");
     expect(h.store.getTask(task.id)).toMatchObject({ status: "completed", attempt: 1, maxAttempts, result: "complete resumed answer" });
     expect(h.ledger.some(e => e.type === "turn.restart.resume")).toBe(true);
@@ -118,7 +151,7 @@ test("live report, input and trace boundaries reject suspended and obsolete gene
       p: { task_id: task.id, summary: "late progress", generation } });
     await expect(progress(0)).rejects.toMatchObject({ code: "stale_execution" });
     await expect(h.client.rpc("turn.input", { ...input, message_ids: [], generation: 0 }, runtimeId))
-      .rejects.toMatchObject({ code: "stale_attempt" });
+      .rejects.toMatchObject({ code: "stale_execution" });
     const append = (generation: number) => h.client.rpc("trace.append", { task_id: task.id, generation, closed: false,
       events: [{ seq: 1, ts: new Date().toISOString(), type: "turn.started", turn: { status: "running" } }] }, runtimeId);
     await expect(append(0)).rejects.toMatchObject({ code: "stale_execution" });
@@ -136,7 +169,7 @@ test("live report, input and trace boundaries reject suspended and obsolete gene
       p: { task_id: task.id, generation: 0, error: "old provider died" } })).rejects.toMatchObject({ code: "stale_execution" });
     await expect(h.client.event({ t: "turn.complete", seq: ++seq, rt: runtimeId,
       p: { ...input, generation: 0, reply: { body_md: "old reply", message_kind: "final" } } }))
-      .rejects.toMatchObject({ code: "stale_attempt" });
+      .rejects.toMatchObject({ code: "stale_execution" });
     expect(h.store.getTask(task.id)?.status).toBe("running");
   } finally { await h.dispose(); }
 }, 20_000);
@@ -509,3 +542,73 @@ for (const snapshot of ["valid", "missing", "digest", "binding"] as const) test(
     expect(h.ledger.some(event => event.type === "task.fail")).toBe(false);
   } finally { await h.dispose(); }
 }, 25_000);
+
+for (const cleanup of ["resume", "sweep", "exhaustion"] as const) test(`stale lost attempt with a running handoff stops daemon recovery via ${cleanup}`, async () => {
+  let providerCalls = 0;
+  const h = await DaemonProtocolHarness.create({ providerFactory: () => ({
+    async *sendStream() { providerCalls++; yield {} as any; },
+    getLastResponse: () => ({ text: "", sessionId: "stale-session", usage: [], toolCalls: [] } as any),
+    close: async () => {},
+  }) });
+  try {
+    await h.startDaemon();
+    await h.settleHeartbeat();
+    const runtimeId = h.store.listRuntimes()[0]!.id;
+    const scope = { workspaceId: "local", runtimeId, daemonId: h.store.getRuntimeLite(runtimeId)!.daemonId! };
+    await h.stopDaemon();
+    const agent = h.store.createAgent({ name: "Stale restart", provider: "claude", runtimeId });
+    const issue = createResponsibleTestIssue(h.store, { title: "Stale retry", assigneeType: "agent", assigneeId: agent.id });
+    const task = h.store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Historical attempt", maxAttempts: 3 });
+    h.store.claimTask(runtimeId); h.store.startTask(task.id);
+    h.store.beginDaemonDrain("local", scope.daemonId);
+    const restarts = h.store.plannedRestarts();
+    const handoff = restarts.request(task.id, scope);
+    const checkpoint = restarts.checkpointReferences(task.id, scope);
+    restarts.suspend(task.id, handoff.handoff_id, 0, checkpoint, scope);
+    h.store.undrainDaemon("local", scope.daemonId);
+    const journalPath = readdirSync(h.root).find(name => name.startsWith("restart-") && name.endsWith(".db"))!;
+    const journal = new PlannedRestartJournal(join(h.root, journalPath));
+    try {
+      const entry = journal.prepare({ workspace_id: "local", daemon_id: scope.daemonId, runtime_id: runtimeId,
+        turn_id: handoff.turn_id, attempt_id: task.id, handoff_id: handoff.handoff_id, generation: 0 }, checkpoint);
+      journal.acknowledge(handoff.handoff_id);
+      restarts.resume(task.id, handoff.handoff_id, entry.consumer_id, scope, () => {});
+      restarts.withExecution(task.id, 1, scope, () => {}, entry.consumer_id);
+      expect(h.store.recoverOrphans(runtimeId, [])).toEqual({ orphaned: 1, retried: 1 });
+      expect(h.db.query("SELECT status FROM multiremi_turn_attempts WHERE id=?").get(task.id)).toMatchObject({ status: "lost" });
+      const successor = h.db.query("SELECT current_attempt_id FROM multiremi_turns WHERE id=?").get(handoff.turn_id) as { current_attempt_id: string };
+      // Match stable: the replacement attempt has already finished.
+      h.store.claimTask(runtimeId); h.store.startTask(successor.current_attempt_id);
+      h.store.completeTask(successor.current_attempt_id, { output: "Replacement finished" });
+      expect(restarts.get(task.id)?.state).toBe("running");
+      if (cleanup === "sweep") restarts.recoverExpiredResumes(runtimeId);
+    } finally { journal.close(); }
+    const before = h.ledger.filter(e => e.type === "turn.restart.resume").length;
+    if (cleanup === "exhaustion") {
+      h.layer.registerRpcHandler("turn.restart.resume", async () => ({ ok: false, code: "server_error", retryable: true }));
+      await h.startDaemon();
+      await waitFor(() => h.sockets.flatMap(socket => socket.frames).some(f => f.t === "res" && f.p?.code === "server_error"), "injected server failure");
+      await (h.daemon as any).resumePlannedRestarts();
+      expect(h.ledger.filter(e => e.type === "turn.restart.resume")).toHaveLength(before + 1);
+      const retryDb = openSqliteDatabase(join(h.root, journalPath));
+      try { retryDb.run("UPDATE planned_restart_retries SET attempts=24"); } finally { retryDb.close(); }
+      await (h.daemon as any).resumePlannedRestarts();
+      expect((h.daemon as any).restartRecoveryCandidates.has(handoff.handoff_id)).toBe(false);
+      await h.recreateDaemon();
+      await (h.daemon as any).resumePlannedRestarts();
+      expect(h.ledger.filter(e => e.type === "turn.restart.resume")).toHaveLength(before + 1);
+      expect((h.daemon as any).restartJournal.entries()).toHaveLength(1);
+      expect(providerCalls).toBe(0);
+      return;
+    }
+    await h.startDaemon();
+    await waitFor(() => (h.daemon as any).restartJournal.entries().length === 0, "terminal journal cleanup");
+    const requests = h.ledger.filter(e => e.type === "turn.restart.resume").slice(before);
+    expect(requests).toHaveLength(1);
+    expect(h.sockets.flatMap(socket => socket.frames).some(f => f.t === "res" && f.p?.code === "restart_terminal")).toBe(true);
+    expect(restarts.get(task.id)?.state).toBe("terminated");
+    for (let i = 0; i < 3; i++) await (h.daemon as any).resumePlannedRestarts();
+    expect(h.ledger.filter(e => e.type === "turn.restart.resume")).toHaveLength(before + 1);
+    expect(providerCalls).toBe(0);
+  } finally { await h.dispose(); }
+}, 30_000);

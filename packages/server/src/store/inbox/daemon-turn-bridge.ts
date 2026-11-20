@@ -32,8 +32,8 @@ const invalidTurnReports=new Set([
   'Source turn does not belong to the sender workspace',
   'Message sender belongs to another workspace','Message recipient belongs to another workspace',
 ]);
-function turnRejectionCode(error:unknown,attemptId:string,runtimeId:string):'stale_attempt'|'input_gap'|'turn_input_pending'|'invalid_report'|null {
-  if(error instanceof PlannedRestartError)return 'stale_attempt';
+function turnRejectionCode(error:unknown,attemptId:string,runtimeId:string):'stale_execution'|'stale_attempt'|'input_gap'|'turn_input_pending'|'invalid_report'|null {
+  if(error instanceof PlannedRestartError)return 'stale_execution';
   if(!(error instanceof Error))return null;
   if ('retryable' in error && error.retryable === false && 'code' in error
     && ['authority_revoked','task_not_found'].includes(String(error.code))) return 'stale_attempt';
@@ -52,16 +52,18 @@ export class DaemonTurnBridge {
     this.ctx.lockWorkspaceRuntimeLifecycle(scope.workspaceId);
     const row=this.ctx.db.query('SELECT t.*,a.runtime_id,a.status AS attempt_status,a.offered_at,a.projection_to_seq AS offered_to FROM multiremi_turns t JOIN multiremi_turn_attempts a ON a.turn_id=t.id WHERE t.id=? AND a.id=?').get(turnId,attemptId);
     const runtime=this.ctx.runtimes().getRuntimeLite(scope.runtimeId);
-    if(!row||row.current_attempt_id!==attemptId||row.workspace_id!==scope.workspaceId||row.runtime_id!==scope.runtimeId||runtime?.daemonId!==scope.daemonId
-      ||!terminal&&!['running','awaiting_human'].includes(row.status)
-        &&!(sentInput&&row.status==='pending'&&row.offered_at&&['offered','accepted'].includes(row.attempt_status)))throw new Error('stale_attempt');
-    lockLane(this.ctx,row.session_id,row.agent_id,row.execution_scope);new PlannedRestarts(this.ctx).assertExecutionWithinTransaction(attemptId,scope.generation);return row;
+    if(!row||row.workspace_id!==scope.workspaceId||row.runtime_id!==scope.runtimeId||runtime?.daemonId!==scope.daemonId)throw new Error('stale_attempt');
+    lockLane(this.ctx,row.session_id,row.agent_id,row.execution_scope);
+    new PlannedRestarts(this.ctx).assertExecutionWithinTransaction(attemptId,scope.generation);
+    if(row.current_attempt_id!==attemptId||!terminal&&!['running','awaiting_human'].includes(row.status)
+      &&!(sentInput&&row.status==='pending'&&row.offered_at&&['offered','accepted'].includes(row.attempt_status)))throw new Error('stale_attempt');
+    return row;
   }
   private messages(sessionId:string,from:number,to:number):UnifiedMessage[]{return this.ctx.db.query("SELECT * FROM multiremi_conversation_log WHERE session_id=? AND seq>? AND seq<=? AND kind='message' AND deleted_at IS NULL AND visibility='shown' ORDER BY seq").all(sessionId,from,to).map(messageFromRow);}
   private inputMessages(turn:any,from:number,to:number,window?:UnifiedMessage[]):UnifiedMessage[] {
     const attempt=this.ctx.db.query(`SELECT a.session_id,a.attempt_no,a.input_trigger_ack,r.checkpoint AS restart_checkpoint
       FROM multiremi_turn_attempts a LEFT JOIN multiremi_planned_restarts r
-        ON r.attempt_id=a.id AND r.state='running' AND r.generation>0 WHERE a.id=?`).get(turn.current_attempt_id);
+        ON r.attempt_id=a.id AND r.state IN ('resuming','running') AND r.generation>0 WHERE a.id=?`).get(turn.current_attempt_id);
     const delivered=plannedRestartDeliveredInputs(attempt.restart_checkpoint);
     const messages=(window??this.messages(turn.session_id,from,to)).filter(message=>!delivered.has(message.id));
     // A cold provider needs the original task even when the reader has already
@@ -146,7 +148,7 @@ export class DaemonTurnBridge {
         JOIN multiremi_session_lanes l ON l.session_id=t.session_id AND l.reader_type='agent'
           AND l.reader_id=t.agent_id AND l.execution_scope=t.execution_scope
         LEFT JOIN multiremi_conversation_heads h ON h.session_id=t.session_id
-        LEFT JOIN multiremi_planned_restarts r ON r.attempt_id=a.id AND r.state='running' AND r.generation>0
+        LEFT JOIN multiremi_planned_restarts r ON r.attempt_id=a.id AND r.state IN ('resuming','running') AND r.generation>0
         WHERE ${where}`).all(...args);
       if(!rows.length)return {messages,wrapUps};
       const selected=rows.map(row=>String(row.snapshot_attempt_id));

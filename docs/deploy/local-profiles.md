@@ -172,9 +172,9 @@ node scripts/local-profile.mjs stable backup
 
 开发流程：在分支修改 → dev 验证 → 运行对应测试和文档检查 → 提交 → 使用具体 commit 更新 stable。stable 的源码和镜像不会跟随开发目录或分支切换自动变化。部署本机提交不等于创建 GitHub Release；正式发版仍遵循 [仓库规则](../../AGENTS.md)。
 
-存在 `compose.application.json` 或 `compose.internal-updates.yml` 时，`stable deploy` 拒绝覆盖应用更新配置，请使用下文 Web/CLI 更新入口。内部模式还阻止直接 `restart`、`backup` 和宿主更新命令，避免与内部操作竞争。尚未接入时，`deploy` 先拉取并核验候选镜像，再停止该环境的 API/Web 写入，保存数据库逻辑备份、API home、旧配置与镜像记录，然后启动并等待健康检查；已经 stop 的环境也保留升级备份步骤。单独 `backup` 同样停止写入，成功后只恢复原本运行的 API/Web。新备份的 `complete.json` 包含每个恢复文件的大小和 SHA-256；旧版只有时间戳的 marker 不满足自动恢复校验。中途失败的目录不能当作可恢复备份。手动部署或备份前应等待正在执行的 Agent 任务结束；API 启动会自动迁移数据库，关闭后台任务也不会跳过迁移。
+存在 `compose.application.json` 或 `compose.internal-updates.yml` 时，`stable deploy` 拒绝覆盖应用更新配置，请使用下文 Web/CLI 更新入口。内部模式还阻止直接 `restart`、`backup` 和宿主更新命令，避免与内部操作竞争。尚未接入时，`deploy` 先拉取并核验候选镜像，再停止该环境的 API/Web 写入，保存数据库逻辑备份、API home、旧配置与镜像记录，然后启动并等待健康检查；已经 stop 的环境也保留升级备份步骤。单独 `backup` 同样停止写入，成功后只恢复原本运行的 API/Web。新备份的 `complete.json` 包含每个恢复文件的大小和 SHA-256；旧版只有时间戳的 marker 不满足自动恢复校验。中途失败的目录不能当作可恢复备份。手动部署或备份前应等待正在执行的 Agent 任务结束；已登记的库在 API 启动时执行版本化加法迁移，关闭后台任务也不会跳过迁移。历史 level 0 首次升级 B1 必须先离线 prepare，详见 [B1 首次升级手册](b1-schema-upgrade.md)。deploy 在停旧容器前检查目标声明及当前库，缺少准备或元数据损坏时保留旧服务并拒绝部署。
 
-所有 `docker compose up` 调用遇到明确的端口绑定冲突（例如 `bind: address already in use` 或 `port is already allocated`）时，按 1、2、4 秒短退避最多重试三次，等待旧容器释放端口；其他错误立即失败。冲突持续时报告端口占用，需检查占用进程后重试。只有启动成功才写入 `active.json`。启动失败保留数据卷并列出已有备份位置，不据此认定迁移已执行或要求恢复数据；回滚前应检查 API 迁移日志，确认实际迁移情况。
+所有 `docker compose up` 调用遇到明确的端口绑定冲突（例如 `bind: address already in use` 或 `port is already allocated`）时，按 1、2、4 秒短退避最多重试三次，等待旧容器释放端口；其他错误立即失败。冲突持续时报告端口占用，需检查占用进程后重试。只有启动成功才写入 `active.json`。启动失败会自动恢复上一版本容器并检查健康，保留当前数据库与 API home；不会恢复数据库备份。回退失败则报告人工恢复要求和备份位置。启动失败本身不能证明迁移已执行。
 
 手动备份保存在 profile 的 `backups/<时间>/`，应用更新备份在 `application-backups/`。停止、重建和升级命令保留命名卷；脚本不提供删除卷操作。默认应用回滚保留当前数据库和文件，必须先验证迁移兼容。恢复旧 PostgreSQL/API home 快照属于独立的手动灾难恢复，会覆盖备份后的写入，不能用作常规版本回滚。备份和旧代码应保留到升级后的实际使用验证完成。
 

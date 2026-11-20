@@ -1,3 +1,4 @@
+import { ExecutionModelPolicyError } from "@multiremi/contracts/execution-endpoint.js";
 import { PlannedRestarts } from "../planned-restarts.js";
 import { readCurrentTurnRow } from "@multiremi/store/execution-reads.js";
 import { readAttemptTurn, readTurnRow } from "@multiremi/store/execution-reads.js";
@@ -1307,6 +1308,8 @@ export class TasksRepo {
         probeVerdicts.set(taskId, taskVerdicts);
       }
     }
+    // Frozen tasks may own different connections even for the same Agent/model.
+    // Key those decisions by task and use the claim predicate for their snapshot.
     const decisions = new Map<string, { agent: MultiremiAgent | null; candidateSupportsModel: boolean[] }>();
     for (const row of rows) {
       // This observer owns only its own reasons. Human and directory waits, and
@@ -1330,10 +1333,12 @@ export class TasksRepo {
         // placement conflict.
         const decisionKey = JSON.stringify([
           row.agent_id, row.runtime_id ?? "", row.execution_model ?? "", row.execution_thinking_level ?? "",
+          row.execution_fingerprint ? row.id : "",
         ]);
         let decision = decisions.get(decisionKey);
         if (!decision) {
           const agent = this.ctx.agents().getAgent(row.agent_id);
+          const frozenTask = row.execution_fingerprint ? this.getTask(row.id) : null;
           const target = agent ? taskExecutionTarget(agent, {
             executionModel: row.execution_model,
             executionThinkingLevel: row.execution_thinking_level,
@@ -1344,7 +1349,9 @@ export class TasksRepo {
             candidateSupportsModel: executionAgent && !executionAgent.archivedAt
               ? runtimes.filter((runtime) => (row.runtime_id === null || runtime.id === row.runtime_id)
                 && runtimesRepo.runtimeCanRouteAgent(runtime, agent!))
-                .map((runtime) => runtimesRepo.runtimeSupportsAgentModel(runtime, executionAgent))
+                .map((runtime) => frozenTask
+                  ? this.runtimeCanRunTaskAgent(runtime, executionAgent, frozenTask)
+                  : runtimesRepo.runtimeSupportsAgentModel(runtime, executionAgent))
               : [],
           };
           decisions.set(decisionKey, decision);
@@ -1379,10 +1386,12 @@ export class TasksRepo {
           row.agent_id,
           claimable.map((verdict) => verdict.runtimeId).sort(),
           row.execution_model ?? "", row.execution_thinking_level ?? "",
+          row.execution_fingerprint ? row.id : "",
         ]);
         let decision = decisions.get(decisionKey);
         if (!decision) {
           const agent = this.ctx.agents().getAgent(row.agent_id);
+          const frozenTask = row.execution_fingerprint ? this.getTask(row.id) : null;
           const target = agent ? taskExecutionTarget(agent, {
             executionModel: row.execution_model,
             executionThinkingLevel: row.execution_thinking_level,
@@ -1395,7 +1404,9 @@ export class TasksRepo {
                 .map((verdict) => runtimesRepo.getRuntime(verdict.runtimeId))
                 .filter((runtime): runtime is MultiremiRuntime => runtime != null
                   && runtimesRepo.runtimeCanRouteAgent(runtime, agent!))
-                .map((runtime) => runtimesRepo.runtimeSupportsAgentModel(runtime, executionAgent))
+                .map((runtime) => frozenTask
+                  ? this.runtimeCanRunTaskAgent(runtime, executionAgent, frozenTask)
+                  : runtimesRepo.runtimeSupportsAgentModel(runtime, executionAgent))
               : [],
           };
           decisions.set(decisionKey, decision);
@@ -1852,6 +1863,12 @@ export class TasksRepo {
     const agent = this.ctx.agents().getAgent(input.agentId);
     if (!agent) throw new Error(`Agent not found: ${input.agentId}`);
     if (agent.archivedAt) throw new Error(`Agent is archived: ${input.agentId}`);
+    const policyReason = this.ctx.runtimes().agentModelPolicyReason({ ...agent,
+      model: cleanOptionalString(input.executionModel ?? input.execution_model) ?? agent.model });
+    // Retries of a claimed attempt retain its frozen connection and model.
+    if (policyReason === "model_blocked_by_policy" && !input.executionFingerprint && !input.execution_fingerprint)
+      throw new ExecutionModelPolicyError(policyReason, `model blocked by policy: ${input.executionModel ?? input.execution_model ?? agent.model}`);
+
     const explicitIssueSessionId = cleanOptionalString(input.issueSessionId ?? input.issue_session_id);
     const explicitIssueSession = explicitIssueSessionId
       ? this.ctx.issueSessions().getIssueSession(explicitIssueSessionId)
@@ -4132,12 +4149,14 @@ ${routing.sql}
 
   /** The capability reason for a Task, given its claimable Runtime set. */
   private queuedCapabilityReasonFor(
-    row: { agent_id: string; execution_model: string | null; execution_thinking_level: string | null; created_at: string },
+    row: { agent_id: string; execution_model: string | null; execution_thinking_level: string | null; created_at: string; execution_fingerprint?: string | null },
     decision: { agent: MultiremiAgent | null; candidateSupportsModel: boolean[] },
     now: number,
   ): { reason: string; alerted: boolean } | null {
     const { agent, candidateSupportsModel } = decision;
     if (!agent || (agent.workspaceId ?? "local") !== (agent.workspaceId ?? "local")) return null;
+    const policyReason = this.ctx.runtimes().agentModelPolicyReason(agent);
+    if (policyReason && !row.execution_fingerprint) return { reason: `${policyReason}: ${agent.model || "default"}`, alerted: false };
     return queuedCapabilityWait({
       candidateSupportsModel,
       model: agent.model,
@@ -5860,7 +5879,7 @@ ${placementAfter.sql}
           && runtimesRepo.runtimeCanRouteAgent(runtime, agent)
           && this.runtimePlacementForTask(runtime, taskId)?.routingOk === true);
       const primary = agentAtTaskTarget(agent, current);
-      if (!eligible.length || eligible.some((runtime) => runtimesRepo.runtimeSupportsAgentModel(runtime, primary))
+      if (!eligible.length || eligible.some((runtime) => this.runtimeCanRunTaskAgent(runtime, primary, current))
         || !eligible.some((runtime) => runtimesRepo.runtimeSupportsAgentModel(runtime, { ...agent, ...plan }))) return null;
       this.getTaskChatExecutionKind(current);
       this.lockTaskIssueSessionsWithinWorkspaceLock([current]);

@@ -64,6 +64,10 @@ remi agent update <agent-id> --execution-group <group-id>
 }
 ```
 
+`model_policy.blocked_models` 是组级屏蔽名单：最多 200 个唯一、区分大小写的精确 ID，校验规则与 `models` 相同；允许填写尚未发现的 ID。缺省或空数组表示不屏蔽，屏蔽优先于放行名单。此版本不支持通配、前缀或端点级屏蔽；后续模式规则将使用独立字段，保持精确 ID 的含义。默认模型被屏蔽时拒绝保存，错误定位到 `model_policy.model`。已保存 Agent 保留原模型，API 返回 `model_policy_reason`，Web 选型器显示屏蔽提示；新任务拒绝入队，未领取任务不可领取并显示策略原因，已领取任务及其冻结重试仍使用原连接与模型。
+
+CLI 支持 `remi runtime group create|update --file group.json --blocked-model exact-id`（可重复；替换屏蔽名单，其他组字段仍由 JSON 提供）。清空时在 JSON 中指定 `model_policy.blocked_models: []`。`group get` 展示策略与是否设置默认模型；`runtime model catalog` 的 JSON 保留 providers 结构并包含 `blocked_models`，table/jsonl 展开模型行，表格显示目录状态、默认模型与推理等级；无默认标记时明确显示 `none identified`，不猜测组配置。
+
 `model_policy: {}` 自动发现模型；可用 `{"model":"default-model","models":["default-model","fast-model"]}` 限制选择。实际目录由各成员通过选定连接探测后求共同可用集合，不用工作区全局目录补足缺失模型。空目录或探测错误不会伪装成可用。端点编辑不触发模型推理；目录探测不等于真实模型调用成功。
 
 ## 第三方端点接入

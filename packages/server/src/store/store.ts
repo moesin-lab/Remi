@@ -5882,6 +5882,9 @@ runMigrations(this.db);
     return this.runtimes.runtimeCanRouteAgent(runtime, agent);
   }
 
+  agentModelPolicyReason(agent: MultiremiAgent): string | null {
+    return this.runtimes.agentModelPolicyReason(agent);
+  }
   runtimeSupportsAgentModel(runtime: MultiremiRuntime, agent: MultiremiAgent): boolean {
     return this.runtimes.runtimeSupportsAgentModel(runtime, agent);
   }

@@ -28,7 +28,9 @@ export function isQueuedObserverWaitReason(reason: string | null | undefined): b
   if (!reason) return false;
   return reason.startsWith(CAPABILITY_WAIT_PREFIX)
     || reason.startsWith(DEVICE_ROUTING_WAIT_PREFIX)
-    || reason.startsWith(PLACEMENT_WAIT_PREFIX);
+    || reason.startsWith(PLACEMENT_WAIT_PREFIX)
+    || reason.startsWith("model_blocked_by_policy:")
+    || reason.startsWith("model_not_allowed_by_policy:");
 }
 
 export function isQueuedCapabilityWaitReason(reason: string | null | undefined): boolean {

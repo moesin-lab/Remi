@@ -837,7 +837,9 @@
     "catalog_needs_machines": "머신을 할당하면 사용 가능한 모델을 검색합니다",
     "ready_summary": "{{ready}}/{{total}} 준비됨",
     "selected_machines": "{{selected}}/{{total}} 선택됨",
-    "retry": "다시 시도"
+    "retry": "다시 시도",
+    "model_blocklist": "차단 모델 (정확한 ID, 한 줄에 하나; 허용 목록보다 우선)",
+    "no_default_model": "그룹 기본 모델 미설정"
   },
   "storage": {
     "card_aria": "{{name}} 저장소",

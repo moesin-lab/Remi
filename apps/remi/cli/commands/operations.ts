@@ -105,8 +105,8 @@ function executionConfigurationSpecs(): CommandSpec[] {
     return [
       ...(resource !== "group" ? [op({ id: `runtime.${resource}.list`, path: ["runtime", resource, "list"], description: resource === "endpoint" ? "List shared gateway endpoints and their API protocols" : "List legacy workspace connection profiles", method: "GET", apiPath: root, auth: HUMAN, query: scope, collections: [collection] })] : []),
       op({ id: `runtime.${resource}.get`, path: ["runtime", resource, "get"], description: `Get a workspace execution ${resource}`, method: "GET", apiPath: item, auth: HUMAN, positionals: [ref(resource)], query: scope }),
-      op({ id: `runtime.${resource}.create`, path: ["runtime", resource, "create"], description: resource === "group" ? "Create a capability group, optionally configuring its provider and models with connection in the same JSON" : "Create a workspace execution profile from JSON", method: "POST", apiPath: root, mutation: "write", auth: HUMAN, options: INPUT_OPTIONS, query: scope, body: withWorkspace }),
-      op({ id: `runtime.${resource}.update`, path: ["runtime", resource, "update"], description: resource === "group" ? "Save group description, membership and optional provider connection atomically from JSON" : "Replace a workspace execution profile configuration from JSON", method: "PUT", apiPath: item, mutation: "write", auth: HUMAN, positionals: [ref(resource)], options: INPUT_OPTIONS, query: scope, body: withWorkspace }),
+      op({ id: `runtime.${resource}.create`, path: ["runtime", resource, "create"], description: resource === "group" ? "Create a capability group, optionally configuring its provider and models with connection in the same JSON" : "Create a workspace execution profile from JSON", method: "POST", apiPath: root, mutation: "write", auth: HUMAN, options: resource === "group" ? [...INPUT_OPTIONS, { name: "blocked-model", type: "string", repeatable: true, valueName: "id", description: "Replace group blocked model IDs (repeatable); clear with model_policy.blocked_models: [] in JSON input" }] : INPUT_OPTIONS, query: scope, body: resource === "group" ? groupPolicyBody : withWorkspace }),
+      op({ id: `runtime.${resource}.update`, path: ["runtime", resource, "update"], description: resource === "group" ? "Save group description, membership and optional provider connection atomically from JSON" : "Replace a workspace execution profile configuration from JSON", method: "PUT", apiPath: item, mutation: "write", auth: HUMAN, positionals: [ref(resource)], options: resource === "group" ? [...INPUT_OPTIONS, { name: "blocked-model", type: "string", repeatable: true, valueName: "id", description: "Replace group blocked model IDs (repeatable); clear with model_policy.blocked_models: [] in JSON input" }] : INPUT_OPTIONS, query: scope, body: resource === "group" ? groupPolicyBody : withWorkspace }),
       op({ id: `runtime.${resource}.delete`, path: ["runtime", resource, "delete"], description: `Delete an unused workspace execution ${resource}`, method: "DELETE", apiPath: item, mutation: "destructive", auth: HUMAN, positionals: [ref(resource)], query: scope }),
     ];
   });
@@ -1508,7 +1508,9 @@ function op(definition: OperationDefinition): CommandSpec {
         query: definition.query?.(invocation) ?? (mutation === "read" ? queryOptions(invocation) : undefined),
         body,
       });
-      if (definition.id === "scm.change-request.checks") {
+      if (definition.id === "runtime.model.catalog") {
+        renderModelCatalog(invocation, response.data);
+      } else if (definition.id === "scm.change-request.checks") {
         renderScmChecks(invocation, response.data);
       } else if (definition.id === "runtime.list" && outputMode(invocation) === "table") {
         const safe = omitSecretFields(sanitizeCliDetails(response.data));
@@ -1525,7 +1527,15 @@ function op(definition: OperationDefinition): CommandSpec {
           ],
         });
       } else {
-        renderSafe(invocation, response.data, definition.collections);
+        const renderData = definition.id === "runtime.group.get" && outputMode(invocation) === "table"
+          && isRecord(response.data) && isRecord(response.data.group) ? response.data.group : response.data;
+        renderSafe(invocation, renderData, definition.collections);
+        if (definition.id === "runtime.group.get" && outputMode(invocation) === "table") {
+          const data = response.data as { group?: { model_policy?: Record<string, unknown> } };
+          console.log(`Default model: ${data.group?.model_policy?.model || "not configured"}`);
+          console.log(`Allowed models: ${JSON.stringify(data.group?.model_policy?.models ?? [])}`);
+          console.log(`Blocked models: ${JSON.stringify(data.group?.model_policy?.blocked_models ?? [])}`);
+        }
         if (definition.id === "runtime.get" && outputMode(invocation) === "table") {
           const data = response.data as { runtime?: { metadata?: Record<string, unknown> }; metadata?: Record<string, unknown> };
           console.log(`Health: ${JSON.stringify((data.runtime ?? data).metadata?.health ?? {})}`);
@@ -1659,4 +1669,43 @@ function requiredStringOption(invocation: CommandInvocation, name: string): stri
   const value = stringOption(invocation, name);
   if (!value) throw new CliError("usage", `--${name} is required`);
   return value;
+}
+
+async function groupPolicyBody(invocation: CommandInvocation): Promise<Record<string, unknown>> {
+  const body = await withWorkspace(invocation);
+  const blocked = stringOptions(invocation, "blocked-model");
+  if (blocked.length) {
+    if (body.model_policy !== undefined && !isRecord(body.model_policy)) throw new CliError("usage", "model_policy must be an object");
+    body.model_policy = { ...(body.model_policy as Record<string, unknown> | undefined), blocked_models: blocked };
+  }
+  return body;
+}
+
+function renderModelCatalog(invocation: CommandInvocation, value: unknown): void {
+  const safe = omitSecretFields(sanitizeCliDetails(value));
+  if (outputMode(invocation) === "json") { renderResource(invocation, safe); return; }
+  const rows: Record<string, unknown>[] = extractRecords(safe, ["providers"]).flatMap(bucket => {
+    const models = extractRecords(bucket.models, []);
+    const blocked = Array.isArray(bucket.blocked_models) ? bucket.blocked_models : [];
+    const defaults = models.filter(model => model.default).map(model => model.id).join(", ");
+    return (models.length ? models : [{}]).map(model => ({ ...model,
+      provider: bucket.provider, catalog_status: bucket.model_catalog_status ?? "unspecified",
+      default_model: defaults || "none identified", blocked_models: blocked,
+    }));
+  });
+  new CliRenderer().render(safe, {
+    mode: outputMode(invocation), rows: () => rows,
+    emptyMessage: "No model catalogs found.",
+    columns: [
+      { header: "ENGINE", value: row => row.provider },
+      { header: "MODEL", value: row => row.id },
+      { header: "LABEL", value: row => row.label },
+      { header: "CATALOG", value: row => row.catalog_status },
+      { header: "EXECUTION", value: row => row.execution_status },
+      { header: "DEFAULT", value: row => row.default_model },
+      { header: "REASONING", value: row => isRecord(row.thinking) && Array.isArray(row.thinking.supported_levels)
+        ? row.thinking.supported_levels.filter(isRecord).map(level => level.value).join(", ") : "-" },
+      { header: "BLOCKED", value: row => row.blocked_models },
+    ],
+  });
 }

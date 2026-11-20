@@ -29,6 +29,45 @@ afterEach(() => {
 });
 
 describe("operations CLI contracts", () => {
+  it("renders nested model catalogs, empty states and missing defaults", async () => {
+    useCliEnv();
+    const spec = specById("runtime.model.catalog");
+    const data = { providers: [
+      { provider: "codex", model_catalog_status: "ready", models: [{ id: "model-a", label: "Model A", default: true, thinking: { supported_levels: [{ value: "high" }] } }], blocked_models: ["hidden"] },
+      { provider: "claude", model_catalog_status: "unknown", models: [] },
+    ] };
+    globalThis.fetch = capabilityFetch(spec.id, () => Response.json(data));
+    const table = await capture(() => registryFor([spec]).execute(["runtime", "model", "catalog", "--output", "table"]));
+    for (const value of ["model-a", "Model A", "ready", "high", "hidden", "none identified", "claude", "unknown"]) expect(table.stdout).toContain(value);
+    const json = await capture(() => registryFor([spec]).execute(["runtime", "model", "catalog", "--json"]));
+    expect(JSON.parse(json.stdout)).toEqual(data);
+    const jsonl = await capture(() => registryFor([spec]).execute(["runtime", "model", "catalog", "--output", "jsonl"]));
+    expect(jsonl.stdout.trim().split("\n").map(line => JSON.parse(line))[0]).toMatchObject({ id: "model-a", provider: "codex" });
+  });
+
+  it("shows the group identity, blocked IDs and absent default in table output", async () => {
+    useCliEnv();
+    const spec = specById("runtime.group.get");
+    globalThis.fetch = capabilityFetch(spec.id, () => Response.json({ group: { id: "group-id", name: "Group name", model_policy: { blocked_models: ["hidden"] } } }));
+    const table = await capture(() => registryFor([spec]).execute(["runtime", "group", "get", "group-id"]));
+    for (const text of ["group-id", "Group name", "Default model: not configured", 'Blocked models: ["hidden"]']) expect(table.stdout).toContain(text);
+  });
+
+  it("sends repeated blocked-model options while preserving other policy fields", async () => {
+    useCliEnv();
+    for (const operation of ["create", "update"]) {
+      const spec = specById(`runtime.group.${operation}`);
+      globalThis.fetch = capabilityFetch(spec.id, async request => {
+        const body = await request.json();
+        expect(body.model_policy).toEqual({ model: "keep", models: ["keep", "hide"], blocked_models: ["hide", "future"] });
+        return Response.json({ group: body });
+      });
+      await capture(() => registryFor([spec]).execute(["runtime", "group", operation, ...(operation === "update" ? ["group"] : []),
+        "--data", JSON.stringify({ name: "Group", model_policy: { model: "keep", models: ["keep", "hide"] } }),
+        "--blocked-model", "hide", "--blocked-model", "future", "--json"]));
+    }
+  });
+
   it("reads live checks with the canonical repository and provider PR number", async () => {
     useCliEnv();
     const spec = specById("scm.change-request.checks");

@@ -1,3 +1,4 @@
+import { parseExecutionModelPolicy } from "@multiremi/contracts/execution-endpoint.js";
 import { createId, nowIso } from "@multiremi/ids.js";
 import type { StoreContext } from "@multiremi/store/context.js";
 import { parseExecutionConnectionProfile } from "@multiremi/contracts/execution-profile.js";
@@ -106,9 +107,15 @@ export class ExecutionProfilesRepo {
         const saved = endpoints.save(workspaceId, { name: input.name, api_key: apiKey,
           connection: { ...current.connection, base_url: profile.base_url, auth_mode: profile.auth_mode,
             env_key: profile.env_key, auth_header: profile.auth_header ?? current.connection.auth_header } }, id);
-        const policy = JSON.stringify({ ...(profile.model ? { model: profile.model } : {}), ...(profile.models ? { models: profile.models } : {}) });
-        this.ctx.db.run("UPDATE multiremi_execution_groups SET model_policy=? WHERE workspace_id=? AND profile_id=? AND provider=?",
-          [policy, workspaceId, id, input.provider]);
+        const groups = this.ctx.db.query("SELECT id,model_policy FROM multiremi_execution_groups WHERE workspace_id=? AND profile_id=? AND provider=?")
+          .all(workspaceId, id, input.provider) as { id: string; model_policy: string }[];
+        for (const group of groups) {
+          const previousPolicy = JSON.parse(group.model_policy);
+          const policy = parseExecutionModelPolicy({ ...(previousPolicy.blocked_models ? { blocked_models: previousPolicy.blocked_models } : {}),
+            ...(profile.model ? { model: profile.model } : {}), ...(profile.models ? { models: profile.models } : {}) });
+          this.ctx.db.run("UPDATE multiremi_execution_groups SET model_policy=? WHERE workspace_id=? AND id=?",
+            [JSON.stringify(policy), workspaceId, group.id]);
+        }
         return { ...saved, provider: input.provider, profile: { ...profile, credential_id: saved.connection.credential_id } };
       }
       if (profile.auth_mode === "api_key") {

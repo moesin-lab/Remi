@@ -1606,7 +1606,7 @@ test('default retention keeps three distinct backup refs and rejects an escaping
 
 const MODERN_SCHEMA = JSON.stringify({ format: 1, expandLevel: 3, contractLevel: 0, minLevel: 3, maxLevel: 3 });
 for (const [name, environment, expected] of [
-  ['missing metadata', { TEST_SCHEMA_INVENTORY: '{"historical":true,"metadata":false}' }, /remi db prepare/],
+  ['missing metadata', { TEST_SCHEMA_INVENTORY: '{"historical":true,"metadata":false}' }, /run the TARGET version of remi db prepare offline; then retry deployment\./],
   ['empty metadata', { TEST_SCHEMA_ROWS: '[]' }, /Invalid schema metadata/],
   ['contract floor', { TEST_SCHEMA_ROWS: '[{"singleton":1,"expand_level":4,"contract_level":4}]' }, /exceeds target maximum/],
   ['query failure', {}, /failed/],

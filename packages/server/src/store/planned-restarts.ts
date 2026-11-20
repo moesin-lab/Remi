@@ -18,7 +18,7 @@ export interface PlannedRestartHandoff {
   turn_id: string;
   handoff_id: string;
   generation: number;
-  state: "requested" | "suspended" | "resuming" | "running";
+  state: "requested" | "suspended" | "resuming" | "running" | "terminated";
   consumer_id: string | null;
   checkpoint: PlannedRestartCheckpoint | null;
 }
@@ -29,12 +29,13 @@ export class PlannedRestartError extends Error {
 
 
 function decode(row: any): PlannedRestartHandoff {
-  if (row.state !== "requested" && (!row.checkpoint || createHash("sha256").update(row.checkpoint).digest("hex") !== row.checkpoint_sha256)) {
+  const terminated = row.state === "running" && row.consumer_id === null;
+  if (!terminated && row.state !== "requested" && (!row.checkpoint || createHash("sha256").update(row.checkpoint).digest("hex") !== row.checkpoint_sha256)) {
     throw new PlannedRestartError("invalid_checkpoint");
   }
   return { attempt_id: row.attempt_id, turn_id: row.turn_id, handoff_id: row.handoff_id,
-    generation: Number(row.generation), state: row.state, consumer_id: row.consumer_id,
-    checkpoint: row.checkpoint ? JSON.parse(row.checkpoint) : null };
+    generation: Number(row.generation), state: terminated ? "terminated" : row.state, consumer_id: row.consumer_id,
+    checkpoint: !terminated && row.checkpoint ? JSON.parse(row.checkpoint) : null };
 }
 
 /**
@@ -53,6 +54,28 @@ export class PlannedRestarts {
   pendingForRuntime(runtimeId: string): Map<string, PlannedRestartHandoff> {
     const rows = this.ctx.db.query("SELECT * FROM multiremi_planned_restarts WHERE runtime_id=? AND state IN ('requested','suspended','resuming')").all(runtimeId);
     return new Map(rows.map(row => { const value = decode(row); return [value.attempt_id, value]; }));
+  }
+
+  /** Durable terminal receipt uses the existing revoked tombstone encoding,
+   * compatible with level-3 databases and older writers (which also fence it).
+   * Never decode a checkpoint or hydrate an offer before reconciling liveness. */
+  reconcileTerminal(attemptId: string, scope: PlannedRestartScope, handoffId?: string): boolean {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(scope.workspaceId);
+      const p = this.ctx.db.query("SELECT * FROM multiremi_planned_restarts WHERE attempt_id=?").get(attemptId);
+      if (!p || p.workspace_id !== scope.workspaceId || p.runtime_id !== scope.runtimeId
+        || p.daemon_id !== scope.daemonId || (handoffId !== undefined && p.handoff_id !== handoffId)) return false;
+      const a = this.ctx.db.query(`SELECT a.status,t.status AS turn_status,t.current_attempt_id,
+        t.session_id,t.agent_id,t.execution_scope FROM multiremi_turn_attempts a
+        JOIN multiremi_turns t ON t.id=a.turn_id WHERE a.id=?`).get(attemptId);
+      if (!a) return false;
+      lockLane(this.ctx, a.session_id, a.agent_id, a.execution_scope);
+      if (p.state === "running" && p.consumer_id === null) return true;
+      if (a.current_attempt_id === attemptId && ["running", "awaiting_human", "pending"].includes(a.turn_status)
+        && ["accepted", "running", "waiting_local_directory"].includes(a.status)) return false;
+      this.revokeWithinTransaction(attemptId);
+      return true;
+    })();
   }
 
   private lock(attemptId: string, scope: PlannedRestartScope) {
@@ -145,6 +168,7 @@ export class PlannedRestarts {
    */
   resume(attemptId: string, handoffId: string, consumerId: string, scope: PlannedRestartScope,
     authorize: (generation: number, checkpoint: PlannedRestartCheckpoint) => void): PlannedRestartHandoff {
+    if (this.reconcileTerminal(attemptId, scope, handoffId)) throw new PlannedRestartError("stale_execution");
     return this.ctx.db.transaction(() => {
       const attempt = this.lock(attemptId, scope);
       this.assertLive(attempt);
@@ -238,6 +262,14 @@ export class PlannedRestarts {
     if (!runtime) return;
     this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(runtime.workspaceId ?? "local");
+      const stale = this.ctx.db.query(`SELECT p.attempt_id,p.daemon_id FROM multiremi_planned_restarts p
+        JOIN multiremi_turn_attempts a ON a.id=p.attempt_id JOIN multiremi_turns t ON t.id=a.turn_id
+        WHERE p.runtime_id=? AND NOT (p.state='running' AND p.consumer_id IS NULL)
+        AND (a.status NOT IN ('accepted','running','waiting_local_directory')
+          OR t.status NOT IN ('running','awaiting_human','pending') OR t.current_attempt_id IS NULL OR t.current_attempt_id<>a.id)`)
+        .all(runtimeId);
+      for (const row of stale) this.reconcileTerminal(row.attempt_id,
+        { workspaceId: runtime.workspaceId ?? "local", runtimeId, daemonId: row.daemon_id });
       const expired = this.ctx.db.query(`SELECT p.attempt_id FROM multiremi_planned_restarts p
         JOIN multiremi_turn_execution_records a ON a.id=p.attempt_id
         WHERE p.runtime_id=? AND p.state='resuming' AND p.updated_at<=?

@@ -335,7 +335,7 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
       generation: 1, input_to_seq: x.offer.input_to_seq, message_ids: x.offer.input_messages.map(message => message.id) }, x.scope))
       .toMatchObject({ ok: false, code: "stale_execution" });
     expect(x.f.store.getTask(x.task.id)?.status).toBe("failed");
-    expect(x.planned().get(x.task.id)).toMatchObject({ state: "running", consumer_id: null, generation: 2 });
+    expect(x.planned().get(x.task.id)).toMatchObject({ state: "terminated", consumer_id: null, generation: 2 });
   });
 
   it("never authorizes a revoked receipt tombstone or exempts it from orphan recovery", () => {
@@ -383,8 +383,69 @@ pendingTurnBackendTests("planned restart handoff", fixture => {
     expect(x.planned().protectsFromOrphanRecovery(x.task.id)).toBe(false);
     expect(x.f.store.getTask(x.task.id)).toMatchObject({ status: "failed", failureReason: "runtime_recovery" });
     expect(Number(x.f.db.query("SELECT COUNT(*) AS n FROM multiremi_turn_attempts WHERE turn_id=?").get(h.turn_id).n)).toBe(2);
-    expect(await invoke()).toMatchObject({ ok: false, code: "stale_execution" });
+    expect(await invoke()).toMatchObject({ ok: false, code: "restart_terminal" });
     assertPeer();
+  });
+
+  for (const status of ["lost", "completed", "cancelled", "failed"] as const) {
+    it(`terminates a stale running handoff for a ${status} attempt before offer preparation`, async () => {
+      const x = setup(3), h = x.suspend();
+      x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+      x.planned().resume(x.task.id, h.handoff_id, "stale-restart-consumer", x.scope, () => {});
+      x.planned().withExecution(x.task.id, 1, x.scope, () => {}, "stale-restart-consumer");
+      x.f.db.run("UPDATE multiremi_turn_attempts SET status=? WHERE id=?", [status, x.task.id]);
+      const handlers = new Map<string, any>();
+      let prepared = 0;
+      registerTaskInputRpcs({ registerRpcHandler: (type: string, fn: any) => handlers.set(type, fn),
+        authorizeRuntimeForTest: async () => ({ ok: true }) } as any, x.f.store, () => {}, undefined, async task => {
+          prepared++;
+          return { ...x.f.store.getDaemonTurnBridge().offerInput(task) };
+        });
+      const payload = { turn_id: h.turn_id, attempt_id: x.task.id, handoff_id: h.handoff_id,
+        consumer_id: "stale-restart-consumer" };
+      const invoke = () => handlers.get("turn.restart.resume")({ rt: x.scope.runtimeId, payload },
+        { runtimeIds: [x.scope.runtimeId], daemonId: x.scope.daemonId, ownerAccessToken: null });
+      expect(await invoke()).toMatchObject({ ok: false, code: "restart_terminal", retryable: false });
+      expect(prepared).toBe(0);
+      const terminal = x.planned().get(x.task.id);
+      expect(terminal).toMatchObject({ state: "terminated", consumer_id: null, generation: 2 });
+      expect(await invoke()).toMatchObject({ ok: false, code: "restart_terminal" });
+      expect(x.planned().get(x.task.id)).toEqual(terminal);
+      expect(x.planned().protectsFromOrphanRecovery(x.task.id)).toBe(false);
+    });
+  }
+
+  for (const failure of ["null", "throw"] as const) it(`commits terminal cleanup when completion wins offer preparation (${failure})`, async () => {
+    const x = setup(), h = x.suspend();
+    x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+    const handlers = new Map<string, any>();
+    registerTaskInputRpcs({ registerRpcHandler: (type: string, fn: any) => handlers.set(type, fn),
+      authorizeRuntimeForTest: async () => ({ ok: true }) } as any, x.f.store, () => {}, undefined, async () => {
+        x.f.store.cancelTask(x.task.id);
+        if (failure === "throw") throw new Error("stale_attempt");
+        return null;
+      });
+    const reply = await handlers.get("turn.restart.resume")({ rt: x.scope.runtimeId,
+      payload: { turn_id: h.turn_id, attempt_id: x.task.id, handoff_id: h.handoff_id, consumer_id: "racing-completion-consumer" } },
+      { runtimeIds: [x.scope.runtimeId], daemonId: x.scope.daemonId, ownerAccessToken: null });
+    expect(reply).toMatchObject({ ok: false, code: "restart_terminal" });
+    expect(x.planned().get(x.task.id)?.state).toBe("terminated");
+  });
+
+  it("automatically sweeps legacy running rows after crash retry replaces the attempt", () => {
+    const x = setup(3), h = x.suspend();
+    x.f.store.undrainDaemon(x.scope.workspaceId, x.scope.daemonId);
+    x.planned().resume(x.task.id, h.handoff_id, "old-running-consumer", x.scope, () => {});
+    x.planned().withExecution(x.task.id, 1, x.scope, () => {}, "old-running-consumer");
+    expect(x.f.store.recoverOrphans(x.scope.runtimeId, [])).toEqual({ orphaned: 1, retried: 1 });
+    // Historical level-3 data remains intact until the ordinary safety sweep.
+    expect(x.planned().get(x.task.id)?.state).toBe("running");
+    x.planned().recoverExpiredResumes(x.scope.runtimeId);
+    expect(x.planned().get(x.task.id)?.state).toBe("terminated");
+    const terminal = x.planned().get(x.task.id);
+    x.planned().recoverExpiredResumes(x.scope.runtimeId);
+    expect(x.planned().get(x.task.id)).toEqual(terminal);
+    expect(Number(x.f.db.query("SELECT COUNT(*) AS n FROM multiremi_turn_attempts WHERE turn_id=?").get(h.turn_id).n)).toBe(2);
   });
 
   it("keeps existing crash policy when no acknowledged checkpoint exists", () => {

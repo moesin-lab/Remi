@@ -8,6 +8,16 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 
 本页记录性能相关实现、需要保留的语义和基线采集入口。实现说明不代表当前版本的延迟、吞吐、CPU、内存或浏览器性能实测结果。下文区分已经存在的优化与待测成本；已有报告必须结合其生成时间、提交和环境判断，不能作为当前版本的实测结果。
 
+## 用量报表生命周期视图
+
+`UsageAccountingRepo.report` 在既有只读快照中单次物化当前 attempt 的生命周期事实，
+一次 SQL 返回 summary、date、agent 和 Runtime 四种聚合；消费事实与价格计算不变。
+这减少三次同步 PG 桥往返，不使用跨请求缓存。SQL 查询入口与 HTTP+JSON 时长预算见
+[usage-report-cost.test.ts](../../tests/unit/multiremi/usage-report-cost.test.ts)，
+同数据 SQLite 对照、计数边界与未验证项见
+[MUL-279 用量报告](../../reports/performance/MUL-279-usage-lifecycle.md)。
+本地测试不代表 stable p95 或事件循环阻塞已解决。
+
 ## 三条优先关注的热路径
 
 ### 1. 任务列表：页面请求展开 → 列表与计数 → PostgreSQL 同步桥

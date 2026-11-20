@@ -394,19 +394,29 @@ export class UsageAccountingRepo {
         const key = (row: Row) => DAY_MODEL_DIMENSIONS.map(field => row[field] === null ? "0" : `1${Buffer.from(String(row[field]), "utf8").toString("hex")}`).join("|");
         return key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0;
       }), next_cursor: cursorKeys.length > detailLimit ? encodeCursor(fingerprint, cursorKeys[detailLimit - 1]!) : null } : undefined;
-      const lifeAggregate = (keys: string[]) => {
-        const fields = keys.length ? `${keys.map((k) => k === "date" ? `${dateExpr.replaceAll(factTime, "t.occurred_at")} AS date` : k).join(",")},` : "";
+      // Materialize the scoped current-attempt facts once. All four lifecycle
+      // views share one bridge round trip and the same read snapshot.
+      const lifeDimensions = [[], ["date"], ["agent_id"], ["runtime_id"]];
+      const lifeBranches = lifeDimensions.map((keys, dimension) => {
+        const fields = ["date", "agent_id", "runtime_id"].map(key => keys.includes(key) ? key : `NULL AS ${key}`).join(",");
         const group = keys.length ? `GROUP BY ${keys.join(",")}` : "";
-        return this.ctx.db.query(`SELECT ${fields}COUNT(*) AS task_count,
-          COALESCE(SUM(CASE WHEN status IN ('completed','failed','cancelled') THEN ${seconds} ELSE 0 END),0) AS total_seconds,
+        return `SELECT ${dimension} AS dimension,${fields},COUNT(*) AS task_count,
+          COALESCE(SUM(CASE WHEN status IN ('completed','failed','cancelled') THEN seconds ELSE 0 END),0) AS total_seconds,
           ${["completed", "failed", "cancelled"].map(s => `SUM(CASE WHEN status='${s}' THEN 1 ELSE 0 END) AS ${s}`).join(",")},
           SUM(CASE WHEN status IN ('dispatched','running','waiting_local_directory','awaiting_human') THEN 1 ELSE 0 END) AS active,
           SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END) AS queued
-          FROM (${tasksSql}) t WHERE ${lifePredicate} ${group}`).all(...params, ...lifeParams).map((raw) => {
-            const r = raw as Row;
-            return { ...Object.fromEntries(keys.map(k => [k, r[k]])), task_count: Number(r.task_count), total_seconds: Number(r.total_seconds),
-              status_counts: Object.fromEntries(["completed", "failed", "cancelled", "active", "queued"].map(s => [s, Number(r[s] ?? 0)])) };
-          });
+          FROM lifecycle ${group}`;
+      });
+      const lifeRows = this.ctx.db.query(`WITH lifecycle AS MATERIALIZED (
+        SELECT t.agent_id,t.runtime_id,t.status,${dateExpr.replaceAll(factTime, "t.occurred_at")} AS date,${seconds} AS seconds
+        FROM (${tasksSql}) t WHERE ${lifePredicate}
+      ) ${lifeBranches.join(" UNION ALL ")}`).all(...params, ...lifeParams) as Row[];
+      const lifeAggregate = (keys: string[]) => {
+        const dimension = lifeDimensions.findIndex(fields => fields.join(",") === keys.join(","));
+        return lifeRows.filter(r => Number(r.dimension) === dimension).map(r => ({
+          ...Object.fromEntries(keys.map(k => [k, r[k]])), task_count: Number(r.task_count), total_seconds: Number(r.total_seconds),
+          status_counts: Object.fromEntries(["completed", "failed", "cancelled", "active", "queued"].map(s => [s, Number(r[s] ?? 0)])),
+        }));
       };
       const lifeSummary = lifeAggregate([])[0]!;
       summary.status_counts = lifeSummary.status_counts as unknown as UsageMetrics["status_counts"];

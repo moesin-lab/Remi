@@ -8,9 +8,17 @@ summary: 历史 level 0 的离线准备、失败处置与部署预检；保留�
 
 B1（#126，`b9c643605` 起）禁止已有历史库在 API 启动时重跑历史迁移。
 缺少 `multiremi_schema_meta` 表表示 level 0，不表示空库。2026-11-19 的 stable
-事故在历史写入前被启动守卫拒绝；旧容器被替换才导致停机。MUL-309 合入且维护窗口获批前，
-stable 保持 `7ae5b48c63838254e522d7ce356e046edbb37d2b`，自动部署暂停。
-本页是操作方案，**不代表已批准或已执行 stable prepare**。
+事故在历史写入前被启动守卫拒绝；旧容器被替换才导致停机。
+
+2026-11-20 已完成 stable 首次 B1 升级，部署版本为
+`aa9a924a90da415dc78822e1b7bc2fae6a7e1280`（MUL-315 操作者实测记录）：
+
+- 离线准备前备份目录：`~/.remi/profiles/stable/backups/2026-11-20T04-50-53-671Z/`；
+  `complete.json` 完成时间为 04:51:07.705 UTC，备份约 15 秒。
+- `db prepare` 于 04:52:16–04:52:21 UTC 执行，用时 4.9 秒、退出码 0；
+  从 level 0 到 expand 3 / contract 0，目标代码兼容区间 [3,3]。
+- 从停 API 到新 API healthy 的停机窗口约 3 分钟；迁移前后各主表行数完全一致，
+  具体计数和单次样本的时间预算见下文。本记录不将容器 healthy 等同于登录、daemon 重连等全部业务验收。
 
 ## 预检与部署边界
 
@@ -20,6 +28,10 @@ stable 保持 `7ae5b48c63838254e522d7ce356e046edbb37d2b`，自动部署暂停。
 历史 level 0 遇到 B1 目标时立即拒绝，给出 `remi db prepare` 指引并恢复旧配置，旧容器继续运行。
 查询失败、损坏声明或损坏元数据同样拒绝。低 expand level 允许由版本化加法迁移升级，
 更高 expand level 不会单独阻止旧代码运行。旧目标没有 B1 声明时不要求登记。
+
+2026-11-20 04:44–04:49 UTC 对 stable 的实际预检：构建目标镜像后输出
+`Historical schema preparation required. Old services have not been stopped...`，
+退出码 1；旧容器全程保持 healthy，验证了拒绝发生在停止旧服务之前。
 
 internal updater 的 release preflight 也读取当前库。历史 level 0 遇到不同 schema 指纹时，
 保守拒绝自动更新（manifest 指纹不携带可逆的 level 信息）。下载并验真后的目标声明还会在
@@ -54,9 +66,18 @@ local-profile 若新 API/Web 启动或健康等待失败，会停止失败候选
    # profile-root 为本机 ~/.remi/profiles/stable 的绝对路径。
    # 仅启动 PostgreSQL；不要 up 整组服务。
    docker compose -p remi-stable --env-file <profile-root>/compose.env -f <profile-root>/compose.yml up -d --wait postgres
-   docker compose -p remi-stable --env-file <profile-root>/compose.env -f <profile-root>/compose.yml -f <target-api.json> run --rm --no-deps api bun run apps/remi/main.ts db prepare --yes
+   docker compose -p remi-stable --env-file <profile-root>/compose.env -f <profile-root>/compose.yml -f <target-api.json> run --rm --no-deps api bun run apps/remi/main.ts db prepare
    docker compose -p remi-stable --env-file <profile-root>/compose.env -f <profile-root>/compose.yml -f <target-api.json> run --rm --no-deps api bun run apps/remi/main.ts db schema
    ```
+
+   `db prepare` 和 `db schema` 的数据库连接串来自 `api` 服务环境中的
+   `MULTIREMI_DATABASE_URL`；`docker compose ... run --rm --no-deps api bun run ...`
+   会继承该服务的环境配置（标准 Compose 从 `POSTGRES_PASSWORD` 等配置构造连接串），
+   无需在宿主额外导出连接串。直接在宿主或目标解包目录运行时，必须自行提供同一数据库的
+   `MULTIREMI_DATABASE_URL`，且使用 `postgres://` 或 `postgresql://` URL。
+   未设置、值为空或前缀不符时，命令报
+   `Fatal: Set MULTIREMI_DATABASE_URL to the PostgreSQL database for this maintenance operation`。
+   `db prepare` 没有 `--yes` 或其他选项；不要因其 `mutation: 'destructive'` 声明添加参数。
 
    保留退出码、schema 输出和迁移报告。已有 internal/application 覆盖文件的安装不能照搬上述命令：
    应停止监管子进程及 updater，在目标解包源码目录用其配套 Bun 执行同一命令，挂载原 API home，
@@ -96,25 +117,24 @@ level 1 登记协议，level 2 创建 `multiremi_live_terms`，level 3 补 daemo
 这说明预期兼容方向，不是该实际库 prepare 失败后的旧版读写验证。
 应以步骤日志和独立兼容验收决定是否恢复旧容器；没有证据就继续离线修复并重试目标，不能自动恢复旧 writer。
 
-## stable 实际规模与时间预算（只读）
+## stable 实际规模与时间预算
 
-2026-11-19 读取事故前 `backups/2026-11-19T12-10-49-646Z/postgres.dump`，
-仅通过 PostgreSQL 17 `pg_restore --data-only --file=-` 解码并计数 COPY 行，**没有连接或恢复数据库**。
-归档 55,983,289 bytes（约 53.4 MiB），解码 SQL 256,496,381 bytes（约 244.6 MiB），
-171 个 COPY 表、229,308 行；没有 schema meta。主要规模如下：
+2026-11-20 stable 首次离线准备的数据规模为 171 表、约 23 万行。
+迁移前后主表行数完全一致（表名省略 `multiremi_` 前缀）：
 
-| 表 | 行数 |
-|---|---:|
-| usage_unit_receipts / usage_units | 各 56,440 |
-| usage_request_owners | 52,688 |
-| issue_activity | 12,672 |
-| conversation_log | 12,518 |
-| turn_attempts / turns | 2,177 / 2,125 |
+| 表 | 迁移前 | 迁移后 |
+|---|---:|---:|
+| issues | 313 | 313 |
+| turns | 2,172 | 2,172 |
+| turn_attempts（attempts） | 2,226 | 2,226 |
+| agents | 18 | 18 |
+| workspaces | 1 | 1 |
+| conversation_log | 12,822 | 12,822 |
+| usage_units | 56,817 | 56,817 |
 
-已存在 unified model、attempt counters、read state、decision、usage startup 等历史标记。
-这支持“较短历史分支、主要为检查和加法登记”的判断。单次只读解码在调查机器上耗时 1.14 秒，
-**不能等同 prepare 耗时**：它不包含 PG bridge 往返、DDL 锁、索引与 catalog 快照开销。
-据约 23 万行、245 MiB 解码规模，先按 prepare **数十秒至数分钟**安排，
-建议为停机、备份、prepare 与启动验证预留 **10–15 分钟**维护窗口。
-这是保守规划估算，不是 SLA 或实测迁移上限；磁盘/锁等待可使其超出。
-实际批准前仍需协调者确认窗口，实际 prepare 后记录耗时与验证结果；本任务未执行 stable prepare。
+`db prepare` **已实测一次：约 5 秒**（精确用时 4.9 秒，04:52:16–04:52:21 UTC，
+退出码 0）。schema 从 level 0 升至 expand 3 / contract 0，目标兼容区间 [3,3]。
+整个停机窗口约 3 分钟，其中备份约 15 秒。
+仍建议预留 **5–10 分钟**维护窗口，以包含备份、离线准备与启动验证。
+这是单次样本，不是 SLA 或迁移耗时上限；数据规模、磁盘、锁等待及启动状态均可能影响耗时。
+主表计数一致和 API healthy 不替代第 5 步的业务验证，也不表示后台 usage 回填已经全部完成。

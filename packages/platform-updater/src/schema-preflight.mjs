@@ -5,7 +5,7 @@ export const SCHEMA_INVENTORY_SQL = `BEGIN READ ONLY; SELECT json_build_object(
   'historical', EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'multiremi\\_%' ESCAPE '\\'),
   'metadata', to_regclass('public.multiremi_schema_meta') IS NOT NULL); COMMIT;`;
 export const SCHEMA_METADATA_SQL = 'BEGIN READ ONLY; SELECT coalesce(json_agg(t), \'[]\'::json) FROM public.multiremi_schema_meta t; COMMIT;';
-export const PREPARE_REQUIRED = 'Historical schema preparation required. Old services have not been stopped. Stop ALL API slots, workers and other database clients; back up; run the TARGET version of remi db prepare --yes offline; then retry deployment. See docs/deploy/b1-schema-upgrade.md. Do not restore database backups.';
+export const PREPARE_REQUIRED = 'Historical schema preparation required. Old services have not been stopped. Stop ALL API slots, workers and other database clients; back up; run the TARGET version of remi db prepare offline; then retry deployment. See docs/deploy/b1-schema-upgrade.md. Do not restore database backups.';
 
 export async function readDeploymentSchema(query) {
   const inventory = JSON.parse(await query(SCHEMA_INVENTORY_SQL));

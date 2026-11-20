@@ -16,6 +16,9 @@ summary: 当前性能相关实现、必须保留的语义，以及复用现有�
 [usage-report-cost.test.ts](../../tests/unit/multiremi/usage-report-cost.test.ts)，
 同数据 SQLite 对照、计数边界与未验证项见
 [MUL-279 用量报告](../../reports/performance/MUL-279-usage-lifecycle.md)。
+可复跑的新旧完整响应对照与双方言计划采集入口为
+[`compare-usage-lifecycle.ts`](../../tests/manual/compare-usage-lifecycle.ts)；
+它从固定 Git 基线读取旧实现，只使用新建的临时数据库，输出逐语句耗时与大夹具计划。
 本地测试不代表 stable p95 或事件循环阻塞已解决。
 
 ## 三条优先关注的热路径

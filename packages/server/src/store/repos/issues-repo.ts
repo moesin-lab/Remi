@@ -1433,7 +1433,13 @@ export class IssuesRepo {
       }
       const closedFilterSql = includeClosed ? "" : buildIssueSearchExcludeUnarchivedClosedSql(isPostgres);
       const issueTieBreakCol = isPostgres ? "i.id" : "i.rowid";
-      const canPushLike = !hasNulTerm && terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS && !terms.some(hasNonAsciiCasedChar);
+      const patterns = terms.map((term) => `%${escapeSearchLikeTerm(term)}%`);
+      const canPushLike = !hasNulTerm
+        && terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS
+        && !terms.some(hasNonAsciiCasedChar)
+        && !/[\uD800-\uDFFF]/.test(query)
+        && (isPostgres || !/[\uFFFD-\uFFFF]/.test(query))
+        && patterns.every((pattern) => Buffer.byteLength(pattern, "utf8") <= ISSUE_SEARCH_MAX_SQL_PATTERN_BYTES);
       if (!canPushLike) {
         return this.searchIssuesWorkspaceScanFallback({
           query,
@@ -1447,11 +1453,10 @@ export class IssuesRepo {
         });
       }
 
-      const patterns = terms.map((term) => `%${escapeSearchLikeTerm(term)}%`);
       const keyLikeSql = buildSearchLikeAllTermsSql(ISSUE_SEARCH_EFFECTIVE_KEY_SQL, terms);
       const titleLikeSql = buildSearchLikeAllTermsSql("i.title", terms);
       const descriptionLikeSql = buildSearchLikeAllTermsSql("i.description", terms);
-      const sqliteFieldHasNulSql = isPostgres
+      const sqliteFieldNeedsFallbackSql = isPostgres
         ? ""
         : `,
                CASE
@@ -1459,23 +1464,31 @@ export class IssuesRepo {
                    OR INSTR(COALESCE(i.issue_key, ''), CHAR(0)) > 0
                    OR INSTR(COALESCE(i.title, ''), CHAR(0)) > 0
                    OR (i.description IS NOT NULL AND INSTR(i.description, CHAR(0)) > 0)
+                   OR ${buildSqliteUtf16ReversedBomSql("COALESCE(i.title, '')")}
+                   OR (i.description IS NOT NULL AND ${buildSqliteUtf16ReversedBomSql("i.description")})
+                   OR TYPEOF(i.id) = 'blob'
+                   OR TYPEOF(i.issue_key) = 'blob'
+                   OR TYPEOF(i.title) = 'blob'
+                   OR TYPEOF(i.description) = 'blob'
                  THEN 1
                  ELSE 0
-               END AS has_nul`;
+               END AS needs_fallback`;
 
       let candidateRows: Row[];
       if (includeCommentBodies) {
         const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
+        const sqliteCommentNeedsFallbackSql =
+          `INSTR(COALESCE(l.body_md, ''), CHAR(0)) > 0 OR TYPEOF(l.body_md) = 'blob' OR ${buildSqliteUtf16ReversedBomSql("COALESCE(l.body_md, '')")}`;
         // Materialize workspace_issues once (preserving database-native ORDER BY updated_at DESC
         // via ROW_NUMBER() + id/rowid) and materialize matched_comments before UNION ALL.
         // On PostgreSQL, CROSS JOIN LATERAL (... LIMIT 1) keeps `l.session_id = s.id` inside
         // `l`'s base restriction clauses (preventing subquery pull-up) so the planner always
         // probes an index on session_id even when table statistics are stale (reltuples = 0).
-        // On SQLite, text LIKE/LOWER operators truncate at U+0000; piggybacking character-level
-        // `INSTR(..., CHAR(0)) > 0` checks in the same candidate query detects real U+0000 code
-        // points safely across UTF-8, UTF-16le, and UTF-16be database encodings and triggers a
-        // same-snapshot JS fallback only when NUL exists (zero extra SQL or rows on normal
-        // NUL-free workspaces).
+        // On SQLite, text LIKE/LOWER operators truncate at U+0000, UTF-16 reversed-BOM (U+FFFE)
+        // prefixes can scramble UTF-16->UTF-8 conversion, and raw BLOB columns coerce differently
+        // from JS toIssue()/String(). Piggybacking those checks in the same candidate query
+        // triggers a same-snapshot JS fallback only when such rows exist (zero extra SQL or rows
+        // on normal workspaces).
         const matchedCommentsSql = isPostgres
           ? `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
              FROM workspace_issues wi
@@ -1494,14 +1507,14 @@ export class IssuesRepo {
                wi.id,
                wi.updated_at,
                wi.issue_ord,
-               MAX(CASE WHEN INSTR(COALESCE(l.body_md, ''), CHAR(0)) > 0 THEN 1 ELSE 0 END) AS has_nul
+               MAX(CASE WHEN ${sqliteCommentNeedsFallbackSql} THEN 1 ELSE 0 END) AS needs_fallback
              FROM workspace_issues wi
              JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
              JOIN multiremi_conversation_log l ON l.session_id = s.id
              WHERE l.visibility = 'shown'
                AND l.kind = 'message'
                AND l.deleted_at IS NULL
-               AND ((${commentLikeSql}) OR INSTR(COALESCE(l.body_md, ''), CHAR(0)) > 0)
+               AND ((${commentLikeSql}) OR (${sqliteCommentNeedsFallbackSql}))
              GROUP BY wi.id, wi.updated_at, wi.issue_ord`;
         const unionSelectSql = isPostgres
           ? `SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank
@@ -1510,11 +1523,11 @@ export class IssuesRepo {
              UNION ALL
              SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank
              FROM matched_comments`
-          : `SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank, has_nul
+          : `SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank, needs_fallback
              FROM workspace_issues
-             WHERE match_rank IS NOT NULL OR has_nul = 1
+             WHERE match_rank IS NOT NULL OR needs_fallback = 1
              UNION ALL
-             SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank, has_nul
+             SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank, needs_fallback
              FROM matched_comments`;
         candidateRows = this.ctx.db.query(
           `WITH workspace_issues AS MATERIALIZED (
@@ -1527,7 +1540,7 @@ export class IssuesRepo {
                  WHEN (${titleLikeSql}) THEN 1
                  WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
                  ELSE NULL
-               END AS match_rank${sqliteFieldHasNulSql}
+               END AS match_rank${sqliteFieldNeedsFallbackSql}
              FROM multiremi_issues i
              WHERE i.workspace_id = ?${closedFilterSql}
            ),
@@ -1549,17 +1562,17 @@ export class IssuesRepo {
                  WHEN (${titleLikeSql}) THEN 1
                  WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
                  ELSE NULL
-               END AS match_rank${sqliteFieldHasNulSql}
+               END AS match_rank${sqliteFieldNeedsFallbackSql}
              FROM multiremi_issues i
              WHERE i.workspace_id = ?${closedFilterSql}
            )
-           SELECT id, updated_at, issue_ord, has_comment_match, match_rank${isPostgres ? "" : ", has_nul"}
+           SELECT id, updated_at, issue_ord, has_comment_match, match_rank${isPostgres ? "" : ", needs_fallback"}
            FROM workspace_issues
-           WHERE match_rank IS NOT NULL${isPostgres ? "" : " OR has_nul = 1"}`,
+           WHERE match_rank IS NOT NULL${isPostgres ? "" : " OR needs_fallback = 1"}`,
         ).all(...patterns, ...patterns, ...patterns, workspaceId) as Row[];
       }
 
-      if (!isPostgres && candidateRows.some((row) => Number(row.has_nul) === 1)) {
+      if (!isPostgres && candidateRows.some((row) => Number(row.needs_fallback) === 1)) {
         return this.searchIssuesWorkspaceScanFallback({
           query,
           workspaceId,
@@ -1635,11 +1648,13 @@ export class IssuesRepo {
    * bridge reply stays strictly below `postgresReplyMaxBytes()`.
    *
    * - PostgreSQL slices by Unicode code points via `SUBSTR(COALESCE(body_md, ''), ?, ?)`.
-   * - SQLite slices raw database-encoded bytes via `SUBSTR(CAST(COALESCE(body_md, '') AS BLOB), ?, ?)`
-   *   with even byte chunks, detects the database encoding (`UTF-8` / `UTF-16le` / `UTF-16be`)
-   *   in the same query via `HEX(CAST('A' AS BLOB))`, and decodes once after concatenation with
-   *   `{ ignoreBOM: true }` so embedded `U+0000`, multi-byte UTF-8 / UTF-16 surrogate pairs, and
-   *   leading `U+FEFF` (BOM) code points are preserved identically to baseline.
+   * - SQLite slices raw database-encoded bytes via `SUBSTR(CAST(body_md AS BLOB), ?, ?)`
+   *   (with `body_md IS NOT NULL`, avoiding `COALESCE` text-expression coercion) using even
+   *   byte chunks, detects the database encoding (`UTF-8` / `UTF-16le` / `UTF-16be`) in the
+   *   same query via `HEX(CAST('A' AS BLOB))`, and decodes once after concatenation with
+   *   `{ ignoreBOM: true }` so embedded `U+0000`, multi-byte UTF-8 / UTF-16 surrogate pairs,
+   *   leading `U+FEFF` (BOM), and leading `U+FFFE` code points are preserved identically to
+   *   baseline.
    */
   private readConversationLogBodyBounded(logId: string, isPostgres: boolean): string {
     const ceiling = postgresReplyMaxBytes();
@@ -1650,7 +1665,7 @@ export class IssuesRepo {
       let startByte = 1;
       while (true) {
         const row = this.ctx.db.query(
-          "SELECT SUBSTR(CAST(COALESCE(body_md, '') AS BLOB), ?, ?) AS c, HEX(CAST('A' AS BLOB)) AS enc FROM multiremi_conversation_log WHERE id = ?",
+          "SELECT SUBSTR(CAST(body_md AS BLOB), ?, ?) AS c, HEX(CAST('A' AS BLOB)) AS enc FROM multiremi_conversation_log WHERE id = ? AND body_md IS NOT NULL",
         ).get(startByte, chunkBytes, logId) as Row | null;
         if (!row || row.c == null) break;
         if (startByte === 1) {
@@ -1725,7 +1740,6 @@ export class IssuesRepo {
            SELECT
              s.issue_id AS issue_id,
              l.id AS id,
-             l.body_md AS body_md,
              ${rowBytesSql} AS row_bytes,
              ROW_NUMBER() OVER (PARTITION BY s.issue_id ORDER BY l.created_at DESC, l.seq DESC, l.id DESC) AS issue_rn
            FROM multiremi_conversation_log l
@@ -1741,7 +1755,6 @@ export class IssuesRepo {
            SELECT
              issue_id,
              id,
-             body_md,
              row_bytes,
              ROW_NUMBER() OVER (ORDER BY issue_id ASC) AS rn,
              SUM(row_bytes) OVER (
@@ -1752,14 +1765,14 @@ export class IssuesRepo {
            WHERE issue_rn = 1
          )
          SELECT
-           issue_id,
-           id,
-           CASE WHEN cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
-           CASE WHEN rn = 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS oversize,
-           CASE WHEN rn > 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS truncated
+           sized.issue_id AS issue_id,
+           sized.id AS id,
+           CASE WHEN sized.cum_bytes > ? THEN NULL ELSE (SELECT l2.body_md FROM multiremi_conversation_log l2 WHERE l2.id = sized.id) END AS body_md,
+           CASE WHEN sized.rn = 1 AND sized.cum_bytes > ? THEN 1 ELSE 0 END AS oversize,
+           CASE WHEN sized.rn > 1 AND sized.cum_bytes > ? THEN 1 ELSE 0 END AS truncated
          FROM sized
-         WHERE rn = 1 OR (cum_bytes - row_bytes) <= ?
-         ORDER BY rn ASC`,
+         WHERE sized.rn = 1 OR (sized.cum_bytes - sized.row_bytes) <= ?
+         ORDER BY sized.rn ASC`,
       ).all(...params) as Row[];
 
       if (rows.length === 0) break;
@@ -1823,6 +1836,7 @@ export class IssuesRepo {
       : [...scope.issueIds];
 
     const budgetBytes = issueSearchReplyBudgetBytes();
+    const batchLimit = Math.max(2, Math.min(ISSUE_SEARCH_COMMENT_BATCH_ROWS, Math.ceil(budgetBytes / 128) + 2));
     const rowBytesSql = buildCommentRowBytesSql(isPostgres);
     let cursor: CommentScanCursor | null = null;
 
@@ -1835,7 +1849,6 @@ export class IssuesRepo {
              l.created_at AS created_at,
              l.seq AS seq,
              l.id AS id,
-             l.body_md AS body_md,
              ${rowBytesSql} AS row_bytes
            FROM ${fromAndJoinSql}
            WHERE ${scopeWhereSql}
@@ -1852,7 +1865,6 @@ export class IssuesRepo {
              created_at,
              seq,
              id,
-             body_md,
              row_bytes,
              ROW_NUMBER() OVER (ORDER BY issue_id ASC, created_at DESC, seq DESC, id DESC) AS rn,
              SUM(row_bytes) OVER (
@@ -1862,20 +1874,20 @@ export class IssuesRepo {
            FROM batch
          )
          SELECT
-           issue_id,
-           created_at,
-           seq,
-           id,
-           CASE WHEN cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
-           CASE WHEN rn = 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS oversize,
-           CASE WHEN rn > 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS truncated
+           sized.issue_id AS issue_id,
+           sized.created_at AS created_at,
+           sized.seq AS seq,
+           sized.id AS id,
+           CASE WHEN sized.cum_bytes > ? THEN NULL ELSE (SELECT l2.body_md FROM multiremi_conversation_log l2 WHERE l2.id = sized.id) END AS body_md,
+           CASE WHEN sized.rn = 1 AND sized.cum_bytes > ? THEN 1 ELSE 0 END AS oversize,
+           CASE WHEN sized.rn > 1 AND sized.cum_bytes > ? THEN 1 ELSE 0 END AS truncated
          FROM sized
-         WHERE rn = 1 OR (cum_bytes - row_bytes) <= ?
-         ORDER BY rn ASC`,
+         WHERE sized.rn = 1 OR (sized.cum_bytes - sized.row_bytes) <= ?
+         ORDER BY sized.rn ASC`,
       ).all(
         ...baseParams,
         ...cursorClause.params,
-        ISSUE_SEARCH_COMMENT_BATCH_ROWS,
+        batchLimit,
         budgetBytes,
         budgetBytes,
         budgetBytes,
@@ -1911,7 +1923,7 @@ export class IssuesRepo {
         }
       }
 
-      if (!truncated && !hadOversize && batchRows.length < ISSUE_SEARCH_COMMENT_BATCH_ROWS) break;
+      if (!truncated && !hadOversize && batchRows.length < batchLimit) break;
       if (!lastFullRow) break;
 
       cursor = snippets.has(lastFullRow.issueId)
@@ -1962,7 +1974,7 @@ export class IssuesRepo {
       const id = String(row.id);
       const number = Number(row.issue_number ?? 0);
       const key = String(row.issue_key || (number > 0 ? formatIssueKey(number) : id));
-      const title = String(row.title ?? "");
+      const title = String(row.title);
       const description = nullableString(row.description) ?? "";
       const fieldMatchSource = searchMatch(key, query)
         ? "key"
@@ -7250,6 +7262,7 @@ function compareIssueSearchCandidates(left: IssueSearchCandidate, right: IssueSe
 }
 
 const ISSUE_SEARCH_MAX_SQL_TERMS = 50;
+const ISSUE_SEARCH_MAX_SQL_PATTERN_BYTES = 4096;
 const ISSUE_SEARCH_COMMENT_BATCH_ROWS = 2000;
 const ISSUE_SEARCH_MAX_ISSUE_ID_FILTER = 500;
 
@@ -7322,6 +7335,13 @@ function hasNonAsciiCasedChar(value: string): boolean {
     if (ch.charCodeAt(0) > 0x7f && ch.toLowerCase() !== ch.toUpperCase()) return true;
   }
   return false;
+}
+
+function buildSqliteUtf16ReversedBomSql(columnSql: string): string {
+  // Detect a leading U+FFFE (reversed BOM) in UTF-16le ('FEFF') or UTF-16be ('FFFE')
+  // SQLite databases using standard HEX(...) rather than X'...' hex literals so the
+  // expression stays within schema-ddl.ts's SQL lexical allowlist.
+  return `((HEX(CAST('A' AS BLOB)) = '4100' AND HEX(SUBSTR(CAST(${columnSql} AS BLOB), 1, 2)) = 'FEFF') OR (HEX(CAST('A' AS BLOB)) = '0041' AND HEX(SUBSTR(CAST(${columnSql} AS BLOB), 1, 2)) = 'FFFE'))`;
 }
 
 function buildSearchLikeAllTermsSql(columnSql: string, terms: string[]): string {

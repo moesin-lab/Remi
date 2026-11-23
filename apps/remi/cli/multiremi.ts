@@ -76,7 +76,7 @@ import {
   type WorkspaceSupervisorLease,
 } from "@daemon/agent-runtime/workspace/process-owner.js";
 import { type CliOptions, numberOpt, parseArgs, stringOpt } from "./multiremi/options.js";
-import { isUnknownFeishuCommand, resolveFeishuCommand, unknownCommandMessage } from "./feishu-commands.js";
+import { isUnknownFeishuCommand, resolveFeishuCommand, unknownCommandMessage } from "@multiremi/assistant/commands.js";
 import {
   SUPPORTED_DAEMON_PROVIDERS,
   type SupportedDaemonProvider,

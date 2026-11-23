@@ -57,6 +57,7 @@ summary: 按任务定位当前实现、约束和验证命令。
 | 改详情页首屏定位、贴底或 `data-perf-state` 契约 | [ADR 0008](../adr/0008-issue-detail-anchored-reveal-and-stick-to-bottom.md) | 先隐藏后一次定位、贴底状态机与预算口径 |
 | 改项目 Memory/Wiki | [项目知识契约](../project-wiki-memory-spec.md) | 查询、提案、发布、物化与权限 |
 | 改 IM 平台导航或管理页面 | [IM 平台管理](im-platforms.md) | 平台目录、机器人/采集连接、能力页面、共享操作者和旧地址迁移 |
+| 改助理领域与渠道边界 | [Assistant 切割方案](../design/assistant-channel-split.md) | Phase 1 路由/命令策略、兼容适配、后续迁移与一次一卡授权 |
 | 改飞书消息接入 | [消息接入](../feishu-message-ingestion.md) | Connection、Source、消息处理与凭据 |
 | 配置部署或排障 | [部署](../../deploy/README.md)、[本机 stable/dev](../deploy/local-profiles.md)、[daemon 环境](../deploy/66-8-remi-environment.md) | 服务组成、配置和启动条件 |
 | 运行 Phase A 并发发版/坏版本验收 | [候选验收 runbook](../operations/phase-a-acceptance.md) | 隔离环境、真实 provider lane、两侧 HTTP 失败、attempt 与浏览器补读；明确 supervisor 直接切换和完整 updater 的验证边界 |

@@ -30,7 +30,7 @@
 - **改后方案**：
   1. 在 `cli.ts` 模块加载期按 `id.localeCompare` 排序一次并预构建、预序列化 5 份只读 JSON 响应（`human` / `daemon` / `share` / `task` 未受限 / `task` 受限），请求期仅按身份与受限布尔值直接返回；
   2. 非 `local` 工作区存在性校验改用 `deps.store.hasWorkspace(resolved.workspaceId)`（`local` 直接短路，零 `SELECT * FROM multiremi_workspaces`）；
-  3. 在 `TasksRepo`（并委托到 `MultiremiStore`）提供单次轻量查询 `getTaskIssueCreationRestrictionCode(taskId, agentId)`，在单条 SQL 的 `CASE WHEN` 中保持与原实现完全一致的优先级（`agent.issue_creation_requires_proposal` / `task.issue_creation_restricted` 优先于飞书发送者白名单 `WITH RECURSIVE lineage` 检查，且先按当前工作区是否存在未批准 allowlist 投递短路），零全量实体/skills/usage/autopilot 水合；`cli.ts` 直接调用 `currentTaskIssueCreationRestricted(c, deps.store)`，消除第二次 `getAgent`。
+  3. 在 `TasksRepo`（并委托到 `MultiremiStore`）提供单次轻量查询 `getTaskIssueCreationRestrictionState(taskId, agentId)`（及委托方法 `getTaskIssueCreationRestrictionCode`），在单条 SQL 中同时返回 `restriction_code`（保持 `agent.issue_creation_requires_proposal` / `task.issue_creation_restricted` 优先于飞书发送者白名单 `WITH RECURSIVE lineage` 检查，且先按当前工作区是否存在未批准 allowlist 投递短路）与 `agent_exists`（通过单次主键 `LEFT JOIN multiremi_agents` 判定），零全量实体/skills/usage/autopilot 水合；写入路径（`currentTaskIssueCreationRestricted` / `denyRestrictedTaskIssueCreation`）继续严格按 `code !== null` 拦截，而 `cli.ts` 调用 `hasRestrictedTaskIssueCreationAgent(c, deps.store)`（`code !== null && agentExists`），在零额外 SQL（仍 ≤ 4 reads）下 100% 保持与原 `Boolean(restrictedTaskIssueCreationAgent)` 的历史语义一致。
 
 ## 同夹具改前/改后实测对照（SQLite）
 
@@ -66,7 +66,7 @@
 
 - 新增单测：`tests/unit/multiremi/snapshot-cli-capabilities-cost.test.ts`（接入 `useMigratedHotspotDatabases` / `openHotspotDatabase`，本地运行 SQLite，CI 自动运行真实 PostgreSQL 17）：
   1. `listWorkspaceAgentTaskSnapshot` 新旧实现逐字段严格等价测试：覆盖同一 Agent 多轮与多 attempt 重试、`lost`、`offered`/`accepted`/`waiting_local_directory`、`awaiting_human`（含 `a.status='failed'` 覆盖、同 turn 旧失败 attempt 仍参与终态排名、`current_attempt_id IS NULL` 三值逻辑）、`ended_at IS NULL` 回退、私密 Chat 隐藏最新结果不顶出旧结果、受损 `chat_session_id=NULL` 投影私密 Session、Task token 本人/他任务/错 Agent/错 Workspace 访问控制、跨工作区隔离与 `autopilotRunId` 挂载。
-  2. `GET /api/cli/capabilities` 与 `getTaskIssueCreationRestrictionCode` 等价测试：覆盖 `human`/`daemon`/`share`/`task` 全部身份，以及未受限、任务受限标志、Agent 提案策略、飞书白名单直达任务、飞书委派子任务血缘、多限制优先级、批准发送者后实时解除受限、非 `local` 工作区 200/404。
+  2. `GET /api/cli/capabilities` 与 `getTaskIssueCreationRestrictionState` / `getTaskIssueCreationRestrictionCode` 等价测试：覆盖 `human`/`daemon`/`share`/`task` 全部身份，以及未受限、任务受限标志、孤立历史数据（移除 `multiremi_agents` 行后 capabilities 返回 `allowed: true` 且写入端仍 403 拦截）、Agent 提案策略、飞书白名单直达任务、飞书委派子任务血缘、多限制优先级、批准发送者后实时解除受限、非 `local` 工作区 200/404。
   3. 同一夹具的 SQL 次数、单次视图引用与耗时预算测试（所有既有测试与预算未放宽）。
 
 ## 遗留边界与说明

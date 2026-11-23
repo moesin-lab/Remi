@@ -39,6 +39,17 @@ export function restrictedTaskIssueCreationAgent(c: Context, store: MultiremiSto
   return store.getAgent(token.agentId);
 }
 
+/**
+ * Lightweight boolean equivalent of `Boolean(restrictedTaskIssueCreationAgent(c, store))`:
+ * requires both an active restriction code and an existing `multiremi_agents` row in one query.
+ */
+export function hasRestrictedTaskIssueCreationAgent(c: Context, store: MultiremiStore): boolean {
+  const token = currentTaskAccessToken(c);
+  if (!token?.agentId) return false;
+  const state = store.getTaskIssueCreationRestrictionState(token.taskId, token.agentId);
+  return state.code !== null && state.agentExists;
+}
+
 export function currentTaskIssueCreationRestricted(c: Context, store: MultiremiStore): boolean {
   return currentTaskIssueCreationRestrictionCode(c, store) !== null;
 }

@@ -781,6 +781,69 @@ describe("MUL-330: agent-task-snapshot and cli/capabilities equivalence and cost
       headers: { Authorization: `Bearer ${humanToken}` },
     });
     expect(missingWs.status).toBe(404);
+
+    // Orphaned historical data parity: task carries issueCreationRestricted + valid task token,
+    // while its multiremi_agents row has been removed.
+    // - While agent row exists: capabilities advertises issue.create / issue.quick-create as allowed: false.
+    // - After removing agent row: capabilities matches legacy Boolean(restrictedTaskIssueCreationAgent)
+    //   (200 with allowed: true), while write-path restriction code remains enforced (POST /api/issues -> 403).
+    const orphanAgent = store.createAgent({ name: "Orphaned Restricted Agent", provider: "codex" });
+    const orphanSession = store.createIssueSession(issue.id, {
+      title: "Orphan Restricted",
+      createdByType: "member",
+      createdById: "local",
+    });
+    const orphanRestrictedTask = store.createTask({
+      agentId: orphanAgent.id,
+      issueId: issue.id,
+      issueSessionId: orphanSession.id,
+      prompt: "orphan restricted",
+      issueCreationRestricted: true,
+    });
+    const orphanTaskToken = await makeTaskToken(orphanRestrictedTask.id, orphanAgent.id, "t-orphan-restricted");
+
+    expect(store.getTaskIssueCreationRestrictionState(orphanRestrictedTask.id, orphanAgent.id)).toEqual({
+      code: "issue_creation_requires_proposal",
+      agentExists: true,
+    });
+    const beforeDeleteResp = await app.request("/api/cli/capabilities", {
+      headers: { Authorization: `Bearer ${orphanTaskToken}` },
+    });
+    expect(beforeDeleteResp.status).toBe(200);
+    const beforeDeleteBody = await beforeDeleteResp.json() as { commands: Array<{ id: string; allowed: boolean }> };
+    expect(beforeDeleteBody).toEqual(legacyCliCapabilitiesBody("task", true));
+    expect(beforeDeleteBody.commands.find((entry) => entry.id === "issue.create")?.allowed).toBe(false);
+    expect(beforeDeleteBody.commands.find((entry) => entry.id === "issue.quick-create")?.allowed).toBe(false);
+
+    db.run("DELETE FROM multiremi_agents WHERE id = ?", [orphanAgent.id]);
+
+    expect(store.getTaskIssueCreationRestrictionState(orphanRestrictedTask.id, orphanAgent.id)).toEqual({
+      code: "issue_creation_requires_proposal",
+      agentExists: false,
+    });
+    expect(store.getTaskIssueCreationRestrictionCode(orphanRestrictedTask.id, orphanAgent.id)).toBe(
+      "issue_creation_requires_proposal",
+    );
+    const afterDeleteResp = await app.request("/api/cli/capabilities", {
+      headers: { Authorization: `Bearer ${orphanTaskToken}` },
+    });
+    expect(afterDeleteResp.status).toBe(200);
+    const afterDeleteBody = await afterDeleteResp.json() as { commands: Array<{ id: string; allowed: boolean }> };
+    expect(afterDeleteBody).toEqual(legacyCliCapabilitiesBody("task", false));
+    expect(afterDeleteBody.commands.find((entry) => entry.id === "issue.create")?.allowed).toBe(true);
+    expect(afterDeleteBody.commands.find((entry) => entry.id === "issue.quick-create")?.allowed).toBe(true);
+
+    // Write path must keep enforcing the restriction code even when the agent row is absent.
+    const writeAttempt = await app.request("/api/issues", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${orphanTaskToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ title: "Should remain blocked" }),
+    });
+    expect(writeAttempt.status).toBe(403);
+    expect((await writeAttempt.json() as { code?: string }).code).toBe("issue_creation_requires_proposal");
   }, 60_000);
 
   it("enforces bounded SQL query counts, single view join, and latency budgets for both hot endpoints", async () => {
@@ -916,6 +979,23 @@ describe("MUL-330: agent-task-snapshot and cli/capabilities equivalence and cost
     const taskRestrictedToken = (await store.createAccessToken({
       name: "t2", type: "task", purpose: "task", workspaceId: "local", userId: "local", taskId: taskRestricted.id, agentId: agents[0]!.id,
     })).token;
+    const orphanBudgetAgent = store.createAgent({
+      name: "Budget Orphan Agent",
+      provider: "codex",
+      instructions: "O".repeat(8_192),
+    });
+    const sessionOrphan = store.createIssueSession(issue.id, { title: "Orphan", createdByType: "member", createdById: "local" });
+    const orphanTaskRestricted = store.createTask({
+      agentId: orphanBudgetAgent.id,
+      issueId: issue.id,
+      issueSessionId: sessionOrphan.id,
+      prompt: largePrompt,
+      issueCreationRestricted: true,
+    });
+    const orphanTaskRestrictedToken = (await store.createAccessToken({
+      name: "t2-orphan", type: "task", purpose: "task", workspaceId: "local", userId: "local", taskId: orphanTaskRestricted.id, agentId: orphanBudgetAgent.id,
+    })).token;
+    resource.db.run("DELETE FROM multiremi_agents WHERE id = ?", [orphanBudgetAgent.id]);
     const agentRestrictedToken = (await store.createAccessToken({
       name: "t3", type: "task", purpose: "task", workspaceId: "local", userId: "local", taskId: agentRestricted.id, agentId: restrictedAgent.id,
     })).token;
@@ -951,25 +1031,28 @@ describe("MUL-330: agent-task-snapshot and cli/capabilities equivalence and cost
     }
 
     // 2. CLI capabilities budgets across all identities and restriction modes
-    for (const [label, path, headers, maxStatements] of [
-      ["caps human local", "/api/cli/capabilities", { Authorization: `Bearer ${humanToken}` }, 2],
-      ["caps human secondary", `/api/cli/capabilities?workspace_id=${secondaryWs.id}`, { Authorization: `Bearer ${secondaryHumanToken}` }, 3],
-      ["caps daemon", "/api/cli/capabilities", { Authorization: `Bearer ${daemonToken}` }, 1],
-      ["caps share", "/api/cli/capabilities", { "X-Remi-Share": shareToken }, 1],
-      ["caps task unrestricted", "/api/cli/capabilities", { Authorization: `Bearer ${unrestrictedTaskToken}` }, 4],
-      ["caps task flag restricted", "/api/cli/capabilities", { Authorization: `Bearer ${taskRestrictedToken}` }, 4],
-      ["caps agent flag restricted", "/api/cli/capabilities", { Authorization: `Bearer ${agentRestrictedToken}` }, 4],
-      ["caps feishu restricted", "/api/cli/capabilities", { Authorization: `Bearer ${feishuRestrictedToken}` }, 4],
+    for (const [label, path, headers, maxStatements, expectedIssueCreateAllowed] of [
+      ["caps human local", "/api/cli/capabilities", { Authorization: `Bearer ${humanToken}` }, 2, true],
+      ["caps human secondary", `/api/cli/capabilities?workspace_id=${secondaryWs.id}`, { Authorization: `Bearer ${secondaryHumanToken}` }, 3, true],
+      ["caps daemon", "/api/cli/capabilities", { Authorization: `Bearer ${daemonToken}` }, 1, false],
+      ["caps share", "/api/cli/capabilities", { "X-Remi-Share": shareToken }, 1, false],
+      ["caps task unrestricted", "/api/cli/capabilities", { Authorization: `Bearer ${unrestrictedTaskToken}` }, 4, true],
+      ["caps task flag restricted", "/api/cli/capabilities", { Authorization: `Bearer ${taskRestrictedToken}` }, 4, false],
+      ["caps task flag restricted missing agent", "/api/cli/capabilities", { Authorization: `Bearer ${orphanTaskRestrictedToken}` }, 4, true],
+      ["caps agent flag restricted", "/api/cli/capabilities", { Authorization: `Bearer ${agentRestrictedToken}` }, 4, false],
+      ["caps feishu restricted", "/api/cli/capabilities", { Authorization: `Bearer ${feishuRestrictedToken}` }, 4, false],
     ] as const) {
       await app.request(path, { headers });
       statements.length = 0;
       const started = performance.now();
       const response = await app.request(path, { headers });
-      const body = await response.json();
+      const body = await response.json() as { commands: Array<{ id: string; allowed: boolean }> };
       const elapsedMs = performance.now() - started;
       console.info(JSON.stringify({ label, statements: statements.length, elapsed_ms: +elapsedMs.toFixed(3), commands: body.commands.length }));
 
       expect(response.status, label).toBe(200);
+      expect(body.commands.find((entry) => entry.id === "issue.create")?.allowed, `${label}: issue.create`).toBe(expectedIssueCreateAllowed);
+      expect(body.commands.find((entry) => entry.id === "issue.quick-create")?.allowed, `${label}: issue.quick-create`).toBe(expectedIssueCreateAllowed);
       expect(statements.length, label).toBeLessThanOrEqual(maxStatements);
       expect(elapsedMs, label).toBeLessThan(2_000);
       // No full task/agent/skills/autopilot/workspace entity hydration on /api/cli/capabilities.

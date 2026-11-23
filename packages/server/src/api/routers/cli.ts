@@ -15,7 +15,7 @@ import {
   runtimeWorkspaceId,
 } from "../wire/index.js";
 import { compatibilityWorkspaceId, denyCurrentUserWorkspaceAccess } from "../helpers.js";
-import { currentTaskIssueCreationRestricted } from "../helpers.js";
+import { hasRestrictedTaskIssueCreationAgent } from "../helpers.js";
 import type { RouterDeps } from "./deps.js";
 
 export const CLI_SHARE_HEADER = "X-Remi-Share";
@@ -121,7 +121,7 @@ export function registerCliRoutes(app: Hono, deps: RouterDeps): void {
     if (resolved.workspaceId !== "local" && !deps.store.hasWorkspace(resolved.workspaceId)) {
       return c.json({ error: "workspace not found" }, 404);
     }
-    const issueCreationRestricted = resolved.type === "task" && currentTaskIssueCreationRestricted(c, deps.store);
+    const issueCreationRestricted = resolved.type === "task" && hasRestrictedTaskIssueCreationAgent(c, deps.store);
     return c.body(
       issueCreationRestricted
         ? PREBUILT_RESTRICTED_TASK_CAPABILITIES_JSON

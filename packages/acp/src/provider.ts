@@ -3179,12 +3179,45 @@ function trackToolCall(entry: PoolEntry, update: SessionUpdate): void {
   }
 }
 
-const ANTIGRAVITY_BG_TASK_ID_RE = /Tool is running as a background task with task id:\s*[`"']?([A-Za-z0-9._:-]+)[`"']?/i;
-const ANTIGRAVITY_TASK_TERMINAL_STATUS_RE = /\bStatus:\s*(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELLED)\b/i;
-const ANTIGRAVITY_TASK_RUNNING_STATUS_RE = /\bStatus:\s*(?:RUNNING|PENDING|IN_PROGRESS)\b/i;
+const ANTIGRAVITY_BG_TASK_ID_RE = /Tool is running as a background task with task id:\s*[`"']?([A-Za-z0-9._:/-]+)[`"']?/i;
+const ANTIGRAVITY_TASK_TERMINAL_STATUS_RE = /\bStatus["']?\s*:\s*["']?(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELLED)\b/i;
+const ANTIGRAVITY_TASK_RUNNING_STATUS_RE = /\bStatus["']?\s*:\s*["']?(?:RUNNING|PENDING|IN_PROGRESS)\b/i;
+const ANTIGRAVITY_COMMAND_EXITED_RE = /\bCommand\s+exited\s+with\s+(?:code\s+-?\d+|signal\s+\S+)\b/i;
 const ANTIGRAVITY_SYSTEM_MESSAGE_RE = /<SYSTEM_MESSAGE>([\s\S]*?)(?:<\/SYSTEM_MESSAGE>|$)/gi;
-const ANTIGRAVITY_COMPLETION_WORD_RE = /\b(?:Status:\s*(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELLED)|completed|finished|exited|terminated|killed|failed|stopped)\b/i;
-const ANTIGRAVITY_STILL_RUNNING_RE = /\b(?:Status:\s*(?:RUNNING|PENDING|IN_PROGRESS)|still\s+running)\b/i;
+const ANTIGRAVITY_TASK_FINISHED_HEADER_RE = /\bTask\s+id\s+[`"']?([A-Za-z0-9._:/-]+)[`"']?\s+(?:finished|completed|failed|exited|terminated|killed)\b/gi;
+const ANTIGRAVITY_MESSAGE_TASK_FINISHED_RE = /\[Message\][^\n]*\bcontent=Task\s+id\s+[`"']?([A-Za-z0-9._:/-]+)[`"']?\s+(?:finished|completed|failed|exited|terminated|killed)\b/gi;
+const ANTIGRAVITY_COMPLETION_WORD_RE = /\b(?:Status["']?\s*:\s*["']?(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELLED)|completed|finished|exited|terminated|killed|failed|stopped)\b/i;
+const ANTIGRAVITY_STILL_RUNNING_RE = /\b(?:Status["']?\s*:\s*["']?(?:RUNNING|PENDING|IN_PROGRESS)|still\s+running)\b/i;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Matches `taskId` as a whole task-id token (allowing `/` inside `<uuid>/task-<n>`)
+ * so `.../task-1` never matches `.../task-10` or `.../task-17`.
+ */
+function containsExactTaskId(text: string, taskId: string): boolean {
+  if (!text || !taskId) return false;
+  return new RegExp(`(?<![A-Za-z0-9._:/-])${escapeRegExp(taskId)}(?![A-Za-z0-9_/-]|[.:][A-Za-z0-9._:/-])`).test(text);
+}
+
+function hasAntigravityTerminalExit(update: SessionUpdate, text: string): boolean {
+  if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(text) || ANTIGRAVITY_COMMAND_EXITED_RE.test(text)) return true;
+  const frame = update as { _meta?: Record<string, unknown>; rawOutput?: unknown };
+  const terminalExitMeta = record(record(frame._meta)?.terminal_exit);
+  if (terminalExitMeta) {
+    const code = terminalExitMeta.exit_code ?? terminalExitMeta.exitCode;
+    if (typeof code === "number" && Number.isSafeInteger(code)) return true;
+    if (typeof terminalExitMeta.signal === "string" && terminalExitMeta.signal.length > 0) return true;
+  }
+  const raw = record(frame.rawOutput);
+  if (raw) {
+    const code = raw.exitCode ?? raw.exit_code;
+    if (typeof code === "number" && Number.isSafeInteger(code)) return true;
+  }
+  return false;
+}
 
 function extractToolUpdateText(update: SessionUpdate): string {
   const frame = update as { rawOutput?: unknown; content?: unknown };
@@ -3221,15 +3254,17 @@ function extractAntigravityBackgroundTaskId(text: string): string | null {
 }
 
 function textIndicatesTaskTerminal(text: string, taskId: string): boolean {
-  if (!text.includes(taskId)) return false;
+  if (!containsExactTaskId(text, taskId)) return false;
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
-    if (!lines[i]!.includes(taskId)) continue;
+    if (!containsExactTaskId(lines[i]!, taskId)) continue;
     const section = [lines[i]!];
     for (let j = i + 1; j < lines.length && j <= i + 4; j++) {
       const next = lines[j]!;
       if (!next.trim()) break;
-      if (/\bTask(?:\s+ID)?\s*[:#]/i.test(next) && !next.includes(taskId)) break;
+      if (/\bTask(?:\s+ID)?(?:\s*[:#]|\s+[A-Za-z0-9._:/-]*[0-9/][A-Za-z0-9._:/-]*)/i.test(next) && !containsExactTaskId(next, taskId)) {
+        break;
+      }
       section.push(next);
     }
     const block = section.join("\n");
@@ -3246,7 +3281,7 @@ function textIndicatesTaskTerminal(text: string, taskId: string): boolean {
  * premature `end_turn` triggered by `agy acp`'s 10 s auto-background prompt.
  */
 class AntigravityBackgroundCommandTracker {
-  private readonly pending = new Map<string, { toolCallId: string; taskId: string | null; announcedInProgress: boolean }>();
+  private readonly pending = new Map<string, { toolCallId: string; taskId: string | null }>();
   private readonly runCommandCalls = new Set<string>();
   private readonly daemonCalls = new Set<string>();
   private readonly manageTaskCalls = new Map<string, { action?: string; taskId?: string }>();
@@ -3294,8 +3329,8 @@ class AntigravityBackgroundCommandTracker {
           return;
         }
         if (status === "completed") {
-          if (bgTaskId && !existing?.announcedInProgress && !ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(text)) {
-            this.pending.set(id, { toolCallId: id, taskId: bgTaskId, announcedInProgress: false });
+          if (bgTaskId && !hasAntigravityTerminalExit(update, text)) {
+            this.pending.set(id, { toolCallId: id, taskId: bgTaskId });
           } else {
             this.pending.delete(id);
           }
@@ -3305,7 +3340,6 @@ class AntigravityBackgroundCommandTracker {
         this.pending.set(id, {
           toolCallId: id,
           taskId: bgTaskId ?? existing?.taskId ?? null,
-          announcedInProgress: existing?.announcedInProgress || Boolean(bgTaskId),
         });
         return;
       }
@@ -3321,6 +3355,7 @@ class AntigravityBackgroundCommandTracker {
             this._clearByTaskId(taskId);
           } else if (text) {
             this._observeManageTaskOutput(text, taskId);
+            this._observeSystemMessage(text);
           }
         }
         return;
@@ -3340,6 +3375,8 @@ class AntigravityBackgroundCommandTracker {
           const endIdx = this.systemMessageTail.lastIndexOf("</SYSTEM_MESSAGE>");
           this.systemMessageTail = this.systemMessageTail.slice(endIdx + "</SYSTEM_MESSAGE>".length);
         }
+      } else if (update.sessionUpdate === "user_message_chunk" && this.systemMessageTail.includes("[Message]")) {
+        this._observeBareTaskFinishedMessages(this.systemMessageTail);
       }
     }
   }
@@ -3389,10 +3426,10 @@ class AntigravityBackgroundCommandTracker {
     let match: RegExpExecArray | null;
     while ((match = ANTIGRAVITY_SYSTEM_MESSAGE_RE.exec(text)) !== null) {
       const body = match[1] ?? "";
+      let matched = this._clearExplicitFinishedTaskIds(body);
       if (!ANTIGRAVITY_COMPLETION_WORD_RE.test(body) || ANTIGRAVITY_STILL_RUNNING_RE.test(body)) continue;
-      let matched = false;
       for (const [callId, entry] of this.pending) {
-        if ((entry.taskId && body.includes(entry.taskId)) || body.includes(callId)) {
+        if ((entry.taskId && containsExactTaskId(body, entry.taskId)) || containsExactTaskId(body, callId)) {
           this.pending.delete(callId);
           matched = true;
         }
@@ -3400,6 +3437,39 @@ class AntigravityBackgroundCommandTracker {
       if (!matched && this.pending.size === 1 && /\b(?:background\s+task|task|command)\b/i.test(body)) {
         const [onlyId, only] = [...this.pending.entries()][0]!;
         if (only.taskId === null) this.pending.delete(onlyId);
+      }
+    }
+  }
+
+  private _clearExplicitFinishedTaskIds(body: string): boolean {
+    if (!this.pending.size) return false;
+    ANTIGRAVITY_TASK_FINISHED_HEADER_RE.lastIndex = 0;
+    let matched = false;
+    let match: RegExpExecArray | null;
+    while ((match = ANTIGRAVITY_TASK_FINISHED_HEADER_RE.exec(body)) !== null) {
+      const finishedId = match[1]?.replace(/[.:,]+$/, "");
+      if (!finishedId) continue;
+      for (const [callId, entry] of this.pending) {
+        if (entry.taskId === finishedId || callId === finishedId) {
+          this.pending.delete(callId);
+          matched = true;
+        }
+      }
+    }
+    return matched;
+  }
+
+  private _observeBareTaskFinishedMessages(text: string): void {
+    if (!this.pending.size) return;
+    ANTIGRAVITY_MESSAGE_TASK_FINISHED_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = ANTIGRAVITY_MESSAGE_TASK_FINISHED_RE.exec(text)) !== null) {
+      const finishedId = match[1]?.replace(/[.:,]+$/, "");
+      if (!finishedId) continue;
+      for (const [callId, entry] of this.pending) {
+        if (entry.taskId === finishedId || callId === finishedId) {
+          this.pending.delete(callId);
+        }
       }
     }
   }

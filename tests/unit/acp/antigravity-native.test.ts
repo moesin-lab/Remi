@@ -55,6 +55,11 @@ it("discovers models and effort, executes and resumes without a gateway", async 
   } finally { await resumed.close(); }
 });
 
+const REAL_CONV_ID = "462ce2d8-4e13-4e87-a53b-f7d18f3aec1e";
+const TASK_1 = `${REAL_CONV_ID}/task-1`;
+const TASK_10 = `${REAL_CONV_ID}/task-10`;
+const TASK_26 = `${REAL_CONV_ID}/task-26`;
+
 function writeContinuationFake(root: string, mode: string) {
   const script = join(root, `native-continuation-${mode}.mjs`);
   const logFile = join(root, `native-continuation-${mode}.jsonl`);
@@ -63,6 +68,9 @@ import { createInterface } from 'node:readline';
 import { appendFileSync } from 'node:fs';
 const mode = ${JSON.stringify(mode)};
 const logFile = ${JSON.stringify(logFile)};
+const TASK_1 = ${JSON.stringify(TASK_1)};
+const TASK_10 = ${JSON.stringify(TASK_10)};
+const TASK_26 = ${JSON.stringify(TASK_26)};
 const send = obj => process.stdout.write(JSON.stringify(obj) + '\\n');
 const update = body => send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'native-session', update: body } });
 let promptCount = 0;
@@ -82,14 +90,14 @@ for await (const line of createInterface({ input: process.stdin })) {
         update({ sessionUpdate: 'tool_call', toolCallId: 'call_bg_1', title: 'tsc --noEmit', kind: 'execute', status: 'in_progress',
           rawInput: { CommandLine: './node_modules/.bin/tsc --noEmit', WaitMsBeforeAsync: 10000 } });
         update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_bg_1', status: 'in_progress',
-          rawOutput: 'Tool is running as a background task with task id: bg_task_1\\nYOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS: A) proceed or B) update the user and end the turn.' });
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 + '\\nYOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS: A) proceed or B) update the user and end the turn.' });
         update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Waiting for typecheck to complete... ' } });
         result = { stopReason: 'end_turn' };
       } else {
         update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_1', title: 'Running manage_task', kind: 'other', status: 'in_progress',
-          rawInput: { Action: 'status', TaskId: 'bg_task_1' } });
+          rawInput: { Action: 'status', TaskId: TASK_26 } });
         update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_1', status: 'completed',
-          rawOutput: 'Task bg_task_1\\nStatus: DONE\\nExit code: 0' });
+          rawOutput: 'Task ' + TASK_26 + '\\nStatus: DONE\\nExit code: 0' });
         update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Typecheck passed.' } });
         result = { stopReason: 'end_turn' };
       }
@@ -100,7 +108,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Running tests... ' } });
         result = { stopReason: 'end_turn' };
       } else {
-        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_bg_2', status: 'completed', rawOutput: { exitCode: 0, combinedOutput: 'all passed' } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_bg_2', status: 'completed', rawOutput: { output: 'Command exited with code 0\\nall passed' } });
         update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'All tests passed.' } });
         result = { stopReason: 'end_turn' };
       }
@@ -109,11 +117,11 @@ for await (const line of createInterface({ input: process.stdin })) {
         update({ sessionUpdate: 'tool_call', toolCallId: 'call_bg_kill', title: 'sleep 60', kind: 'execute', status: 'in_progress',
           rawInput: { CommandLine: 'sleep 60', WaitMsBeforeAsync: 10000 } });
         update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_bg_kill', status: 'in_progress',
-          rawOutput: 'Tool is running as a background task with task id: bg_kill_1' });
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
         result = { stopReason: 'end_turn' };
       } else {
         update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_kill', title: 'manage_task', kind: 'other', status: 'in_progress',
-          rawInput: { Action: 'kill', TaskId: 'bg_kill_1' } });
+          rawInput: { Action: 'kill', TaskId: TASK_1 } });
         update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_kill', status: 'completed', rawOutput: 'Task killed.' });
         update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Killed stuck command.' } });
         result = { stopReason: 'end_turn' };
@@ -123,18 +131,126 @@ for await (const line of createInterface({ input: process.stdin })) {
         update({ sessionUpdate: 'tool_call', toolCallId: 'call_bg_sys', title: 'npm run build', kind: 'execute', status: 'in_progress',
           rawInput: { CommandLine: 'npm run build', WaitMsBeforeAsync: 10000 } });
         update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_bg_sys', status: 'in_progress',
-          rawOutput: 'Tool is running as a background task with task id: bg_sys_1' });
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
         result = { stopReason: 'end_turn' };
       } else {
-        update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: '<SYSTEM_MESSAGE>Background task bg_sys_1 completed with exit code 0.</SYSTEM_MESSAGE>' } });
+        update({ sessionUpdate: 'user_message_chunk', content: { type: 'text',
+          text: '<SYSTEM_MESSAGE>[Message] timestamp=2026-11-23T06:00:00Z sender=' + TASK_26 + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_26 + '" finished with result: ok</SYSTEM_MESSAGE>' } });
         update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Build finished.' } });
         result = { stopReason: 'end_turn' };
       }
+    } else if (mode === 'concurrent-slash-manage-task-and-late-exit') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'tsc --noEmit', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'tsc --noEmit', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_1', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'bun test', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'bun test', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Waiting on both... ' } });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        // task-1 completes via manage_task(list) and manage_task(status); task-10 stays RUNNING.
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_list', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'list' } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_list', status: 'completed',
+          rawOutput: 'Task ' + TASK_1 + '\\nStatus: DONE\\n\\nTask ' + TASK_10 + '\\nStatus: RUNNING' });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_empty', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'status', TaskId: TASK_10 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_empty', status: 'completed' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Task 1 done, waiting on task 10... ' } });
+        result = { stopReason: 'end_turn' };
+      } else {
+        // Late run_command completed update with Command exited with code 0 clears task-10.
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'completed',
+          rawOutput: { output: 'Command exited with code 0\\n100 passed' } });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Both tasks done.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'concurrent-system-message-task1-then-task10') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'job1', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job1', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_1', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        // Real agy acp <SYSTEM_MESSAGE> for task-1 must NOT clear task-10.
+        update({ sessionUpdate: 'user_message_chunk', content: { type: 'text',
+          text: '<SYSTEM_MESSAGE>[Message] timestamp=2026-11-23T06:00:00Z sender=' + TASK_1 + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_1 + '" finished with result: ok</SYSTEM_MESSAGE>' } });
+        result = { stopReason: 'end_turn' };
+      } else {
+        update({ sessionUpdate: 'user_message_chunk', content: { type: 'text',
+          text: '<SYSTEM_MESSAGE>[Message] timestamp=2026-11-23T06:00:01Z sender=' + TASK_10 + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_10 + '" finished with result: ok</SYSTEM_MESSAGE>' } });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Task 1 then task 10 finished.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'concurrent-system-message-task10-then-task1') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'job1', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job1', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_1', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        // Real agy acp <SYSTEM_MESSAGE> for task-10 must NOT prefix-match and clear task-1!
+        update({ sessionUpdate: 'user_message_chunk', content: { type: 'text',
+          text: '<SYSTEM_MESSAGE>[Message] timestamp=2026-11-23T06:00:00Z sender=' + TASK_10 + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_10 + '" finished with result: ok</SYSTEM_MESSAGE>' } });
+        result = { stopReason: 'end_turn' };
+      } else {
+        update({ sessionUpdate: 'user_message_chunk', content: { type: 'text',
+          text: '<SYSTEM_MESSAGE>[Message] timestamp=2026-11-23T06:00:01Z sender=' + TASK_1 + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_1 + '" finished with result: ok</SYSTEM_MESSAGE>' } });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Task 10 then task 1 finished.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'in-progress-then-completed-handoff') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_handoff', title: 'tsc --noEmit', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: './node_modules/.bin/tsc --noEmit', WaitMsBeforeAsync: 10000 } });
+        // First in_progress reports background task id...
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_handoff', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+        // ...then agy acp hands control back to the model with a completed frame carrying the same handoff notice and no exit code.
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_handoff', status: 'completed',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 + '\\nYOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS: A) proceed or B) update the user and end the turn.' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Waiting after handoff... ' } });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        // Empty manage_task frame does not falsely clear pending task.
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_26', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'status', TaskId: TASK_26 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_26', status: 'completed' });
+        result = { stopReason: 'end_turn' };
+      } else {
+        // Late real completion with Command exited with code 0 clears pending task.
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_handoff', status: 'completed',
+          rawOutput: { output: 'Command exited with code 0\\nTypecheck ok' } });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Handoff command finished.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'completed-with-terminal-exit-meta') {
+      update({ sessionUpdate: 'tool_call', toolCallId: 'call_meta_exit', title: 'echo ok', kind: 'execute', status: 'in_progress',
+        rawInput: { CommandLine: 'echo ok', WaitMsBeforeAsync: 10000 } });
+      update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_meta_exit', status: 'completed',
+        rawOutput: 'Tool is running as a background task with task id: ' + TASK_26,
+        _meta: { terminal_exit: { terminal_id: 'call_meta_exit', exit_code: 0, signal: null } } });
+      update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Exited via meta.' } });
+      result = { stopReason: 'end_turn' };
     } else if (mode === 'daemon-no-continue') {
       update({ sessionUpdate: 'tool_call', toolCallId: 'call_daemon_1', title: 'bun run dev', kind: 'execute', status: 'in_progress',
         rawInput: { CommandLine: 'bun run dev', IsDaemon: true, WaitMsBeforeAsync: 500 } });
       update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_daemon_1', status: 'in_progress',
-        rawOutput: 'Tool is running as a background task with task id: daemon_task_1' });
+        rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
       update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Dev server running.' } });
       result = { stopReason: 'end_turn' };
     } else if (mode === 'bounded-max-continuations') {
@@ -142,7 +258,7 @@ for await (const line of createInterface({ input: process.stdin })) {
         update({ sessionUpdate: 'tool_call', toolCallId: 'call_stuck_1', title: 'sleep 999', kind: 'execute', status: 'in_progress',
           rawInput: { CommandLine: 'sleep 999', WaitMsBeforeAsync: 10000 } });
         update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_stuck_1', status: 'in_progress',
-          rawOutput: 'Tool is running as a background task with task id: stuck_task_1' });
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
       }
       update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Still waiting ' + promptCount + '. ' } });
       result = { stopReason: 'end_turn' };
@@ -159,7 +275,7 @@ for await (const line of createInterface({ input: process.stdin })) {
 }
 
 describe("Antigravity background run_command continuation guard", () => {
-  it("continues on the same native-session until manage_task confirms Status: DONE", async () => {
+  it("continues on the same native-session until manage_task confirms Status: DONE for <uuid>/task-<n>", async () => {
     const { root, base, home } = fixture();
     await seedIssueSessionNativeAntigravityHome(home, base);
     const fake = writeContinuationFake(root, "manage-task-done");
@@ -172,7 +288,7 @@ describe("Antigravity background run_command continuation guard", () => {
       expect(prompts[1]?.sessionId).toBe("native-session");
       expect(prompts[1]?.text).toContain('manage_task (Action: "status")');
       expect(prompts[1]?.text).toContain("Status: DONE");
-      expect(prompts[1]?.text).toContain("bg_task_1");
+      expect(prompts[1]?.text).toContain(TASK_26);
       expect(p.getLastResponse()?.text).toContain("Typecheck passed.");
     } finally { await p.close(); }
   });
@@ -191,7 +307,7 @@ describe("Antigravity background run_command continuation guard", () => {
     } finally { await p.close(); }
   });
 
-  it("clears pending background commands on manage_task Action: kill and <SYSTEM_MESSAGE> completion receipts", async () => {
+  it("clears pending background commands on manage_task Action: kill and <SYSTEM_MESSAGE> completion receipts with <uuid>/task-<n>", async () => {
     for (const [mode, expectedText] of [["manage-task-kill", "Killed stuck command."], ["system-message-done", "Build finished."]] as const) {
       const { root, base, home } = fixture();
       await seedIssueSessionNativeAntigravityHome(home, base);
@@ -203,6 +319,73 @@ describe("Antigravity background run_command continuation guard", () => {
         expect(p.getLastResponse()?.text).toContain(expectedText);
       } finally { await p.close(); }
     }
+  });
+
+  it("keeps full <uuid>/task-<n> ids distinct across concurrent tasks for manage_task and late run_command completed updates", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "concurrent-slash-manage-task-and-late-exit");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("run both", { chatId: "concurrent-mt" })) {}
+      const prompts = fake.readPrompts();
+      expect(prompts).toHaveLength(3);
+      expect(prompts[1]?.text).toContain(TASK_1);
+      expect(prompts[1]?.text).toContain(TASK_10);
+      expect(prompts[2]?.text).toContain(TASK_10);
+      expect(prompts[2]?.text).not.toContain(`${TASK_1},`);
+      expect(prompts[2]?.text).not.toContain(`${TASK_1}.`);
+      expect(p.getLastResponse()?.text).toContain("Both tasks done.");
+    } finally { await p.close(); }
+  });
+
+  it("uses exact task-id boundaries in <SYSTEM_MESSAGE> so .../task-1 and .../task-10 never clear each other", async () => {
+    for (const [mode, remainingAfterFirst, clearedAfterFirst, expectedText] of [
+      ["concurrent-system-message-task1-then-task10", TASK_10, TASK_1, "Task 1 then task 10 finished."],
+      ["concurrent-system-message-task10-then-task1", TASK_1, TASK_10, "Task 10 then task 1 finished."],
+    ] as const) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, mode);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run pair", { chatId: mode })) {}
+        const prompts = fake.readPrompts();
+        expect(prompts).toHaveLength(3);
+        expect(prompts[1]?.text).toContain(TASK_1);
+        expect(prompts[1]?.text).toContain(TASK_10);
+        expect(prompts[2]?.text).toContain(`Pending task id(s): ${remainingAfterFirst}.`);
+        expect(prompts[2]?.text).not.toContain(`Pending task id(s): ${clearedAfterFirst}.`);
+        expect(p.getLastResponse()?.text).toContain(expectedText);
+      } finally { await p.close(); }
+    }
+  });
+
+  it("keeps pending task when in_progress announces bgTaskId and a follow-up completed handoff frame has no exit code", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "in-progress-then-completed-handoff");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("run handoff", { chatId: "handoff" })) {}
+      const prompts = fake.readPrompts();
+      expect(prompts).toHaveLength(3);
+      expect(prompts[1]?.text).toContain(`Pending task id(s): ${TASK_26}.`);
+      expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_26}.`);
+      expect(p.getLastResponse()?.text).toContain("Handoff command finished.");
+    } finally { await p.close(); }
+  });
+
+  it("clears pending task when a completed frame carries _meta.terminal_exit", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "completed-with-terminal-exit-meta");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("run quick", { chatId: "meta-exit" })) {}
+      expect(fake.readPrompts()).toHaveLength(1);
+      expect(p.getLastResponse()?.text).toBe("Exited via meta.");
+    } finally { await p.close(); }
   });
 
   it("does not trigger continuation when IsDaemon is true", async () => {

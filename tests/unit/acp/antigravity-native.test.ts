@@ -58,6 +58,7 @@ it("discovers models and effort, executes and resumes without a gateway", async 
 const REAL_CONV_ID = "462ce2d8-4e13-4e87-a53b-f7d18f3aec1e";
 const TASK_1 = `${REAL_CONV_ID}/task-1`;
 const TASK_10 = `${REAL_CONV_ID}/task-10`;
+const TASK_21 = `${REAL_CONV_ID}/task-21`;
 const TASK_26 = `${REAL_CONV_ID}/task-26`;
 
 function writeContinuationFake(root: string, mode: string) {
@@ -70,6 +71,7 @@ const mode = ${JSON.stringify(mode)};
 const logFile = ${JSON.stringify(logFile)};
 const TASK_1 = ${JSON.stringify(TASK_1)};
 const TASK_10 = ${JSON.stringify(TASK_10)};
+const TASK_21 = ${JSON.stringify(TASK_21)};
 const TASK_26 = ${JSON.stringify(TASK_26)};
 const send = obj => process.stdout.write(JSON.stringify(obj) + '\\n');
 const update = body => send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'native-session', update: body } });
@@ -262,6 +264,120 @@ for await (const line of createInterface({ input: process.stdin })) {
       }
       update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Still waiting ' + promptCount + '. ' } });
       result = { stopReason: 'end_turn' };
+    } else if (mode === 'envelope-handoff-noisy-log-and-manage-task') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_env_21', title: 'remi scm change-request checks', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'remi scm change-request checks moesin-lab/Remi 165 --output json && sleep 15', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_env_21', status: 'completed',
+          rawOutput: [
+            'Tool is running as a background task with task id: ' + TASK_21,
+            'Task logs are available at: file:///tmp/tasks/task-21.log',
+            'Log output:',
+            '{"status": "completed", "conclusion": "failed", "detail": "Command exited with code 0."}',
+            '',
+            'YOU MUST TAKE ONE OF THE FOLLOWING TWO ACTIONS: A) proceed or B) update the user and end the turn.',
+          ].join('\\n') });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Waiting on task-21... ' } });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        // Envelope says Status: RUNNING while child Log output contains JSON "status": "done" -> must stay pending.
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_running', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'status', TaskId: TASK_21 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_running', status: 'completed',
+          rawOutput: [
+            'Created At: 2026-11-23T06:16:45Z',
+            'Completed At: 2026-11-23T06:16:48Z',
+            'Task: ' + TASK_21,
+            'Status: RUNNING',
+            'Log: file:///tmp/tasks/task-21.log',
+            'Log output:',
+            '{"status": "done", "result": "completed"}',
+          ].join('\\n') });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Still running... ' } });
+        result = { stopReason: 'end_turn' };
+      } else {
+        // Envelope says Status: DONE while child Log output contains JSON "status": "in_progress" / "running" -> must clear cleanly.
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_done', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'status', TaskId: TASK_21 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_done', status: 'completed',
+          rawOutput: [
+            'Created At: 2026-11-23T06:16:55Z',
+            'Completed At: 2026-11-23T06:16:58Z',
+            'Task: ' + TASK_21,
+            'Status: DONE',
+            'Log: file:///tmp/tasks/task-21.log',
+            'Log output:',
+            '{"status": "in_progress", "state": "running", "queue": {"status": "pending"}}',
+          ].join('\\n') });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Envelope task-21 done.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'envelope-manage-task-without-input-id-and-system-message') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_env_no_id', title: 'remi issue get', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'remi issue get iss_1 --output json', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_env_no_id', status: 'completed',
+          rawOutput: [
+            'Tool is running as a background task with task id: ' + TASK_21,
+            'Task logs are available at: file:///tmp/tasks/task-21.log',
+            'Log output:',
+            '{"status": "cancelled"}',
+          ].join('\\n') });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        // manage_task without TaskId input: Status: RUNNING + Log output {"status": "done"} must NOT clear.
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_noid_1', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'list' } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_noid_1', status: 'completed',
+          rawOutput: [
+            'Task: ' + TASK_21,
+            'Status: RUNNING',
+            'Log: file:///tmp/tasks/task-21.log',
+            'Log output:',
+            '{"status": "done"}',
+          ].join('\\n') });
+        result = { stopReason: 'end_turn' };
+      } else {
+        // Appended <SYSTEM_MESSAGE> after Log output still clears even when envelope says Status: RUNNING.
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_noid_2', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'status', TaskId: TASK_21 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_noid_2', status: 'completed',
+          rawOutput: [
+            'Task: ' + TASK_21,
+            'Status: RUNNING',
+            'Log: file:///tmp/tasks/task-21.log',
+            'Log output:',
+            '{"status": "in_progress"}',
+            '<SYSTEM_MESSAGE>[Message] timestamp=2026-11-23T06:17:00Z sender=' + TASK_21 + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_21 + '" finished with result: ok</SYSTEM_MESSAGE>',
+          ].join('\\n') });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Cleared via appended system message.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'foreground-command-output-spoofed-bg-id') {
+      update({ sessionUpdate: 'tool_call', toolCallId: 'call_fg_diff', title: 'git diff', kind: 'execute', status: 'in_progress',
+        rawInput: { CommandLine: 'git diff packages/acp/src/provider.ts', WaitMsBeforeAsync: 10000 } });
+      update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_fg_diff', status: 'completed',
+        rawOutput: [
+          'Created At: 2026-11-23T06:16:22Z',
+          'Completed At: 2026-11-23T06:16:42Z',
+          'Command exited with code 0.',
+          '',
+          'Command output:',
+          'Tool is running as a background task with task id: fake/task-9',
+        ].join('\\n') });
+      update({ sessionUpdate: 'tool_call', toolCallId: 'call_fg_rg', title: 'rg bg', kind: 'execute', status: 'in_progress',
+        rawInput: { CommandLine: 'rg background task', WaitMsBeforeAsync: 10000 } });
+      // Even without an explicit "Command exited with code" header, Command output: text must not register a fake bg task id.
+      update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_fg_rg', status: 'completed',
+        rawOutput: [
+          'Created At: 2026-11-23T06:16:43Z',
+          'Completed At: 2026-11-23T06:16:44Z',
+          '',
+          'Command output:',
+          'Tool is running as a background task with task id: fake/task-10',
+        ].join('\\n') });
+      update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Foreground diff done.' } });
+      result = { stopReason: 'end_turn' };
     }
   }
   if (r.id !== undefined) send({ jsonrpc: '2.0', id: r.id, result });
@@ -411,6 +527,48 @@ describe("Antigravity background run_command continuation guard", () => {
       expect(prompts).toHaveLength(4);
       expect(prompts.every(item => item.sessionId === "native-session")).toBe(true);
       expect(p.getLastResponse()?.text).toContain("Still waiting 4.");
+    } finally { await p.close(); }
+  });
+
+  it("isolates host envelope headers from Log output JSON during 10s handoff and manage_task status checks", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "envelope-handoff-noisy-log-and-manage-task");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("check pr status", { chatId: "env-noisy-log" })) {}
+      const prompts = fake.readPrompts();
+      expect(prompts).toHaveLength(3);
+      expect(prompts[1]?.text).toContain(`Pending task id(s): ${TASK_21}.`);
+      expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_21}.`);
+      expect(p.getLastResponse()?.text).toContain("Envelope task-21 done.");
+    } finally { await p.close(); }
+  });
+
+  it("ignores child Log output in manage_task without TaskId while still honoring appended <SYSTEM_MESSAGE> receipts", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "envelope-manage-task-without-input-id-and-system-message");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("inspect issue", { chatId: "env-sysmsg" })) {}
+      const prompts = fake.readPrompts();
+      expect(prompts).toHaveLength(3);
+      expect(prompts[1]?.text).toContain(`Pending task id(s): ${TASK_21}.`);
+      expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_21}.`);
+      expect(p.getLastResponse()?.text).toContain("Cleared via appended system message.");
+    } finally { await p.close(); }
+  });
+
+  it("does not extract fake background task ids from foreground Command output text", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "foreground-command-output-spoofed-bg-id");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("run git diff", { chatId: "env-fg-diff" })) {}
+      expect(fake.readPrompts()).toHaveLength(1);
+      expect(p.getLastResponse()?.text).toBe("Foreground diff done.");
     } finally { await p.close(); }
   });
 });

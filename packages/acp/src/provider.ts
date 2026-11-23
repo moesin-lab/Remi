@@ -3180,6 +3180,7 @@ function trackToolCall(entry: PoolEntry, update: SessionUpdate): void {
 }
 
 const ANTIGRAVITY_BG_TASK_ID_RE = /Tool is running as a background task with task id:\s*[`"']?([A-Za-z0-9._:/-]+)[`"']?/i;
+const ANTIGRAVITY_TOOL_OUTPUT_SEPARATOR_RE = /(?:^|\r?\n)(?:Log|Command) output:[ \t]*(?:\r?\n|$)/;
 const ANTIGRAVITY_TASK_TERMINAL_STATUS_RE = /\bStatus["']?\s*:\s*["']?(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELLED)\b/i;
 const ANTIGRAVITY_TASK_RUNNING_STATUS_RE = /\bStatus["']?\s*:\s*["']?(?:RUNNING|PENDING|IN_PROGRESS)\b/i;
 const ANTIGRAVITY_COMMAND_EXITED_RE = /\bCommand\s+exited\s+with\s+(?:code\s+-?\d+|signal\s+\S+)\b/i;
@@ -3194,6 +3195,17 @@ function escapeRegExp(value: string): string {
 }
 
 /**
+ * Extracts `agy`'s host-generated tool envelope header (everything before the
+ * standalone `Log output:` or `Command output:` delimiter), excluding child
+ * stdout/stderr so subprocess JSON or diff lines cannot spoof status, exit
+ * codes, or background task ids.
+ */
+function extractAntigravityToolEnvelope(text: string): string {
+  const match = ANTIGRAVITY_TOOL_OUTPUT_SEPARATOR_RE.exec(text);
+  return match ? text.slice(0, match.index) : text;
+}
+
+/**
  * Matches `taskId` as a whole task-id token (allowing `/` inside `<uuid>/task-<n>`)
  * so `.../task-1` never matches `.../task-10` or `.../task-17`.
  */
@@ -3203,7 +3215,8 @@ function containsExactTaskId(text: string, taskId: string): boolean {
 }
 
 function hasAntigravityTerminalExit(update: SessionUpdate, text: string): boolean {
-  if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(text) || ANTIGRAVITY_COMMAND_EXITED_RE.test(text)) return true;
+  const envelope = extractAntigravityToolEnvelope(text);
+  if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(envelope) || ANTIGRAVITY_COMMAND_EXITED_RE.test(envelope)) return true;
   const frame = update as { _meta?: Record<string, unknown>; rawOutput?: unknown };
   const terminalExitMeta = record(record(frame._meta)?.terminal_exit);
   if (terminalExitMeta) {
@@ -3248,14 +3261,16 @@ function isDaemonToolInput(input: Record<string, unknown> | undefined): boolean 
 }
 
 function extractAntigravityBackgroundTaskId(text: string): string | null {
-  const match = ANTIGRAVITY_BG_TASK_ID_RE.exec(text);
+  const envelope = extractAntigravityToolEnvelope(text);
+  const match = ANTIGRAVITY_BG_TASK_ID_RE.exec(envelope);
   const id = match?.[1]?.replace(/[.:,]+$/, "");
   return id || null;
 }
 
 function textIndicatesTaskTerminal(text: string, taskId: string): boolean {
-  if (!containsExactTaskId(text, taskId)) return false;
-  const lines = text.split(/\r?\n/);
+  const envelope = extractAntigravityToolEnvelope(text);
+  if (!containsExactTaskId(envelope, taskId)) return false;
+  const lines = envelope.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     if (!containsExactTaskId(lines[i]!, taskId)) continue;
     const section = [lines[i]!];
@@ -3272,7 +3287,7 @@ function textIndicatesTaskTerminal(text: string, taskId: string): boolean {
       return true;
     }
   }
-  return ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(text) && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(text);
+  return ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(envelope) && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(envelope);
 }
 
 /**
@@ -3321,7 +3336,8 @@ class AntigravityBackgroundCommandTracker {
         }
         if (this.daemonCalls.has(id)) return;
 
-        const bgTaskId = text ? extractAntigravityBackgroundTaskId(text) : null;
+        const envelope = text ? extractAntigravityToolEnvelope(text) : "";
+        const bgTaskId = envelope ? extractAntigravityBackgroundTaskId(envelope) : null;
         const existing = this.pending.get(id);
 
         if (status === "failed") {
@@ -3329,7 +3345,7 @@ class AntigravityBackgroundCommandTracker {
           return;
         }
         if (status === "completed") {
-          if (bgTaskId && !hasAntigravityTerminalExit(update, text)) {
+          if (bgTaskId && !hasAntigravityTerminalExit(update, envelope)) {
             this.pending.set(id, { toolCallId: id, taskId: bgTaskId });
           } else {
             this.pending.delete(id);
@@ -3382,22 +3398,23 @@ class AntigravityBackgroundCommandTracker {
   }
 
   private _observeManageTaskOutput(text: string, inputTaskId: string | undefined): void {
+    const envelope = extractAntigravityToolEnvelope(text);
     if (inputTaskId) {
-      if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(text) && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(text)) {
+      if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(envelope) && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(envelope)) {
         this._clearByTaskId(inputTaskId);
       }
       return;
     }
     let matched = false;
     for (const [callId, entry] of this.pending) {
-      if (entry.taskId && textIndicatesTaskTerminal(text, entry.taskId)) {
+      if (entry.taskId && textIndicatesTaskTerminal(envelope, entry.taskId)) {
         this.pending.delete(callId);
         matched = true;
       }
     }
     if (!matched && this.pending.size === 1
-      && ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(text)
-      && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(text)) {
+      && ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(envelope)
+      && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(envelope)) {
       const [onlyId, only] = [...this.pending.entries()][0]!;
       if (only.taskId === null) this.pending.delete(onlyId);
     }

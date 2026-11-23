@@ -1455,9 +1455,10 @@ export class IssuesRepo {
         ? ""
         : `,
                CASE
-                 WHEN INSTR(CAST(COALESCE(i.issue_key, '') AS BLOB), X'00') > 0
-                   OR INSTR(CAST(COALESCE(i.title, '') AS BLOB), X'00') > 0
-                   OR (i.description IS NOT NULL AND INSTR(CAST(i.description AS BLOB), X'00') > 0)
+                 WHEN INSTR(CAST(COALESCE(i.id, '') AS BLOB), ZEROBLOB(1)) > 0
+                   OR INSTR(CAST(COALESCE(i.issue_key, '') AS BLOB), ZEROBLOB(1)) > 0
+                   OR INSTR(CAST(COALESCE(i.title, '') AS BLOB), ZEROBLOB(1)) > 0
+                   OR (i.description IS NOT NULL AND INSTR(CAST(i.description AS BLOB), ZEROBLOB(1)) > 0)
                  THEN 1
                  ELSE 0
                END AS has_nul`;
@@ -1470,7 +1471,7 @@ export class IssuesRepo {
         // On PostgreSQL, CROSS JOIN LATERAL (... LIMIT 1) keeps `l.session_id = s.id` inside
         // `l`'s base restriction clauses (preventing subquery pull-up) so the planner always
         // probes an index on session_id even when table statistics are stale (reltuples = 0).
-        // On SQLite, text operators truncate at U+0000; piggybacking BLOB `X'00'` checks in
+        // On SQLite, text operators truncate at U+0000; piggybacking BLOB `ZEROBLOB(1)` checks in
         // the same candidate query triggers a same-snapshot JS fallback only when NUL exists
         // (zero extra SQL or rows on normal NUL-free workspaces).
         const matchedCommentsSql = isPostgres
@@ -1491,14 +1492,14 @@ export class IssuesRepo {
                wi.id,
                wi.updated_at,
                wi.issue_ord,
-               MAX(CASE WHEN INSTR(CAST(COALESCE(l.body_md, '') AS BLOB), X'00') > 0 THEN 1 ELSE 0 END) AS has_nul
+               MAX(CASE WHEN INSTR(CAST(COALESCE(l.body_md, '') AS BLOB), ZEROBLOB(1)) > 0 THEN 1 ELSE 0 END) AS has_nul
              FROM workspace_issues wi
              JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
              JOIN multiremi_conversation_log l ON l.session_id = s.id
              WHERE l.visibility = 'shown'
                AND l.kind = 'message'
                AND l.deleted_at IS NULL
-               AND ((${commentLikeSql}) OR INSTR(CAST(COALESCE(l.body_md, '') AS BLOB), X'00') > 0)
+               AND ((${commentLikeSql}) OR INSTR(CAST(COALESCE(l.body_md, '') AS BLOB), ZEROBLOB(1)) > 0)
              GROUP BY wi.id, wi.updated_at, wi.issue_ord`;
         const unionSelectSql = isPostgres
           ? `SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank

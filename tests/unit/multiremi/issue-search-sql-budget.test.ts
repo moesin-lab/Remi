@@ -1348,6 +1348,10 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
       expect(largeMissAfter.statements[0]).toContain("TYPEOF(i.archived_at) = 'text'");
       expect(largeMissAfter.statements[0]).toContain("ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.rowid ASC) AS issue_ord");
       expect(largeMissAfter.statements[0]).not.toContain("CROSS JOIN LATERAL");
+      expect(largeMissAfter.statements[0]).toContain("ZEROBLOB(1)");
+      expect(largeMissAfter.statements[0]).not.toContain("X'00'");
+      expect(largeNoCommentAfter.statements[0]).toContain("ZEROBLOB(1)");
+      expect(largeNoCommentAfter.statements[0]).not.toContain("X'00'");
     }
 
     // Every emitted SQL statement translates cleanly for PostgreSQL (numbered $N placeholders, intact ESCAPE '\' and AS MATERIALIZED).
@@ -2122,6 +2126,31 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(newerHit.matchSource).toBe("comment");
     expect(newerHit.matchedCommentSnippet).toBe("\u0000archive newer");
     expect(newerHit.matchedSnippet).toBe("\u0000archive newer");
+
+    // 4. Raw NULL issue_key + issue_number=0 row whose effective key falls back to `i.id`
+    //    containing U+0000 must also trigger fallback via `ZEROBLOB(1)` check on `i.id`.
+    const nulIdKey = "raw_nul\u0000id_tail_991";
+    f.db.run(
+      `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
+       VALUES (?, 0, NULL, 'Neutral NUL id key issue', NULL, 'todo', 'local', '2026-11-13T06:00:00.000Z', '2026-11-13T06:00:00.000Z')`,
+      [nulIdKey],
+    );
+    for (const includeCommentBodies of [true, false]) {
+      const idKeyExpected = legacySearchIssuesOracle(f.store, f.db, {
+        q: "id_tail_991",
+        workspaceId: "local",
+        includeCommentBodies,
+      });
+      const idKeyActual = f.store.searchIssues({
+        q: "id_tail_991",
+        workspaceId: "local",
+        includeCommentBodies,
+      });
+      expect(idKeyActual).toEqual(idKeyExpected);
+      expect(idKeyActual.total).toBe(1);
+      expect(idKeyActual.issues[0]?.id).toBe(nulIdKey);
+      expect(idKeyActual.issues[0]?.matchSource).toBe("key");
+    }
   }, 30_000);
 
   it("chunks oversized >4,000-byte SQLite comments containing U+0000 via BLOB SUBSTR under non-exempt 4096B reply budget", async () => {

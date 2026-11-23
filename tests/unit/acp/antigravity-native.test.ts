@@ -58,6 +58,7 @@ it("discovers models and effort, executes and resumes without a gateway", async 
 
 const REAL_CONV_ID = "462ce2d8-4e13-4e87-a53b-f7d18f3aec1e";
 const TASK_1 = `${REAL_CONV_ID}/task-1`;
+const TASK_9 = `${REAL_CONV_ID}/task-9`;
 const TASK_10 = `${REAL_CONV_ID}/task-10`;
 const TASK_17 = `${REAL_CONV_ID}/task-17`;
 const TASK_21 = `${REAL_CONV_ID}/task-21`;
@@ -72,6 +73,7 @@ import { appendFileSync } from 'node:fs';
 const mode = ${JSON.stringify(mode)};
 const logFile = ${JSON.stringify(logFile)};
 const TASK_1 = ${JSON.stringify(TASK_1)};
+const TASK_9 = ${JSON.stringify(TASK_9)};
 const TASK_10 = ${JSON.stringify(TASK_10)};
 const TASK_17 = ${JSON.stringify(TASK_17)};
 const TASK_21 = ${JSON.stringify(TASK_21)};
@@ -528,6 +530,147 @@ for await (const line of createInterface({ input: process.stdin })) {
         update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Stale snapshot ignored.' } });
         result = { stopReason: 'end_turn' };
       }
+    } else if (mode === 'incremental-manage-task-list-streaming' || mode === 'incremental-manage-task-list-statusless') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_9', title: 'job9', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job9', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_9', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_9 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_inc', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'list' } });
+        // Partial first frame: task-9 is DONE, task-10 has arrived without its Status line yet.
+        const firstUpdate = { sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_inc',
+          rawOutput: 'Task ID: ' + TASK_9 + '\\nStatus: DONE\\n\\nTask ID: ' + TASK_10 };
+        if (mode === 'incremental-manage-task-list-streaming') firstUpdate.status = 'in_progress';
+        update(firstUpdate);
+        // Second frame delivers task-10's RUNNING status.
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_inc', status: 'completed',
+          rawOutput: '\\nStatus: RUNNING' });
+        result = { stopReason: 'end_turn' };
+      } else {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_final', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'status', TaskId: TASK_10 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_final', status: 'completed',
+          rawOutput: 'Task ID: ' + TASK_10 + '\\nStatus: DONE' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Incremental list preserved task-10.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode.startsWith('manage-task-list-format-')) {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_9', title: 'job9', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job9', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_9', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_9 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        const formatOutputs = {
+          'manage-task-list-format-done-running': 'Task ID: ' + TASK_9 + '\\nStatus: DONE\\nTask ID: ' + TASK_10 + '\\nStatus: RUNNING',
+          'manage-task-list-format-running-done': 'Task ID: ' + TASK_10 + '\\nStatus: RUNNING\\nTask ID: ' + TASK_9 + '\\nStatus: DONE',
+          'manage-task-list-format-status-before-id': 'Status: DONE\\nCommand: a\\nLog: file:///tmp/t9.log\\nTask ID: ' + TASK_9 + '\\nStatus: RUNNING\\nCommand: b\\nLog: file:///tmp/t10.log\\nTask ID: ' + TASK_10,
+          'manage-task-list-format-long-block': [
+            'Task ID: ' + TASK_9, 'Command: job9', 'Cwd: /tmp', 'Created At: 2026-11-23T09:00:00Z',
+            'Completed At: 2026-11-23T09:00:12Z', 'Log: file:///tmp/tasks/task-9.log', 'Status: DONE', '',
+            'Task ID: ' + TASK_10, 'Command: job10', 'Cwd: /tmp', 'Created At: 2026-11-23T09:00:01Z',
+            'Host: devbox', 'Log: file:///tmp/tasks/task-10.log', 'Status: RUNNING',
+          ].join('\\n'),
+          'manage-task-list-format-table': TASK_9 + ' | DONE\\n' + TASK_10 + ' | RUNNING',
+          'manage-task-list-format-table-reversed': TASK_10 + ' | RUNNING\\n' + TASK_9 + ' | DONE',
+          'manage-task-list-format-json': JSON.stringify([
+            { taskId: TASK_10, status: 'RUNNING', log: 'file:///tmp/tasks/task-10.log' },
+            { taskId: TASK_9, status: 'DONE', log: 'file:///tmp/tasks/task-9.log' },
+          ]),
+        };
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_fmt', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'list' } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_fmt', status: 'completed',
+          rawOutput: formatOutputs[mode] });
+        result = { stopReason: 'end_turn' };
+      } else {
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'completed',
+          rawOutput: 'Command exited with code 0.\\n\\nCommand output:\\nok' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Format verified: ' + mode } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'multi-call-same-bg-task-id') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_shared_1', title: 'bun test', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'bun test', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_shared_1', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_shared_2', title: 'bun test', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'bun test', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_shared_2', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+        result = { stopReason: 'end_turn' };
+      } else {
+        // Completing only call_shared_1 must clear both call_shared_1 and call_shared_2 sharing TASK_26.
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_shared_1', status: 'completed',
+          rawOutput: 'Command exited with code 0.\\n\\nCommand output:\\nok' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Both calls cleared together.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'mixed-sysmsg-and-bare-same-chunk' || mode === 'mixed-sysmsg-and-bare-two-chunks') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'job1', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job1', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_1', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else {
+        const partA = '<SYSTEM_MESSAGE>[Message] timestamp=2026-11-23T09:00:00Z sender=' + TASK_1
+          + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_1 + '" finished with result: ok</SYSTEM_MESSAGE>';
+        const partB = '\\n[Message] timestamp=2026-11-23T09:00:01Z sender=' + TASK_10
+          + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_10 + '" finished with result: ok';
+        if (mode === 'mixed-sysmsg-and-bare-same-chunk') {
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: partA + partB } });
+        } else {
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: partA } });
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: partB } });
+        }
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Mixed receipts cleared.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode.startsWith('long-bare-message-')) {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_long_bare', title: 'bun test', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'bun test', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_long_bare', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+        result = { stopReason: 'end_turn' };
+      } else {
+        const prefix = '[Message] timestamp=2026-11-23T09:00:00Z metadata=';
+        const suffix = ' content=Task id "' + TASK_26 + '" finished with result: ' + 'r'.repeat(400);
+        const padLen = Math.max(0, 8705 - prefix.length - suffix.length);
+        const fullLine = prefix + 'm'.repeat(padLen) + suffix;
+        if (mode === 'long-bare-message-single') {
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: fullLine } });
+        } else if (mode === 'long-bare-message-split-8100') {
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: fullLine.slice(0, 8100) } });
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: fullLine.slice(8100) } });
+        } else if (mode === 'long-bare-message-split-multi') {
+          // Split across [Message] tag, at 8100, and right inside task-26 id.
+          const idSplit = fullLine.indexOf('task-26') + 5;
+          for (const piece of [fullLine.slice(0, 4), fullLine.slice(4, 8100), fullLine.slice(8100, idSplit), fullLine.slice(idSplit)]) {
+            update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: piece } });
+          }
+        }
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Long bare receipt cleared.' } });
+        result = { stopReason: 'end_turn' };
+      }
     }
   }
   if (r.id !== undefined) send({ jsonrpc: '2.0', id: r.id, result });
@@ -977,5 +1120,265 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       expect(prompts).toHaveLength(2);
       expect(p.getLastResponse()?.text).toContain("Stale snapshot ignored.");
     } finally { await p.close(); }
+  });
+
+  it("never borrows DONE from another task during incremental manage_task list streaming", async () => {
+    for (const mode of ["incremental-manage-task-list-streaming", "incremental-manage-task-list-statusless"] as const) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, mode);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run pair", { chatId: mode })) {}
+        const prompts = fake.readPrompts();
+        expect(prompts).toHaveLength(3);
+        expect(prompts[1]?.text).toContain(TASK_9);
+        expect(prompts[1]?.text).toContain(TASK_10);
+        expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_10}.`);
+        expect(prompts[2]?.text).not.toContain(TASK_9);
+        expect(p.getLastResponse()?.text).toContain("Incremental list preserved task-10.");
+      } finally { await p.close(); }
+    }
+  });
+
+  it("parses manage_task list outputs order-independently across DONE/RUNNING orders, Status-before-ID, >5-line blocks, tables, and JSON", async () => {
+    const formats = [
+      "manage-task-list-format-done-running",
+      "manage-task-list-format-running-done",
+      "manage-task-list-format-status-before-id",
+      "manage-task-list-format-long-block",
+      "manage-task-list-format-table",
+      "manage-task-list-format-table-reversed",
+      "manage-task-list-format-json",
+    ] as const;
+    for (const mode of formats) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, mode);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run pair", { chatId: mode })) {}
+        const prompts = fake.readPrompts();
+        expect(prompts).toHaveLength(3);
+        expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_10}.`);
+        expect(prompts[2]?.text).not.toContain(TASK_9);
+        expect(p.getLastResponse()?.text).toContain(`Format verified: ${mode}`);
+      } finally { await p.close(); }
+    }
+  });
+
+  it("clears all run_command calls sharing the same bgTaskId together when one reaches a terminal state", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "multi-call-same-bg-task-id");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("run shared task", { chatId: "shared-task-id" })) {}
+      const prompts = fake.readPrompts();
+      expect(prompts).toHaveLength(2);
+      expect(p.getLastResponse()?.text).toContain("Both calls cleared together.");
+    } finally { await p.close(); }
+  });
+
+  it("releases openTools on daemon handoffs, shared-task clears, and callId receipts so native continuation watchdog fires", async () => {
+    const scenarios = [
+      "daemon-handoff-then-silent",
+      "callid-sysmsg-receipt-then-silent",
+      "callid-bare-receipt-then-silent",
+      "shared-task-clear-then-silent",
+    ] as const;
+
+    for (const scenario of scenarios) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const script = join(root, `native-open-tools-${scenario}.mjs`);
+      const logFile = join(root, `native-open-tools-${scenario}.jsonl`);
+      writeFileSync(script, `#!/usr/bin/env node
+import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+const scenario = ${JSON.stringify(scenario)};
+const logFile = ${JSON.stringify(logFile)};
+const TASK_1 = ${JSON.stringify(TASK_1)};
+const TASK_26 = ${JSON.stringify(TASK_26)};
+const send = obj => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...obj }) + '\\n');
+const update = body => send({ method: 'session/update', params: { sessionId: 'native-open-session', update: body } });
+let promptCount = 0;
+let pendingPromptId = null;
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const r = JSON.parse(line);
+  appendFileSync(logFile, JSON.stringify({ method: r.method, promptCount }) + '\\n');
+  if (r.method === 'initialize') {
+    send({ id: r.id, result: { protocolVersion: 1, agentInfo: { name: 'antigravity-native-fake', version: '1.0.0' },
+      agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } } } });
+  } else if (r.method === 'session/new' || r.method === 'session/resume') {
+    send({ id: r.id, result: { sessionId: 'native-open-session',
+      configOptions: [{ id: 'model', category: 'model', type: 'select', currentValue: 'gemini-3.8-flash',
+        options: [{ value: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' }] }],
+      modes: { currentModeId: 'yolo', availableModes: [{ id: 'yolo', name: 'YOLO' }] } } });
+  } else if (r.method === 'session/set_mode' || r.method === 'session/set_config_option') {
+    send({ id: r.id, result: {} });
+  } else if (r.method === 'session/prompt') {
+    promptCount++;
+    if (promptCount === 1) {
+      update({ sessionUpdate: 'tool_call', toolCallId: 'call_bg_init', title: 'sleep 60', kind: 'execute', status: 'in_progress',
+        rawInput: { CommandLine: 'sleep 60', WaitMsBeforeAsync: 10000 } });
+      update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_bg_init', status: 'in_progress',
+        rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+      send({ id: r.id, result: { stopReason: 'end_turn' } });
+    } else {
+      pendingPromptId = r.id;
+      if (scenario === 'daemon-handoff-then-silent') {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_daemon_cont', title: 'dev server', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'bun run dev', IsDaemon: true, WaitMsBeforeAsync: 500 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_daemon_cont', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
+      } else if (scenario === 'callid-sysmsg-receipt-then-silent') {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_anon_cont', title: 'check', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'check', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'user_message_chunk', content: { type: 'text',
+          text: '<SYSTEM_MESSAGE>[Message] timestamp=2026-11-23T09:00:00Z sender=call_anon_cont priority=MESSAGE_PRIORITY_HIGH content=Task id "call_anon_cont" finished with result: ok</SYSTEM_MESSAGE>' } });
+      } else if (scenario === 'callid-bare-receipt-then-silent') {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_anon_bare', title: 'check', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'check', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'user_message_chunk', content: { type: 'text',
+          text: '[Message] timestamp=2026-11-23T09:00:00Z sender=call_anon_bare priority=MESSAGE_PRIORITY_HIGH content=Task id "call_anon_bare" finished with result: ok' } });
+      } else if (scenario === 'shared-task-clear-then-silent') {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_dup_a', title: 'job', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_dup_b', title: 'job', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_dup_a', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_dup_b', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_dup_a', status: 'completed',
+          rawOutput: 'Command exited with code 0.' });
+      }
+      // Go completely silent until session/cancel arrives.
+    }
+  } else if (r.method === 'session/cancel') {
+    if (pendingPromptId !== null) {
+      send({ id: pendingPromptId, result: { stopReason: 'cancelled' } });
+      pendingPromptId = null;
+    }
+  } else if (r.id !== undefined) {
+    send({ id: r.id, error: { code: -32601, message: 'Method not found: ' + r.method } });
+  }
+});
+`, { mode: 0o755 });
+      chmodSync(script, 0o755);
+      const p = new AcpProvider({
+        agentType: "antigravity",
+        antigravityNative: true,
+        providerHome: home.home,
+        cwd: root,
+        executable: script,
+        turnStallTimeoutMs: 120,
+      });
+      const externalAbort = new AbortController();
+      const externalAbortTimer = setTimeout(() => externalAbort.abort(), 3_000);
+      try {
+        const started = performance.now();
+        const error = await (async () => {
+          for await (const _ of p.sendStream("run continuation watchdog check", { chatId: scenario, signal: externalAbort.signal })) {}
+          return null;
+        })().catch((e) => e);
+        const elapsed = performance.now() - started;
+        expect(externalAbort.signal.aborted).toBe(false);
+        expect(error).toBeInstanceOf(AcpSessionFailureError);
+        expect((error as AcpSessionFailureError).failure).toMatchObject({ category: "timeout", errorKind: "turn_stalled" });
+        expect(elapsed).toBeLessThan(2_000);
+        const events = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as { method: string });
+        expect(events.filter(e => e.method === "session/prompt")).toHaveLength(2);
+        expect(events.filter(e => e.method === "session/cancel")).toHaveLength(1);
+      } finally {
+        clearTimeout(externalAbortTimer);
+        await p.close();
+      }
+    }
+  });
+
+  it("never sends continuation prompts after the consumer breaks out of sendStream early without aborting", async () => {
+    for (const delayedEndTurn of [false, true] as const) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const script = join(root, `native-early-break-${delayedEndTurn ? "delayed" : "sync"}.mjs`);
+      const logFile = join(root, `native-early-break-${delayedEndTurn ? "delayed" : "sync"}.jsonl`);
+      writeFileSync(script, `#!/usr/bin/env node
+import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+const delayed = ${JSON.stringify(delayedEndTurn)};
+const logFile = ${JSON.stringify(logFile)};
+const TASK_26 = ${JSON.stringify(TASK_26)};
+const send = obj => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...obj }) + '\\n');
+const update = body => send({ method: 'session/update', params: { sessionId: 'native-break-session', update: body } });
+let promptCount = 0;
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const r = JSON.parse(line);
+  if (r.method === 'initialize') {
+    send({ id: r.id, result: { protocolVersion: 1, agentInfo: { name: 'antigravity-native-fake', version: '1.0.0' },
+      agentCapabilities: { loadSession: true } } });
+  } else if (r.method === 'session/new' || r.method === 'session/resume') {
+    send({ id: r.id, result: { sessionId: 'native-break-session', configOptions: [],
+      modes: { currentModeId: 'default', availableModes: [{ id: 'default', name: 'Default' }] } } });
+  } else if (r.method === 'session/prompt') {
+    promptCount++;
+    appendFileSync(logFile, JSON.stringify({ promptCount }) + '\\n');
+    update({ sessionUpdate: 'tool_call', toolCallId: 'call_early', title: 'sleep 60', kind: 'execute', status: 'in_progress',
+      rawInput: { CommandLine: 'sleep 60', WaitMsBeforeAsync: 10000 } });
+    update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_early', status: 'in_progress',
+      rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+    update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Waiting...' } });
+    if (delayed) {
+      setTimeout(() => send({ id: r.id, result: { stopReason: 'end_turn' } }), 40);
+    } else {
+      send({ id: r.id, result: { stopReason: 'end_turn' } });
+    }
+  } else if (r.id !== undefined) {
+    send({ id: r.id, result: {} });
+  }
+});
+`, { mode: 0o755 });
+      chmodSync(script, 0o755);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: script });
+      try {
+        for await (const evt of p.sendStream("run bg", { chatId: `early-break-${delayedEndTurn}` })) {
+          if (evt.sessionUpdate === "tool_call") break;
+        }
+        await new Promise((r) => setTimeout(r, 150));
+        const prompts = existsSync(logFile)
+          ? readFileSync(logFile, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line))
+          : [];
+        expect(prompts).toHaveLength(1);
+      } finally { await p.close(); }
+    }
+  });
+
+  it("consumes combined <SYSTEM_MESSAGE> and bare [Message] receipts equivalently in one chunk or split chunks", async () => {
+    for (const mode of ["mixed-sysmsg-and-bare-same-chunk", "mixed-sysmsg-and-bare-two-chunks"] as const) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, mode);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run mixed receipts", { chatId: mode })) {}
+        expect(fake.readPrompts()).toHaveLength(2);
+        expect(p.getLastResponse()?.text).toContain("Mixed receipts cleared.");
+      } finally { await p.close(); }
+    }
+  });
+
+  it("preserves 8,705-char bare [Message] headers across arbitrary chunk splits (including at offset 8,100)", async () => {
+    for (const mode of ["long-bare-message-single", "long-bare-message-split-8100", "long-bare-message-split-multi"] as const) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, mode);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run long bare receipt", { chatId: mode })) {}
+        expect(fake.readPrompts()).toHaveLength(2);
+        expect(p.getLastResponse()?.text).toContain("Long bare receipt cleared.");
+      } finally { await p.close(); }
+    }
   });
 });

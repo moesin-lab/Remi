@@ -1404,15 +1404,31 @@ export class IssuesRepo {
     }
 
     const patterns = terms.map((term) => `%${escapeSearchLikeTerm(term)}%`);
-    const keyLikeSql = buildSearchLikeAllTermsSql(ISSUE_SEARCH_EFFECTIVE_KEY_SQL, patterns.length);
-    const titleLikeSql = buildSearchLikeAllTermsSql("i.title", patterns.length);
-    const descriptionLikeSql = buildSearchLikeAllTermsSql("i.description", patterns.length);
+    const keyLikeSql = buildSearchLikeAllTermsSql(ISSUE_SEARCH_EFFECTIVE_KEY_SQL, terms);
+    const titleLikeSql = buildSearchLikeAllTermsSql("i.title", terms);
+    const descriptionLikeSql = buildSearchLikeAllTermsSql("i.description", terms);
 
     let candidateRows: Row[];
     if (includeCommentBodies) {
-      const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", patterns.length);
+      const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
+      // Materialize matched_comments and UNION ALL instead of LEFT JOIN so PostgreSQL 12+
+      // never inlines a single-reference CTE into a correlated Nested Loop when table stats
+      // are stale (e.g. reltuples = 0 immediately after bulk inserts). Both branches scan once.
       candidateRows = this.ctx.db.query(
-        `WITH matched_comments AS (
+        `WITH issue_matches AS (
+           SELECT
+             i.id,
+             i.updated_at,
+             CASE
+               WHEN (${keyLikeSql}) THEN 0
+               WHEN (${titleLikeSql}) THEN 1
+               WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
+               ELSE NULL
+             END AS match_rank
+           FROM multiremi_issues i
+           WHERE i.workspace_id = ?${closedFilterSql}
+         ),
+         matched_comments AS MATERIALIZED (
            SELECT DISTINCT s.issue_id
            FROM multiremi_issues i
            JOIN multiremi_issue_sessions s ON s.issue_id = i.id
@@ -1423,28 +1439,15 @@ export class IssuesRepo {
              AND l.visibility = 'shown'
              AND l.deleted_at IS NULL
              AND (${commentLikeSql})
-         ),
-         scored AS (
-           SELECT
-             i.id,
-             i.updated_at,
-             CASE WHEN mc.issue_id IS NOT NULL THEN 1 ELSE 0 END AS has_comment_match,
-             CASE
-               WHEN (${keyLikeSql}) THEN 0
-               WHEN (${titleLikeSql}) THEN 1
-               WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
-               WHEN mc.issue_id IS NOT NULL THEN 3
-               ELSE NULL
-             END AS match_rank
-           FROM multiremi_issues i
-           LEFT JOIN matched_comments mc ON mc.issue_id = i.id
-           WHERE i.workspace_id = ?${closedFilterSql}
          )
-         SELECT id, updated_at, has_comment_match, match_rank
-         FROM scored
+         SELECT id, updated_at, 0 AS has_comment_match, match_rank
+         FROM issue_matches
          WHERE match_rank IS NOT NULL
-         ORDER BY match_rank ASC, updated_at DESC`,
-      ).all(workspaceId, ...patterns, ...patterns, ...patterns, ...patterns, workspaceId) as Row[];
+         UNION ALL
+         SELECT i.id, i.updated_at, 1 AS has_comment_match, 3 AS match_rank
+         FROM matched_comments mc
+         JOIN multiremi_issues i ON i.id = mc.issue_id`,
+      ).all(...patterns, ...patterns, ...patterns, workspaceId, workspaceId, ...patterns) as Row[];
     } else {
       candidateRows = this.ctx.db.query(
         `WITH scored AS (
@@ -1463,17 +1466,27 @@ export class IssuesRepo {
          )
          SELECT id, updated_at, has_comment_match, match_rank
          FROM scored
-         WHERE match_rank IS NOT NULL
-         ORDER BY match_rank ASC, updated_at DESC`,
+         WHERE match_rank IS NOT NULL`,
       ).all(...patterns, ...patterns, ...patterns, workspaceId) as Row[];
     }
 
-    const candidates = candidateRows.map((row) => ({
-      id: String(row.id),
-      updatedAt: String(row.updated_at),
-      matchRank: Number(row.match_rank),
-      hasCommentMatch: Number(row.has_comment_match) === 1,
-    })).sort((left, right) => left.matchRank - right.matchRank || Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+    const mergedById = new Map<string, { id: string; updatedAt: string; matchRank: number; hasCommentMatch: boolean }>();
+    for (const row of candidateRows) {
+      const id = String(row.id);
+      const updatedAt = String(row.updated_at);
+      const matchRank = Number(row.match_rank);
+      const hasCommentMatch = Number(row.has_comment_match) === 1;
+      const existing = mergedById.get(id);
+      if (existing) {
+        existing.matchRank = Math.min(existing.matchRank, matchRank);
+        existing.hasCommentMatch = existing.hasCommentMatch || hasCommentMatch;
+      } else {
+        mergedById.set(id, { id, updatedAt, matchRank, hasCommentMatch });
+      }
+    }
+    const candidates = [...mergedById.values()].sort(
+      (left, right) => left.matchRank - right.matchRank || Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+    );
 
     const total = candidates.length;
     const page = candidates.slice(offset, offset + limit);
@@ -1484,14 +1497,15 @@ export class IssuesRepo {
       ? page.filter((item) => item.hasCommentMatch).map((item) => item.id)
       : [];
     const commentSnippetsByIssueId = commentPageIds.length > 0
-      ? this.searchIssueCommentSnippets(commentPageIds, query, patterns)
+      ? this.searchIssueCommentSnippets(commentPageIds, query, terms, patterns)
       : new Map<string, string>();
 
     const issues: MultiremiIssueSearchResult[] = [];
     for (const item of page) {
       const issue = hydratedById.get(item.id);
       if (!issue) continue;
-      issues.push(buildIssueSearchResult(issue, query, commentSnippetsByIssueId.get(item.id) ?? null));
+      const built = buildIssueSearchResult(issue, query, commentSnippetsByIssueId.get(item.id) ?? null);
+      if (built) issues.push(built);
     }
     return { issues, total };
   }
@@ -1509,11 +1523,17 @@ export class IssuesRepo {
     return byId;
   }
 
-  private searchIssueCommentSnippets(issueIds: string[], query: string, patterns: string[]): Map<string, string> {
+  /**
+   * Fetch the latest matching visible issue-session comment snippet per issue.
+   * Tie-breaking contract: when multiple matching comments for the same issue share
+   * an identical `created_at`, deterministic ordering uses
+   * `ORDER BY l.created_at DESC, l.seq DESC, l.id DESC` (latest session sequence first).
+   */
+  private searchIssueCommentSnippets(issueIds: string[], query: string, terms: string[], patterns: string[]): Map<string, string> {
     const snippets = new Map<string, string>();
     if (issueIds.length === 0) return snippets;
     const placeholders = issueIds.map(() => "?").join(", ");
-    const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", patterns.length);
+    const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
     const rows = this.ctx.db.query(
       `SELECT issue_id, body_md
        FROM (
@@ -1558,6 +1578,8 @@ export class IssuesRepo {
     ).all(workspaceId) as Row[];
     const commentSnippetByIssueId = new Map<string, string>();
     if (includeCommentBodies && rows.length > 0) {
+      // Same deterministic tie-breaking contract as searchIssueCommentSnippets:
+      // ORDER BY l.created_at DESC, l.seq DESC, l.id DESC picks the latest session seq on ties.
       const commentRows = this.ctx.db.query(
         `SELECT s.issue_id AS issue_id, l.body_md AS body_md
          FROM multiremi_issues i
@@ -1608,7 +1630,8 @@ export class IssuesRepo {
     for (const item of page) {
       const issue = hydratedById.get(item.id);
       if (!issue) continue;
-      issues.push(buildIssueSearchResult(issue, query, commentSnippetByIssueId.get(item.id) ?? null));
+      const built = buildIssueSearchResult(issue, query, commentSnippetByIssueId.get(item.id) ?? null);
+      if (built) issues.push(built);
     }
     return { issues, total };
   }
@@ -6774,8 +6797,15 @@ const ISSUE_SEARCH_CLOSED_NORMALIZED_SQL = [...CLOSED_ISSUE_STATUSES]
   .map((status) => `'${status}'`)
   .join(", ");
 
+// Match JS String.prototype.trim() ASCII whitespace stripping on status before comparing
+// against normalized closed statuses (SQL single-arg TRIM() only strips 0x20 space).
+const ISSUE_SEARCH_NORMALIZED_STATUS_SQL =
+  "TRIM(" +
+  "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(i.status, 'todo'), '\t', ' '), '\n', ' '), '\r', ' '), '\v', ' '), '\f', ' ')" +
+  ")";
+
 const ISSUE_SEARCH_EXCLUDE_UNARCHIVED_CLOSED_SQL =
-  ` AND (TRIM(COALESCE(i.status, 'todo')) NOT IN (${ISSUE_SEARCH_CLOSED_NORMALIZED_SQL}) ` +
+  ` AND (${ISSUE_SEARCH_NORMALIZED_STATUS_SQL} NOT IN (${ISSUE_SEARCH_CLOSED_NORMALIZED_SQL}) ` +
   "OR (i.archived_at IS NOT NULL AND i.archived_at <> ''))";
 
 const ISSUE_SEARCH_MAX_SQL_TERMS = 50;
@@ -6795,22 +6825,38 @@ function hasNonAsciiCasedChar(value: string): boolean {
   return false;
 }
 
-function buildSearchLikeAllTermsSql(columnSql: string, termCount: number): string {
-  return Array.from({ length: termCount }, () => `LOWER(${columnSql}) LIKE ? ESCAPE '\\'`).join(" AND ");
+function buildSearchLikeAllTermsSql(columnSql: string, terms: string[]): string {
+  // Across all Unicode (U+0080..U+10FFFF), ECMAScript String.prototype.toLowerCase()
+  // folds only two non-ASCII code points into ASCII letters:
+  //   - U+212A ('K' Kelvin Sign) -> 'k' (SQLite LOWER() leaves U+212A unchanged)
+  //   - U+0130 ('İ' Latin Capital I With Dot Above) -> 'i\u0307' (PG en_US.utf8 LOWER() drops '\u0307' -> 'i')
+  // Normalizing those two code points before LOWER() keeps both SQLite and PostgreSQL
+  // exact-equivalent with JS searchMatch() without losing O(1) SQL pushdown.
+  let normalizedColumnSql = columnSql;
+  if (terms.some((term) => term.includes("k"))) {
+    normalizedColumnSql = `REPLACE(${normalizedColumnSql}, '\u212A', 'k')`;
+  }
+  if (terms.some((term) => term.includes("i"))) {
+    normalizedColumnSql = `REPLACE(${normalizedColumnSql}, '\u0130', 'i\u0307')`;
+  }
+  return terms.map(() => `LOWER(${normalizedColumnSql}) LIKE ? ESCAPE '\\'`).join(" AND ");
 }
 
 function buildIssueSearchResult(
   issue: MultiremiIssue,
   query: string,
   matchedCommentSnippet: string | null,
-): MultiremiIssueSearchResult {
+): MultiremiIssueSearchResult | null {
   const matchSource = searchMatch(issue.key, query)
     ? "key"
     : searchMatch(issue.title, query)
       ? "title"
       : searchMatch(issue.description ?? "", query)
         ? "description"
-        : "comment";
+        : matchedCommentSnippet !== null
+          ? "comment"
+          : null;
+  if (!matchSource) return null;
   const result: MultiremiIssueSearchResult = {
     ...issue,
     matchSource,

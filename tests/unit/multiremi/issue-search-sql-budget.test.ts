@@ -27,6 +27,12 @@ type SearchInput = {
 /**
  * Verbatim pre-MUL-331 searchIssues implementation used as the ground-truth
  * semantic oracle and before-change SQL query-count baseline.
+ *
+ * Note on equal-`created_at` comments: the legacy query ordered only by
+ * `created_at DESC` (non-deterministic on ties across SQLite/PostgreSQL).
+ * MUL-331 standardizes equal-`created_at` tie-breaking to
+ * `ORDER BY l.created_at DESC, l.seq DESC, l.id DESC` (latest session `seq` first),
+ * asserted explicitly in the dedicated tie-breaking test below.
  */
 function legacySearchIssuesOracle(
   store: MultiremiStore,
@@ -86,6 +92,9 @@ function legacySearchIssuesOracle(
   return { issues: rows.slice(offset, offset + limit), total: rows.length };
 }
 
+const SQL_WRITE_RE =
+  /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|REPLACE\s+INTO|CREATE\s+(?:TABLE|INDEX|VIEW|TRIGGER|UNIQUE)|DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER)|ALTER\s+TABLE)\b/i;
+
 function measureSql<T>(db: SqlDatabase, fn: () => T): { result: T; reads: number; writes: number; total: number; elapsedMs: number; statements: string[] } {
   const statements: string[] = [];
   const wrapped = new WeakSet<object>();
@@ -124,7 +133,7 @@ function measureSql<T>(db: SqlDatabase, fn: () => T): { result: T; reads: number
   try {
     const result = fn();
     const elapsedMs = performance.now() - startedAt;
-    const writes = statements.filter((text) => /\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b/i.test(text)).length;
+    const writes = statements.filter((text) => SQL_WRITE_RE.test(text)).length;
     return { result, reads: statements.length - writes, writes, total: statements.length, elapsedMs, statements };
   } finally {
     querySpy.mockRestore();
@@ -172,7 +181,7 @@ async function measureSqlAsync<T>(db: SqlDatabase, fn: () => Promise<T>): Promis
   try {
     const result = await fn();
     const elapsedMs = performance.now() - startedAt;
-    const writes = statements.filter((text) => /\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b/i.test(text)).length;
+    const writes = statements.filter((text) => SQL_WRITE_RE.test(text)).length;
     return { result, reads: statements.length - writes, writes, total: statements.length, elapsedMs };
   } finally {
     querySpy.mockRestore();
@@ -289,11 +298,20 @@ function seedEquivalenceFixture(f: PendingTurnTestFixture) {
     body: "ALPHA-100 inside a non-message kind row",
   });
   db.run("UPDATE multiremi_conversation_log SET kind = 'turn' WHERE id = ?", [turnLogEntry.id]);
-  // Chat-owned session linked to this issue_id (chat_id IS NOT NULL)
+  // Chat-owned session linked to this issue_id (chat_id IS NOT NULL).
+  // Seed a real multiremi_chat_sessions parent row so PostgreSQL enforces
+  // multiremi_issue_sessions_chat_id_fkey without error.
+  const chatAgent = store.createAgent({ name: "Search Chat Agent", workspaceId: "local", provider: "claude" });
+  const leakChat = store.createChatSession({
+    workspaceId: "local",
+    agentId: chatAgent.id,
+    title: "Chat projection",
+    creatorId: "local",
+  });
   db.run(
     `INSERT INTO multiremi_issue_sessions (id, chat_id, issue_id, workspace_id, title, status, is_default, created_at, updated_at)
-     VALUES ('chat_sess_leak', 'chat_1', ?, 'local', 'Chat projection', 'active', 0, '2026-10-05T00:00:00.000Z', '2026-10-05T00:00:00.000Z')`,
-    [nonVisibleCommentIssue.id],
+     VALUES ('chat_sess_leak', ?, ?, 'local', 'Chat projection', 'active', 0, '2026-10-05T00:00:00.000Z', '2026-10-05T00:00:00.000Z')`,
+    [leakChat.id, nonVisibleCommentIssue.id],
   );
   db.run(
     `INSERT INTO multiremi_conversation_log (session_id, seq, id, kind, visibility, sender_type, body_md, created_at, updated_at)
@@ -369,7 +387,88 @@ function seedEquivalenceFixture(f: PendingTurnTestFixture) {
      VALUES ('raw_num_key_888', 888, NULL, 'Legacy numbered null key issue', NULL, 'todo', 'local', '2026-10-07T04:00:00.000Z', '2026-10-07T04:00:00.000Z')`,
   );
 
-  // 10. Foreign workspace data with identical tokens (must stay isolated)
+  // 10. Unicode ASCII-folding edge cases (U+212A 'K' -> 'k' and U+0130 'İ' -> 'i\u0307')
+  const kelvinTitleIssue = f.createIssue({
+    workspaceId: "local",
+    title: "\u212Aelvin temperature calibration",
+    description: "Title uses U+212A unit sign",
+  });
+  setUpdatedAt(db, kelvinTitleIssue.id, "2026-10-07T05:00:00.000Z");
+
+  const kelvinCommentIssue = f.createIssue({
+    workspaceId: "local",
+    title: "Neutral telemetry ticket",
+    description: "Comment carries U+212A unit sign only",
+  });
+  const kelvinComment = store.createIssueComment(kelvinCommentIssue.id, {
+    body: "Recorded \u212Aelvin drift in sensor comment",
+  });
+  setCommentCreatedAt(db, kelvinComment.id, "2026-10-07T05:30:00.000Z");
+  setUpdatedAt(db, kelvinCommentIssue.id, "2026-10-07T05:30:00.000Z");
+
+  const istanbulTitleIssue = f.createIssue({
+    workspaceId: "local",
+    title: "\u0130stanbul edge POP rollout",
+    description: "Title uses U+0130 dotted capital I",
+  });
+  setUpdatedAt(db, istanbulTitleIssue.id, "2026-10-07T06:00:00.000Z");
+
+  const istanbulCommentIssue = f.createIssue({
+    workspaceId: "local",
+    title: "Neutral edge note",
+    description: "Comment uses U+0130 dotted capital I",
+  });
+  const istanbulComment = store.createIssueComment(istanbulCommentIssue.id, {
+    body: "Observed \u0130stanbul latency spike in comment",
+  });
+  setCommentCreatedAt(db, istanbulComment.id, "2026-10-07T06:30:00.000Z");
+  setUpdatedAt(db, istanbulCommentIssue.id, "2026-10-07T06:30:00.000Z");
+
+  // 11. Whitespace-padded raw status values (\t, \n, \r, \v, \f) vs JS .trim()
+  const wsOpenControl = f.createIssue({
+    workspaceId: "local",
+    title: "WSCLOSED-99 open control",
+    description: "Remains visible when includeClosed=false",
+  });
+  setUpdatedAt(db, wsOpenControl.id, "2026-10-07T07:00:00.000Z");
+
+  const wsTabNewlineDone = f.createIssue({
+    workspaceId: "local",
+    title: "WSCLOSED-99 tab newline done",
+    description: "Unarchived done with tab/newline padding",
+  });
+  db.run("UPDATE multiremi_issues SET status = ? WHERE id = ?", ["\tdone\n", wsTabNewlineDone.id]);
+  setUpdatedAt(db, wsTabNewlineDone.id, "2026-10-07T07:10:00.000Z");
+
+  const wsCancelledTab = f.createIssue({
+    workspaceId: "local",
+    title: "WSCLOSED-99 space tab cancelled",
+    description: "Unarchived cancelled with space/tab padding",
+  });
+  db.run("UPDATE multiremi_issues SET status = ? WHERE id = ?", [" cancelled\t", wsCancelledTab.id]);
+  setUpdatedAt(db, wsCancelledTab.id, "2026-10-07T07:20:00.000Z");
+
+  const wsControlCharsDone = f.createIssue({
+    workspaceId: "local",
+    title: "WSCLOSED-99 cr vt ff done",
+    description: "Unarchived done with CR/VT/FF padding",
+  });
+  db.run("UPDATE multiremi_issues SET status = ? WHERE id = ?", ["\r\v\fdone\n", wsControlCharsDone.id]);
+  setUpdatedAt(db, wsControlCharsDone.id, "2026-10-07T07:30:00.000Z");
+
+  const wsArchivedTabDone = f.createIssue({
+    workspaceId: "local",
+    title: "WSCLOSED-99 archived tab done",
+    description: "Archived tab/newline done stays visible when includeClosed=false",
+  });
+  db.run("UPDATE multiremi_issues SET status = ?, archived_at = ? WHERE id = ?", [
+    "\tdone\n",
+    "2026-10-07T07:40:00.000Z",
+    wsArchivedTabDone.id,
+  ]);
+  setUpdatedAt(db, wsArchivedTabDone.id, "2026-10-07T07:40:00.000Z");
+
+  // 12. Foreign workspace data with identical tokens (must stay isolated)
   const foreignIssue = f.createIssue({
     workspaceId: foreignWs.id,
     title: "ALPHA-100 foreign workspace title 100% 中文性能回归",
@@ -394,6 +493,15 @@ function seedEquivalenceFixture(f: PendingTurnTestFixture) {
     archivedCancelled,
     specialWildcardReal,
     specialWildcardDecoy,
+    kelvinTitleIssue,
+    kelvinCommentIssue,
+    istanbulTitleIssue,
+    istanbulCommentIssue,
+    wsOpenControl,
+    wsTabNewlineDone,
+    wsCancelledTab,
+    wsControlCharsDone,
+    wsArchivedTabDone,
     foreignIssue,
   };
 }
@@ -493,6 +601,54 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(unicodeCasedHit.issues.map((item) => item.id)).toEqual([seeded.specialWildcardReal.id]);
     expect(unicodeCasedHit.issues[0]?.matchSource).toBe("comment");
 
+    // Unicode ASCII-folding edge cases (U+212A 'K' -> 'k', U+0130 'İ' -> 'i\u0307')
+    const kelvinHit = assertMatchesOracle({ q: "kelvin", workspaceId: "local", includeCommentBodies: true });
+    expect(kelvinHit.issues.map((item) => item.id)).toEqual([
+      seeded.kelvinTitleIssue.id,
+      seeded.kelvinCommentIssue.id,
+    ]);
+    expect(kelvinHit.issues[0]?.matchSource).toBe("title");
+    expect(kelvinHit.issues[1]?.matchSource).toBe("comment");
+    expect(kelvinHit.issues[1]?.matchedCommentSnippet).toContain("\u212Aelvin drift");
+
+    const kelvinNoComments = assertMatchesOracle({ q: "kelvin", workspaceId: "local", includeCommentBodies: false });
+    expect(kelvinNoComments.issues.map((item) => item.id)).toEqual([seeded.kelvinTitleIssue.id]);
+    expect(kelvinNoComments.issues[0]?.matchSource).toBe("title");
+
+    // 'istanbul' MUST NOT match 'İstanbul' (JS 'İstanbul'.toLowerCase() === 'i\u0307stanbul'),
+    // and includeCommentBodies=false must never fabricate matchSource='comment'.
+    const istanbulMissWithComments = assertMatchesOracle({ q: "istanbul", workspaceId: "local", includeCommentBodies: true });
+    expect(istanbulMissWithComments).toEqual({ issues: [], total: 0 });
+    const istanbulMissNoComments = assertMatchesOracle({ q: "istanbul", workspaceId: "local", includeCommentBodies: false });
+    expect(istanbulMissNoComments).toEqual({ issues: [], total: 0 });
+
+    const istanbulExactHit = assertMatchesOracle({ q: "\u0130stanbul", workspaceId: "local", includeCommentBodies: true });
+    expect(istanbulExactHit.issues.map((item) => item.id)).toEqual([
+      seeded.istanbulTitleIssue.id,
+      seeded.istanbulCommentIssue.id,
+    ]);
+    expect(istanbulExactHit.issues[0]?.matchSource).toBe("title");
+    expect(istanbulExactHit.issues[1]?.matchSource).toBe("comment");
+    const istanbulExactNoComments = assertMatchesOracle({ q: "\u0130stanbul", workspaceId: "local", includeCommentBodies: false });
+    expect(istanbulExactNoComments.issues.map((item) => item.id)).toEqual([seeded.istanbulTitleIssue.id]);
+
+    // Whitespace-padded raw closed statuses (\t, \n, \r, \v, \f) align with normalizeIssueStatus (.trim())
+    const wsClosedExcluded = assertMatchesOracle({ q: "WSCLOSED-99", workspaceId: "local", includeClosed: false });
+    expect(wsClosedExcluded.total).toBe(2);
+    expect(wsClosedExcluded.issues.map((item) => item.id)).toEqual([
+      seeded.wsArchivedTabDone.id,
+      seeded.wsOpenControl.id,
+    ]);
+    const wsClosedIncluded = assertMatchesOracle({ q: "WSCLOSED-99", workspaceId: "local", includeClosed: true });
+    expect(wsClosedIncluded.total).toBe(5);
+    expect(wsClosedIncluded.issues.map((item) => item.id)).toEqual([
+      seeded.wsArchivedTabDone.id,
+      seeded.wsControlCharsDone.id,
+      seeded.wsCancelledTab.id,
+      seeded.wsTabNewlineDone.id,
+      seeded.wsOpenControl.id,
+    ]);
+
     // Raw NULL issue_key fallback matching id or MUL-<number>
     const rawIdKeyHit = assertMatchesOracle({ q: "raw_legacy_id_777", workspaceId: "local" });
     expect(rawIdKeyHit.issues.map((item) => item.id)).toEqual(["raw_legacy_id_777"]);
@@ -513,6 +669,42 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(page2.issues).toHaveLength(2);
     expect(pageBeyond.issues).toHaveLength(0);
     expect([...page1.issues, ...page2.issues].map((item) => item.id)).toEqual(openAlpha.issues.slice(0, 4).map((item) => item.id));
+  }, 30_000);
+
+  it("breaks equal created_at comment snippet ties deterministically by seq DESC, id DESC", () => {
+    const f = fixture();
+    const issue = f.createIssue({
+      workspaceId: "local",
+      title: "Tie-break comment issue",
+      description: "Clean description",
+    });
+    const first = f.store.createIssueComment(issue.id, {
+      body: "TIEBREAK-777 café earlier seq 1 snippet",
+    });
+    const second = f.store.createIssueComment(issue.id, {
+      body: "TIEBREAK-777 café later seq 2 winner snippet",
+    });
+    const nonMatching = f.store.createIssueComment(issue.id, {
+      body: "Unrelated seq 3 comment at identical timestamp",
+    });
+    const tiedTimestamp = "2026-10-10T10:00:00.000Z";
+    setCommentCreatedAt(f.db, first.id, tiedTimestamp);
+    setCommentCreatedAt(f.db, second.id, tiedTimestamp);
+    setCommentCreatedAt(f.db, nonMatching.id, tiedTimestamp);
+
+    // SQL pushdown path: ORDER BY l.created_at DESC, l.seq DESC, l.id DESC
+    const sqlPath = f.store.searchIssues({ q: "TIEBREAK-777", workspaceId: "local" });
+    expect(sqlPath.total).toBe(1);
+    expect(sqlPath.issues[0]?.matchSource).toBe("comment");
+    expect(sqlPath.issues[0]?.matchedCommentSnippet).toContain("later seq 2 winner snippet");
+    expect(sqlPath.issues[0]?.matchedSnippet).toBe(sqlPath.issues[0]?.matchedCommentSnippet);
+
+    // Non-ASCII cased fallback path enforces the exact same tie-breaking contract
+    const fallbackPath = f.store.searchIssues({ q: "café tiebreak-777", workspaceId: "local" });
+    expect(fallbackPath.total).toBe(1);
+    expect(fallbackPath.issues[0]?.matchSource).toBe("comment");
+    expect(fallbackPath.issues[0]?.matchedCommentSnippet).toContain("later seq 2 winner snippet");
+    expect(fallbackPath.issues[0]?.matchedSnippet).toBe(fallbackPath.issues[0]?.matchedCommentSnippet);
   }, 30_000);
 
   it("keeps SQL query count O(1) across growing workspace and foreign issue counts", async () => {
@@ -638,10 +830,18 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(largeCommentAfter.writes).toBe(0);
     expect(largeMissBefore.reads).toBeGreaterThanOrEqual(300);
 
-    // Every emitted SQL statement translates cleanly for PostgreSQL (numbered $N placeholders, intact ESCAPE '\').
+    // Candidate query with comment bodies uses MATERIALIZED CTE + UNION ALL (never LEFT JOIN CTE inlining)
+    expect(largeMissAfter.statements[0]).toContain("AS MATERIALIZED");
+    expect(largeMissAfter.statements[0]).toContain("UNION ALL");
+
+    // Every emitted SQL statement translates cleanly for PostgreSQL (numbered $N placeholders, intact ESCAPE '\' and AS MATERIALIZED).
     for (const sql of [...largeMissAfter.statements, ...largeCommentAfter.statements, ...largeMultiTermAfter.statements]) {
       const pgSql = translateSqliteToPg(sql);
       expect(pgSql).not.toContain("?");
+      if (sql.includes("AS MATERIALIZED")) {
+        expect(pgSql).toContain("AS MATERIALIZED");
+        expect(pgSql).toContain("UNION ALL");
+      }
       if (sql.includes("LIKE")) {
         expect(pgSql).toContain("ESCAPE '\\'");
       }

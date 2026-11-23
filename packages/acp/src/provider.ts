@@ -35,7 +35,7 @@ import { AcpRpcError, AcpSessionFailureError, airMetadata, readSessionFailure, r
 import { resolveAcpProcessLaunch } from "./launch.js";
 import { createAdapter, type AgentAdapter } from "./adapters/index.js";
 import { resolveClaudeContextSelection, hasOneMillionContext } from "./adapters/claude-code/model-context.js";
-import { autonomousOrigin, isWorkspaceTrustPrompt, nativeAgentId, permissionAsQuestion, serviceMessage, serviceMessageFailure, type PermissionQuestion } from "./adapters/trace-vendor.js";
+import { autonomousOrigin, contentText, isWorkspaceTrustPrompt, nativeAgentId, permissionAsQuestion, serviceMessage, serviceMessageFailure, type PermissionQuestion } from "./adapters/trace-vendor.js";
 import { ANTIGRAVITY_NATIVE_ACCESS, nativeAntigravityLaunch } from "./access/antigravity-native.js";
 import { accessConfigFor, type AcpAccessConfig } from "./access/index.js";
 import type { GatewayShimChannel, GatewayShimEvent, GatewayShimHost, GatewayShimListingFailure } from "./access/gateway-shim-types.js";
@@ -260,6 +260,11 @@ const MAX_LOGGED_UNKNOWN_SESSIONS = 32;
 const ASYNC_TASK_STOP_TIMEOUT_MS = 10_000;
 /** Background tasks kept per pooled session; the oldest ended ones go first. */
 const MAX_ASYNC_TASKS = 256;
+/** Max bounded same-session continuations when Antigravity ends a turn with pending non-daemon shell commands. */
+const MAX_ANTIGRAVITY_BG_CONTINUATIONS = 3;
+const ANTIGRAVITY_BG_CONTINUATION_PROMPT =
+  'A non-daemon shell command started in this turn is still running in the background. '
+  + 'Do not end the turn yet: check its status with manage_task (Action: "status") until Status: DONE, then finish your task.';
 const DEFAULT_PERMISSION_MODE_BY_AGENT: Record<string, string | null> = {
   claude: "bypassPermissions",
   // codex advertises read-only/agent/agent-full-access, so the literal id is
@@ -983,6 +988,9 @@ export class AcpProvider implements Provider {
     const turnFailure = () => failureState.failure?.severity === "error"
       ? failureState.failure : failureState.compaction ?? failureState.failure;
     let resolveWaiting: (() => void) | null = null;
+    const wakeStream = () => {
+      resolveWaiting?.();
+    };
 
     const pushEvent = (evt: ProviderEvent) => {
       eventQueue.push(evt);
@@ -1034,6 +1042,9 @@ export class AcpProvider implements Provider {
     let lastOutputSeq = 0;
     /** Tool calls still pending / in progress, with the frame order of their last update. */
     const openTools = new Map<string, number>();
+    /** Tracks non-daemon `run_command` calls that `agy acp` may auto-background past 10 s. */
+    const antigravityBgCommands = this._adapter.agentType === "antigravity"
+      ? new AntigravityBackgroundCommandTracker() : null;
     const onUpdate = (notification: SessionNotification) => {
       const child = this._routeFrame(chatId, entry, notification);
       if (child === undefined) return;
@@ -1155,6 +1166,7 @@ export class AcpProvider implements Provider {
       if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
         trackToolCall(entry, update);
       }
+      antigravityBgCommands?.observe(update, this._adapter);
       if (update.sessionUpdate === "tool_call_update") {
         const status = (update as any).status;
         const compaction = record(record(update._meta)?.contextCompaction);
@@ -1255,10 +1267,49 @@ export class AcpProvider implements Provider {
       }
     };
     endGatewayPrompt = gateway?.channel?.beginPrompt() ?? null;
-    const promptCompletion = entry.client
-      .prompt(entry.acpSessionId, message, buildMediaContent(options?.media,
-        entry.client.initializeResult?.agentCapabilities?.promptCapabilities?.image === true, this._adapter.agentType))
-      .then(async (result: PromptResult) => {
+    const initialMedia = buildMediaContent(options?.media,
+      entry.client.initializeResult?.agentCapabilities?.promptCapabilities?.image === true, this._adapter.agentType);
+    const promptCompletion = (async () => {
+      let currentMessage = message;
+      let currentMedia = initialMedia;
+      let continuations = 0;
+
+      while (true) {
+        const result: PromptResult = await entry.client.prompt(entry.acpSessionId, currentMessage, currentMedia);
+        const failure = readSessionFailure(result._meta, credentials);
+        if (failure && (failure.severity === "error" || failureState.failure?.severity !== "error")) failureState.failure = failure;
+
+        const canContinue = antigravityBgCommands !== null
+          && result.stopReason === "end_turn"
+          && !options?.signal?.aborted
+          && !stalled
+          && !gatewayStop
+          && !cancelSent
+          && turnFailure()?.severity !== "error"
+          && entry.client.alive
+          && antigravityBgCommands.hasPending;
+
+        if (canContinue && continuations < MAX_ANTIGRAVITY_BG_CONTINUATIONS) {
+          continuations++;
+          lastActivity = Date.now();
+          const taskIds = antigravityBgCommands.pendingTaskIds();
+          console.warn(
+            `[AcpProvider] antigravity: ${antigravityBgCommands.pendingCount} non-daemon run_command call(s) still pending at end_turn; `
+            + `continuing on session ${entry.acpSessionId} (${continuations}/${MAX_ANTIGRAVITY_BG_CONTINUATIONS})`,
+          );
+          currentMessage = taskIds.length
+            ? `${ANTIGRAVITY_BG_CONTINUATION_PROMPT} Pending task id(s): ${taskIds.join(", ")}.`
+            : ANTIGRAVITY_BG_CONTINUATION_PROMPT;
+          currentMedia = undefined;
+          continue;
+        }
+        if (canContinue) {
+          console.warn(
+            `[AcpProvider] antigravity: reached max ${MAX_ANTIGRAVITY_BG_CONTINUATIONS} background-command continuations `
+            + `on session ${entry.acpSessionId}; ending turn`,
+          );
+        }
+
         // The turn is over for steering at once; usage settles before promptDone,
         // so the stream cannot build its fallback response first.
         settlePromptInFlight();
@@ -1268,8 +1319,6 @@ export class AcpProvider implements Provider {
           await settleCodexRolloutUsage(promptState, requestedModel(), requestedModelSource(), CODEX_ROLLOUT_SETTLE_MS);
         }
         promptDone = true;
-        const failure = readSessionFailure(result._meta, credentials);
-        if (failure && (failure.severity === "error" || failureState.failure?.severity !== "error")) failureState.failure = failure;
         if (entry.promptState === promptState && this._activeStreaming.has(chatId)) {
           const normalized = this._adapter.normalizePromptResult?.(result);
           if (normalized?.model !== undefined) entry.promptState.usage.model = normalized.model;
@@ -1284,16 +1333,17 @@ export class AcpProvider implements Provider {
         if (result.stopReason === "cancelled" || result.stopReason === "interrupted") {
           promptError = new Error("Cancelled");
         }
-        resolveWaiting?.();
-      })
-      .catch(async (err: unknown) => {
-        settlePromptInFlight();
-        await drainGateway();
-        promptDone = true;
-        promptError = redactProviderError(err, credentials);
-        console.error(`[AcpProvider] prompt FAILED after ${((Date.now() - promptStartMs) / 1000).toFixed(1)}s: ${promptError.message}`);
-        resolveWaiting?.();
-      });
+        wakeStream();
+        return;
+      }
+    })().catch(async (err: unknown) => {
+      settlePromptInFlight();
+      await drainGateway();
+      promptDone = true;
+      promptError = redactProviderError(err, credentials);
+      console.error(`[AcpProvider] prompt FAILED after ${((Date.now() - promptStartMs) / 1000).toFixed(1)}s: ${promptError.message}`);
+      wakeStream();
+    });
     // The request is on the wire; `onPromptStarted` waits for the turn itself.
     if (!promptDone) entry.promptInFlight = promptToken;
 
@@ -3126,6 +3176,232 @@ function trackToolCall(entry: PoolEntry, update: SessionUpdate): void {
     if (entry.openToolCalls.delete(call.toolCallId) && !entry.openToolCalls.size) wakeSteerWaiters(entry);
   } else if (call.sessionUpdate === "tool_call") {
     entry.openToolCalls.add(call.toolCallId);
+  }
+}
+
+const ANTIGRAVITY_BG_TASK_ID_RE = /Tool is running as a background task with task id:\s*[`"']?([A-Za-z0-9._:-]+)[`"']?/i;
+const ANTIGRAVITY_TASK_TERMINAL_STATUS_RE = /\bStatus:\s*(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELLED)\b/i;
+const ANTIGRAVITY_TASK_RUNNING_STATUS_RE = /\bStatus:\s*(?:RUNNING|PENDING|IN_PROGRESS)\b/i;
+const ANTIGRAVITY_SYSTEM_MESSAGE_RE = /<SYSTEM_MESSAGE>([\s\S]*?)(?:<\/SYSTEM_MESSAGE>|$)/gi;
+const ANTIGRAVITY_COMPLETION_WORD_RE = /\b(?:Status:\s*(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELLED)|completed|finished|exited|terminated|killed|failed|stopped)\b/i;
+const ANTIGRAVITY_STILL_RUNNING_RE = /\b(?:Status:\s*(?:RUNNING|PENDING|IN_PROGRESS)|still\s+running)\b/i;
+
+function extractToolUpdateText(update: SessionUpdate): string {
+  const frame = update as { rawOutput?: unknown; content?: unknown };
+  const parts: string[] = [];
+  if (typeof frame.rawOutput === "string") {
+    parts.push(frame.rawOutput);
+  } else if (frame.rawOutput && typeof frame.rawOutput === "object") {
+    const output = frame.rawOutput as Record<string, unknown>;
+    const text = output.formatted_output ?? output.combinedOutput ?? output.output ?? output.text;
+    parts.push(typeof text === "string" ? text : JSON.stringify(output));
+  }
+  const content = contentText(frame.content);
+  if (content) parts.push(content);
+  return parts.join("\n");
+}
+
+function readStringField(input: Record<string, unknown> | undefined, keys: readonly string[]): string | undefined {
+  if (!input) return undefined;
+  for (const key of keys) {
+    const value = input[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function isDaemonToolInput(input: Record<string, unknown> | undefined): boolean {
+  return input?.IsDaemon === true || input?.is_daemon === true;
+}
+
+function extractAntigravityBackgroundTaskId(text: string): string | null {
+  const match = ANTIGRAVITY_BG_TASK_ID_RE.exec(text);
+  const id = match?.[1]?.replace(/[.:,]+$/, "");
+  return id || null;
+}
+
+function textIndicatesTaskTerminal(text: string, taskId: string): boolean {
+  if (!text.includes(taskId)) return false;
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i]!.includes(taskId)) continue;
+    const section = [lines[i]!];
+    for (let j = i + 1; j < lines.length && j <= i + 4; j++) {
+      const next = lines[j]!;
+      if (!next.trim()) break;
+      if (/\bTask(?:\s+ID)?\s*[:#]/i.test(next) && !next.includes(taskId)) break;
+      section.push(next);
+    }
+    const block = section.join("\n");
+    if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(block) && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(block)) {
+      return true;
+    }
+  }
+  return ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(text) && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(text);
+}
+
+/**
+ * Tracks non-daemon `run_command` tool calls within one Antigravity turn so
+ * `AcpProvider.sendStream` can distinguish an intentional final answer from a
+ * premature `end_turn` triggered by `agy acp`'s 10 s auto-background prompt.
+ */
+class AntigravityBackgroundCommandTracker {
+  private readonly pending = new Map<string, { toolCallId: string; taskId: string | null; announcedInProgress: boolean }>();
+  private readonly runCommandCalls = new Set<string>();
+  private readonly daemonCalls = new Set<string>();
+  private readonly manageTaskCalls = new Map<string, { action?: string; taskId?: string }>();
+  private systemMessageTail = "";
+
+  get hasPending(): boolean {
+    return this.pending.size > 0;
+  }
+
+  get pendingCount(): number {
+    return this.pending.size;
+  }
+
+  pendingTaskIds(): string[] {
+    const ids: string[] = [];
+    for (const entry of this.pending.values()) {
+      if (entry.taskId && !ids.includes(entry.taskId)) ids.push(entry.taskId);
+    }
+    return ids;
+  }
+
+  observe(update: SessionUpdate, adapter: AgentAdapter): void {
+    if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+      const id = typeof update.toolCallId === "string" ? update.toolCallId : null;
+      if (!id) return;
+      const status = typeof update.status === "string" ? update.status : undefined;
+      const resolvedName = adapter.resolveToolName(update);
+      const input = adapter.extractToolInput(update);
+      const text = extractToolUpdateText(update);
+
+      if (resolvedName === "run_command" || this.runCommandCalls.has(id)) {
+        this.runCommandCalls.add(id);
+        if (isDaemonToolInput(input)) {
+          this.daemonCalls.add(id);
+          this.pending.delete(id);
+          return;
+        }
+        if (this.daemonCalls.has(id)) return;
+
+        const bgTaskId = text ? extractAntigravityBackgroundTaskId(text) : null;
+        const existing = this.pending.get(id);
+
+        if (status === "failed") {
+          this.pending.delete(id);
+          return;
+        }
+        if (status === "completed") {
+          if (bgTaskId && !existing?.announcedInProgress && !ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(text)) {
+            this.pending.set(id, { toolCallId: id, taskId: bgTaskId, announcedInProgress: false });
+          } else {
+            this.pending.delete(id);
+          }
+          return;
+        }
+
+        this.pending.set(id, {
+          toolCallId: id,
+          taskId: bgTaskId ?? existing?.taskId ?? null,
+          announcedInProgress: existing?.announcedInProgress || Boolean(bgTaskId),
+        });
+        return;
+      }
+
+      if (resolvedName === "manage_task" || this.manageTaskCalls.has(id)) {
+        const prev = this.manageTaskCalls.get(id) ?? {};
+        const action = readStringField(input, ["Action", "action"])?.toLowerCase() ?? prev.action;
+        const taskId = readStringField(input, ["TaskId", "task_id", "taskId"]) ?? prev.taskId;
+        this.manageTaskCalls.set(id, { action, taskId });
+
+        if (status !== "failed") {
+          if (action === "kill" && status === "completed") {
+            this._clearByTaskId(taskId);
+          } else if (text) {
+            this._observeManageTaskOutput(text, taskId);
+          }
+        }
+        return;
+      }
+
+      if (text) this._observeSystemMessage(text);
+      return;
+    }
+
+    if (update.sessionUpdate === "user_message_chunk" || update.sessionUpdate === "agent_message_chunk") {
+      const text = extractChunkText(update.content);
+      if (!text) return;
+      this.systemMessageTail = (this.systemMessageTail + text).slice(-4096);
+      if (this.systemMessageTail.includes("<SYSTEM_MESSAGE>")) {
+        this._observeSystemMessage(this.systemMessageTail);
+        if (this.systemMessageTail.includes("</SYSTEM_MESSAGE>")) {
+          const endIdx = this.systemMessageTail.lastIndexOf("</SYSTEM_MESSAGE>");
+          this.systemMessageTail = this.systemMessageTail.slice(endIdx + "</SYSTEM_MESSAGE>".length);
+        }
+      }
+    }
+  }
+
+  private _observeManageTaskOutput(text: string, inputTaskId: string | undefined): void {
+    if (inputTaskId) {
+      if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(text) && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(text)) {
+        this._clearByTaskId(inputTaskId);
+      }
+      return;
+    }
+    let matched = false;
+    for (const [callId, entry] of this.pending) {
+      if (entry.taskId && textIndicatesTaskTerminal(text, entry.taskId)) {
+        this.pending.delete(callId);
+        matched = true;
+      }
+    }
+    if (!matched && this.pending.size === 1
+      && ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(text)
+      && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(text)) {
+      const [onlyId, only] = [...this.pending.entries()][0]!;
+      if (only.taskId === null) this.pending.delete(onlyId);
+    }
+  }
+
+  private _clearByTaskId(taskId: string | undefined): void {
+    if (taskId) {
+      let matched = false;
+      for (const [callId, entry] of this.pending) {
+        if (entry.taskId === taskId || callId === taskId) {
+          this.pending.delete(callId);
+          matched = true;
+        }
+      }
+      if (matched) return;
+    }
+    if (this.pending.size === 1) {
+      const [onlyId, only] = [...this.pending.entries()][0]!;
+      if (only.taskId === null) this.pending.delete(onlyId);
+    }
+  }
+
+  private _observeSystemMessage(text: string): void {
+    if (!this.pending.size || !text.includes("<SYSTEM_MESSAGE>")) return;
+    ANTIGRAVITY_SYSTEM_MESSAGE_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = ANTIGRAVITY_SYSTEM_MESSAGE_RE.exec(text)) !== null) {
+      const body = match[1] ?? "";
+      if (!ANTIGRAVITY_COMPLETION_WORD_RE.test(body) || ANTIGRAVITY_STILL_RUNNING_RE.test(body)) continue;
+      let matched = false;
+      for (const [callId, entry] of this.pending) {
+        if ((entry.taskId && body.includes(entry.taskId)) || body.includes(callId)) {
+          this.pending.delete(callId);
+          matched = true;
+        }
+      }
+      if (!matched && this.pending.size === 1 && /\b(?:background\s+task|task|command)\b/i.test(body)) {
+        const [onlyId, only] = [...this.pending.entries()][0]!;
+        if (only.taskId === null) this.pending.delete(onlyId);
+      }
+    }
   }
 }
 

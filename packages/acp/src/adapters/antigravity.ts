@@ -49,9 +49,21 @@ function workingDirectoryNote(cwd: unknown): string | null {
  * Server 1.4.0 keeps a turn open while a background command runs and ignores
  * `session/cancel` meanwhile (live probe); the provider's stall watchdog is
  * the backstop when the model backgrounds one anyway.
+ *
+ * Conversely, `agy acp` enforces a 10 s `WaitMsBeforeAsync` ceiling on
+ * `run_command`: any command exceeding it is auto-backgrounded with an
+ * injected prompt suggesting ending the turn to wait for notifications.
+ * Ending the turn closes the Remi session process and stops the command
+ * prematurely, so the model must keep working or poll `manage_task`
+ * (`Action: "status"`) until `Status: DONE` in the same turn (paired with
+ * AcpProvider's bounded same-session continuation guard).
  */
 export const ANTIGRAVITY_FOREGROUND_NOTE = "Run shell commands in the foreground and wait for them to finish; never leave a command "
-  + "running in the background. If a command could run for a long time, say so instead of starting it in the background.";
+  + "running in the background. If a command could run for a long time, say so instead of starting it in the background. "
+  + "If a non-daemon shell command (IsDaemon not set to true) automatically moves to the background after exceeding the "
+  + "WaitMsBeforeAsync limit, DO NOT end the turn to wait for notifications (never choose to update the user and end the turn) — "
+  + "Remi closes the session process when the turn ends. Instead, continue other work in the same turn or call "
+  + "manage_task (Action: \"status\") until the background task reaches Status: DONE before ending the turn.";
 
 /**
  * No `steering`: server 1.4.0 advertises none, and a second `session/prompt`

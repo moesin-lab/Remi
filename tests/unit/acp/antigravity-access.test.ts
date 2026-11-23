@@ -180,9 +180,14 @@ describe("AntigravityAdapter.buildSessionMeta", () => {
     });
   });
 
-  it("asks for foreground shell commands, since a background one holds the turn open", () => {
+  it("asks for foreground shell commands and forbids ending the turn when non-daemon commands auto-background", () => {
     expect(ANTIGRAVITY_FOREGROUND_NOTE).toContain("in the foreground");
     expect(ANTIGRAVITY_FOREGROUND_NOTE).toContain("could run for a long time, say so");
+    expect(ANTIGRAVITY_FOREGROUND_NOTE).toContain("IsDaemon");
+    expect(ANTIGRAVITY_FOREGROUND_NOTE).toContain("WaitMsBeforeAsync");
+    expect(ANTIGRAVITY_FOREGROUND_NOTE).toContain("DO NOT end the turn");
+    expect(ANTIGRAVITY_FOREGROUND_NOTE).toContain("manage_task");
+    expect(ANTIGRAVITY_FOREGROUND_NOTE).toContain("Status: DONE");
   });
 
   it("names the session cwd first, so shell commands run there and not in the server's skills directory (R5)", () => {

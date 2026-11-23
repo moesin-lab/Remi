@@ -3,6 +3,47 @@ import { afterCommit } from '../db/postgres.js';
 import { nowIso } from '@multiremi/ids.js';
 import { questionMetadataText } from './question-indexes.js';
 
+const PLAIN_JSON_ASCII_ID = /^[A-Za-z0-9_.:-]+$/;
+const WORK_TRIGGER_REASON_SQL = "(wake_reason IN ('human_sender','agent_dispatch') OR (wake_reason='to_parent_owner' AND message_kind='request'))";
+
+function pendingTurnHasWorkTrigger(ctx: StoreContext, turn: any): boolean {
+  const exactDelivery = `${questionMetadataText(ctx.db, 'merged.metadata', 'delivery_turn_id')}=?`;
+  const deliveryClause = ctx.db.dialect === 'postgres' && PLAIN_JSON_ASCII_ID.test(String(turn.id))
+    ? `CASE WHEN strpos(merged.metadata,?)>0 THEN ${exactDelivery} ELSE FALSE END`
+    : exactDelivery;
+  const deliveryParams = ctx.db.dialect === 'postgres' && PLAIN_JSON_ASCII_ID.test(String(turn.id))
+    ? [turn.id, turn.id]
+    : [turn.id];
+  const merged = ctx.db.query(`SELECT 1 FROM multiremi_conversation_log merged
+    WHERE merged.session_id=? AND merged.kind='message' AND merged.deleted_at IS NULL
+      AND (merged.wake_reason IN ('human_sender','agent_dispatch') OR (merged.wake_reason='to_parent_owner' AND merged.message_kind='request'))
+      AND ${deliveryClause}
+    LIMIT 1`).get(turn.session_id, ...deliveryParams);
+  if (merged) return true;
+
+  // Also cover unconsumed work triggers on the same lane when re_ring picked a later non-work notice.
+  const lane = ctx.db.query(`SELECT cursor_seq FROM multiremi_session_lanes
+    WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`)
+    .get(turn.session_id, turn.agent_id, turn.execution_scope);
+  const covered = ctx.db.query(`SELECT MAX(CASE WHEN prev.status='completed' THEN COALESCE(prev.input_to_seq,0)
+    ELSE COALESCE(prev_m.seq,0) END) AS seq
+    FROM multiremi_turns prev
+    LEFT JOIN multiremi_conversation_log prev_m ON prev_m.id=prev.trigger_message_id
+    WHERE prev.session_id=? AND prev.agent_id=? AND prev.execution_scope=?
+      AND prev.status IN ('completed','failed','cancelled')`)
+    .get(turn.session_id, turn.agent_id, turn.execution_scope);
+  const unreadFloor = Math.max(Number(lane?.cursor_seq ?? 0), Number(covered?.seq ?? 0));
+  const scopeSql = ctx.db.dialect === 'postgres'
+    ? "COALESCE(u.metadata::jsonb->>'execution_scope','')"
+    : "COALESCE(json_extract(u.metadata,'$.execution_scope'),'')";
+  const unread = ctx.db.query(`SELECT 1 FROM multiremi_conversation_log u
+    WHERE u.session_id=? AND u.seq>? AND u.kind='message' AND u.deleted_at IS NULL
+      AND u.to_agent_id=? AND u.wake_applied='now' AND ${scopeSql}=?
+      AND ${WORK_TRIGGER_REASON_SQL.replaceAll('wake_reason', 'u.wake_reason').replaceAll('message_kind', 'u.message_kind')}
+    LIMIT 1`).get(turn.session_id, unreadFloor, turn.agent_id, turn.execution_scope);
+  return Boolean(unread);
+}
+
 /** Only turns and unanswered owner decisions participate; attempts are deliberately absent. */
 export function deriveIssueStatusWithinTransaction(ctx:StoreContext,issueId:string,events:CommitEventQueue): {changed:boolean;previousStatus:string|null} {
   if(!ctx.db.inTransaction)throw new Error('Issue derivation requires a transaction');
@@ -10,10 +51,7 @@ export function deriveIssueStatusWithinTransaction(ctx:StoreContext,issueId:stri
   const issue=ctx.issues().getIssue(issueId);
   if(!issue||['done','cancelled'].includes(issue.status))return {changed:false,previousStatus:issue?.status??null};
   const owner=ctx.resolveIssueResponsibility(issueId).executionOwner;
-  const turns=ctx.db.query(`SELECT t.*,m.sender_type AS trigger_sender,m.wake_reason AS trigger_reason,m.message_kind AS trigger_kind,
-      (SELECT COUNT(*) FROM multiremi_conversation_log merged WHERE merged.kind='message' AND merged.deleted_at IS NULL
-        AND ${questionMetadataText(ctx.db, 'merged.metadata', 'delivery_turn_id')}=t.id
-        AND (merged.wake_reason IN ('human_sender','agent_dispatch') OR (merged.wake_reason='to_parent_owner' AND merged.message_kind='request'))) AS merged_work_triggers
+  const turns=ctx.db.query(`SELECT t.*,m.sender_type AS trigger_sender,m.wake_reason AS trigger_reason,m.message_kind AS trigger_kind
     FROM multiremi_turns t LEFT JOIN multiremi_conversation_log m ON m.id=t.trigger_message_id
     LEFT JOIN multiremi_issue_sessions owned_session ON owned_session.id=t.session_id
     WHERE t.issue_id=? AND COALESCE(owned_session.chat_id,t.chat_session_id) IS NULL
@@ -32,7 +70,9 @@ export function deriveIssueStatusWithinTransaction(ctx:StoreContext,issueId:stri
   // A question still waiting on a Leader is execution, not review.
   else if(active.some(t=>t.status==='awaiting_human')||decision)status='in_progress';
   else if(active.some(t=>t.status==='pending')){
-    if(active.some(t=>Number(t.merged_work_triggers)>0||t.trigger_sender==='member'||t.trigger_reason==='agent_dispatch'||(t.trigger_reason==='to_parent_owner'&&t.trigger_kind==='request')||['human_sender','agent_dispatch'].includes(t.wake_source)))status='todo';
+    const pendingTurns=active.filter(t=>t.status==='pending');
+    const hasDirectWorkTrigger=pendingTurns.some(t=>t.trigger_sender==='member'||t.trigger_reason==='agent_dispatch'||(t.trigger_reason==='to_parent_owner'&&t.trigger_kind==='request')||['human_sender','agent_dispatch'].includes(t.wake_source));
+    if(hasDirectWorkTrigger||pendingTurns.some(t=>pendingTurnHasWorkTrigger(ctx,t)))status='todo';
   }else{
     // Intake completion belongs to the business round, including unassigned intake work.
     const latest=issue.issueKind==='intake'

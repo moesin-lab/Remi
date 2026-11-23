@@ -417,6 +417,224 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
     }
   });
 
+  it('MUL-335: member-started running P0 enforces pair_round_trip_limit for L=1 and L=2 (resetting on member intervention) and ignores non-request parent_owner reports',()=>{
+    const prevLimit=process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+    try{
+      const {store}=fixture();
+      const makePair=(tag:string)=>{
+        const parentRuntime=store.registerRuntime({name:`Parent rt ${tag}`,provider:'codex',workspaceId:'local'});
+        const childRuntime=store.registerRuntime({name:`Child rt ${tag}`,provider:'codex',workspaceId:'local'});
+        const parentAgent=store.createAgent({name:`Parent ${tag}`,provider:'codex',runtimeId:parentRuntime.id});
+        const childAgent=store.createAgent({name:`Child ${tag}`,provider:'codex',runtimeId:childRuntime.id});
+        return {parentRuntime,childRuntime,parentAgent,childAgent};
+      };
+
+      const runContinuousParentLoop=(limitVal:number)=>{
+        process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=String(limitVal);
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair(`loop-${limitVal}`);
+        const parent=createResponsibleTestIssue(store,{title:`Running P0 L=${limitVal}`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:`Running Child L=${limitVal}`,parentIssueId:parent.id,status:'todo',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        // Member starts P0 and P0 stays running across rounds.
+        const startP0=store.sendMessage({
+          session_id:parentMain.id,
+          sender:{type:'member',id:'mem_local_local'},
+          to:{type:'agent',ref:parentAgent.id},
+          message_kind:'request',
+          wake_requested:'now',
+          body_md:'Member starts coordinator P0',
+        });
+        const p0=store.getTurn(startP0.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+
+        for(let round=1;round<=limitVal;round++){
+          const disp=store.sendMessage({
+            session_id:childMain.id,
+            sender:{type:'agent',id:parentAgent.id},
+            source_turn_id:p0.id,
+            to:{type:'role',ref:'issue_owner'},
+            message_kind:'request',
+            wake_requested:'now',
+            body_md:`Round ${round} dispatch`,
+          });
+          expect(disp.wake_applied).toBe('now');
+          expect(disp.wake_reason).toBe('agent_dispatch');
+          const childTurn=store.getTurn(disp.turn_id!)!;
+          expect(store.claimTask(childRuntime.id)?.id).toBe(childTurn.current_attempt_id!);
+          store.startTask(childTurn.current_attempt_id!);
+
+          const upward=store.sendMessage({
+            session_id:parentMain.id,
+            sender:{type:'agent',id:childAgent.id},
+            source_turn_id:childTurn.id,
+            to:{type:'role',ref:'issue_owner'},
+            message_kind:'request',
+            wake_requested:'now',
+            body_md:`Round ${round} child request into running P0`,
+          });
+          expect(upward.wake_applied).toBe('now');
+          expect(upward.wake_reason).toBe('to_parent_owner');
+          expect(upward.turn_id).toBe(p0.id);
+          store.completeTask(childTurn.current_attempt_id!,{output:`Child round ${round} done`});
+        }
+
+        // Dispatch (limitVal + 1) from the still-running P0 must hit pair_round_trip_limit.
+        const blocked=store.sendMessage({
+          session_id:childMain.id,
+          sender:{type:'agent',id:parentAgent.id},
+          source_turn_id:p0.id,
+          to:{type:'role',ref:'issue_owner'},
+          message_kind:'request',
+          wake_requested:'now',
+          body_md:`Blocked dispatch at L=${limitVal}`,
+        });
+        expect(blocked.wake_applied).toBe('next_turn');
+        expect(blocked.wake_reason).toBe('pair_round_trip_limit');
+        expect(blocked.turn_id).toBeUndefined();
+
+        // Member intervention in parentMain resets the pair counter even in the same millisecond.
+        store.sendMessage({
+          session_id:parentMain.id,
+          sender:{type:'member',id:'mem_local_local'},
+          to:{type:'none'},
+          message_kind:'request',
+          wake_requested:'inbox_only',
+          body_md:`Member intervenes at L=${limitVal}`,
+        });
+        const resumed=store.sendMessage({
+          session_id:childMain.id,
+          sender:{type:'agent',id:parentAgent.id},
+          source_turn_id:p0.id,
+          to:{type:'role',ref:'issue_owner'},
+          message_kind:'request',
+          wake_requested:'now',
+          body_md:`Resumed dispatch after member intervention at L=${limitVal}`,
+        });
+        expect(resumed.wake_applied).toBe('now');
+        expect(resumed.wake_reason).toBe('agent_dispatch');
+        expect(resumed.turn_id).toBeTruthy();
+      };
+
+      runContinuousParentLoop(1);
+      runContinuousParentLoop(2);
+
+      // re_ring successor turn (triggered by a later platform status after an unconsumed to_parent_owner request)
+      // must also count the unconsumed child request hop at L=1.
+      process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+      {
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair('re-ring');
+        const parent=createResponsibleTestIssue(store,{title:'ReRing Parent L=1',status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:'ReRing Child L=1',parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start re_ring parent'});
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+        const d1=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch for re_ring'});
+        const c1=store.getTurn(d1.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(c1.current_attempt_id!);
+        store.startTask(c1.current_attempt_id!);
+        const req1=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Unconsumed request before platform status'});
+        expect(req1.turn_id).toBe(p0.id);
+        const plat=store.sendMessage({session_id:parentMain.id,sender:{type:'platform',id:null},to:{type:'agent',ref:parentAgent.id},message_kind:'status',wake_requested:'now',body_md:'Later platform status'});
+        expect(plat.turn_id).toBe(p0.id);
+        store.completeTask(c1.current_attempt_id!,{output:'Child done'});
+        store.completeTask(p0.current_attempt_id!,{output:'Parent done without reading req1'});
+        const pSucc=store.listTurns({workspace_id:'local',session_id:parentMain.id}).find(t=>t.status==='pending')!;
+        expect(pSucc.wake_source).toBe('re_ring');
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(pSucc.current_attempt_id!);
+        store.startTask(pSucc.current_attempt_id!);
+        const d2=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:pSucc.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Second dispatch from re_ring successor hits L=1'});
+        expect(d2.wake_applied).toBe('next_turn');
+        expect(d2.wake_reason).toBe('pair_round_trip_limit');
+        expect(d2.turn_id).toBeUndefined();
+      }
+
+      // Non-request --to parent-owner --kind report (both standalone idle trigger and merged into pending platform turn)
+      // must NEVER count as delegation hops or trigger pair_round_trip_limit at L=1.
+      process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+      for(const mode of ['standalone','merged_platform'] as const){
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair(`report-${mode}`);
+        const parent=createResponsibleTestIssue(store,{title:`Report non-hop ${mode}`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:`Child report ${mode}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.createTask({agentId:parentAgent.id,issueId:parent.id,issueSessionId:parentMain.id,prompt:`Start ${mode}`});
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(pStart.id);
+        store.startTask(pStart.id);
+        const firstDisp=store.sendMessage({
+          session_id:childMain.id,
+          sender:{type:'agent',id:parentAgent.id},
+          source_turn_id:pStart.id,
+          to:{type:'role',ref:'issue_owner'},
+          message_kind:'request',
+          wake_requested:'now',
+          body_md:'Initial dispatch',
+        });
+        expect(firstDisp.wake_reason).toBe('agent_dispatch');
+        const cTurn=store.getTurn(firstDisp.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(cTurn.current_attempt_id!);
+        store.startTask(cTurn.current_attempt_id!);
+        store.completeTask(pStart.id,{output:'Parent finished first round'});
+        for(const pending of store.listTurns({workspace_id:'local',session_id:parentMain.id}).filter(t=>t.status==='pending')){
+          store.cancelTask(pending.current_attempt_id!);
+        }
+
+        let expectedParentTurnId:string|undefined;
+        if(mode==='merged_platform'){
+          const plat=store.sendMessage({
+            session_id:parentMain.id,
+            sender:{type:'platform',id:null},
+            to:{type:'agent',ref:parentAgent.id},
+            message_kind:'status',
+            wake_requested:'now',
+            body_md:'Platform status creates pending parent turn',
+          });
+          expectedParentTurnId=plat.turn_id;
+        }
+
+        const reportMsg=store.sendMessage({
+          session_id:childMain.id,
+          sender:{type:'agent',id:childAgent.id},
+          source_turn_id:cTurn.id,
+          to:{type:'role',ref:'parent_owner'},
+          message_kind:'report',
+          wake_requested:'now',
+          body_md:`Ordinary report (${mode})`,
+        });
+        expect(reportMsg.wake_applied).toBe('now');
+        expect(reportMsg.wake_reason).toBe('to_parent_owner');
+        expect(reportMsg.message.session_id).toBe(parentMain.id);
+        if(mode==='merged_platform')expect(reportMsg.turn_id).toBe(expectedParentTurnId);
+        const parentNextTurn=store.getTurn(reportMsg.turn_id!)!;
+        store.completeTask(cTurn.current_attempt_id!,{output:'Child finished'});
+
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(parentNextTurn.current_attempt_id!);
+        store.startTask(parentNextTurn.current_attempt_id!);
+        const secondDisp=store.sendMessage({
+          session_id:childMain.id,
+          sender:{type:'agent',id:parentAgent.id},
+          source_turn_id:parentNextTurn.id,
+          to:{type:'role',ref:'issue_owner'},
+          message_kind:'request',
+          wake_requested:'now',
+          body_md:`Second dispatch after non-request report (${mode}) must succeed`,
+        });
+        expect(secondDisp.wake_applied).toBe('now');
+        expect(secondDisp.wake_reason).toBe('agent_dispatch');
+        expect(secondDisp.turn_id).toBeTruthy();
+      }
+    }finally{
+      if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+      else process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=prevLimit;
+    }
+  });
+
   it('MUL-335: sibling request via another issue child parent_owner role and grandchild --to delegator preserve delegation semantics',()=>{
     const {store}=fixture();
     const rtA=store.registerRuntime({name:'RT A',provider:'codex',workspaceId:'local'});

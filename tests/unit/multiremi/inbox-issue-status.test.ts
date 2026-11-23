@@ -68,6 +68,74 @@ pendingTurnBackendTests('MUL-506 Issue derivation and read progress',fixture=>{
     expect(mergedReq.turn_id).toBe(platformPending.turn_id);
     expect(f.store.getIssue(parent3.id)?.status).toBe('todo');
   });
+  it('MUL-335: re_ring pending successor derives todo when an unconsumed to_parent_owner request precedes a later platform status, while non-request report keeps blocked',()=>{
+    const {store,db}=fixture();
+    const parentRuntime=store.registerRuntime({name:'Parent re-ring rt',provider:'codex',workspaceId:'local'});
+    const childRuntime=store.registerRuntime({name:'Child re-ring rt',provider:'codex',workspaceId:'local'});
+    const parentOwner=store.createAgent({name:'Parent re-ring owner',provider:'codex',runtimeId:parentRuntime.id});
+    const childOwner=store.createAgent({name:'Child re-ring owner',provider:'codex',runtimeId:childRuntime.id});
+
+    for(const endKind of ['completed','failed'] as const){
+      const parent=store.createIssue({title:`Parent re_ring ${endKind}`,status:'in_progress',assigneeType:'agent',assigneeId:parentOwner.id});
+      const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+      const child=store.createIssue({title:`Child re_ring ${endKind}`,parentIssueId:parent.id,status:'todo',assigneeType:'agent',assigneeId:childOwner.id});
+      const childMain=store.getOrCreateDefaultIssueSession(child.id);
+      const childSource=store.sendMessage({session_id:childMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:childOwner.id},message_kind:'request',wake_requested:'now',body_md:'work child'});
+
+      const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentOwner.id},message_kind:'request',wake_requested:'now',body_md:`Start ${endKind}`});
+      const pRun=store.getTurn(pStart.turn_id!)!;
+      expect(pRun.trigger_message_id).toBe(pStart.message.id);
+      expect(store.claimTask(parentRuntime.id)?.id).toBe(pRun.current_attempt_id!);
+      store.startTask(pRun.current_attempt_id!);
+      expect(store.getIssue(parent.id)?.status).toBe('in_progress');
+
+      // Child sends to_parent_owner request first (seq s1), then platform sends status second (seq s2); both delivered to running pRun without being consumed.
+      const childReq=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childOwner.id},source_turn_id:childSource.turn_id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Unconsumed child request'});
+      expect(childReq.wake_reason).toBe('to_parent_owner');
+      expect(childReq.turn_id).toBe(pRun.id);
+      const platStatus=store.sendMessage({session_id:parentMain.id,sender:{type:'platform',id:null},to:{type:'agent',ref:parentOwner.id},message_kind:'status',wake_requested:'now',body_md:'Later platform status'});
+      expect(platStatus.wake_reason).toBe('platform_to_owner');
+      expect(platStatus.turn_id).toBe(pRun.id);
+
+      if(endKind==='completed'){
+        store.completeTask(pRun.current_attempt_id!,{output:'Finished without reading s1/s2'});
+      }else{
+        store.failTask(pRun.current_attempt_id!,{error:'Failed without reading s1/s2'});
+      }
+
+      const successor=store.listTurns({workspace_id:'local',session_id:parentMain.id}).find(t=>t.status==='pending');
+      expect(successor).toBeTruthy();
+      expect(successor!.wake_source).toBe('re_ring');
+      expect(successor!.trigger_message_id).toBe(platStatus.message.id);
+      expect(store.getIssue(parent.id)?.status).toBe('todo');
+      store.cancelTask(successor!.current_attempt_id!);
+    }
+
+    // Contrast: blocked parent whose re_ring unread window only has a non-request to_parent_owner report + platform status stays blocked.
+    const blockedParent=store.createIssue({title:'Blocked parent re_ring report only',status:'in_progress',assigneeType:'agent',assigneeId:parentOwner.id});
+    const blockedParentMain=store.getOrCreateDefaultIssueSession(blockedParent.id);
+    const blockedChild=store.createIssue({title:'Child report only',parentIssueId:blockedParent.id,status:'todo',assigneeType:'agent',assigneeId:childOwner.id});
+    const blockedChildMain=store.getOrCreateDefaultIssueSession(blockedChild.id);
+    const blockedChildSource=store.sendMessage({session_id:blockedChildMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:childOwner.id},message_kind:'request',wake_requested:'now',body_md:'work blocked child'});
+
+    const bpStart=store.sendMessage({session_id:blockedParentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentOwner.id},message_kind:'request',wake_requested:'now',body_md:'Start blocked parent'});
+    const bpRun=store.getTurn(bpStart.turn_id!)!;
+    expect(bpRun.trigger_message_id).toBe(bpStart.message.id);
+    expect(store.claimTask(parentRuntime.id)?.id).toBe(bpRun.current_attempt_id!);
+    store.startTask(bpRun.current_attempt_id!);
+    const nonReqReport=store.sendMessage({session_id:blockedChildMain.id,sender:{type:'agent',id:childOwner.id},source_turn_id:blockedChildSource.turn_id,to:{type:'role',ref:'parent_owner'},message_kind:'report',wake_requested:'now',body_md:'FYI non-request report'});
+    expect(nonReqReport.wake_reason).toBe('to_parent_owner');
+    expect(nonReqReport.turn_id).toBe(bpRun.id);
+    const laterPlat=store.sendMessage({session_id:blockedParentMain.id,sender:{type:'platform',id:null},to:{type:'agent',ref:parentOwner.id},message_kind:'status',wake_requested:'now',body_md:'Later platform status'});
+    expect(laterPlat.turn_id).toBe(bpRun.id);
+    // Simulate parent already blocked before re-deriving with the non-work re_ring pending successor.
+    db.run("UPDATE multiremi_issues SET status='blocked' WHERE id=?",[blockedParent.id]);
+    store.failTask(bpRun.current_attempt_id!,{error:'Failed after non-request notices'});
+    const blockedSucc=store.listTurns({workspace_id:'local',session_id:blockedParentMain.id}).find(t=>t.status==='pending');
+    expect(blockedSucc).toBeTruthy();
+    expect(blockedSucc!.wake_source).toBe('re_ring');
+    expect(store.getIssue(blockedParent.id)?.status).toBe('blocked');
+  });
   // An owner question at the human stage needs a human: in_review until running work resumes.
   it('unanswered owner decision at the human stage parks the Issue in_review until work resumes',()=>{const f=setup();
     const runtime=f.store.registerRuntime({name:'Derivation native host',provider:'codex',daemonId:'derive-native'});

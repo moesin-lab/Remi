@@ -54,38 +54,200 @@ export function messageFromRow(row: Record<string, any>): UnifiedMessage {
     card_token_hash:row.card_token_hash,card_token_recipient:row.card_token_recipient,card_token_consumed_at:row.card_token_consumed_at};
 }
 
+const PLAIN_JSON_ASCII_ID = /^[A-Za-z0-9_.:-]+$/;
+
+function deliveryTurnMatchSql(ctx: StoreContext, column: string, turnId: string): { sql: string; params: string[] } {
+  const exact = `${questionMetadataText(ctx.db, column, 'delivery_turn_id')}=?`;
+  if (ctx.db.dialect === 'postgres' && PLAIN_JSON_ASCII_ID.test(turnId)) {
+    return {
+      sql: `CASE WHEN strpos(${column},?)>0 THEN ${exact} ELSE FALSE END`,
+      params: [turnId, turnId],
+    };
+  }
+  return { sql: exact, params: [turnId] };
+}
+
 export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,targetId:string,limit=pairRoundTripLimit()):number {
   const source=readTurnRow(ctx.db, sourceId);
   if(!source)return 0;
-  const hop=(id:string)=>{
-    const turn=readTurnRow(ctx.db, id);
-    if(!turn)return null;
-    const trigger=turn.trigger_message_id
-      ?ctx.db.query('SELECT task_id, sender_type, sender_id, wake_reason FROM multiremi_conversation_log WHERE id=?').get(turn.trigger_message_id)
-      :null;
-    const counterpart=turn.agent_id===source.agent_id?targetId:source.agent_id;
-    let parentReportTrigger=
-      !turn.delegation_id&&!turn.delegated_by_agent_id
-      &&trigger?.sender_type==='agent'&&trigger?.wake_reason==='to_parent_owner'
-      &&trigger?.task_id&&trigger?.sender_id===counterpart
-        ?trigger
-        :null;
-    if(!parentReportTrigger&&!turn.delegation_id&&!turn.delegated_by_agent_id&&trigger?.sender_type!=='member'&&counterpart){
-      parentReportTrigger=ctx.db.query(`SELECT task_id, sender_type, sender_id, wake_reason
-        FROM multiremi_conversation_log
-        WHERE session_id=? AND kind='message' AND deleted_at IS NULL
-          AND ${questionMetadataText(ctx.db, 'metadata', 'delivery_turn_id')}=?
-          AND sender_type='agent' AND sender_id=? AND wake_reason='to_parent_owner' AND task_id IS NOT NULL
-        ORDER BY seq DESC LIMIT 1`).get(turn.session_id,turn.id,counterpart)??null;
-    }
-    return {id:turn.id,agentId:turn.agent_id,workspaceId:turn.workspace_id,createdAt:turn.created_at,
-      delegationId:turn.delegation_id??(parentReportTrigger?`parent_report:${turn.id}`:null),
-      delegatedByAgentId:turn.delegated_by_agent_id??(parentReportTrigger?parentReportTrigger.sender_id:null),
-      parentTaskId:parentReportTrigger?.task_id??trigger?.task_id??null};
+  const lastMember=ctx.db.query(`SELECT id, seq, created_at FROM multiremi_conversation_log
+    WHERE session_id=? AND kind='message' AND sender_type='member' AND deleted_at IS NULL
+    ORDER BY seq DESC LIMIT 1`).get(source.session_id) as { id: string; seq: number; created_at: string } | null;
+
+  interface HopStep {
+    turnId: string;
+    beforeCreatedAt: string | null;
+    excludeTaskId: string | null;
+  }
+  const steps = new Map<string, HopStep>();
+  let stepSeq = 0;
+  const enqueueStep = (turnId: string | null, beforeCreatedAt: string | null, excludeTaskId: string | null): string | null => {
+    if (!turnId) return null;
+    const key = `step:${++stepSeq}`;
+    steps.set(key, { turnId, beforeCreatedAt, excludeTaskId });
+    return key;
   };
-  const cutoff=source?ctx.db.query("SELECT MAX(created_at) AS at FROM multiremi_conversation_log WHERE session_id=? AND sender_type='member'").get(source.session_id)?.at:null;
-  const node=source?hop(source.id):null;
-  return node?countDelegationPairHops(node,targetId,hop,cutoff??null,2*limit):0;
+  const prevReqSeqByTurn = new Map<string, number>();
+
+  const findParentRequestTrigger = (
+    turn: any,
+    counterpart: string,
+    step: HopStep,
+  ): { id: string; seq: number; created_at: string; task_id: string; sender_id: string } | null => {
+    const clauses: string[] = [
+      'session_id=?',
+      "kind='message'",
+      'deleted_at IS NULL',
+      "sender_type='agent'",
+      'sender_id=?',
+      'to_agent_id=?',
+      "wake_applied='now'",
+      "wake_reason='to_parent_owner'",
+      "message_kind='request'",
+      'task_id IS NOT NULL',
+      'task_id<>?',
+    ];
+    const params: Array<string | number> = [turn.session_id, counterpart, turn.agent_id, turn.id];
+
+    if (step.excludeTaskId) {
+      clauses.push('task_id<>?');
+      params.push(step.excludeTaskId);
+    }
+    const prevReqSeq = prevReqSeqByTurn.get(turn.id);
+    if (prevReqSeq !== undefined) {
+      clauses.push('seq<?');
+      params.push(prevReqSeq);
+    }
+    if (step.beforeCreatedAt !== null) {
+      clauses.push('created_at<=?');
+      params.push(step.beforeCreatedAt);
+    }
+    if (lastMember) {
+      if (turn.session_id === source.session_id) {
+        clauses.push('seq>?');
+        params.push(Number(lastMember.seq));
+      } else {
+        clauses.push('created_at>=?');
+        params.push(lastMember.created_at);
+      }
+    }
+
+    const matchBranches: string[] = [];
+    const matchParams: Array<string | number> = [];
+    if (turn.trigger_message_id) {
+      matchBranches.push('id=?');
+      matchParams.push(turn.trigger_message_id);
+    }
+    const delivery = deliveryTurnMatchSql(ctx, 'metadata', turn.id);
+    matchBranches.push(delivery.sql);
+    matchParams.push(...delivery.params);
+
+    if (turn.wake_source === 're_ring') {
+      const ceilSeq = Number(turn.input_to_seq ?? turn.wake_seq ?? 0);
+      const covered = ctx.db.query(`SELECT MAX(CASE WHEN prev.status='completed' THEN COALESCE(prev.input_to_seq,0)
+        ELSE COALESCE(prev_m.seq,0) END) AS seq
+        FROM multiremi_turns prev
+        LEFT JOIN multiremi_conversation_log prev_m ON prev_m.id=prev.trigger_message_id
+        WHERE prev.session_id=? AND prev.agent_id=? AND prev.execution_scope=?
+          AND prev.status IN ('completed','failed','cancelled') AND prev.seq<?`)
+        .get(turn.session_id, turn.agent_id, turn.execution_scope, turn.seq);
+      let floorSeq = Math.max(Number(covered?.seq ?? 0), turn.input_from_seq != null ? Number(turn.input_from_seq) : 0);
+      if (turn.status === 'pending') {
+        const lane = ctx.db.query(`SELECT cursor_seq FROM multiremi_session_lanes
+          WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`)
+          .get(turn.session_id, turn.agent_id, turn.execution_scope);
+        floorSeq = Math.max(floorSeq, Number(lane?.cursor_seq ?? 0));
+      }
+      if (ceilSeq > floorSeq) {
+        const scopeSql = ctx.db.dialect === 'postgres'
+          ? "COALESCE(metadata::jsonb->>'execution_scope','')"
+          : "COALESCE(json_extract(metadata,'$.execution_scope'),'')";
+        matchBranches.push(`(seq>? AND seq<=? AND ${scopeSql}=?)`);
+        matchParams.push(floorSeq, ceilSeq, turn.execution_scope);
+      }
+    }
+
+    clauses.push(`(${matchBranches.join(' OR ')})`);
+    params.push(...matchParams);
+
+    return (ctx.db.query(`SELECT id, seq, created_at, task_id, sender_id
+      FROM multiremi_conversation_log
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY seq DESC LIMIT 1`).get(...params) as { id: string; seq: number; created_at: string; task_id: string; sender_id: string } | null) ?? null;
+  };
+
+  const resolveNode = (step: HopStep) => {
+    const turn = readTurnRow(ctx.db, step.turnId);
+    if (!turn) return null;
+    const trigger = turn.trigger_message_id
+      ? ctx.db.query('SELECT id, session_id, seq, created_at, task_id FROM multiremi_conversation_log WHERE id=?').get(turn.trigger_message_id) as {
+          id: string; session_id: string; seq: number; created_at: string; task_id: string | null;
+        } | null
+      : null;
+
+    if (turn.delegation_id && turn.delegated_by_agent_id) {
+      if (lastMember) {
+        if (turn.session_id === source.session_id) {
+          if (trigger && trigger.session_id === source.session_id) {
+            if (Number(trigger.seq) <= Number(lastMember.seq)) return null;
+          } else if (turn.created_at <= lastMember.created_at) {
+            return null;
+          }
+        } else if (turn.created_at < lastMember.created_at) {
+          return null;
+        }
+      }
+      return {
+        id: turn.id,
+        agentId: turn.agent_id,
+        workspaceId: turn.workspace_id,
+        createdAt: turn.created_at,
+        delegationId: turn.delegation_id,
+        delegatedByAgentId: turn.delegated_by_agent_id,
+        parentTaskId: enqueueStep(trigger?.task_id ?? null, trigger?.created_at ?? null, turn.id),
+      };
+    }
+
+    if (!turn.delegation_id && !turn.delegated_by_agent_id) {
+      const counterpart = turn.agent_id === source.agent_id ? targetId : source.agent_id;
+      const parentReq = counterpart ? findParentRequestTrigger(turn, counterpart, step) : null;
+      if (parentReq) {
+        prevReqSeqByTurn.set(turn.id, Number(parentReq.seq));
+        return {
+          id: `parent_req:${parentReq.id}`,
+          agentId: turn.agent_id,
+          workspaceId: turn.workspace_id,
+          createdAt: parentReq.created_at,
+          delegationId: `parent_req:${parentReq.id}`,
+          delegatedByAgentId: parentReq.sender_id,
+          parentTaskId: enqueueStep(parentReq.task_id, parentReq.created_at, turn.id),
+        };
+      }
+    }
+
+    return {
+      id: turn.id,
+      agentId: turn.agent_id,
+      workspaceId: turn.workspace_id,
+      createdAt: turn.created_at,
+      delegationId: turn.delegation_id ?? null,
+      delegatedByAgentId: turn.delegated_by_agent_id ?? null,
+      parentTaskId: enqueueStep(trigger?.task_id ?? null, trigger?.created_at ?? null, turn.id),
+    };
+  };
+
+  const initialNode = resolveNode({ turnId: source.id, beforeCreatedAt: null, excludeTaskId: null });
+  if (!initialNode) return 0;
+  return countDelegationPairHops(
+    initialNode,
+    targetId,
+    (stepKey) => {
+      const step = steps.get(stepKey);
+      return step ? resolveNode(step) : null;
+    },
+    null,
+    2 * limit,
+  );
 }
 
 export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageInput,events:CommitEventQueue,

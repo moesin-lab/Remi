@@ -207,6 +207,52 @@ test("release:check falls back to HEAD^ for unreachable or all-zero base-ref whi
   expect(cliCheck(unreachableRef)).toEqual({ status: 0, output: "version_changed=true\n" });
 }, 30_000);
 
+test("release:check rejects existing non-commit Git objects (blob/tree) without falling back to HEAD^", () => {
+  const root = repository();
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  git("init", "--quiet");
+  git("add", ".");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "baseline");
+  const parentRef = git("rev-parse", "HEAD");
+  mkdirSync(join(root, "scripts"));
+  for (const file of ["scripts/release-runtime.ts", "packages/acp/src/runtime-versions.ts"]) {
+    copyFileSync(resolve(import.meta.dir, "../../..", file), join(root, file));
+  }
+  writeFileSync(join(root, "README.md"), "follow-up commit\n");
+  git("add", ".");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "follow-up");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.com", "tag", "-a", "v0.2.69-base", parentRef, "-m", "annotated base");
+
+  const blobRef = git("rev-parse", "HEAD:package.json");
+  const treeRef = git("rev-parse", "HEAD^{tree}");
+  const tagRef = git("rev-parse", "refs/tags/v0.2.69-base");
+  expect(git("cat-file", "-t", blobRef)).toBe("blob");
+  expect(git("cat-file", "-t", treeRef)).toBe("tree");
+  expect(git("cat-file", "-t", tagRef)).toBe("tag");
+
+  const output = join(root, "github-output");
+  const cliCheck = (ref: string) => {
+    writeFileSync(output, "");
+    const child = spawnSync(process.execPath, [join(root, "scripts/release-runtime.ts"), "check", "--base-ref", ref], {
+      cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: output },
+    });
+    expect(child.error).toBeUndefined();
+    return { status: child.status, output: readFileSync(output, "utf8") };
+  };
+
+  expect(() => resolveBaseRef(root, blobRef)).toThrow("Git blob");
+  expect(() => resolveBaseRef(root, treeRef)).toThrow("Git tree");
+  expect(() => checkRelease(root, { baseRef: blobRef })).toThrow("Git blob");
+  expect(() => checkRelease(root, { baseRef: treeRef })).toThrow("Git tree");
+  expect(cliCheck(blobRef)).toEqual({ status: 1, output: "" });
+  expect(cliCheck(treeRef)).toEqual({ status: 1, output: "" });
+
+  // An annotated tag pointing to a commit still resolves cleanly to that commit.
+  expect(resolveBaseRef(root, tagRef)).toBe(parentRef);
+  expect(checkRelease(root, { baseRef: tagRef })).toBe(false);
+  expect(cliCheck(tagRef)).toEqual({ status: 0, output: "version_changed=false\n" });
+}, 30_000);
+
 test("tag publication rejects malformed snapshots and prerelease dependency pins", () => {
   for (const invalid of [
     { ...baseline, checkedAt: null },

@@ -195,10 +195,16 @@ export function resolveBaseRef(root: string, baseRef?: string): string {
     throw new Error("A valid base commit SHA is required for release preparation checks");
   }
   if (!/^0+$/.test(baseRef)) {
-    const reachable = spawnSync("git", ["cat-file", "-e", `${baseRef}^{commit}`], { cwd: root, stdio: "ignore" });
-    if (reachable.status === 0) return baseRef;
+    const objectType = spawnSync("git", ["cat-file", "-t", baseRef], { cwd: root, encoding: "utf8" });
+    if (objectType.status === 0) {
+      const resolved = spawnSync("git", ["rev-parse", "--verify", "--quiet", `${baseRef}^{commit}`], { cwd: root, encoding: "utf8" });
+      const commitSha = resolved.stdout?.trim() ?? "";
+      if (resolved.status === 0 && /^[a-f0-9]{40}$/.test(commitSha)) return commitSha;
+      const type = objectType.stdout?.trim() || "object";
+      throw new Error(`A valid base commit SHA is required for release preparation checks (got Git ${type} ${baseRef})`);
+    }
   }
-  // After a force-push / history rewrite or on an all-zero GitHub `before` SHA,
+  // After a force-push / history rewrite (missing object) or on an all-zero GitHub `before` SHA,
   // fall back to `HEAD^` when available so baseline package.json can still be read.
   const parent = spawnSync("git", ["rev-parse", "--verify", "--quiet", "HEAD^^{commit}"], { cwd: root, encoding: "utf8" });
   const fallback = parent.stdout?.trim() ?? "";

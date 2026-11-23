@@ -190,6 +190,22 @@ export async function prepareRelease(root: string, version: string, options: {
   return snapshot;
 }
 
+export function resolveBaseRef(root: string, baseRef?: string): string {
+  if (!baseRef || !/^[a-f0-9]{40}$/.test(baseRef)) {
+    throw new Error("A valid base commit SHA is required for release preparation checks");
+  }
+  if (!/^0+$/.test(baseRef)) {
+    const reachable = spawnSync("git", ["cat-file", "-e", `${baseRef}^{commit}`], { cwd: root, stdio: "ignore" });
+    if (reachable.status === 0) return baseRef;
+  }
+  // After a force-push / history rewrite or on an all-zero GitHub `before` SHA,
+  // fall back to `HEAD^` when available so baseline package.json can still be read.
+  const parent = spawnSync("git", ["rev-parse", "--verify", "--quiet", "HEAD^^{commit}"], { cwd: root, encoding: "utf8" });
+  const fallback = parent.stdout?.trim() ?? "";
+  if (parent.status === 0 && /^[a-f0-9]{40}$/.test(fallback)) return fallback;
+  throw new Error("A valid base commit SHA is required for release preparation checks");
+}
+
 export function checkRelease(root: string, options: { baseRef?: string; tag?: string }): boolean {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const snapshot = JSON.parse(readFileSync(join(root, SNAPSHOT_PATH), "utf8"));
@@ -200,12 +216,10 @@ export function checkRelease(root: string, options: { baseRef?: string; tag?: st
   }
   // PR and main checks require a fresh snapshot when preparing a new release;
   // ordinary development commits may retain the previous release's snapshot.
-  if (!options.baseRef || !/^[a-f0-9]{40}$/.test(options.baseRef) || /^0+$/.test(options.baseRef)) {
-    throw new Error("A valid base commit SHA is required for release preparation checks");
-  }
+  const baseRef = resolveBaseRef(root, options.baseRef);
   // Every commit keeps a well-formed Antigravity pin, release or not.
   checkAntigravityPin(snapshot.antigravity);
-  const base = JSON.parse(execFileSync("git", ["show", `${options.baseRef}:package.json`], { cwd: root, encoding: "utf8" }));
+  const base = JSON.parse(execFileSync("git", ["show", `${baseRef}:package.json`], { cwd: root, encoding: "utf8" }));
   if (base.version !== pkg.version) {
     if (compareVersions(pkg.version, base.version) <= 0) throw new Error("Release version must increase");
     checkReleaseSnapshot(pkg.version, snapshot);

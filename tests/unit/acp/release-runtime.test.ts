@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { BRIDGE_PACKAGE, RUNTIME_PIN } from "../../../packages/acp/src/runtime-versions.js";
 import {
-  ACP_REGISTRY_URL, checkRelease, checkReleaseSnapshot, latestRuntimeVersions, pinAntigravity, prepareRelease, SNAPSHOT_PATH,
+  ACP_REGISTRY_URL, checkRelease, checkReleaseSnapshot, latestRuntimeVersions, pinAntigravity, prepareRelease, resolveBaseRef, SNAPSHOT_PATH,
   type RuntimeSnapshot,
 } from "../../../scripts/release-runtime.js";
 import type { AntigravityPin } from "../../../packages/acp/src/runtime-versions.js";
@@ -156,6 +156,55 @@ test("a simple package version bump cannot bypass the CI release snapshot gate",
   expect(() => checkRelease(root, { baseRef: "--bad-ref" })).toThrow("base commit");
   expect(cliCheck("--bad-ref")).toEqual({ status: 1, output: "" });
   expect(cliCheck("f".repeat(40))).toEqual({ status: 1, output: "" });
+  expect(cliCheck("0".repeat(40))).toEqual({ status: 1, output: "" });
+}, 30_000);
+
+test("release:check falls back to HEAD^ for unreachable or all-zero base-ref while keeping version gate intact", async () => {
+  const root = repository();
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  git("init", "--quiet");
+  git("add", ".");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "baseline");
+  const parentRef = git("rev-parse", "HEAD");
+  mkdirSync(join(root, "scripts"));
+  for (const file of ["scripts/release-runtime.ts", "packages/acp/src/runtime-versions.ts"]) {
+    copyFileSync(resolve(import.meta.dir, "../../..", file), join(root, file));
+  }
+  writeFileSync(join(root, "README.md"), "follow-up commit\n");
+  git("add", ".");
+  git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "follow-up");
+
+  const unreachableRef = "09559852d2dcec1edf9c4122c612b0637eaf9652";
+  const zeroRef = "0".repeat(40);
+  expect(resolveBaseRef(root, parentRef)).toBe(parentRef);
+  expect(resolveBaseRef(root, unreachableRef)).toBe(parentRef);
+  expect(resolveBaseRef(root, zeroRef)).toBe(parentRef);
+  expect(() => resolveBaseRef(root, "--bad-ref")).toThrow("base commit");
+  expect(() => resolveBaseRef(root, "")).toThrow("base commit");
+
+  const output = join(root, "github-output");
+  const cliCheck = (ref: string) => {
+    writeFileSync(output, "");
+    const child = spawnSync(process.execPath, [join(root, "scripts/release-runtime.ts"), "check", "--base-ref", ref], {
+      cwd: root, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: output },
+    });
+    expect(child.error).toBeUndefined();
+    return { status: child.status, output: readFileSync(output, "utf8") };
+  };
+
+  expect(checkRelease(root, { baseRef: unreachableRef })).toBe(false);
+  expect(checkRelease(root, { baseRef: zeroRef })).toBe(false);
+  expect(cliCheck(unreachableRef)).toEqual({ status: 0, output: "version_changed=false\n" });
+  expect(cliCheck(zeroRef)).toEqual({ status: 0, output: "version_changed=false\n" });
+  expect(cliCheck("--bad-ref")).toEqual({ status: 1, output: "" });
+
+  // Fallback still enforces release preparation when package.json version increases relative to HEAD^.
+  writeFileSync(join(root, "package.json"), '{"version":"0.2.70"}');
+  expect(() => checkRelease(root, { baseRef: unreachableRef })).toThrow("not prepared");
+  expect(cliCheck(unreachableRef)).toEqual({ status: 1, output: "" });
+  await prepareRelease(root, "0.2.70", { latest: async () => next, verify: async () => {} });
+  expect(checkRelease(root, { baseRef: unreachableRef })).toBe(true);
+  expect(cliCheck(unreachableRef)).toEqual({ status: 0, output: "version_changed=true\n" });
 }, 30_000);
 
 test("tag publication rejects malformed snapshots and prerelease dependency pins", () => {

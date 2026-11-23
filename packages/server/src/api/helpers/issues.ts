@@ -46,13 +46,7 @@ export function currentTaskIssueCreationRestricted(c: Context, store: MultiremiS
 function currentTaskIssueCreationRestrictionCode(c: Context, store: MultiremiStore): string | null {
   const token = currentTaskAccessToken(c);
   if (!token?.agentId) return null;
-  if (
-    (token.taskId ? store.getTask(token.taskId)?.issueCreationRestricted : false)
-    || store.getAgent(token.agentId)?.issueCreationRequiresProposal
-  ) return ISSUE_CREATION_REQUIRES_PROPOSAL_CODE;
-  return token.taskId && store.isFeishuBotTaskIssueCreationRestricted(token.taskId)
-    ? FEISHU_SENDER_APPROVAL_REQUIRED_CODE
-    : null;
+  return store.getTaskIssueCreationRestrictionCode(token.taskId, token.agentId);
 }
 
 /** Trusted parent lineage for server-created descendants. Request bodies must

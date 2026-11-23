@@ -6000,6 +6000,12 @@ runMigrations(this.db);
     return this.tasks.listWorkspaceAgentTaskSnapshot(...args);
   }
 
+  getTaskIssueCreationRestrictionCode(
+    ...args: Parameters<TasksRepo["getTaskIssueCreationRestrictionCode"]>
+  ): ReturnType<TasksRepo["getTaskIssueCreationRestrictionCode"]> {
+    return this.tasks.getTaskIssueCreationRestrictionCode(...args);
+  }
+
   listWorkspaceAgentRunCounts(workspaceId = "local", days = 30): MultiremiAgentRunCount[] {
     return this.tasks.listWorkspaceAgentRunCounts(workspaceId, days);
   }

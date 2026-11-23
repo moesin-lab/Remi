@@ -15,7 +15,7 @@ import {
   runtimeWorkspaceId,
 } from "../wire/index.js";
 import { compatibilityWorkspaceId, denyCurrentUserWorkspaceAccess } from "../helpers.js";
-import { restrictedTaskIssueCreationAgent } from "../helpers.js";
+import { currentTaskIssueCreationRestricted } from "../helpers.js";
 import type { RouterDeps } from "./deps.js";
 
 export const CLI_SHARE_HEADER = "X-Remi-Share";
@@ -28,6 +28,78 @@ interface ResolvedCliIdentity {
   workspaceId: string;
   shareIssueId: string | null;
 }
+
+interface CliCapabilityCommandEntry {
+  readonly id: string;
+  readonly command: string;
+  readonly capability: string;
+  readonly outputs: readonly string[];
+  readonly allowed: boolean;
+}
+
+interface CliCapabilitiesPayload {
+  readonly protocol_version: number;
+  readonly manifest_version: string;
+  readonly server_version: string;
+  readonly identity: CliIdentity;
+  readonly features: {
+    readonly async_operations: true;
+    readonly capability_negotiation: true;
+    readonly jsonl_output: true;
+    readonly local_cwd_merge: true;
+    readonly resource_resolution: readonly string[];
+  };
+  readonly commands: readonly CliCapabilityCommandEntry[];
+}
+
+const CLI_CAPABILITIES_FEATURES = Object.freeze({
+  async_operations: true as const,
+  capability_negotiation: true as const,
+  jsonl_output: true as const,
+  local_cwd_merge: true as const,
+  resource_resolution: Object.freeze(["full_id", "unique_short_id", "unique_name"]),
+});
+
+const SORTED_CLI_CAPABILITY_COMMANDS = Object.freeze(
+  Object.entries(CLI_CAPABILITIES_RUNTIME.commands)
+    .sort(([leftId], [rightId]) => leftId.localeCompare(rightId))
+    .map(([id, command]) => Object.freeze({
+      id,
+      command: command.command,
+      capability: command.capability,
+      outputs: command.output,
+      auth: command.auth as readonly string[],
+      restrictedWhenProposalRequired: id === "issue.create" || id === "issue.quick-create",
+    })),
+);
+
+function buildCliCapabilitiesPayload(identity: CliIdentity, issueCreationRestricted: boolean): CliCapabilitiesPayload {
+  return Object.freeze({
+    protocol_version: CLI_PROTOCOL_VERSION,
+    manifest_version: String(CLI_CAPABILITIES_RUNTIME.schema_version),
+    server_version: multiremiVersion,
+    identity,
+    features: CLI_CAPABILITIES_FEATURES,
+    commands: Object.freeze(
+      SORTED_CLI_CAPABILITY_COMMANDS.map((entry) => Object.freeze({
+        id: entry.id,
+        command: entry.command,
+        capability: entry.capability,
+        outputs: entry.outputs,
+        allowed: entry.auth.includes(identity) && !(issueCreationRestricted && entry.restrictedWhenProposalRequired),
+      })),
+    ),
+  });
+}
+
+const PREBUILT_CLI_CAPABILITIES_JSON: Readonly<Record<CliIdentity, string>> = Object.freeze({
+  human: JSON.stringify(buildCliCapabilitiesPayload("human", false)),
+  task: JSON.stringify(buildCliCapabilitiesPayload("task", false)),
+  daemon: JSON.stringify(buildCliCapabilitiesPayload("daemon", false)),
+  share: JSON.stringify(buildCliCapabilitiesPayload("share", false)),
+});
+
+const PREBUILT_RESTRICTED_TASK_CAPABILITIES_JSON: string = JSON.stringify(buildCliCapabilitiesPayload("task", true));
 
 export function registerCliRoutes(app: Hono, deps: RouterDeps): void {
   app.get("/api/cli/context", (c) => {
@@ -46,33 +118,17 @@ export function registerCliRoutes(app: Hono, deps: RouterDeps): void {
     if (resolved instanceof Response) return resolved;
     const denied = denyCliWorkspaceAccess(c, deps, resolved);
     if (denied) return denied;
-    if (!deps.store.getWorkspace(resolved.workspaceId) && resolved.workspaceId !== "local") {
+    if (resolved.workspaceId !== "local" && !deps.store.hasWorkspace(resolved.workspaceId)) {
       return c.json({ error: "workspace not found" }, 404);
     }
-    const issueCreationRestricted = Boolean(restrictedTaskIssueCreationAgent(c, deps.store));
-    return c.json({
-      protocol_version: CLI_PROTOCOL_VERSION,
-      manifest_version: String(CLI_CAPABILITIES_RUNTIME.schema_version),
-      server_version: multiremiVersion,
-      identity: resolved.type,
-      features: {
-        async_operations: true,
-        capability_negotiation: true,
-        jsonl_output: true,
-        local_cwd_merge: true,
-        resource_resolution: ["full_id", "unique_short_id", "unique_name"],
-      },
-      commands: Object.entries(CLI_CAPABILITIES_RUNTIME.commands)
-        .map(([id, command]) => ({
-          id,
-          command: command.command,
-          capability: command.capability,
-          outputs: command.output,
-          allowed: (command.auth as readonly string[]).includes(resolved.type)
-            && !(issueCreationRestricted && (id === "issue.create" || id === "issue.quick-create")),
-        }))
-        .sort((left, right) => left.id.localeCompare(right.id)),
-    });
+    const issueCreationRestricted = resolved.type === "task" && currentTaskIssueCreationRestricted(c, deps.store);
+    return c.body(
+      issueCreationRestricted
+        ? PREBUILT_RESTRICTED_TASK_CAPABILITIES_JSON
+        : PREBUILT_CLI_CAPABILITIES_JSON[resolved.type],
+      200,
+      { "Content-Type": "application/json" },
+    );
   });
 }
 

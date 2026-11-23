@@ -495,6 +495,39 @@ for await (const line of createInterface({ input: process.stdin })) {
         update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Statusless terminal exit cleared.' } });
         result = { stopReason: 'end_turn' };
       }
+    } else if (mode === 'large-system-message-chunk') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_large_1', title: 'bun test', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'bun test', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_large_1', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+        result = { stopReason: 'end_turn' };
+      } else {
+        // Single user_message_chunk carrying an 8500-char payload inside <SYSTEM_MESSAGE>.
+        update({ sessionUpdate: 'user_message_chunk', content: { type: 'text',
+          text: '<SYSTEM_MESSAGE>[Message] timestamp=2026-11-23T08:00:00Z sender=' + TASK_26
+            + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_26
+            + '" finished with result:\\n' + 'x'.repeat(8500) + '</SYSTEM_MESSAGE>' } });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Large receipt done.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'statusless-terminal-exit-then-stale-bg-snapshot') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_meta_stale', title: 'tsc --noEmit', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'tsc --noEmit', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_meta_stale', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+        result = { stopReason: 'end_turn' };
+      } else {
+        // Status-less terminal_exit clears call_meta_stale and tombstones call_meta_stale + TASK_26.
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_meta_stale',
+          _meta: { terminal_exit: { terminal_id: 'call_meta_stale', exit_code: 0, signal: null } } });
+        // Subsequent status-less incremental snapshot still carrying old bgTaskId (without _meta.terminal_exit) must NOT re-add it.
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_meta_stale',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 + '\\nLog output:\\nstale trailing output' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Stale snapshot ignored.' } });
+        result = { stopReason: 'end_turn' };
+      }
     }
   }
   if (r.id !== undefined) send({ jsonrpc: '2.0', id: r.id, result });
@@ -838,6 +871,111 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       const prompts = fake.readPrompts();
       expect(prompts).toHaveLength(2);
       expect(p.getLastResponse()?.text).toContain("Statusless terminal exit cleared.");
+    } finally { await p.close(); }
+  });
+
+  it("enforces the stall watchdog on silent continuations for local antigravityNative sessions without gatewayShim", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const script = join(root, "native-continuation-stall-fake.mjs");
+    const logFile = join(root, "native-continuation-stall-fake.jsonl");
+    writeFileSync(script, `#!/usr/bin/env node
+import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+const logFile = ${JSON.stringify(logFile)};
+const TASK_26 = ${JSON.stringify(TASK_26)};
+const send = obj => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...obj }) + '\\n');
+const update = body => send({ method: 'session/update', params: { sessionId: 'native-stall-session', update: body } });
+let promptCount = 0;
+let pendingPromptId = null;
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const r = JSON.parse(line);
+  appendFileSync(logFile, JSON.stringify({ method: r.method, promptCount }) + '\\n');
+  if (r.method === 'initialize') {
+    send({ id: r.id, result: { protocolVersion: 1, agentInfo: { name: 'antigravity-native-fake', version: '1.0.0' },
+      agentCapabilities: { loadSession: true, sessionCapabilities: { resume: {} } } } });
+  } else if (r.method === 'session/new' || r.method === 'session/resume') {
+    send({ id: r.id, result: { sessionId: 'native-stall-session',
+      configOptions: [{ id: 'model', category: 'model', type: 'select', currentValue: 'gemini-3.8-flash',
+        options: [{ value: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' }] }],
+      modes: { currentModeId: 'yolo', availableModes: [{ id: 'yolo', name: 'YOLO' }] } } });
+  } else if (r.method === 'session/set_mode' || r.method === 'session/set_config_option') {
+    send({ id: r.id, result: {} });
+  } else if (r.method === 'session/prompt') {
+    promptCount++;
+    if (promptCount === 1) {
+      update({ sessionUpdate: 'tool_call', toolCallId: 'call_native_stall', title: 'sleep 60', kind: 'execute', status: 'in_progress',
+        rawInput: { CommandLine: 'sleep 60', WaitMsBeforeAsync: 10000 } });
+      update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_native_stall', status: 'in_progress',
+        rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+      send({ id: r.id, result: { stopReason: 'end_turn' } });
+    } else {
+      pendingPromptId = r.id;
+    }
+  } else if (r.method === 'session/cancel') {
+    if (pendingPromptId !== null) {
+      send({ id: pendingPromptId, result: { stopReason: 'cancelled' } });
+      pendingPromptId = null;
+    }
+  } else if (r.id !== undefined) {
+    send({ id: r.id, error: { code: -32601, message: 'Method not found: ' + r.method } });
+  }
+});
+`, { mode: 0o755 });
+    chmodSync(script, 0o755);
+    const p = new AcpProvider({
+      agentType: "antigravity",
+      antigravityNative: true,
+      providerHome: home.home,
+      cwd: root,
+      executable: script,
+      turnStallTimeoutMs: 200,
+    });
+    const externalAbort = new AbortController();
+    const externalAbortTimer = setTimeout(() => externalAbort.abort(), 4_000);
+    try {
+      const started = performance.now();
+      const error = await (async () => {
+        for await (const _ of p.sendStream("run native background then hang", { chatId: "native-bg-stall", signal: externalAbort.signal })) {}
+        return null;
+      })().catch((e) => e);
+      const elapsed = performance.now() - started;
+      expect(externalAbort.signal.aborted).toBe(false);
+      expect(error).toBeInstanceOf(AcpSessionFailureError);
+      expect((error as AcpSessionFailureError).failure).toMatchObject({ category: "timeout", errorKind: "turn_stalled" });
+      expect(elapsed).toBeLessThan(2_000);
+      const events = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as { method: string });
+      expect(events.filter(e => e.method === "session/prompt")).toHaveLength(2);
+      expect(events.filter(e => e.method === "session/cancel")).toHaveLength(1);
+    } finally {
+      clearTimeout(externalAbortTimer);
+      await p.close();
+    }
+  });
+
+  it("scans full single-chunk <SYSTEM_MESSAGE> completion receipts even when the result payload exceeds 8192 characters", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "large-system-message-chunk");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("run verbose test suite", { chatId: "large-sysmsg" })) {}
+      const prompts = fake.readPrompts();
+      expect(prompts).toHaveLength(2);
+      expect(p.getLastResponse()?.text).toContain("Large receipt done.");
+    } finally { await p.close(); }
+  });
+
+  it("tombstones cleared call and task ids so status-less snapshot updates carrying old bgTaskId never resurrect a finished command", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "statusless-terminal-exit-then-stale-bg-snapshot");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("run stale snapshot test", { chatId: "stale-snapshot" })) {}
+      const prompts = fake.readPrompts();
+      expect(prompts).toHaveLength(2);
+      expect(p.getLastResponse()?.text).toContain("Stale snapshot ignored.");
     } finally { await p.close(); }
   });
 });

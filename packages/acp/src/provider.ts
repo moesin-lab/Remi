@@ -1030,9 +1030,10 @@ export class AcpProvider implements Provider {
     let syntheticSeq = 0;
     /** This round sent `session/cancel` (a stop, a steer, an opened breaker or the stall watchdog). */
     let cancelSent = false;
-    /** Stall watchdog state (access configs with `turnStallTimeoutMs`). */
+    /** Stall watchdog state (access configs with `turnStallTimeoutMs`, or Antigravity background continuations). */
     let lastActivity = Date.now();
     let stalled = false;
+    let inAntigravityContinuation = false;
     /** The opened shim breaker asked to stop the turn. */
     let gatewayStop = false;
     /** A cancel is waiting for the prompt to settle (a stop, a steer fallback, the breaker or the watchdog). */
@@ -1297,6 +1298,7 @@ export class AcpProvider implements Provider {
 
         if (canContinue && continuations < MAX_ANTIGRAVITY_BG_CONTINUATIONS) {
           continuations++;
+          inAntigravityContinuation = true;
           openTools.clear();
           entry.openToolCalls?.clear();
           lastActivity = Date.now();
@@ -1394,26 +1396,33 @@ export class AcpProvider implements Provider {
     // output (text, a thought, another tool call) arrives on the same ordered
     // ACP stream: a model can only continue once the tool returned, so after
     // that the tool runs in the background and no longer explains the silence.
-    const stallMs = this._access?.turnStallTimeoutMs && gateway
-      ? Math.max(1, this._options.turnStallTimeoutMs ?? this._access.turnStallTimeoutMs) : null;
-    const watchdog = stallMs === null ? null : setInterval(() => {
+    const configuredStallMs = this._options.turnStallTimeoutMs != null && (gateway || this._adapter.agentType === "antigravity")
+      ? Math.max(1, this._options.turnStallTimeoutMs)
+      : (this._access?.turnStallTimeoutMs && gateway ? Math.max(1, this._access.turnStallTimeoutMs) : null);
+    const watchdogBasisMs = configuredStallMs !== null || this._adapter.agentType === "antigravity"
+      ? (configuredStallMs ?? ANTIGRAVITY_CONTINUATION_STALL_MS) : null;
+    const watchdog = watchdogBasisMs === null ? null : setInterval(() => {
       // A stop, a steer fallback or the breaker is already ending the turn through the settle path.
       if (promptDone || stalled || settling || gatewayStop || options?.signal?.aborted) return;
+      const activeStallMs = inAntigravityContinuation
+        ? (configuredStallMs ?? ANTIGRAVITY_CONTINUATION_STALL_MS)
+        : configuredStallMs;
+      if (activeStallMs === null) return;
       const now = Date.now();
       const blockingTool = [...openTools.values()].some((updatedSeq) => updatedSeq >= lastOutputSeq);
-      if (gateway!.inflight > 0 || blockingTool || (entry.userInputs ?? 0) > 0 || (entry.steersInFlight ?? 0) > 0) {
+      if ((gateway?.inflight ?? 0) > 0 || blockingTool || (entry.userInputs ?? 0) > 0 || (entry.steersInFlight ?? 0) > 0) {
         lastActivity = now;
         return;
       }
-      if (now - lastActivity < stallMs) return;
+      if (now - lastActivity < activeStallMs) return;
       stalled = true;
       // An earlier typed failure (e.g. an opened breaker whose cancel the server ignored) stays the turn's reason.
       if (failureState.failure?.severity !== "error") onUpdate({ sessionId: entry.acpSessionId, update: {
         sessionUpdate: "session_info_update",
-        _meta: { jetbrains: { air: { sessionFailure: turnStalledFailure(this._adapter.agentType, stallMs, `${this._adapter.agentType}:stall:${++syntheticSeq}`) } } },
+        _meta: { jetbrains: { air: { sessionFailure: turnStalledFailure(this._adapter.agentType, activeStallMs, `${this._adapter.agentType}:stall:${++syntheticSeq}`) } } },
       } as SessionUpdate });
       resolveWaiting?.();
-    }, Math.max(5, Math.min(5_000, Math.floor(stallMs / 4))));
+    }, Math.max(5, Math.min(5_000, Math.floor(watchdogBasisMs / 4))));
     (watchdog as { unref?: () => void } | null)?.unref?.();
 
     try {
@@ -3187,6 +3196,7 @@ function trackToolCall(entry: PoolEntry, update: SessionUpdate): void {
   }
 }
 
+const ANTIGRAVITY_CONTINUATION_STALL_MS = 120_000;
 const ANTIGRAVITY_BG_TASK_ID_RE = /Tool is running as a background task with task id:\s*[`"']?([A-Za-z0-9._:/-]+)[`"']?/i;
 const ANTIGRAVITY_TOOL_OUTPUT_SEPARATOR_RE = /(?:^|\r?\n)(?:Log|Command) output:[ \t]*(?:\r?\n|$)/;
 const ANTIGRAVITY_TASK_TERMINAL_STATUS_RE = /\bStatus["']?\s*:\s*["']?(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELLED)\b/i;
@@ -3342,6 +3352,8 @@ class AntigravityBackgroundCommandTracker {
   private readonly pending = new Map<string, { toolCallId: string; taskId: string | null }>();
   private readonly runCommandCalls = new Set<string>();
   private readonly daemonCalls = new Set<string>();
+  private readonly clearedCallIds = new Set<string>();
+  private readonly clearedTaskIds = new Set<string>();
   private readonly manageTaskCalls = new Map<string, { action?: string; taskId?: string }>();
   private systemMessageTail = "";
 
@@ -3359,6 +3371,14 @@ class AntigravityBackgroundCommandTracker {
       if (entry.taskId && !ids.includes(entry.taskId)) ids.push(entry.taskId);
     }
     return ids;
+  }
+
+  private _markCleared(callId: string, taskId?: string | null): void {
+    const existing = this.pending.get(callId);
+    this.pending.delete(callId);
+    this.clearedCallIds.add(callId);
+    if (existing?.taskId) this.clearedTaskIds.add(existing.taskId);
+    if (taskId) this.clearedTaskIds.add(taskId);
   }
 
   observe(update: SessionUpdate, adapter: AgentAdapter): { releaseOpenToolCallId?: string } | undefined {
@@ -3382,15 +3402,18 @@ class AntigravityBackgroundCommandTracker {
           const existing = this.pending.get(id);
           const hasTerminalExit = hasAntigravityTerminalExit(update, envelope);
 
-          if (status === "failed" || hasTerminalExit) {
-            this.pending.delete(id);
+          if (this.clearedCallIds.has(id) || (bgTaskId !== null && this.clearedTaskIds.has(bgTaskId))) {
+            this._markCleared(id, bgTaskId);
+            releaseOpenToolCallId = id;
+          } else if (status === "failed" || hasTerminalExit) {
+            this._markCleared(id, bgTaskId);
             releaseOpenToolCallId = id;
           } else if (status === "completed") {
             if (bgTaskId) {
               this.pending.set(id, { toolCallId: id, taskId: bgTaskId });
               releaseOpenToolCallId = id;
             } else {
-              this.pending.delete(id);
+              this._markCleared(id);
               releaseOpenToolCallId = id;
             }
           } else if (update.sessionUpdate === "tool_call_update" && status === undefined && !existing && !bgTaskId) {
@@ -3434,15 +3457,28 @@ class AntigravityBackgroundCommandTracker {
     if (update.sessionUpdate === "user_message_chunk" || update.sessionUpdate === "agent_message_chunk") {
       const text = extractChunkText(update.content);
       if (!text) return undefined;
-      this.systemMessageTail = (this.systemMessageTail + text).slice(-4096);
-      if (this.systemMessageTail.includes("<SYSTEM_MESSAGE>")) {
-        this._observeSystemMessage(this.systemMessageTail);
-        if (this.systemMessageTail.includes("</SYSTEM_MESSAGE>")) {
-          const endIdx = this.systemMessageTail.lastIndexOf("</SYSTEM_MESSAGE>");
-          this.systemMessageTail = this.systemMessageTail.slice(endIdx + "</SYSTEM_MESSAGE>".length);
+      const combined = this.systemMessageTail + text;
+      if (combined.includes("<SYSTEM_MESSAGE>")) {
+        this._observeSystemMessage(combined);
+        const lastOpen = combined.lastIndexOf("<SYSTEM_MESSAGE>");
+        const lastClose = combined.lastIndexOf("</SYSTEM_MESSAGE>");
+        if (lastClose > lastOpen) {
+          this.systemMessageTail = combined.slice(lastClose + "</SYSTEM_MESSAGE>".length).slice(-4096);
+        } else {
+          const openSlice = combined.slice(lastOpen);
+          if (ANTIGRAVITY_SYSTEM_MESSAGE_BODY_SEPARATOR_RE.test(openSlice)) {
+            const tail = combined.slice(-256);
+            const tagIdx = tail.lastIndexOf("<SYSTEM_MESSAGE>");
+            this.systemMessageTail = tagIdx >= 0 ? tail.slice(tagIdx + "<SYSTEM_MESSAGE>".length) : tail;
+          } else {
+            this.systemMessageTail = openSlice.slice(0, 16_384);
+          }
         }
-      } else if (update.sessionUpdate === "user_message_chunk" && this.systemMessageTail.includes("[Message]")) {
-        this._observeBareTaskFinishedMessages(this.systemMessageTail);
+      } else {
+        if (update.sessionUpdate === "user_message_chunk" && combined.includes("[Message]")) {
+          this._observeBareTaskFinishedMessages(combined);
+        }
+        this.systemMessageTail = combined.slice(-4096);
       }
     }
     return undefined;
@@ -3459,7 +3495,7 @@ class AntigravityBackgroundCommandTracker {
     let matched = false;
     for (const [callId, entry] of this.pending) {
       if (entry.taskId && textIndicatesTaskTerminal(envelope, entry.taskId)) {
-        this.pending.delete(callId);
+        this._markCleared(callId, entry.taskId);
         matched = true;
       }
     }
@@ -3467,7 +3503,7 @@ class AntigravityBackgroundCommandTracker {
       && ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(envelope)
       && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(envelope)) {
       const [onlyId, only] = [...this.pending.entries()][0]!;
-      if (only.taskId === null) this.pending.delete(onlyId);
+      if (only.taskId === null) this._markCleared(onlyId);
     }
   }
 
@@ -3478,7 +3514,7 @@ class AntigravityBackgroundCommandTracker {
     }
     if (this.pending.size === 1) {
       const [onlyId, only] = [...this.pending.entries()][0]!;
-      if (only.taskId === null) this.pending.delete(onlyId);
+      if (only.taskId === null) this._markCleared(onlyId);
     }
   }
 
@@ -3487,31 +3523,35 @@ class AntigravityBackgroundCommandTracker {
     for (const [callId, entry] of this.pending) {
       if (options?.requireKnownTaskId) {
         if (entry.taskId !== null && entry.taskId === taskId) {
-          this.pending.delete(callId);
+          this._markCleared(callId, taskId);
           matched = true;
         }
       } else if (entry.taskId === taskId || callId === taskId) {
-        this.pending.delete(callId);
+        this._markCleared(callId, entry.taskId);
         matched = true;
       }
+    }
+    if (!options?.requireKnownTaskId || matched) {
+      this.clearedTaskIds.add(taskId);
     }
     return matched;
   }
 
   private _observeToolSystemMessage(text: string): void {
-    if (!this.pending.size || !text.includes("<SYSTEM_MESSAGE>")) return;
+    if (!text.includes("<SYSTEM_MESSAGE>")) return;
     const { envelope, tail } = splitAntigravityToolOutput(text);
     if (envelope.includes("<SYSTEM_MESSAGE>")) {
       this._observeSystemMessage(envelope);
     }
-    if (tail.includes("<SYSTEM_MESSAGE>")) {
+    if (this.pending.size && tail.includes("<SYSTEM_MESSAGE>")) {
       this._observeSystemMessage(tail, { strictHostAppended: true });
     }
   }
 
   private _observeSystemMessage(text: string, options?: { strictHostAppended?: boolean }): void {
-    if (!this.pending.size || !text.includes("<SYSTEM_MESSAGE>")) return;
+    if (!text.includes("<SYSTEM_MESSAGE>")) return;
     const strictHostAppended = options?.strictHostAppended === true;
+    if (strictHostAppended && !this.pending.size) return;
     ANTIGRAVITY_SYSTEM_MESSAGE_RE.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = ANTIGRAVITY_SYSTEM_MESSAGE_RE.exec(text)) !== null) {
@@ -3530,34 +3570,30 @@ class AntigravityBackgroundCommandTracker {
         }
         continue;
       }
+      if (!this.pending.size) continue;
       if (!ANTIGRAVITY_COMPLETION_WORD_RE.test(header) || ANTIGRAVITY_STILL_RUNNING_RE.test(header)) continue;
       let matched = false;
       for (const [callId, entry] of this.pending) {
         if ((entry.taskId && containsExactTaskId(header, entry.taskId)) || containsExactTaskId(header, callId)) {
-          this.pending.delete(callId);
+          this._markCleared(callId, entry.taskId);
           matched = true;
         }
       }
       if (!matched && !ANTIGRAVITY_EXPLICIT_TASK_ID_RE.test(header)
         && this.pending.size === 1 && /\b(?:background\s+task|task|command)\b/i.test(header)) {
         const [onlyId, only] = [...this.pending.entries()][0]!;
-        if (only.taskId === null) this.pending.delete(onlyId);
+        if (only.taskId === null) this._markCleared(onlyId);
       }
     }
   }
 
   private _observeBareTaskFinishedMessages(text: string): void {
-    if (!this.pending.size) return;
     ANTIGRAVITY_MESSAGE_TASK_FINISHED_RE.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = ANTIGRAVITY_MESSAGE_TASK_FINISHED_RE.exec(text)) !== null) {
       const finishedId = match[1]?.replace(/[.:,]+$/, "");
       if (!finishedId) continue;
-      for (const [callId, entry] of this.pending) {
-        if (entry.taskId === finishedId || callId === finishedId) {
-          this.pending.delete(callId);
-        }
-      }
+      this._clearExactTaskId(finishedId);
     }
   }
 }

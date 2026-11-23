@@ -247,6 +247,282 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
     expect(nonDefaultParentSession.wake_reason).toBe('agent_dispatch');
     expect(String(nonDefaultParentSession.message.metadata.execution_scope)).toStartWith('dlg_');
     expect(store.getTurn(nonDefaultParentSession.turn_id!)!).toMatchObject({delegated_by_agent_id:dev1.id});
+
+    // Explicit custom execution_scope + role parent_owner stays agent_dispatch with full delegation lineage.
+    const child2Source=store.sendMessage({session_id:child2Session.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:dev2.id},message_kind:'request',wake_requested:'now',body_md:'start child 2'});
+    const explicitParentOwnerScope=store.sendMessage({
+      session_id:child2Session.id,
+      sender:{type:'agent',id:dev2.id},
+      source_turn_id:child2Source.turn_id,
+      to:{type:'role',ref:'parent_owner'},
+      message_kind:'request',
+      wake_requested:'now',
+      execution_scope:'dlg_custom',
+      body_md:'Child 2 role parent_owner with custom scope',
+    });
+    expect(explicitParentOwnerScope.wake_reason).toBe('agent_dispatch');
+    expect(explicitParentOwnerScope.message.session_id).toBe(parentMain.id);
+    expect(explicitParentOwnerScope.message.metadata.execution_scope).toBe('dlg_custom');
+    expect(store.getTurn(explicitParentOwnerScope.turn_id!)!).toMatchObject({
+      execution_scope:'dlg_custom',
+      delegation_id:'dlg_custom',
+      delegated_by_agent_id:dev2.id,
+      delegated_from_issue_session_id:child2Session.id,
+    });
+
+    // Non-request ordinary report directly to parent Main keeps baseline main semantics (next_turn / agent_pair_not_privileged) and never creates a turn when idle.
+    const idleParent=createResponsibleTestIssue(store,{title:'Idle Parent for report check',status:'in_progress',assigneeType:'agent',assigneeId:coordinator.id});
+    const idleParentMain=store.getOrCreateDefaultIssueSession(idleParent.id);
+    const idleChild=createResponsibleTestIssue(store,{title:'Idle Child for report check',parentIssueId:idleParent.id,status:'todo',assigneeType:'agent',assigneeId:dev1.id});
+    const idleChildMain=store.getOrCreateDefaultIssueSession(idleChild.id);
+    const idleChildSource=store.sendMessage({session_id:idleChildMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:dev1.id},message_kind:'request',wake_requested:'now',body_md:'start idle child'});
+    for(const reportTo of [{type:'role' as const,ref:'issue_owner' as const},{type:'agent' as const,ref:coordinator.id}]){
+      const directReport=store.sendMessage({
+        session_id:idleParentMain.id,
+        sender:{type:'agent',id:dev1.id},
+        source_turn_id:idleChildSource.turn_id,
+        to:reportTo,
+        message_kind:'report',
+        wake_requested:'now',
+        body_md:'Direct non-request report to parent Main',
+      });
+      expect(directReport.wake_applied).toBe('next_turn');
+      expect(directReport.wake_reason).toBe('agent_pair_not_privileged');
+      expect(directReport.turn_id).toBeUndefined();
+    }
+    // Contrast: non-request report on child's own session to parent_owner keeps baseline now / to_parent_owner.
+    const childOwnReport=store.sendMessage({
+      session_id:idleChildMain.id,
+      sender:{type:'agent',id:dev1.id},
+      source_turn_id:idleChildSource.turn_id,
+      to:{type:'role',ref:'parent_owner'},
+      message_kind:'report',
+      wake_requested:'now',
+      body_md:'Child-session report to parent_owner',
+    });
+    expect(childOwnReport.wake_applied).toBe('now');
+    expect(childOwnReport.wake_reason).toBe('to_parent_owner');
+    expect(childOwnReport.message.session_id).toBe(idleParentMain.id);
+  });
+
+  it('MUL-335: pair_round_trip_limit counts parent to_parent_owner turns in memory without persisting reverse delegation',()=>{
+    const prevLimit=process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+    process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+    try{
+      const {store}=fixture();
+      const parentRuntime=store.registerRuntime({name:'Parent rt',provider:'codex',workspaceId:'local'});
+      const childRuntime=store.registerRuntime({name:'Child rt',provider:'codex',workspaceId:'local'});
+      const parentAgent=store.createAgent({name:'Parent Coord',provider:'codex',runtimeId:parentRuntime.id});
+      const childAgent=store.createAgent({name:'Child Worker',provider:'codex',runtimeId:childRuntime.id});
+      const parent=createResponsibleTestIssue(store,{title:'Parent P',status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+      const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+      const child=createResponsibleTestIssue(store,{title:'Child C',parentIssueId:parent.id,status:'todo',assigneeType:'agent',assigneeId:childAgent.id});
+      const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+      // 1. Parent runs and dispatches child (hop 1: C delegated by P).
+      const parentTask0=store.createTask({agentId:parentAgent.id,issueId:parent.id,issueSessionId:parentMain.id,prompt:'Coordinate P'});
+      expect(store.claimTask(parentRuntime.id)?.id).toBe(parentTask0.id);
+      store.startTask(parentTask0.id);
+      const dispatch1=store.sendMessage({
+        session_id:childMain.id,
+        sender:{type:'agent',id:parentAgent.id},
+        source_turn_id:parentTask0.id,
+        to:{type:'role',ref:'issue_owner'},
+        message_kind:'request',
+        wake_requested:'now',
+        body_md:'First dispatch to child',
+      });
+      expect(dispatch1.wake_reason).toBe('agent_dispatch');
+      store.completeTask(parentTask0.id,{output:'Dispatched'});
+
+      // 2. Child runs and sends --to issue-owner --kind request to Parent Main (to_parent_owner, no persisted delegation fields).
+      const childTurn1=store.getTurn(dispatch1.turn_id!)!;
+      expect(store.claimTask(childRuntime.id)?.id).toBe(childTurn1.current_attempt_id!);
+      store.startTask(childTurn1.current_attempt_id!);
+      const upwardReq=store.sendMessage({
+        session_id:parentMain.id,
+        sender:{type:'agent',id:childAgent.id},
+        source_turn_id:childTurn1.id,
+        to:{type:'role',ref:'issue_owner'},
+        message_kind:'request',
+        wake_requested:'now',
+        body_md:'Child asks parent to coordinate',
+      });
+      expect(upwardReq.wake_applied).toBe('now');
+      expect(upwardReq.wake_reason).toBe('to_parent_owner');
+      const parentTurn1=store.getTurn(upwardReq.turn_id!)!;
+      expect(parentTurn1).toMatchObject({
+        execution_scope:'',
+        delegation_id:null,
+        delegated_by_agent_id:null,
+        delegated_from_issue_session_id:null,
+      });
+      store.completeTask(childTurn1.current_attempt_id!,{output:'Child reported'});
+
+      // 3. Parent runs on parentTurn1 and attempts to dispatch child again: L=1 => 2 hops => pair_round_trip_limit.
+      expect(store.claimTask(parentRuntime.id)?.id).toBe(parentTurn1.current_attempt_id!);
+      store.startTask(parentTurn1.current_attempt_id!);
+      const dispatch2=store.sendMessage({
+        session_id:childMain.id,
+        sender:{type:'agent',id:parentAgent.id},
+        source_turn_id:parentTurn1.id,
+        to:{type:'role',ref:'issue_owner'},
+        message_kind:'request',
+        wake_requested:'now',
+        body_md:'Second dispatch should hit pair limit',
+      });
+      expect(dispatch2.wake_applied).toBe('next_turn');
+      expect(dispatch2.wake_reason).toBe('pair_round_trip_limit');
+      expect(dispatch2.turn_id).toBeUndefined();
+
+      // Completing parentTurn1 must still NOT send any reverse delegation return bell to childMain.
+      const childMsgsBefore=store.listMessages(childMain.id).length;
+      store.completeTask(parentTurn1.current_attempt_id!,{output:'Waiting on human'});
+      expect(store.getTask(parentTurn1.current_attempt_id!)?.delegationReturnTaskId).toBeNull();
+      expect(store.listMessages(childMain.id)).toHaveLength(childMsgsBefore);
+
+      // Direct trigger path (no prior platform_to_owner pending turn): child already in_progress sends to_parent_owner directly.
+      const parentDirect=createResponsibleTestIssue(store,{title:'Parent Direct',status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+      const parentDirectMain=store.getOrCreateDefaultIssueSession(parentDirect.id);
+      const childDirect=createResponsibleTestIssue(store,{title:'Child Direct',parentIssueId:parentDirect.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+      const childDirectMain=store.getOrCreateDefaultIssueSession(childDirect.id);
+      const pd0=store.createTask({agentId:parentAgent.id,issueId:parentDirect.id,issueSessionId:parentDirectMain.id,prompt:'Coord direct'});
+      expect(store.claimTask(parentRuntime.id)?.id).toBe(pd0.id);
+      store.startTask(pd0.id);
+      const dd1=store.sendMessage({session_id:childDirectMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:pd0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Direct dispatch 1'});
+      const cd1=store.getTurn(dd1.turn_id!)!;
+      expect(store.claimTask(childRuntime.id)?.id).toBe(cd1.current_attempt_id!);
+      store.startTask(cd1.current_attempt_id!);
+      // Complete pd0 after cd1 is already running so parentDirectMain is completely idle when directUp arrives.
+      store.completeTask(pd0.id,{output:'Dispatched direct'});
+      for(const pending of store.listTurns({workspace_id:'local',session_id:parentDirectMain.id}).filter(t=>t.status==='pending')){
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(pending.current_attempt_id!);
+        store.startTask(pending.current_attempt_id!);
+        store.completeTask(pending.current_attempt_id!,{output:'Drained status notice'});
+      }
+      const directUp=store.sendMessage({session_id:parentDirectMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:cd1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Direct upward request'});
+      const pd1=store.getTurn(directUp.turn_id!)!;
+      expect(pd1.trigger_message_id).toBe(directUp.message.id);
+      expect(pd1).toMatchObject({execution_scope:'',delegation_id:null,delegated_by_agent_id:null});
+      store.completeTask(cd1.current_attempt_id!,{output:'Child direct done'});
+      expect(store.claimTask(parentRuntime.id)?.id).toBe(pd1.current_attempt_id!);
+      store.startTask(pd1.current_attempt_id!);
+      const dd2=store.sendMessage({session_id:childDirectMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:pd1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Direct dispatch 2 hits limit'});
+      expect(dd2.wake_applied).toBe('next_turn');
+      expect(dd2.wake_reason).toBe('pair_round_trip_limit');
+      expect(dd2.turn_id).toBeUndefined();
+    }finally{
+      if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+      else process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=prevLimit;
+    }
+  });
+
+  it('MUL-335: sibling request via another issue child parent_owner role and grandchild --to delegator preserve delegation semantics',()=>{
+    const {store}=fixture();
+    const rtA=store.registerRuntime({name:'RT A',provider:'codex',workspaceId:'local'});
+    const rtB=store.registerRuntime({name:'RT B',provider:'codex',workspaceId:'local'});
+    const rtC=store.registerRuntime({name:'RT C',provider:'codex',workspaceId:'local'});
+    const agentA=store.createAgent({name:'Agent A',provider:'codex',runtimeId:rtA.id});
+    const agentB=store.createAgent({name:'Agent B',provider:'codex',runtimeId:rtB.id});
+    const agentC=store.createAgent({name:'Agent C',provider:'codex',runtimeId:rtC.id});
+
+    // Sibling A -> B_child's parent_owner (= B, not an ancestor of A) must stay agent_dispatch with dlg_* lineage.
+    const issueA=createResponsibleTestIssue(store,{title:'Sibling A',status:'in_progress',assigneeType:'agent',assigneeId:agentA.id});
+    const issueAMain=store.getOrCreateDefaultIssueSession(issueA.id);
+    const issueB=createResponsibleTestIssue(store,{title:'Sibling B',status:'in_progress',assigneeType:'agent',assigneeId:agentB.id});
+    const issueBMain=store.getOrCreateDefaultIssueSession(issueB.id);
+    const issueBChild=createResponsibleTestIssue(store,{title:'B Child',parentIssueId:issueB.id,status:'todo',assigneeType:'agent',assigneeId:agentC.id});
+    const issueBChildMain=store.getOrCreateDefaultIssueSession(issueBChild.id);
+
+    const aTurn=store.sendMessage({session_id:issueAMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:agentA.id},message_kind:'request',wake_requested:'now',body_md:'start A'});
+    const crossViaParentOwner=store.sendMessage({
+      session_id:issueBChildMain.id,
+      sender:{type:'agent',id:agentA.id},
+      source_turn_id:aTurn.turn_id,
+      to:{type:'role',ref:'parent_owner'},
+      message_kind:'request',
+      wake_requested:'now',
+      body_md:'Sibling A reaching B via B_child parent_owner',
+    });
+    expect(crossViaParentOwner.wake_applied).toBe('now');
+    expect(crossViaParentOwner.wake_reason).toBe('agent_dispatch');
+    expect(crossViaParentOwner.message.session_id).toBe(issueBMain.id);
+    expect(String(crossViaParentOwner.message.metadata.execution_scope)).toStartWith('dlg_');
+    expect(store.getTurn(crossViaParentOwner.turn_id!)!).toMatchObject({
+      session_id:issueBMain.id,
+      agent_id:agentB.id,
+      delegated_by_agent_id:agentA.id,
+      delegated_from_issue_session_id:issueAMain.id,
+    });
+
+    // Grandchild --to delegator: Parent(A) -> Child(B, dlg_outer) -> Grandchild(C, dlg_inner).
+    const root=createResponsibleTestIssue(store,{title:'Root',status:'in_progress',assigneeType:'agent',assigneeId:agentA.id});
+    const rootMain=store.getOrCreateDefaultIssueSession(root.id);
+    const mid=createResponsibleTestIssue(store,{title:'Mid',parentIssueId:root.id,status:'todo',assigneeType:'agent',assigneeId:agentB.id});
+    const midMain=store.getOrCreateDefaultIssueSession(mid.id);
+    const leaf=createResponsibleTestIssue(store,{title:'Leaf',parentIssueId:mid.id,status:'todo',assigneeType:'agent',assigneeId:agentC.id});
+    const leafMain=store.getOrCreateDefaultIssueSession(leaf.id);
+
+    const rootSource=store.sendMessage({session_id:rootMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:agentA.id},message_kind:'request',wake_requested:'now',body_md:'start root'});
+    const outerDispatch=store.sendMessage({
+      session_id:midMain.id,
+      sender:{type:'agent',id:agentA.id},
+      source_turn_id:rootSource.turn_id,
+      to:{type:'role',ref:'issue_owner'},
+      message_kind:'request',
+      wake_requested:'now',
+      body_md:'Root dispatches Mid',
+    });
+    const outerTurn=store.getTurn(outerDispatch.turn_id!)!;
+    expect(outerTurn.execution_scope).toStartWith('dlg_');
+
+    const innerDispatch=store.sendMessage({
+      session_id:leafMain.id,
+      sender:{type:'agent',id:agentB.id},
+      source_turn_id:outerTurn.id,
+      to:{type:'role',ref:'issue_owner'},
+      message_kind:'request',
+      wake_requested:'now',
+      body_md:'Mid dispatches Leaf from dlg_outer',
+    });
+    const innerTurn=store.getTurn(innerDispatch.turn_id!)!;
+    expect(innerTurn.execution_scope).toStartWith('dlg_');
+
+    // Grandchild --to delegator --kind request must stay agent_dispatch (not to_parent_owner colliding with delegator lineage on dlg_outer).
+    const delegatorReq=store.sendMessage({
+      session_id:leafMain.id,
+      sender:{type:'agent',id:agentC.id},
+      source_turn_id:innerTurn.id,
+      to:{type:'role',ref:'delegator'},
+      message_kind:'request',
+      wake_requested:'now',
+      body_md:'Leaf requests delegator Mid',
+    });
+    expect(delegatorReq.wake_applied).toBe('now');
+    expect(delegatorReq.wake_reason).toBe('agent_dispatch');
+    expect(delegatorReq.message.session_id).toBe(midMain.id);
+    expect(delegatorReq.message.metadata.execution_scope).not.toBe(outerTurn.execution_scope);
+    expect(store.getTurn(delegatorReq.turn_id!)!).toMatchObject({
+      agent_id:agentB.id,
+      delegated_by_agent_id:agentC.id,
+      delegated_from_issue_session_id:leafMain.id,
+    });
+
+    // Grandchild --to delegator --kind reply still resumes Mid's dlg_outer lane as member_to_delegator.
+    const delegatorReply=store.sendMessage({
+      session_id:leafMain.id,
+      sender:{type:'agent',id:agentC.id},
+      source_turn_id:innerTurn.id,
+      to:{type:'role',ref:'delegator'},
+      message_kind:'reply',
+      wake_requested:'now',
+      body_md:'Leaf replies to delegator Mid',
+    });
+    expect(delegatorReply.wake_applied).toBe('now');
+    expect(delegatorReply.wake_reason).toBe('member_to_delegator');
+    expect(delegatorReply.message.session_id).toBe(midMain.id);
+    expect(delegatorReply.message.metadata.execution_scope).toBe(outerTurn.execution_scope);
+    expect(delegatorReply.turn_id).toBe(outerTurn.id);
   });
 
 }, { isolation: "snapshot", file: import.meta.path });

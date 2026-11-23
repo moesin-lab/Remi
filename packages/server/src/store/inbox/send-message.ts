@@ -10,6 +10,7 @@ import { clampEnvelopeBody } from '../envelope-body.js';
 import { countDelegationPairHops, pairRoundTripLimit, DelegationRoundTripLimitError, type TaskSessionContinuation } from '../repos/tasks-repo.js';
 import { resolveWake } from './wake-policy.js';
 import { deriveIssueStatusWithinTransaction } from './issue-status.js';
+import { questionMetadataText } from './question-indexes.js';
 import { lockLane } from './lane-machine.js';
 import { deliverToRunningTurn, ensurePendingTurn } from './lane-machine.js';
 import { dependencyGateEnabled } from '../repos/issue-dependencies.js';
@@ -59,9 +60,28 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
   const hop=(id:string)=>{
     const turn=readTurnRow(ctx.db, id);
     if(!turn)return null;
-    const trigger=turn.trigger_message_id?ctx.db.query('SELECT task_id FROM multiremi_conversation_log WHERE id=?').get(turn.trigger_message_id):null;
+    const trigger=turn.trigger_message_id
+      ?ctx.db.query('SELECT task_id, sender_type, sender_id, wake_reason FROM multiremi_conversation_log WHERE id=?').get(turn.trigger_message_id)
+      :null;
+    const counterpart=turn.agent_id===source.agent_id?targetId:source.agent_id;
+    let parentReportTrigger=
+      !turn.delegation_id&&!turn.delegated_by_agent_id
+      &&trigger?.sender_type==='agent'&&trigger?.wake_reason==='to_parent_owner'
+      &&trigger?.task_id&&trigger?.sender_id===counterpart
+        ?trigger
+        :null;
+    if(!parentReportTrigger&&!turn.delegation_id&&!turn.delegated_by_agent_id&&trigger?.sender_type!=='member'&&counterpart){
+      parentReportTrigger=ctx.db.query(`SELECT task_id, sender_type, sender_id, wake_reason
+        FROM multiremi_conversation_log
+        WHERE session_id=? AND kind='message' AND deleted_at IS NULL
+          AND ${questionMetadataText(ctx.db, 'metadata', 'delivery_turn_id')}=?
+          AND sender_type='agent' AND sender_id=? AND wake_reason='to_parent_owner' AND task_id IS NOT NULL
+        ORDER BY seq DESC LIMIT 1`).get(turn.session_id,turn.id,counterpart)??null;
+    }
     return {id:turn.id,agentId:turn.agent_id,workspaceId:turn.workspace_id,createdAt:turn.created_at,
-      delegationId:turn.delegation_id,delegatedByAgentId:turn.delegated_by_agent_id,parentTaskId:trigger?.task_id??null};
+      delegationId:turn.delegation_id??(parentReportTrigger?`parent_report:${turn.id}`:null),
+      delegatedByAgentId:turn.delegated_by_agent_id??(parentReportTrigger?parentReportTrigger.sender_id:null),
+      parentTaskId:parentReportTrigger?.task_id??trigger?.task_id??null};
   };
   const cutoff=source?ctx.db.query("SELECT MAX(created_at) AS at FROM multiremi_conversation_log WHERE session_id=? AND sender_type='member'").get(source.session_id)?.at:null;
   const node=source?hop(source.id):null;
@@ -189,23 +209,20 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
   const hops=source&&recipientId?countMessageDelegationPairHops(ctx,source.id,recipientId,limit):0;
   const isLeader=recipientId&&input.sender.id?!!ctx.db.query(`SELECT 1 FROM multiremi_squads s JOIN multiremi_squad_members m ON m.squad_id=s.id
     WHERE s.leader_id=? AND m.member_id=? AND m.member_type='agent' AND s.workspace_id=? AND s.archived_at IS NULL`).get(recipientId,input.sender.id,workspaceId):false;
-  // The direct parent's execution owner on the current Issue (for non-request
-  // notices inside a child Issue), plus ancestor coordinator recognition when a
-  // descendant Issue writes to an ancestor Issue's default coordination session.
-  const directParentAgent=input.sender.type==='agent'&&input.message_kind!=='request'&&issue
-    ?ctx.resolveIssueResponsibility(issue.id).chain[1]?.executionOwner??null:null;
-  const ancestorParentAgent=input.sender.type==='agent'&&recipientType==='agent'&&recipientId
+  // The direct parent's execution owner, whatever the rest of the chain resolves to.
+  const parentAgent=issue?ctx.resolveIssueResponsibility(issue.id).chain[1]?.executionOwner??null:null;
+  // Recognize a descendant Issue agent sending a request to an ancestor Issue's
+  // default coordination session so it stays on the parent's default lane.
+  const ancestorParentAgent=input.sender.type==='agent'&&input.message_kind==='request'&&recipientType==='agent'&&recipientId
     &&source?.issue_id&&dispatchIssue&&source.issue_id!==dispatchIssue.id
     &&finalSession&&!finalSession.chatId&&finalSession.isDefault&&finalSession.issueId===dispatchIssue.id
-    &&!input.execution_scope
+    &&!input.execution_scope&&!roleScope&&!(input.to.type==='role'&&input.to.ref==='delegator')
     ?ctx.resolveIssueResponsibility(source.issue_id).chain.slice(1)
         .find((node)=>node.issueId===dispatchIssue.id)?.executionOwner??null
     :null;
-  const isParentOwner=Boolean(recipientType==='agent'&&recipientId&&(
-    input.message_kind==='request'
-      ?ancestorParentAgent?.id===recipientId
-      :directParentAgent?.id===recipientId||ancestorParentAgent?.id===recipientId
-  ));
+  const isParentOwner=input.message_kind==='request'
+    ?Boolean(recipientType==='agent'&&recipientId&&ancestorParentAgent?.id===recipientId)
+    :parentAgent?.id===recipientId;
   const policy=resolveWake(input.sender,input.to,input.wake_requested,input.message_kind,{
     recipientType,recipientId,recipientAvailable:recipientType==='agent'?!!targetAgent&&!targetAgent.archivedAt:recipientType==='member'?!!member&&!member.archivedAt:false,
     // Structural platform reports retain main's dependency exemption. Agent

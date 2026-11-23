@@ -13,7 +13,7 @@ export function deriveIssueStatusWithinTransaction(ctx:StoreContext,issueId:stri
   const turns=ctx.db.query(`SELECT t.*,m.sender_type AS trigger_sender,m.wake_reason AS trigger_reason,m.message_kind AS trigger_kind,
       (SELECT COUNT(*) FROM multiremi_conversation_log merged WHERE merged.kind='message' AND merged.deleted_at IS NULL
         AND ${questionMetadataText(ctx.db, 'merged.metadata', 'delivery_turn_id')}=t.id
-        AND merged.wake_reason IN ('human_sender','agent_dispatch')) AS merged_work_triggers
+        AND (merged.wake_reason IN ('human_sender','agent_dispatch') OR (merged.wake_reason='to_parent_owner' AND merged.message_kind='request'))) AS merged_work_triggers
     FROM multiremi_turns t LEFT JOIN multiremi_conversation_log m ON m.id=t.trigger_message_id
     LEFT JOIN multiremi_issue_sessions owned_session ON owned_session.id=t.session_id
     WHERE t.issue_id=? AND COALESCE(owned_session.chat_id,t.chat_session_id) IS NULL
@@ -32,7 +32,7 @@ export function deriveIssueStatusWithinTransaction(ctx:StoreContext,issueId:stri
   // A question still waiting on a Leader is execution, not review.
   else if(active.some(t=>t.status==='awaiting_human')||decision)status='in_progress';
   else if(active.some(t=>t.status==='pending')){
-    if(active.some(t=>Number(t.merged_work_triggers)>0||t.trigger_sender==='member'||t.trigger_reason==='agent_dispatch'||['human_sender','agent_dispatch'].includes(t.wake_source)))status='todo';
+    if(active.some(t=>Number(t.merged_work_triggers)>0||t.trigger_sender==='member'||t.trigger_reason==='agent_dispatch'||(t.trigger_reason==='to_parent_owner'&&t.trigger_kind==='request')||['human_sender','agent_dispatch'].includes(t.wake_source)))status='todo';
   }else{
     // Intake completion belongs to the business round, including unassigned intake work.
     const latest=issue.issueKind==='intake'

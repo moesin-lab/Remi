@@ -26,6 +26,48 @@ pendingTurnBackendTests('MUL-506 Issue derivation and read progress',fixture=>{
     const second=f.store.sendMessage({...base,sender:{type:'member',id:'mem_local_local'},message_kind:'request',body_md:'human starts work'});
     expect(second.turn_id).toBe(first.turn_id);
     expect(f.store.getIssue(mergedIssue.id)?.status).toBe('todo');});
+  it('MUL-335: blocked parent transitions to todo on child to_parent_owner request (standalone or merged) while non-request preserves blocked',()=>{
+    const f=setup();
+    const childOwner=f.store.createAgent({name:'Child Owner',provider:'codex'});
+    const parent1=f.store.createIssue({title:'Blocked parent standalone',status:'blocked',assigneeType:'agent',assigneeId:f.agent.id});
+    const parent1Main=f.store.getOrCreateDefaultIssueSession(parent1.id);
+    const child1=f.store.createIssue({title:'Child 1',parentIssueId:parent1.id,status:'in_progress',assigneeType:'agent',assigneeId:childOwner.id});
+    const child1Main=f.store.getOrCreateDefaultIssueSession(child1.id);
+    const child1Source=f.store.sendMessage({session_id:child1Main.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:childOwner.id},message_kind:'request',wake_requested:'now',body_md:'work child 1'});
+
+    // Non-request to_parent_owner status/report keeps blocked parent blocked.
+    const statusReport=f.store.sendMessage({session_id:child1Main.id,sender:{type:'agent',id:childOwner.id},source_turn_id:child1Source.turn_id,to:{type:'role',ref:'parent_owner'},message_kind:'report',wake_requested:'now',body_md:'FYI report'});
+    expect(statusReport.wake_reason).toBe('to_parent_owner');
+    expect(statusReport.message.session_id).toBe(parent1Main.id);
+    expect(f.store.getIssue(parent1.id)?.status).toBe('blocked');
+
+    // Direct child request on a blocked parent (no prior pending turn) moves parent to todo.
+    const parent2=f.store.createIssue({title:'Blocked parent direct request',status:'blocked',assigneeType:'agent',assigneeId:f.agent.id});
+    const parent2Main=f.store.getOrCreateDefaultIssueSession(parent2.id);
+    const child2=f.store.createIssue({title:'Child 2',parentIssueId:parent2.id,status:'in_progress',assigneeType:'agent',assigneeId:childOwner.id});
+    const child2Main=f.store.getOrCreateDefaultIssueSession(child2.id);
+    const child2Source=f.store.sendMessage({session_id:child2Main.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:childOwner.id},message_kind:'request',wake_requested:'now',body_md:'work child 2'});
+    const directReq=f.store.sendMessage({session_id:parent2Main.id,sender:{type:'agent',id:childOwner.id},source_turn_id:child2Source.turn_id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Child 2 needs parent action'});
+    expect(directReq.wake_reason).toBe('to_parent_owner');
+    expect(f.store.getIssue(parent2.id)?.status).toBe('todo');
+
+    // Blocked parent with pending platform_to_owner turn stays blocked on platform/report, then becomes todo when a child request coalesces in.
+    const parent3=f.store.createIssue({title:'Blocked parent merged pending',status:'blocked',assigneeType:'agent',assigneeId:f.agent.id});
+    const parent3Main=f.store.getOrCreateDefaultIssueSession(parent3.id);
+    const child3=f.store.createIssue({title:'Child 3',parentIssueId:parent3.id,status:'in_progress',assigneeType:'agent',assigneeId:childOwner.id});
+    const child3Main=f.store.getOrCreateDefaultIssueSession(child3.id);
+    const child3Source=f.store.sendMessage({session_id:child3Main.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:childOwner.id},message_kind:'request',wake_requested:'now',body_md:'work child 3'});
+    const platformPending=f.store.sendMessage({session_id:parent3Main.id,sender:{type:'platform',id:null},to:{type:'agent',ref:f.agent.id},message_kind:'status',wake_requested:'now',body_md:'Child status notice'});
+    expect(platformPending.wake_reason).toBe('platform_to_owner');
+    expect(f.store.getIssue(parent3.id)?.status).toBe('blocked');
+    const mergedReport=f.store.sendMessage({session_id:child3Main.id,sender:{type:'agent',id:childOwner.id},source_turn_id:child3Source.turn_id,to:{type:'role',ref:'parent_owner'},message_kind:'report',wake_requested:'now',body_md:'Non-request report coalesced'});
+    expect(mergedReport.turn_id).toBe(platformPending.turn_id);
+    expect(f.store.getIssue(parent3.id)?.status).toBe('blocked');
+    const mergedReq=f.store.sendMessage({session_id:parent3Main.id,sender:{type:'agent',id:childOwner.id},source_turn_id:child3Source.turn_id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Child 3 requests parent coordination'});
+    expect(mergedReq.wake_reason).toBe('to_parent_owner');
+    expect(mergedReq.turn_id).toBe(platformPending.turn_id);
+    expect(f.store.getIssue(parent3.id)?.status).toBe('todo');
+  });
   // An owner question at the human stage needs a human: in_review until running work resumes.
   it('unanswered owner decision at the human stage parks the Issue in_review until work resumes',()=>{const f=setup();
     const runtime=f.store.registerRuntime({name:'Derivation native host',provider:'codex',daemonId:'derive-native'});

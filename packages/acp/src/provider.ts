@@ -3276,13 +3276,13 @@ const ANTIGRAVITY_STILL_RUNNING_RE = /\b(?:Status["']?\s*[:=]\s*["']?(?:RUNNING|
 const ANTIGRAVITY_LOG_LINE_RE = /^\s*(?:Log|Task logs(?:\s+are\s+available\s+at)?)\s*:.*$/gim;
 const ANTIGRAVITY_URL_RE = /(?:file|https?):\/\/\S+/gi;
 const ANTIGRAVITY_JSON_SKIP_PAYLOAD_KEY_RE = /^(?:log|logs|logpath|log_path|logurl|log_url|output|rawoutput|raw_output|formatted_output|combinedoutput|stdout|stderr|result|results|command|cmd|input|rawinput|raw_input|args|env|summary|message|preview|payload)$/i;
-const ANTIGRAVITY_JSON_EXPLICIT_ID_KEY_RE = /^(?:taskId|task_id|TaskId|id|callId|call_id|toolCallId|tool_call_id)$/;
+const ANTIGRAVITY_JSON_DEDICATED_ID_KEY_RE = /^(?:taskId|task_id|TaskId|callId|call_id|toolCallId|tool_call_id)$/;
 const ANTIGRAVITY_JSON_DESCRIPTIVE_KEY_RE = /^(?:title|name|label|description|prompt|reason|error|cwd|path|file|url)$/i;
 const ANTIGRAVITY_CONV_TASK_TOKEN_RE = /\b([A-Za-z0-9._-]+\/task-[A-Za-z0-9._-]+)\b/gi;
 const ANTIGRAVITY_STANDALONE_TASK_TOKEN_RE = /(?<![A-Za-z0-9._:/-])(task-\d+)(?![A-Za-z0-9._:/-])/gi;
 const ANTIGRAVITY_LABELED_TASK_TOKEN_RE = /\bTask(?:\s+ID)?\s*[:#]\s*[`"']?([A-Za-z0-9._:/-]+)[`"']?/gi;
 const ANTIGRAVITY_SPACED_TASK_TOKEN_RE = /\bTask\s+[`"']?([A-Za-z0-9._:/-]*[0-9/][A-Za-z0-9._:/-]*)[`"']?/gi;
-const ANTIGRAVITY_JSON_TASK_TOKEN_RE = /"(?:taskId|task_id|TaskId|id|callId|call_id|toolCallId|tool_call_id)"\s*:\s*"([A-Za-z0-9._:/-]+)"/gi;
+const ANTIGRAVITY_JSON_TASK_TOKEN_RE = /"(?:taskId|task_id|TaskId|callId|call_id|toolCallId|tool_call_id)"\s*:\s*"([A-Za-z0-9._:/-]+)"/gi;
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -3321,12 +3321,56 @@ function stripNonStatusMetadataLines(text: string): string {
     .join("\n");
 }
 
+/**
+ * Unwraps up to two layers of JSON-string encoding (such as
+ * `JSON.stringify(JSON.stringify(obj))`) so double-serialized string carriers
+ * enter the same envelope and payload-blanking pipeline as structured objects
+ * and single-encoded JSON strings. Also unwraps a leading JSON-string carrier
+ * when followed by a newline and trailing host text (e.g. an appended
+ * `<SYSTEM_MESSAGE>`).
+ */
+function unwrapJsonStringCarrier(text: string): string {
+  let current = text;
+  for (let depth = 0; depth < 2; depth++) {
+    const trimmed = current.trim();
+    if (!trimmed.startsWith("\"")) break;
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed === "string") {
+        current = parsed;
+        continue;
+      }
+      break;
+    } catch {
+      const strEnd = findJsonStringEnd(trimmed, 0);
+      if (strEnd === -1 || strEnd >= trimmed.length - 1) break;
+      const tail = trimmed.slice(strEnd + 1);
+      if (!/^[ \t]*\r?\n/.test(tail)) break;
+      try {
+        const parsed = JSON.parse(trimmed.slice(0, strEnd + 1));
+        if (typeof parsed === "string") {
+          const innerTrimmed = parsed.trimStart();
+          if (innerTrimmed.startsWith("{") || innerTrimmed.startsWith("[") || innerTrimmed.startsWith("\"")) {
+            current = parsed + tail;
+            continue;
+          }
+        }
+      } catch {
+        // Not a valid leading JSON string carrier.
+      }
+      break;
+    }
+  }
+  return current;
+}
+
 function splitAntigravityToolOutput(text: string): { envelope: string; tail: string } {
-  const match = ANTIGRAVITY_TOOL_OUTPUT_SEPARATOR_RE.exec(text);
-  if (!match) return { envelope: text, tail: "" };
+  const unwrapped = unwrapJsonStringCarrier(text);
+  const match = ANTIGRAVITY_TOOL_OUTPUT_SEPARATOR_RE.exec(unwrapped);
+  if (!match) return { envelope: unwrapped, tail: "" };
   return {
-    envelope: text.slice(0, match.index),
-    tail: text.slice(match.index + match[0].length),
+    envelope: unwrapped.slice(0, match.index),
+    tail: unwrapped.slice(match.index + match[0].length),
   };
 }
 
@@ -3413,6 +3457,29 @@ function extractTaskIdTokens(text: string, knownIds?: ReadonlySet<string>): stri
     let match: RegExpExecArray | null;
     while ((match = re.exec(sanitized)) !== null) {
       addToken(match[1]);
+    }
+  }
+  if (sanitized.includes("{") && /"id"\s*:/i.test(sanitized)) {
+    const visitGenericId = (node: unknown): void => {
+      if (Array.isArray(node)) {
+        for (const item of node) visitGenericId(item);
+        return;
+      }
+      if (!node || typeof node !== "object") return;
+      const obj = node as Record<string, unknown>;
+      if (typeof obj.id === "string" && obj.id.trim() && hasJsonStatusField(obj)) {
+        addToken(obj.id.trim());
+      }
+      for (const [key, val] of Object.entries(obj)) {
+        if (ANTIGRAVITY_JSON_SKIP_PAYLOAD_KEY_RE.test(key)) continue;
+        if (val && typeof val === "object") visitGenericId(val);
+      }
+    };
+    const containers = extractTopLevelJsonContainers(sanitized);
+    if (containers.length > 0) {
+      for (const container of containers) visitGenericId(container.value);
+    } else {
+      for (const obj of extractBalancedJsonObjects(sanitized)) visitGenericId(obj.value);
     }
   }
   return [...found];
@@ -3532,6 +3599,62 @@ function extractTopLevelJsonContainers(text: string): Array<{ start: number; end
   return containers;
 }
 
+function jsonContainerTailState(text: string): { unclosed: boolean; inString: boolean } {
+  const envelope = extractAntigravityToolEnvelope(unwrapJsonStringCarrier(text));
+  for (let i = 0; i < envelope.length; i++) {
+    const ch = envelope[i];
+    if (ch === "\"") {
+      const strEnd = findJsonStringEnd(envelope, i);
+      if (strEnd === -1) break;
+      if (!/[\r\n]/.test(envelope.slice(i + 1, strEnd))) {
+        i = strEnd;
+      }
+      continue;
+    }
+    if (ch !== "{" && ch !== "[") continue;
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    let closed = false;
+    for (let j = i; j < envelope.length; j++) {
+      const c = envelope[j]!;
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (c === "\\") {
+          escaped = true;
+        } else if (c === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+      if (c === "\"") {
+        inString = true;
+      } else if (c === "{") {
+        stack.push("}");
+      } else if (c === "[") {
+        stack.push("]");
+      } else if (c === "}" || c === "]") {
+        if (stack.length === 0 || stack[stack.length - 1] !== c) {
+          return { unclosed: true, inString: false };
+        }
+        stack.pop();
+        if (stack.length === 0) {
+          i = j;
+          closed = true;
+          break;
+        }
+      }
+    }
+    if (!closed) return { unclosed: true, inString };
+  }
+  return { unclosed: false, inString: false };
+}
+
+function hasUnclosedJsonContainer(text: string): boolean {
+  return jsonContainerTailState(text).unclosed;
+}
+
 function skipJsonWhitespace(text: string, index: number): number {
   let i = index;
   while (i < text.length && /\s/.test(text[i]!)) i++;
@@ -3543,15 +3666,17 @@ function skipJsonWhitespace(text: string, index: number): number {
  * such as `"output": {...}`, `"result": [...]`, `"output": "..."`, or primitive values)
  * with `null` using a string-aware balanced-bracket scanner so arbitrarily deep or
  * truncated payload subtrees cannot leak task ids, status tokens, or `<SYSTEM_MESSAGE>`
- * receipts. Only scans JSON string literals and keys while inside `{...}` / `[...]`.
+ * receipts. Unwraps JSON string carriers first and only scans JSON string literals and
+ * keys while inside `{...}` / `[...]`.
  */
 function blankJsonPayloadSubtrees(text: string): string {
   if (!text) return "";
+  const source = unwrapJsonStringCarrier(text);
   let out = "";
   let braceDepth = 0;
   let i = 0;
-  while (i < text.length) {
-    const ch = text[i]!;
+  while (i < source.length) {
+    const ch = source[i]!;
     if (ch === "{" || ch === "[") {
       braceDepth++;
       out += ch;
@@ -3565,44 +3690,44 @@ function blankJsonPayloadSubtrees(text: string): string {
       continue;
     }
     if (ch === "\"" && braceDepth > 0) {
-      const strEnd = findJsonStringEnd(text, i);
+      const strEnd = findJsonStringEnd(source, i);
       if (strEnd === -1) {
-        out += text.slice(i);
+        out += source.slice(i);
         break;
       }
-      const key = text.slice(i + 1, strEnd);
-      const colonIdx = skipJsonWhitespace(text, strEnd + 1);
+      const key = source.slice(i + 1, strEnd);
+      const colonIdx = skipJsonWhitespace(source, strEnd + 1);
       if (
         !key.includes("\n")
         && !key.includes("\\")
-        && colonIdx < text.length
-        && text[colonIdx] === ":"
+        && colonIdx < source.length
+        && source[colonIdx] === ":"
         && ANTIGRAVITY_JSON_SKIP_PAYLOAD_KEY_RE.test(key)
       ) {
-        const valStart = skipJsonWhitespace(text, colonIdx + 1);
-        if (valStart < text.length) {
-          const valCh = text[valStart]!;
+        const valStart = skipJsonWhitespace(source, colonIdx + 1);
+        if (valStart < source.length) {
+          const valCh = source[valStart]!;
           if (valCh === "{" || valCh === "[") {
-            const valEnd = findJsonContainerEnd(text, valStart);
-            out += `${text.slice(i, colonIdx + 1)} null`;
-            i = valEnd !== -1 ? valEnd + 1 : text.length;
+            const valEnd = findJsonContainerEnd(source, valStart);
+            out += `${source.slice(i, colonIdx + 1)} null`;
+            i = valEnd !== -1 ? valEnd + 1 : source.length;
             continue;
           }
           if (valCh === "\"") {
-            const valStrEnd = findJsonStringEnd(text, valStart);
-            out += `${text.slice(i, colonIdx + 1)} null`;
-            i = valStrEnd !== -1 ? valStrEnd + 1 : text.length;
+            const valStrEnd = findJsonStringEnd(source, valStart);
+            out += `${source.slice(i, colonIdx + 1)} null`;
+            i = valStrEnd !== -1 ? valStrEnd + 1 : source.length;
             continue;
           }
-          const primMatch = /^(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=$|[\s,}\]])/.exec(text.slice(valStart));
+          const primMatch = /^(?:true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=$|[\s,}\]])/.exec(source.slice(valStart));
           if (primMatch) {
-            out += `${text.slice(i, colonIdx + 1)} null`;
+            out += `${source.slice(i, colonIdx + 1)} null`;
             i = valStart + primMatch[0].length;
             continue;
           }
         }
       }
-      out += text.slice(i, strEnd + 1);
+      out += source.slice(i, strEnd + 1);
       i = strEnd + 1;
       continue;
     }
@@ -3729,6 +3854,34 @@ function classifySingleTaskEnvelopeStatus(envelope: string): { terminal: boolean
   return { terminal, running };
 }
 
+function hasJsonStatusField(obj: Record<string, unknown>): boolean {
+  return "status" in obj || "Status" in obj || "state" in obj || "State" in obj;
+}
+
+function extractJsonExplicitTaskIdValue(
+  obj: Record<string, unknown>,
+  key: string,
+  val: unknown,
+  taskId: string,
+  knownIds: ReadonlySet<string>,
+): string | null {
+  if (typeof val !== "string") return null;
+  const trimmed = val.trim();
+  if (!trimmed) return null;
+  if (ANTIGRAVITY_JSON_DEDICATED_ID_KEY_RE.test(key)) return trimmed;
+  if (key === "id") {
+    if (
+      hasJsonStatusField(obj)
+      || trimmed === taskId
+      || knownIds.has(trimmed)
+      || extractTaskIdTokens(trimmed, knownIds).length > 0
+    ) {
+      return trimmed;
+    }
+  }
+  return null;
+}
+
 function jsonValueIndicatesTaskTerminal(
   value: unknown,
   taskId: string,
@@ -3747,9 +3900,8 @@ function jsonValueIndicatesTaskTerminal(
     const obj = node as Record<string, unknown>;
     const explicitIds: string[] = [];
     for (const [key, val] of Object.entries(obj)) {
-      if (ANTIGRAVITY_JSON_EXPLICIT_ID_KEY_RE.test(key) && typeof val === "string" && val.trim()) {
-        explicitIds.push(val.trim());
-      }
+      const explicitId = extractJsonExplicitTaskIdValue(obj, key, val, taskId, knownIds);
+      if (explicitId) explicitIds.push(explicitId);
     }
     if (explicitIds.length > 0) {
       sawExplicitId = true;
@@ -3913,6 +4065,7 @@ function isStructuredManageTaskRawOutput(rawOutput: unknown): boolean {
   return "status" in obj || "Status" in obj
     || "state" in obj || "State" in obj
     || "taskId" in obj || "task_id" in obj || "TaskId" in obj || "id" in obj
+    || "callId" in obj || "call_id" in obj || "toolCallId" in obj || "tool_call_id" in obj
     || "tasks" in obj || "items" in obj;
 }
 
@@ -3961,29 +4114,30 @@ function mergeManageTaskOutput(
   knownIds: ReadonlySet<string>,
   inputTaskId?: string,
 ): string {
-  if (!next) return prev ?? "";
-  if (!prev) return next;
-  if (next === prev || next.includes(prev)) return next;
-  const prevTrimmed = prev.trimStart();
-  const prevIsIncompleteJson = (prevTrimmed.startsWith("[") || prevTrimmed.startsWith("{"))
-    && !isValidJsonContainer(prev);
-  const prevBlanked = blankJsonPayloadSubtrees(extractAntigravityToolEnvelope(prev));
-  const nextBlanked = blankJsonPayloadSubtrees(extractAntigravityToolEnvelope(next));
+  const prevUnwrapped = prev ? unwrapJsonStringCarrier(prev) : undefined;
+  const nextUnwrapped = unwrapJsonStringCarrier(next);
+  if (!nextUnwrapped) return prevUnwrapped ?? "";
+  if (!prevUnwrapped) return nextUnwrapped;
+  if (nextUnwrapped === prevUnwrapped || nextUnwrapped.includes(prevUnwrapped)) return nextUnwrapped;
+  const prevTrimmed = prevUnwrapped.trimStart();
+  const prevJsonTail = jsonContainerTailState(prevUnwrapped);
+  const prevBlanked = blankJsonPayloadSubtrees(extractAntigravityToolEnvelope(prevUnwrapped));
+  const nextBlanked = blankJsonPayloadSubtrees(extractAntigravityToolEnvelope(nextUnwrapped));
   const prevIds = extractTaskIdTokens(prevBlanked, knownIds);
   const nextIds = extractTaskIdTokens(nextBlanked, knownIds);
   const nextRepeatsPrevTask = nextIds.some((id) => prevIds.includes(id));
 
-  if (prevIsIncompleteJson) {
-    const prevExpectsValue = /[:,[]\s*$/.test(prev);
-    const nextIsCompleteJson = isValidJsonContainer(next);
+  if (prevJsonTail.unclosed) {
+    const prevExpectsValue = prevJsonTail.inString || /[:,[]\s*$/.test(prevUnwrapped);
+    const nextIsCompleteJson = isValidJsonContainer(nextUnwrapped);
     const nextReplacesIncomplete = !prevExpectsValue
       && nextIsCompleteJson
-      && !isValidJsonContainer(prev + next)
+      && hasUnclosedJsonContainer(prevUnwrapped + nextUnwrapped)
       && (
         nextRepeatsPrevTask
-        || (prevTrimmed.startsWith("[") && next.trimStart().startsWith("["))
+        || (prevTrimmed.startsWith("[") && nextUnwrapped.trimStart().startsWith("["))
       );
-    return nextReplacesIncomplete ? next : prev + next;
+    return nextReplacesIncomplete ? nextUnwrapped : prevUnwrapped + nextUnwrapped;
   }
 
   const prevStatus = classifySingleTaskEnvelopeStatus(prevBlanked);
@@ -3995,32 +4149,32 @@ function mergeManageTaskOutput(
     const prevOnlyTarget = prevIds.every((id) => id === inputTaskId);
     const nextHasNoOtherTask = nextIds.every((id) => id === inputTaskId);
     if (prevOnlyTarget && nextHasNoOtherTask && prevHasStatus && nextHasStatus) {
-      return next;
+      return nextUnwrapped;
     }
   } else if (prevIds.length === 0 && nextIds.length === 0 && prevHasStatus && nextHasStatus) {
-    return next;
+    return nextUnwrapped;
   }
 
   if (
-    prev.endsWith(`\n${next}`)
-    || prev.endsWith(`\r\n${next}`)
-    || ((next.startsWith("\n") || next.startsWith("\r\n")) && prev.endsWith(next))
+    prevUnwrapped.endsWith(`\n${nextUnwrapped}`)
+    || prevUnwrapped.endsWith(`\r\n${nextUnwrapped}`)
+    || ((nextUnwrapped.startsWith("\n") || nextUnwrapped.startsWith("\r\n")) && prevUnwrapped.endsWith(nextUnwrapped))
   ) {
-    return prev;
+    return prevUnwrapped;
   }
 
-  const nextStartsFreshSnapshot = /^\s*(?:[\[{]|Created At\s*:)/i.test(next);
-  if (nextStartsFreshSnapshot || nextRepeatsPrevTask) return next;
+  const nextStartsFreshSnapshot = /^\s*(?:[\[{]|Created At\s*:)/i.test(nextUnwrapped);
+  if (nextStartsFreshSnapshot || nextRepeatsPrevTask) return nextUnwrapped;
 
-  const firstNextLine = next.split(/\r?\n/, 1)[0] ?? "";
-  if (!/\s$/.test(prev) && (
-    /^(?:Status|State|Task(?:\s+ID)?|Log|Command\s+output|Log\s+output|Created At|Completed At)\s*[:=]/i.test(next)
+  const firstNextLine = nextUnwrapped.split(/\r?\n/, 1)[0] ?? "";
+  if (!/\s$/.test(prevUnwrapped) && (
+    /^(?:Status|State|Task(?:\s+ID)?|Log|Command\s+output|Log\s+output|Created At|Completed At)\s*[:=]/i.test(nextUnwrapped)
     || ANTIGRAVITY_STANDALONE_TERMINAL_STATUS_LINE_RE.test(firstNextLine)
     || ANTIGRAVITY_STANDALONE_RUNNING_STATUS_LINE_RE.test(firstNextLine)
   )) {
-    return `${prev}\n${next}`;
+    return `${prevUnwrapped}\n${nextUnwrapped}`;
   }
-  return prev + next;
+  return prevUnwrapped + nextUnwrapped;
 }
 
 /**
@@ -4525,10 +4679,7 @@ class AntigravityBackgroundCommandTracker {
         const action = readStringField(input, ["Action", "action"])?.toLowerCase() ?? prev.action;
         const taskId = readStringField(input, ["TaskId", "task_id", "taskId"]) ?? prev.taskId;
         const sawNonTerminal = prev.sawNonTerminal === true || status === "pending" || status === "in_progress";
-        const prevTrimmed = prev.output?.trimStart() ?? "";
-        const prevWasIncompleteJson = Boolean(prev.output)
-          && (prevTrimmed.startsWith("{") || prevTrimmed.startsWith("["))
-          && !isValidJsonContainer(prev.output!);
+        const prevWasIncompleteJson = Boolean(prev.output) && hasUnclosedJsonContainer(prev.output!);
         const mergedOutput = manageTaskText ? mergeManageTaskOutput(prev.output, manageTaskText, this._knownTaskIds(taskId), taskId) : prev.output;
         const structuredRaw = isStructuredManageTaskRawOutput(frame.rawOutput);
         let sysMsgText = "";

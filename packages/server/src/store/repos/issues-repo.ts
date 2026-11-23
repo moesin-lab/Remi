@@ -1387,46 +1387,230 @@ export class IssuesRepo {
     const includeCommentBodies = input.includeCommentBodies !== false;
     const limit = clampSearchLimit(input.limit);
     const offset = Math.max(0, Number(input.offset ?? 0));
-    const rows = this.listIssues({ includeArchived: true }).map((issue) => ({
-      issue,
-      matchedCommentSnippet: includeCommentBodies
-        ? this.searchIssueCommentSnippet(issue.id, query)
-        : null,
-    })).filter(({ issue, matchedCommentSnippet }) => {
-      if (issue.workspaceId !== workspaceId) return false;
-      if (!includeClosed && CLOSED_ISSUE_STATUSES.has(issue.status) && !issue.archivedAt) return false;
-      return searchMatch(issue.key, query)
-        || searchMatch(issue.title, query)
-        || searchMatch(issue.description ?? "", query)
-        || matchedCommentSnippet !== null;
-    }).map(({ issue, matchedCommentSnippet }) => {
-      const matchSource = searchMatch(issue.key, query)
-        ? "key"
-        : searchMatch(issue.title, query)
-          ? "title"
-          : searchMatch(issue.description ?? "", query)
-            ? "description"
-            : "comment";
-      const result: MultiremiIssueSearchResult = {
-        ...issue,
-        matchSource,
-      };
-      if (matchSource === "description" && issue.description) result.matchedDescriptionSnippet = extractSearchSnippet(issue.description, query);
-      if (matchedCommentSnippet !== null) {
-        result.matchedCommentSnippet = matchedCommentSnippet;
-        if (matchSource === "comment") result.matchedSnippet = matchedCommentSnippet;
-      }
-      return result;
-    }).sort((left, right) => searchRank(left.matchSource) - searchRank(right.matchSource) || Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
-    return { issues: rows.slice(offset, offset + limit), total: rows.length };
+    const terms = extractSearchTerms(query);
+    if (terms.length === 0) return { issues: [], total: 0 };
+
+    const closedFilterSql = includeClosed ? "" : ISSUE_SEARCH_EXCLUDE_UNARCHIVED_CLOSED_SQL;
+    const canPushLike = terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS && !terms.some(hasNonAsciiCasedChar);
+    if (!canPushLike) {
+      return this.searchIssuesWorkspaceScanFallback({
+        query,
+        workspaceId,
+        closedFilterSql,
+        includeCommentBodies,
+        limit,
+        offset,
+      });
+    }
+
+    const patterns = terms.map((term) => `%${escapeSearchLikeTerm(term)}%`);
+    const keyLikeSql = buildSearchLikeAllTermsSql(ISSUE_SEARCH_EFFECTIVE_KEY_SQL, patterns.length);
+    const titleLikeSql = buildSearchLikeAllTermsSql("i.title", patterns.length);
+    const descriptionLikeSql = buildSearchLikeAllTermsSql("i.description", patterns.length);
+
+    let candidateRows: Row[];
+    if (includeCommentBodies) {
+      const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", patterns.length);
+      candidateRows = this.ctx.db.query(
+        `WITH matched_comments AS (
+           SELECT DISTINCT s.issue_id
+           FROM multiremi_issues i
+           JOIN multiremi_issue_sessions s ON s.issue_id = i.id
+           JOIN multiremi_conversation_log l ON l.session_id = s.id
+           WHERE i.workspace_id = ?${closedFilterSql}
+             AND s.chat_id IS NULL
+             AND l.kind = 'message'
+             AND l.visibility = 'shown'
+             AND l.deleted_at IS NULL
+             AND (${commentLikeSql})
+         ),
+         scored AS (
+           SELECT
+             i.id,
+             i.updated_at,
+             CASE WHEN mc.issue_id IS NOT NULL THEN 1 ELSE 0 END AS has_comment_match,
+             CASE
+               WHEN (${keyLikeSql}) THEN 0
+               WHEN (${titleLikeSql}) THEN 1
+               WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
+               WHEN mc.issue_id IS NOT NULL THEN 3
+               ELSE NULL
+             END AS match_rank
+           FROM multiremi_issues i
+           LEFT JOIN matched_comments mc ON mc.issue_id = i.id
+           WHERE i.workspace_id = ?${closedFilterSql}
+         )
+         SELECT id, updated_at, has_comment_match, match_rank
+         FROM scored
+         WHERE match_rank IS NOT NULL
+         ORDER BY match_rank ASC, updated_at DESC`,
+      ).all(workspaceId, ...patterns, ...patterns, ...patterns, ...patterns, workspaceId) as Row[];
+    } else {
+      candidateRows = this.ctx.db.query(
+        `WITH scored AS (
+           SELECT
+             i.id,
+             i.updated_at,
+             0 AS has_comment_match,
+             CASE
+               WHEN (${keyLikeSql}) THEN 0
+               WHEN (${titleLikeSql}) THEN 1
+               WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
+               ELSE NULL
+             END AS match_rank
+           FROM multiremi_issues i
+           WHERE i.workspace_id = ?${closedFilterSql}
+         )
+         SELECT id, updated_at, has_comment_match, match_rank
+         FROM scored
+         WHERE match_rank IS NOT NULL
+         ORDER BY match_rank ASC, updated_at DESC`,
+      ).all(...patterns, ...patterns, ...patterns, workspaceId) as Row[];
+    }
+
+    const candidates = candidateRows.map((row) => ({
+      id: String(row.id),
+      updatedAt: String(row.updated_at),
+      matchRank: Number(row.match_rank),
+      hasCommentMatch: Number(row.has_comment_match) === 1,
+    })).sort((left, right) => left.matchRank - right.matchRank || Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+
+    const total = candidates.length;
+    const page = candidates.slice(offset, offset + limit);
+    if (page.length === 0) return { issues: [], total };
+
+    const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id));
+    const commentPageIds = includeCommentBodies
+      ? page.filter((item) => item.hasCommentMatch).map((item) => item.id)
+      : [];
+    const commentSnippetsByIssueId = commentPageIds.length > 0
+      ? this.searchIssueCommentSnippets(commentPageIds, query, patterns)
+      : new Map<string, string>();
+
+    const issues: MultiremiIssueSearchResult[] = [];
+    for (const item of page) {
+      const issue = hydratedById.get(item.id);
+      if (!issue) continue;
+      issues.push(buildIssueSearchResult(issue, query, commentSnippetsByIssueId.get(item.id) ?? null));
+    }
+    return { issues, total };
   }
 
-  private searchIssueCommentSnippet(issueId: string, query: string): string | null {
+  private hydrateIssuesByIdsInWorkspace(workspaceId: string, issueIds: string[]): Map<string, MultiremiIssue> {
+    const byId = new Map<string, MultiremiIssue>();
+    if (issueIds.length === 0) return byId;
+    const placeholders = issueIds.map(() => "?").join(", ");
     const rows = this.ctx.db.query(
-      "SELECT body FROM multiremi_issue_message_records WHERE issue_id = ? ORDER BY created_at DESC",
-    ).all(issueId) as Row[];
-    const match = rows.find((row) => searchMatch(String(row.body ?? ""), query));
-    return match ? extractSearchSnippet(String(match.body ?? ""), query) : null;
+      `SELECT * FROM multiremi_issues WHERE workspace_id = ? AND id IN (${placeholders})`,
+    ).all(workspaceId, ...issueIds) as Row[];
+    for (const issue of this.hydrateIssues(rows.map((row) => toIssue(row)))) {
+      byId.set(issue.id, issue);
+    }
+    return byId;
+  }
+
+  private searchIssueCommentSnippets(issueIds: string[], query: string, patterns: string[]): Map<string, string> {
+    const snippets = new Map<string, string>();
+    if (issueIds.length === 0) return snippets;
+    const placeholders = issueIds.map(() => "?").join(", ");
+    const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", patterns.length);
+    const rows = this.ctx.db.query(
+      `SELECT issue_id, body_md
+       FROM (
+         SELECT
+           s.issue_id AS issue_id,
+           l.body_md AS body_md,
+           ROW_NUMBER() OVER (PARTITION BY s.issue_id ORDER BY l.created_at DESC, l.seq DESC, l.id DESC) AS rn
+         FROM multiremi_conversation_log l
+         JOIN multiremi_issue_sessions s ON s.id = l.session_id
+         WHERE s.issue_id IN (${placeholders})
+           AND s.chat_id IS NULL
+           AND l.kind = 'message'
+           AND l.visibility = 'shown'
+           AND l.deleted_at IS NULL
+           AND (${commentLikeSql})
+       ) ranked
+       WHERE rn = 1`,
+    ).all(...issueIds, ...patterns) as Row[];
+    for (const row of rows) {
+      const body = String(row.body_md ?? "");
+      if (searchMatch(body, query)) {
+        snippets.set(String(row.issue_id), extractSearchSnippet(body, query));
+      }
+    }
+    return snippets;
+  }
+
+  private searchIssuesWorkspaceScanFallback(input: {
+    query: string;
+    workspaceId: string;
+    closedFilterSql: string;
+    includeCommentBodies: boolean;
+    limit: number;
+    offset: number;
+  }): { issues: MultiremiIssueSearchResult[]; total: number } {
+    const { query, workspaceId, closedFilterSql, includeCommentBodies, limit, offset } = input;
+    const rows = this.ctx.db.query(
+      `SELECT id, issue_number, issue_key, title, description, updated_at
+       FROM multiremi_issues i
+       WHERE i.workspace_id = ?${closedFilterSql}
+       ORDER BY i.updated_at DESC`,
+    ).all(workspaceId) as Row[];
+    const commentSnippetByIssueId = new Map<string, string>();
+    if (includeCommentBodies && rows.length > 0) {
+      const commentRows = this.ctx.db.query(
+        `SELECT s.issue_id AS issue_id, l.body_md AS body_md
+         FROM multiremi_issues i
+         JOIN multiremi_issue_sessions s ON s.issue_id = i.id
+         JOIN multiremi_conversation_log l ON l.session_id = s.id
+         WHERE i.workspace_id = ?${closedFilterSql}
+           AND s.chat_id IS NULL
+           AND l.kind = 'message'
+           AND l.visibility = 'shown'
+           AND l.deleted_at IS NULL
+         ORDER BY s.issue_id ASC, l.created_at DESC, l.seq DESC, l.id DESC`,
+      ).all(workspaceId) as Row[];
+      for (const row of commentRows) {
+        const issueId = String(row.issue_id);
+        if (commentSnippetByIssueId.has(issueId)) continue;
+        const body = String(row.body_md ?? "");
+        if (searchMatch(body, query)) {
+          commentSnippetByIssueId.set(issueId, extractSearchSnippet(body, query));
+        }
+      }
+    }
+    const candidates: Array<{ id: string; matchRank: number; updatedAt: string }> = [];
+    for (const row of rows) {
+      const id = String(row.id);
+      const number = Number(row.issue_number ?? 0);
+      const key = String(row.issue_key || (number > 0 ? formatIssueKey(number) : id));
+      const title = String(row.title ?? "");
+      const description = nullableString(row.description) ?? "";
+      const hasComment = commentSnippetByIssueId.has(id);
+      const matchSource = searchMatch(key, query)
+        ? "key"
+        : searchMatch(title, query)
+          ? "title"
+          : searchMatch(description, query)
+            ? "description"
+            : hasComment
+              ? "comment"
+              : null;
+      if (!matchSource) continue;
+      candidates.push({ id, matchRank: searchRank(matchSource), updatedAt: String(row.updated_at) });
+    }
+    candidates.sort((left, right) => left.matchRank - right.matchRank || Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+    const total = candidates.length;
+    const page = candidates.slice(offset, offset + limit);
+    if (page.length === 0) return { issues: [], total };
+    const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id));
+    const issues: MultiremiIssueSearchResult[] = [];
+    for (const item of page) {
+      const issue = hydratedById.get(item.id);
+      if (!issue) continue;
+      issues.push(buildIssueSearchResult(issue, query, commentSnippetByIssueId.get(item.id) ?? null));
+    }
+    return { issues, total };
   }
 
   private sameWorkspaceParent(issue: MultiremiIssue): MultiremiIssue | null {
@@ -6578,6 +6762,67 @@ export class IssuesRepo {
 
 function formatIssueKey(number: number): string {
   return `MUL-${number}`;
+}
+
+const ISSUE_SEARCH_EFFECTIVE_KEY_SQL =
+  "CASE WHEN i.issue_key IS NOT NULL AND i.issue_key <> '' THEN i.issue_key " +
+  "WHEN COALESCE(i.issue_number, 0) > 0 THEN 'MUL-' || CAST(i.issue_number AS TEXT) " +
+  "ELSE i.id END";
+
+const ISSUE_SEARCH_CLOSED_NORMALIZED_SQL = [...CLOSED_ISSUE_STATUSES]
+  .filter((status) => (ISSUE_STATUSES as readonly string[]).includes(status))
+  .map((status) => `'${status}'`)
+  .join(", ");
+
+const ISSUE_SEARCH_EXCLUDE_UNARCHIVED_CLOSED_SQL =
+  ` AND (TRIM(COALESCE(i.status, 'todo')) NOT IN (${ISSUE_SEARCH_CLOSED_NORMALIZED_SQL}) ` +
+  "OR (i.archived_at IS NOT NULL AND i.archived_at <> ''))";
+
+const ISSUE_SEARCH_MAX_SQL_TERMS = 50;
+
+function extractSearchTerms(query: string): string[] {
+  return [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
+}
+
+function escapeSearchLikeTerm(term: string): string {
+  return term.replace(/[\\%_]/gu, (character) => `\\${character}`);
+}
+
+function hasNonAsciiCasedChar(value: string): boolean {
+  for (const ch of value) {
+    if (ch.charCodeAt(0) > 0x7f && ch.toLowerCase() !== ch.toUpperCase()) return true;
+  }
+  return false;
+}
+
+function buildSearchLikeAllTermsSql(columnSql: string, termCount: number): string {
+  return Array.from({ length: termCount }, () => `LOWER(${columnSql}) LIKE ? ESCAPE '\\'`).join(" AND ");
+}
+
+function buildIssueSearchResult(
+  issue: MultiremiIssue,
+  query: string,
+  matchedCommentSnippet: string | null,
+): MultiremiIssueSearchResult {
+  const matchSource = searchMatch(issue.key, query)
+    ? "key"
+    : searchMatch(issue.title, query)
+      ? "title"
+      : searchMatch(issue.description ?? "", query)
+        ? "description"
+        : "comment";
+  const result: MultiremiIssueSearchResult = {
+    ...issue,
+    matchSource,
+  };
+  if (matchSource === "description" && issue.description) {
+    result.matchedDescriptionSnippet = extractSearchSnippet(issue.description, query);
+  }
+  if (matchedCommentSnippet !== null) {
+    result.matchedCommentSnippet = matchedCommentSnippet;
+    if (matchSource === "comment") result.matchedSnippet = matchedCommentSnippet;
+  }
+  return result;
 }
 
 function escapeDependencyCheckEventIdForLike(value: string): string {

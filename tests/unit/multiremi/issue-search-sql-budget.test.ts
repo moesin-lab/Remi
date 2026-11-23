@@ -1,8 +1,25 @@
 import { expect, it, spyOn } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Hono } from "hono";
 import { createMultiremiApp } from "@multiremi/api.js";
 import type { MultiremiIssueSearchResult } from "@multiremi/contracts/types.js";
-import type { MultiremiStore } from "@multiremi/store.js";
-import { translateSqliteToPg, type SqlDatabase, type SqlStatement } from "@multiremi/store/db/postgres.js";
+import {
+  DB_REPLY_TRANSITION_EXCEPTIONS,
+  createRequestMetricsMiddleware,
+  currentDbReplyPolicy,
+} from "@multiremi/observability/request-metrics.js";
+import { MultiremiStore } from "@multiremi/store.js";
+import {
+  PostgresSyncDatabase,
+  postgresReplyMaxBytes,
+  resetDbReplyLimitForTest,
+  translateSqliteToPg,
+  type SqlDatabase,
+  type SqlStatement,
+} from "@multiremi/store/db/postgres.js";
+import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import {
   clampSearchLimit,
   extractSearchSnippet,
@@ -11,7 +28,7 @@ import {
   searchRank,
 } from "@multiremi/store/helpers.js";
 import { pendingTurnBackendTests, type PendingTurnTestFixture } from "./pending-turn-test-backends.js";
-import { seedHistoricalIssueFacts } from "./helpers.js";
+import { createResponsibleTestIssue, seedHistoricalIssueFacts } from "./helpers.js";
 
 const LEGACY_CLOSED_ISSUE_STATUSES = new Set(["done", "completed", "closed", "cancelled", "failed"]);
 
@@ -95,10 +112,13 @@ function legacySearchIssuesOracle(
 const SQL_WRITE_RE =
   /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|REPLACE\s+INTO|CREATE\s+(?:TABLE|INDEX|VIEW|TRIGGER|UNIQUE)|DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER)|ALTER\s+TABLE)\b/i;
 
+const SQL_TX_CONTROL_RE = /^\s*SET\s+TRANSACTION\s+ISOLATION\s+LEVEL\b/i;
+
 function measureSql<T>(db: SqlDatabase, fn: () => T): {
   result: T;
   reads: number;
   writes: number;
+  txControl: number;
   total: number;
   elapsedMs: number;
   statements: string[];
@@ -106,6 +126,15 @@ function measureSql<T>(db: SqlDatabase, fn: () => T): {
 } {
   const statements: string[] = [];
   const calls: Array<{ sql: string; params: unknown[] }> = [];
+  let txControl = 0;
+  const record = (text: string, params: unknown[]) => {
+    if (SQL_TX_CONTROL_RE.test(text)) {
+      txControl += 1;
+      return;
+    }
+    statements.push(text);
+    calls.push({ sql: text, params });
+  };
   const wrapped = new WeakSet<object>();
   const wrap = (statement: SqlStatement, text: string): SqlStatement => {
     if (wrapped.has(statement)) return statement;
@@ -114,8 +143,7 @@ function measureSql<T>(db: SqlDatabase, fn: () => T): {
         const value = Reflect.get(target, key, target);
         if (["get", "all", "run", "values"].includes(String(key))) {
           return (...args: unknown[]) => {
-            statements.push(text);
-            calls.push({ sql: text, params: args });
+            record(text, args);
             return (value as (...a: unknown[]) => unknown).apply(target, args);
           };
         }
@@ -132,13 +160,11 @@ function measureSql<T>(db: SqlDatabase, fn: () => T): {
   const querySpy = spyOn(db, "query").mockImplementation((text) => wrap(query(text), text));
   const prepareSpy = spyOn(db, "prepare").mockImplementation((text) => wrap(prepare(text), text));
   const runSpy = spyOn(db, "run").mockImplementation((text, ...args) => {
-    statements.push(text);
-    calls.push({ sql: text, params: args });
+    record(text, args);
     return run(text, ...args);
   });
   const execSpy = spyOn(db, "exec").mockImplementation((text) => {
-    statements.push(text);
-    calls.push({ sql: text, params: [] });
+    record(text, []);
     exec(text);
   });
   const startedAt = performance.now();
@@ -146,7 +172,7 @@ function measureSql<T>(db: SqlDatabase, fn: () => T): {
     const result = fn();
     const elapsedMs = performance.now() - startedAt;
     const writes = statements.filter((text) => SQL_WRITE_RE.test(text)).length;
-    return { result, reads: statements.length - writes, writes, total: statements.length, elapsedMs, statements, calls };
+    return { result, reads: statements.length - writes, writes, txControl, total: statements.length, elapsedMs, statements, calls };
   } finally {
     querySpy.mockRestore();
     prepareSpy.mockRestore();
@@ -155,8 +181,24 @@ function measureSql<T>(db: SqlDatabase, fn: () => T): {
   }
 }
 
-async function measureSqlAsync<T>(db: SqlDatabase, fn: () => Promise<T>): Promise<{ result: T; reads: number; writes: number; total: number; elapsedMs: number }> {
+async function measureSqlAsync<T>(db: SqlDatabase, fn: () => Promise<T>): Promise<{
+  result: T;
+  reads: number;
+  writes: number;
+  txControl: number;
+  total: number;
+  elapsedMs: number;
+  statements: string[];
+}> {
   const statements: string[] = [];
+  let txControl = 0;
+  const record = (text: string) => {
+    if (SQL_TX_CONTROL_RE.test(text)) {
+      txControl += 1;
+      return;
+    }
+    statements.push(text);
+  };
   const wrapped = new WeakSet<object>();
   const wrap = (statement: SqlStatement, text: string): SqlStatement => {
     if (wrapped.has(statement)) return statement;
@@ -165,7 +207,7 @@ async function measureSqlAsync<T>(db: SqlDatabase, fn: () => Promise<T>): Promis
         const value = Reflect.get(target, key, target);
         if (["get", "all", "run", "values"].includes(String(key))) {
           return (...args: unknown[]) => {
-            statements.push(text);
+            record(text);
             return (value as (...a: unknown[]) => unknown).apply(target, args);
           };
         }
@@ -182,11 +224,11 @@ async function measureSqlAsync<T>(db: SqlDatabase, fn: () => Promise<T>): Promis
   const querySpy = spyOn(db, "query").mockImplementation((text) => wrap(query(text), text));
   const prepareSpy = spyOn(db, "prepare").mockImplementation((text) => wrap(prepare(text), text));
   const runSpy = spyOn(db, "run").mockImplementation((text, ...args) => {
-    statements.push(text);
+    record(text);
     return run(text, ...args);
   });
   const execSpy = spyOn(db, "exec").mockImplementation((text) => {
-    statements.push(text);
+    record(text);
     exec(text);
   });
   const startedAt = performance.now();
@@ -194,7 +236,7 @@ async function measureSqlAsync<T>(db: SqlDatabase, fn: () => Promise<T>): Promis
     const result = await fn();
     const elapsedMs = performance.now() - startedAt;
     const writes = statements.filter((text) => SQL_WRITE_RE.test(text)).length;
-    return { result, reads: statements.length - writes, writes, total: statements.length, elapsedMs };
+    return { result, reads: statements.length - writes, writes, txControl, total: statements.length, elapsedMs, statements };
   } finally {
     querySpy.mockRestore();
     prepareSpy.mockRestore();
@@ -1173,7 +1215,19 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(largeMissAfter.writes).toBe(0);
     expect(largeTitleAfter.writes).toBe(0);
     expect(largeCommentAfter.writes).toBe(0);
+    expect(largeMissAfter.txControl).toBe(backend === "PostgreSQL" ? 1 : 0);
+    expect(largeCommentAfter.txControl).toBe(backend === "PostgreSQL" ? 1 : 0);
+    expect(largeUnicodeMissAfter.txControl).toBe(backend === "PostgreSQL" ? 1 : 0);
     expect(largeMissBefore.reads).toBeGreaterThanOrEqual(300);
+
+    // Calling searchIssues inside an existing outer transaction reuses that transaction
+    // without issuing a nested SET TRANSACTION ISOLATION LEVEL statement.
+    const nestedSearch = measureSql(f.db, () =>
+      f.transaction(() => f.store.searchIssues({ q: "no-match-anywhere", workspaceId: "local", limit: 5 })),
+    );
+    expect(nestedSearch.result).toEqual(largeMissAfter.result);
+    expect(nestedSearch.txControl).toBe(0);
+    expect(nestedSearch).toMatchObject({ reads: 1, writes: 0 });
 
     // Candidate query with comment bodies materializes workspace_issues once + matched_comments via UNION ALL
     expect(largeMissAfter.statements[0]).toContain("workspace_issues AS MATERIALIZED");
@@ -1253,6 +1307,35 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(translatedPgCandidate).toContain("LIMIT 1");
     expect(translatedPgCandidate).toContain("ESCAPE '\\'");
 
+    // Also verify translateSqliteToPg preserves the bounded PostgreSQL comment-scan window SQL.
+    const pgBoundedCommentTemplate = `WITH batch AS (
+      SELECT s.issue_id AS issue_id, l.created_at AS created_at, l.seq AS seq, l.id AS id, l.body_md AS body_md,
+        OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(COALESCE(s.issue_id, '')) + OCTET_LENGTH(COALESCE(l.created_at, '')) + OCTET_LENGTH(COALESCE(l.id, '')) + 128 AS row_bytes
+      FROM multiremi_issue_sessions s
+      JOIN multiremi_conversation_log l ON l.session_id = s.id
+      WHERE s.issue_id IN (?, ?) AND s.chat_id IS NULL AND l.kind = 'message' AND l.visibility = 'shown' AND l.deleted_at IS NULL
+      ORDER BY s.issue_id ASC, l.created_at DESC, l.seq DESC, l.id DESC
+      LIMIT ?
+    ),
+    sized AS (
+      SELECT issue_id, created_at, seq, id, body_md, row_bytes,
+        ROW_NUMBER() OVER (ORDER BY issue_id ASC, created_at DESC, seq DESC, id DESC) AS rn,
+        SUM(row_bytes) OVER (ORDER BY issue_id ASC, created_at DESC, seq DESC, id DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_bytes
+      FROM batch
+    )
+    SELECT issue_id, created_at, seq, id,
+      CASE WHEN rn > 1 AND cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
+      CASE WHEN rn > 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS truncated
+    FROM sized
+    WHERE rn <= 2 OR (cum_bytes - row_bytes) <= ?
+    ORDER BY rn ASC`;
+    const translatedPgBounded = translateSqliteToPg(pgBoundedCommentTemplate);
+    expect(translatedPgBounded).not.toContain("?");
+    expect(translatedPgBounded).toContain("$6");
+    expect(translatedPgBounded).toContain("OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text)");
+    expect(translatedPgBounded).toContain("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW");
+    expect(translatedPgBounded).toContain("WHERE rn <= 2 OR (cum_bytes - row_bytes) <= $6");
+
     // HTTP route smoke check on the 300-issue dataset
     const app = createMultiremiApp({ store: f.store });
     const httpMeasured = await measureSqlAsync(f.db, async () => {
@@ -1297,5 +1380,304 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
       httpCommentHitReads: httpMeasured.reads,
       httpCommentHitMs: Number(httpMeasured.elapsedMs.toFixed(2)),
     }));
+  }, 30_000);
+
+  it("paginates comment reads within postgresReplyMaxBytes under low HTTP reply budget without PostgresReplyTooLargeError", async () => {
+    const f = fixture();
+    const pad = (label: string, bytes = 860) => `${label} ${"x".repeat(bytes)}`;
+
+    // 8 issues x 3 visible comments (~900B each) => > 21 KiB total comment payload (>> 4 KiB bridge ceiling).
+    const titleHitA = f.createIssue({
+      workspaceId: "local",
+      title: "BUDGETHIT-900 CAFÉ title hit A",
+      description: "Short description A",
+    });
+    const tA1 = f.store.createIssueComment(titleHitA.id, { body: pad("Older BUDGETHIT-900 CAFÉ titleA seq1") });
+    const tA2 = f.store.createIssueComment(titleHitA.id, { body: pad("Winner BUDGETHIT-900 CAFÉ titleA seq2") });
+    const tA3 = f.store.createIssueComment(titleHitA.id, { body: pad("Newest unrelated chatter titleA seq3") });
+    setCommentCreatedAt(f.db, tA1.id, "2026-11-10T01:00:00.000Z");
+    setCommentCreatedAt(f.db, tA2.id, "2026-11-10T02:00:00.000Z");
+    setCommentCreatedAt(f.db, tA3.id, "2026-11-10T03:00:00.000Z");
+    setUpdatedAt(f.db, titleHitA.id, "2026-11-10T10:00:00.000Z");
+
+    const titleHitB = f.createIssue({
+      workspaceId: "local",
+      title: "BUDGETHIT-900 CAFÉ title hit B",
+      description: "Short description B",
+    });
+    const tB1 = f.store.createIssueComment(titleHitB.id, { body: pad("Winner BUDGETHIT-900 CAFÉ titleB seq1") });
+    const tB2 = f.store.createIssueComment(titleHitB.id, { body: pad("Unrelated chatter titleB seq2") });
+    const tB3 = f.store.createIssueComment(titleHitB.id, { body: pad("Unrelated chatter titleB seq3") });
+    setCommentCreatedAt(f.db, tB1.id, "2026-11-10T01:00:00.000Z");
+    setCommentCreatedAt(f.db, tB2.id, "2026-11-10T02:00:00.000Z");
+    setCommentCreatedAt(f.db, tB3.id, "2026-11-10T03:00:00.000Z");
+    setUpdatedAt(f.db, titleHitB.id, "2026-11-10T09:00:00.000Z");
+
+    // 4 comment-only hits exercising oldest-match continuation (after_row),
+    // newest-match skip (after_issue), and multi-match latest-winner tie-break.
+    const commentHitA = f.createIssue({ workspaceId: "local", title: "Neutral budget issue C1", description: "Short C1" });
+    const cA1 = f.store.createIssueComment(commentHitA.id, { body: pad("Oldest-match BUDGETHIT-900 COMMENTONLY-900 CAFÉ C1 seq1") });
+    const cA2 = f.store.createIssueComment(commentHitA.id, { body: pad("Unrelated filler C1 seq2") });
+    const cA3 = f.store.createIssueComment(commentHitA.id, { body: pad("Unrelated filler C1 seq3") });
+    setCommentCreatedAt(f.db, cA1.id, "2026-11-10T01:00:00.000Z");
+    setCommentCreatedAt(f.db, cA2.id, "2026-11-10T02:00:00.000Z");
+    setCommentCreatedAt(f.db, cA3.id, "2026-11-10T03:00:00.000Z");
+    setUpdatedAt(f.db, commentHitA.id, "2026-11-10T08:00:00.000Z");
+
+    const commentHitB = f.createIssue({ workspaceId: "local", title: "Neutral budget issue C2", description: "Short C2" });
+    const cB1 = f.store.createIssueComment(commentHitB.id, { body: pad("Unrelated filler C2 seq1") });
+    const cB2 = f.store.createIssueComment(commentHitB.id, { body: pad("Middle-match BUDGETHIT-900 COMMENTONLY-900 CAFÉ C2 seq2") });
+    const cB3 = f.store.createIssueComment(commentHitB.id, { body: pad("Unrelated filler C2 seq3") });
+    setCommentCreatedAt(f.db, cB1.id, "2026-11-10T01:00:00.000Z");
+    setCommentCreatedAt(f.db, cB2.id, "2026-11-10T02:00:00.000Z");
+    setCommentCreatedAt(f.db, cB3.id, "2026-11-10T03:00:00.000Z");
+    setUpdatedAt(f.db, commentHitB.id, "2026-11-10T07:00:00.000Z");
+
+    const commentHitC = f.createIssue({ workspaceId: "local", title: "Neutral budget issue C3", description: "Short C3" });
+    const cC1 = f.store.createIssueComment(commentHitC.id, { body: pad("Unrelated filler C3 seq1") });
+    const cC2 = f.store.createIssueComment(commentHitC.id, { body: pad("Unrelated filler C3 seq2") });
+    const cC3 = f.store.createIssueComment(commentHitC.id, { body: pad("Newest-match BUDGETHIT-900 COMMENTONLY-900 CAFÉ C3 seq3") });
+    setCommentCreatedAt(f.db, cC1.id, "2026-11-10T01:00:00.000Z");
+    setCommentCreatedAt(f.db, cC2.id, "2026-11-10T02:00:00.000Z");
+    setCommentCreatedAt(f.db, cC3.id, "2026-11-10T03:00:00.000Z");
+    setUpdatedAt(f.db, commentHitC.id, "2026-11-10T06:00:00.000Z");
+
+    const commentHitD = f.createIssue({ workspaceId: "local", title: "Neutral budget issue C4", description: "Short C4" });
+    const cD1 = f.store.createIssueComment(commentHitD.id, { body: pad("Older-match BUDGETHIT-900 COMMENTONLY-900 CAFÉ C4 seq1") });
+    const cD2 = f.store.createIssueComment(commentHitD.id, { body: pad("Winner-match BUDGETHIT-900 COMMENTONLY-900 CAFÉ C4 seq2") });
+    const cD3 = f.store.createIssueComment(commentHitD.id, { body: pad("Unrelated filler C4 seq3") });
+    setCommentCreatedAt(f.db, cD1.id, "2026-11-10T01:00:00.000Z");
+    setCommentCreatedAt(f.db, cD2.id, "2026-11-10T02:00:00.000Z");
+    setCommentCreatedAt(f.db, cD3.id, "2026-11-10T03:00:00.000Z");
+    setUpdatedAt(f.db, commentHitD.id, "2026-11-10T05:00:00.000Z");
+
+    // 2 completely non-matching issues adding extra ~5.5 KiB of non-matching comment noise
+    for (const suffix of ["N1", "N2"]) {
+      const noise = f.createIssue({ workspaceId: "local", title: `Unrelated budget noise ${suffix}`, description: "Noise" });
+      for (let seq = 1; seq <= 3; seq += 1) {
+        const msg = f.store.createIssueComment(noise.id, { body: pad(`Noise commentary ${suffix} seq${seq}`) });
+        setCommentCreatedAt(f.db, msg.id, `2026-11-10T0${seq}:00:00.000Z`);
+      }
+      setUpdatedAt(f.db, noise.id, "2026-11-10T04:00:00.000Z");
+    }
+
+    const previousLimit = process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
+    const previousEnforce = process.env.MULTIREMI_PG_REPLY_ENFORCE;
+    const replyExceptions = DB_REPLY_TRANSITION_EXCEPTIONS as Set<string>;
+    const wasCompatExempt = replyExceptions.delete("GET /api/issues/search");
+    const wasCanonicalExempt = replyExceptions.delete("GET /api/multiremi/issues/search");
+    process.env.MULTIREMI_PG_REPLY_MAX_BYTES = "4096";
+    process.env.MULTIREMI_PG_REPLY_ENFORCE = "1";
+    resetDbReplyLimitForTest();
+
+    let fallbackPage0Actual: { issues: MultiremiIssueSearchResult[]; total: number };
+    let fallbackPage1Actual: { issues: MultiremiIssueSearchResult[]; total: number };
+    let fallbackCommentOnlyActual: { issues: MultiremiIssueSearchResult[]; total: number };
+    let pushdownPage0Actual: { issues: MultiremiIssueSearchResult[]; total: number };
+    let pushdownPage1Actual: { issues: MultiremiIssueSearchResult[]; total: number };
+
+    try {
+      // Verify createRequestMetricsMiddleware activates the 4096-byte enforced policy.
+      const policyProbe = new Hono();
+      policyProbe.use("*", createRequestMetricsMiddleware({
+        enabled: false,
+        slowRequestMs: 500,
+        summaryIntervalMs: 60_000,
+        summaryTopRoutes: 10,
+        bufferCapacity: 256,
+        role: "all",
+      }));
+      policyProbe.get("/api/search-reply-budget-probe", (c) => {
+        expect(postgresReplyMaxBytes()).toBe(4096);
+        expect(currentDbReplyPolicy()).toMatchObject({ limitBytes: 4096, enforced: true, exempt: false });
+        return c.body(null, 204);
+      });
+      expect((await policyProbe.request("/api/search-reply-budget-probe")).status).toBe(204);
+
+      const app = createMultiremiApp({ store: f.store });
+
+      // 1. Non-ASCII fallback (mixed field + comment hits): must batch comment scans under 4096B
+      const fallbackPage0Measured = await measureSqlAsync(f.db, async () => {
+        const resp = await app.request(
+          `/api/multiremi/issues/search?q=${encodeURIComponent("café budgethit-900")}&workspaceId=local&limit=4&offset=0`,
+        );
+        expect(resp.status).toBe(200);
+        return await resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
+      });
+      fallbackPage0Actual = fallbackPage0Measured.result;
+      expect(fallbackPage0Measured.writes).toBe(0);
+      expect(fallbackPage0Measured.reads).toBeGreaterThanOrEqual(8);
+
+      const fallbackPage1Resp = await app.request(
+        `/api/multiremi/issues/search?q=${encodeURIComponent("café budgethit-900")}&workspaceId=local&limit=4&offset=4`,
+      );
+      expect(fallbackPage1Resp.status).toBe(200);
+      fallbackPage1Actual = await fallbackPage1Resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
+
+      // 2. Non-ASCII fallback comment-only (0 field hits -> workspace-wide bounded comment scan > 21 KiB)
+      const fallbackCommentOnlyMeasured = await measureSqlAsync(f.db, async () => {
+        const resp = await app.request(
+          `/api/multiremi/issues/search?q=${encodeURIComponent("café commentonly-900")}&workspaceId=local&limit=4&offset=0`,
+        );
+        expect(resp.status).toBe(200);
+        return await resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
+      });
+      fallbackCommentOnlyActual = fallbackCommentOnlyMeasured.result;
+      expect(fallbackCommentOnlyMeasured.writes).toBe(0);
+      expect(fallbackCommentOnlyMeasured.reads).toBeGreaterThanOrEqual(8);
+
+      // 3. ASCII SQL pushdown: searchIssueCommentSnippets must batch the 4 ~900B winning snippets under 4096B
+      const pushdownPage0Measured = await measureSqlAsync(f.db, async () => {
+        const resp = await app.request(
+          `/api/multiremi/issues/search?q=${encodeURIComponent("budgethit-900")}&workspaceId=local&limit=4&offset=0`,
+        );
+        expect(resp.status).toBe(200);
+        return await resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
+      });
+      pushdownPage0Actual = pushdownPage0Measured.result;
+      expect(pushdownPage0Measured.writes).toBe(0);
+      // 1 candidate + 1 hydration + 1 labels + >=2 snippet batches (+ workspace lookup)
+      const snippetQueries = pushdownPage0Measured.statements.filter((sql) => sql.includes("WITH latest_per_issue"));
+      expect(snippetQueries.length).toBeGreaterThanOrEqual(2);
+
+      const pushdownPage1Resp = await app.request(
+        `/api/multiremi/issues/search?q=${encodeURIComponent("budgethit-900")}&workspaceId=local&limit=4&offset=4`,
+      );
+      expect(pushdownPage1Resp.status).toBe(200);
+      pushdownPage1Actual = await pushdownPage1Resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
+
+      // 4. Compatibility HTTP route GET /api/issues/search under the same 4096B bridge ceiling
+      for (const q of ["café budgethit-900", "budgethit-900"]) {
+        const compatResp = await app.request(
+          `/api/issues/search?q=${encodeURIComponent(q)}&workspace_id=local&limit=4&offset=0`,
+        );
+        expect(compatResp.status).toBe(200);
+        expect(compatResp.headers.get("X-Total-Count")).toBe("6");
+        const compatBody = await compatResp.json() as { issues: Array<{ id: string; matched_comment_snippet?: string }>; total: number };
+        expect(compatBody.total).toBe(6);
+        expect(compatBody.issues).toHaveLength(4);
+        expect(compatBody.issues.every((item) => typeof item.matched_comment_snippet === "string" && item.matched_comment_snippet.length > 0)).toBe(true);
+      }
+    } finally {
+      if (previousLimit === undefined) delete process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
+      else process.env.MULTIREMI_PG_REPLY_MAX_BYTES = previousLimit;
+      if (previousEnforce === undefined) delete process.env.MULTIREMI_PG_REPLY_ENFORCE;
+      else process.env.MULTIREMI_PG_REPLY_ENFORCE = previousEnforce;
+      if (wasCompatExempt) replyExceptions.add("GET /api/issues/search");
+      if (wasCanonicalExempt) replyExceptions.add("GET /api/multiremi/issues/search");
+      resetDbReplyLimitForTest();
+    }
+
+    // Compare every low-budget HTTP result field-for-field against legacySearchIssuesOracle under default budget.
+    expect(fallbackPage0Actual).toEqual(legacySearchIssuesOracle(f.store, f.db, { q: "café budgethit-900", workspaceId: "local", limit: 4, offset: 0 }));
+    expect(fallbackPage1Actual).toEqual(legacySearchIssuesOracle(f.store, f.db, { q: "café budgethit-900", workspaceId: "local", limit: 4, offset: 4 }));
+    expect(fallbackCommentOnlyActual).toEqual(legacySearchIssuesOracle(f.store, f.db, { q: "café commentonly-900", workspaceId: "local", limit: 4, offset: 0 }));
+    expect(pushdownPage0Actual).toEqual(legacySearchIssuesOracle(f.store, f.db, { q: "budgethit-900", workspaceId: "local", limit: 4, offset: 0 }));
+    expect(pushdownPage1Actual).toEqual(legacySearchIssuesOracle(f.store, f.db, { q: "budgethit-900", workspaceId: "local", limit: 4, offset: 4 }));
+  }, 30_000);
+
+  it("keeps candidate discovery, total, and page hydration inside one consistent read snapshot under concurrent status transition", () => {
+    const f = fixture();
+
+    const verifyConcurrentTransition = (
+      db1: SqlDatabase,
+      store1: MultiremiStore,
+      db2: SqlDatabase,
+      createIssue: (title: string, updatedAt: string) => string,
+    ) => {
+      const scenarios: Array<{ label: string; token: string; query: string }> = [
+        { label: "sql-pushdown", token: "SNAPRACE-ASCII", query: "SNAPRACE-ASCII" },
+        { label: "non-ascii-fallback", token: "SNAPRACE-CAFÉ", query: "snaprace-café" },
+      ];
+
+      for (const scenario of scenarios) {
+        const id1 = createIssue(`${scenario.token} issue 1`, "2026-11-12T01:00:00.000Z");
+        const id2 = createIssue(`${scenario.token} issue 2`, "2026-11-12T02:00:00.000Z");
+        const id3 = createIssue(`${scenario.token} issue 3`, "2026-11-12T03:00:00.000Z");
+        store1.createIssueComment(id2, { body: `Comment mentioning ${scenario.token}` });
+        setUpdatedAt(db1, id2, "2026-11-12T02:00:00.000Z");
+
+        // Inject a concurrent commit on connection 2 right after candidate discovery
+        // and immediately before page hydration reads multiremi_issues.
+        let mutated = false;
+        const originalQuery = db1.query.bind(db1);
+        const querySpy = spyOn(db1, "query").mockImplementation((sql) => {
+          if (!mutated && sql.includes("SELECT * FROM multiremi_issues WHERE workspace_id = ? AND id IN (")) {
+            mutated = true;
+            db2.run("UPDATE multiremi_issues SET status = 'done' WHERE id = ?", [id2]);
+          }
+          return originalQuery(sql);
+        });
+
+        let duringMutation: { issues: MultiremiIssueSearchResult[]; total: number };
+        try {
+          duringMutation = store1.searchIssues({
+            q: scenario.query,
+            workspaceId: "local",
+            includeClosed: false,
+            includeCommentBodies: true,
+            limit: 10,
+          });
+        } finally {
+          querySpy.mockRestore();
+        }
+
+        expect(mutated, `${scenario.label}: concurrent writer should fire before hydration`).toBe(true);
+        // Consistent pre-commit snapshot: all 3 open issues returned, no unarchived done leaked, no short page.
+        expect(duringMutation.total).toBe(3);
+        expect(duringMutation.issues).toHaveLength(3);
+        expect(duringMutation.issues.map((item) => item.id)).toEqual([id3, id2, id1]);
+        expect(duringMutation.issues.every((item) => item.status === "todo")).toBe(true);
+
+        // Next search starts a fresh snapshot and observes the committed todo -> done transition.
+        const afterMutation = store1.searchIssues({
+          q: scenario.query,
+          workspaceId: "local",
+          includeClosed: false,
+          includeCommentBodies: true,
+          limit: 10,
+        });
+        expect(afterMutation.total).toBe(2);
+        expect(afterMutation.issues).toHaveLength(2);
+        expect(afterMutation.issues.map((item) => item.id)).toEqual([id3, id1]);
+        expect(afterMutation.issues.map((item) => item.id)).not.toContain(id2);
+      }
+    };
+
+    if (backend === "PostgreSQL") {
+      expect(f.databaseUrl).toBeTruthy();
+      const db2 = new PostgresSyncDatabase(f.databaseUrl!);
+      try {
+        verifyConcurrentTransition(f.db, f.store, db2, (title, updatedAt) => {
+          const issue = f.createIssue({ workspaceId: "local", title, description: "Concurrent PG snapshot check" });
+          setUpdatedAt(f.db, issue.id, updatedAt);
+          return issue.id;
+        });
+      } finally {
+        db2.close();
+      }
+    } else {
+      // File-backed SQLite WAL fixture with two independent connections so connection 2
+      // can commit while connection 1 holds a BEGIN DEFERRED WAL read snapshot.
+      const dir = mkdtempSync(join(tmpdir(), "mul331-wal-snapshot-"));
+      const dbPath = join(dir, "search-snapshot.sqlite");
+      const db1 = openSqliteDatabase(dbPath) as unknown as SqlDatabase;
+      const db2 = openSqliteDatabase(dbPath) as unknown as SqlDatabase;
+      try {
+        db1.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000");
+        db2.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000");
+        const store1 = new MultiremiStore(db1);
+        store1.ensureLocalWorkspace();
+        verifyConcurrentTransition(db1, store1, db2, (title, updatedAt) => {
+          const issue = createResponsibleTestIssue(store1, { workspaceId: "local", title, description: "Concurrent SQLite WAL snapshot check" });
+          setUpdatedAt(db1, issue.id, updatedAt);
+          return issue.id;
+        });
+      } finally {
+        db2.close();
+        db1.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   }, 30_000);
 }, { isolation: "snapshot" });

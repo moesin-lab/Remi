@@ -51,7 +51,7 @@ import { createId, nowIso } from "@multiremi/ids.js";
 import { COMMENT_DISPATCH_REPLAY_DELAY_MS, COMMENT_DISPATCH_REPLAY_MAX_AGE_MS,
   commentDispatchReplayEnabled } from "@multiremi/store/re-ring-sweep.js";
 import { numberAllocationLockKey } from "@multiremi/store/advisory-locks.js";
-import { advisoryXactLock, afterCommit } from "@multiremi/store/db/postgres.js";
+import { advisoryXactLock, afterCommit, postgresReplyMaxBytes } from "@multiremi/store/db/postgres.js";
 import { createLogger } from "@shared/logger.js";
 import { resolveIssueArchiveSettings } from "@multiremi/store/issue-archive.js";
 import { INBOX_LEDGER_TYPES, isInboxLedgerType, issueActivityDetails, type IssueActivityEntry } from "@multiremi/contracts";
@@ -1372,6 +1372,17 @@ export class IssuesRepo {
     return { deleted };
   }
 
+  private withIssueSearchReadSnapshot<T>(fn: () => T): T {
+    if (this.ctx.db.inTransaction) return fn();
+    const snapshot = this.ctx.db.transaction(() => {
+      if (this.ctx.db.dialect === "postgres") {
+        this.ctx.db.exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      }
+      return fn();
+    });
+    return (snapshot.deferred ?? snapshot)();
+  }
+
   searchIssues(input: {
     q: string;
     workspaceId?: string | null;
@@ -1390,142 +1401,144 @@ export class IssuesRepo {
     const terms = extractSearchTerms(query);
     if (terms.length === 0) return { issues: [], total: 0 };
 
-    const isPostgres = this.ctx.db.dialect === "postgres";
-    const closedFilterSql = includeClosed ? "" : buildIssueSearchExcludeUnarchivedClosedSql(isPostgres);
-    const issueTieBreakCol = isPostgres ? "i.ctid" : "i.rowid";
-    const canPushLike = terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS && !terms.some(hasNonAsciiCasedChar);
-    if (!canPushLike) {
-      return this.searchIssuesWorkspaceScanFallback({
-        query,
-        workspaceId,
-        closedFilterSql,
-        isPostgres,
-        includeCommentBodies,
-        limit,
-        offset,
-      });
-    }
+    return this.withIssueSearchReadSnapshot(() => {
+      const isPostgres = this.ctx.db.dialect === "postgres";
+      const closedFilterSql = includeClosed ? "" : buildIssueSearchExcludeUnarchivedClosedSql(isPostgres);
+      const issueTieBreakCol = isPostgres ? "i.ctid" : "i.rowid";
+      const canPushLike = terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS && !terms.some(hasNonAsciiCasedChar);
+      if (!canPushLike) {
+        return this.searchIssuesWorkspaceScanFallback({
+          query,
+          workspaceId,
+          closedFilterSql,
+          isPostgres,
+          includeCommentBodies,
+          limit,
+          offset,
+        });
+      }
 
-    const patterns = terms.map((term) => `%${escapeSearchLikeTerm(term)}%`);
-    const keyLikeSql = buildSearchLikeAllTermsSql(ISSUE_SEARCH_EFFECTIVE_KEY_SQL, terms);
-    const titleLikeSql = buildSearchLikeAllTermsSql("i.title", terms);
-    const descriptionLikeSql = buildSearchLikeAllTermsSql("i.description", terms);
+      const patterns = terms.map((term) => `%${escapeSearchLikeTerm(term)}%`);
+      const keyLikeSql = buildSearchLikeAllTermsSql(ISSUE_SEARCH_EFFECTIVE_KEY_SQL, terms);
+      const titleLikeSql = buildSearchLikeAllTermsSql("i.title", terms);
+      const descriptionLikeSql = buildSearchLikeAllTermsSql("i.description", terms);
 
-    let candidateRows: Row[];
-    if (includeCommentBodies) {
-      const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
-      // Materialize workspace_issues once (preserving database-native ORDER BY updated_at DESC
-      // via ROW_NUMBER() + ctid/rowid) and materialize matched_comments before UNION ALL.
-      // On PostgreSQL, CROSS JOIN LATERAL (... LIMIT 1) keeps `l.session_id = s.id` inside
-      // `l`'s base restriction clauses (preventing subquery pull-up) so the planner always
-      // probes an index on session_id even when table statistics are stale (reltuples = 0).
-      const matchedCommentsSql = isPostgres
-        ? `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
-           FROM workspace_issues wi
-           JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
-           CROSS JOIN LATERAL (
-             SELECT 1 AS hit
-             FROM multiremi_conversation_log l
-             WHERE l.session_id = s.id
-               AND l.visibility = 'shown'
+      let candidateRows: Row[];
+      if (includeCommentBodies) {
+        const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
+        // Materialize workspace_issues once (preserving database-native ORDER BY updated_at DESC
+        // via ROW_NUMBER() + ctid/rowid) and materialize matched_comments before UNION ALL.
+        // On PostgreSQL, CROSS JOIN LATERAL (... LIMIT 1) keeps `l.session_id = s.id` inside
+        // `l`'s base restriction clauses (preventing subquery pull-up) so the planner always
+        // probes an index on session_id even when table statistics are stale (reltuples = 0).
+        const matchedCommentsSql = isPostgres
+          ? `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
+             FROM workspace_issues wi
+             JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
+             CROSS JOIN LATERAL (
+               SELECT 1 AS hit
+               FROM multiremi_conversation_log l
+               WHERE l.session_id = s.id
+                 AND l.visibility = 'shown'
+                 AND l.kind = 'message'
+                 AND l.deleted_at IS NULL
+                 AND (${commentLikeSql})
+               LIMIT 1
+             ) cm`
+          : `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
+             FROM workspace_issues wi
+             JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
+             JOIN multiremi_conversation_log l ON l.session_id = s.id
+             WHERE l.visibility = 'shown'
                AND l.kind = 'message'
                AND l.deleted_at IS NULL
-               AND (${commentLikeSql})
-             LIMIT 1
-           ) cm`
-        : `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
-           FROM workspace_issues wi
-           JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
-           JOIN multiremi_conversation_log l ON l.session_id = s.id
-           WHERE l.visibility = 'shown'
-             AND l.kind = 'message'
-             AND l.deleted_at IS NULL
-             AND (${commentLikeSql})`;
-      candidateRows = this.ctx.db.query(
-        `WITH workspace_issues AS MATERIALIZED (
-           SELECT
-             i.id,
-             i.updated_at,
-             ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC) AS issue_ord,
-             CASE
-               WHEN (${keyLikeSql}) THEN 0
-               WHEN (${titleLikeSql}) THEN 1
-               WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
-               ELSE NULL
-             END AS match_rank
-           FROM multiremi_issues i
-           WHERE i.workspace_id = ?${closedFilterSql}
-         ),
-         matched_comments AS MATERIALIZED (
-           ${matchedCommentsSql}
-         )
-         SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank
-         FROM workspace_issues
-         WHERE match_rank IS NOT NULL
-         UNION ALL
-         SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank
-         FROM matched_comments`,
-      ).all(...patterns, ...patterns, ...patterns, workspaceId, ...patterns) as Row[];
-    } else {
-      candidateRows = this.ctx.db.query(
-        `WITH workspace_issues AS (
-           SELECT
-             i.id,
-             i.updated_at,
-             ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC) AS issue_ord,
-             0 AS has_comment_match,
-             CASE
-               WHEN (${keyLikeSql}) THEN 0
-               WHEN (${titleLikeSql}) THEN 1
-               WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
-               ELSE NULL
-             END AS match_rank
-           FROM multiremi_issues i
-           WHERE i.workspace_id = ?${closedFilterSql}
-         )
-         SELECT id, updated_at, issue_ord, has_comment_match, match_rank
-         FROM workspace_issues
-         WHERE match_rank IS NOT NULL`,
-      ).all(...patterns, ...patterns, ...patterns, workspaceId) as Row[];
-    }
-
-    const mergedById = new Map<string, IssueSearchCandidate>();
-    for (const row of candidateRows) {
-      const id = String(row.id);
-      const updatedAt = String(row.updated_at);
-      const issueOrd = Number(row.issue_ord ?? 0);
-      const matchRank = Number(row.match_rank);
-      const hasCommentMatch = Number(row.has_comment_match) === 1;
-      const existing = mergedById.get(id);
-      if (existing) {
-        existing.matchRank = Math.min(existing.matchRank, matchRank);
-        existing.hasCommentMatch = existing.hasCommentMatch || hasCommentMatch;
+               AND (${commentLikeSql})`;
+        candidateRows = this.ctx.db.query(
+          `WITH workspace_issues AS MATERIALIZED (
+             SELECT
+               i.id,
+               i.updated_at,
+               ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC) AS issue_ord,
+               CASE
+                 WHEN (${keyLikeSql}) THEN 0
+                 WHEN (${titleLikeSql}) THEN 1
+                 WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
+                 ELSE NULL
+               END AS match_rank
+             FROM multiremi_issues i
+             WHERE i.workspace_id = ?${closedFilterSql}
+           ),
+           matched_comments AS MATERIALIZED (
+             ${matchedCommentsSql}
+           )
+           SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank
+           FROM workspace_issues
+           WHERE match_rank IS NOT NULL
+           UNION ALL
+           SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank
+           FROM matched_comments`,
+        ).all(...patterns, ...patterns, ...patterns, workspaceId, ...patterns) as Row[];
       } else {
-        mergedById.set(id, { id, updatedAt, issueOrd, matchRank, hasCommentMatch });
+        candidateRows = this.ctx.db.query(
+          `WITH workspace_issues AS (
+             SELECT
+               i.id,
+               i.updated_at,
+               ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC) AS issue_ord,
+               0 AS has_comment_match,
+               CASE
+                 WHEN (${keyLikeSql}) THEN 0
+                 WHEN (${titleLikeSql}) THEN 1
+                 WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
+                 ELSE NULL
+               END AS match_rank
+             FROM multiremi_issues i
+             WHERE i.workspace_id = ?${closedFilterSql}
+           )
+           SELECT id, updated_at, issue_ord, has_comment_match, match_rank
+           FROM workspace_issues
+           WHERE match_rank IS NOT NULL`,
+        ).all(...patterns, ...patterns, ...patterns, workspaceId) as Row[];
       }
-    }
-    const candidates = [...mergedById.values()].sort(compareIssueSearchCandidates);
 
-    const total = candidates.length;
-    const page = candidates.slice(offset, offset + limit);
-    if (page.length === 0) return { issues: [], total };
+      const mergedById = new Map<string, IssueSearchCandidate>();
+      for (const row of candidateRows) {
+        const id = String(row.id);
+        const updatedAt = String(row.updated_at);
+        const issueOrd = Number(row.issue_ord ?? 0);
+        const matchRank = Number(row.match_rank);
+        const hasCommentMatch = Number(row.has_comment_match) === 1;
+        const existing = mergedById.get(id);
+        if (existing) {
+          existing.matchRank = Math.min(existing.matchRank, matchRank);
+          existing.hasCommentMatch = existing.hasCommentMatch || hasCommentMatch;
+        } else {
+          mergedById.set(id, { id, updatedAt, issueOrd, matchRank, hasCommentMatch });
+        }
+      }
+      const candidates = [...mergedById.values()].sort(compareIssueSearchCandidates);
 
-    const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id));
-    const commentPageIds = includeCommentBodies
-      ? page.filter((item) => item.hasCommentMatch).map((item) => item.id)
-      : [];
-    const commentSnippetsByIssueId = commentPageIds.length > 0
-      ? this.searchIssueCommentSnippets(commentPageIds, query, terms, patterns)
-      : new Map<string, string>();
+      const total = candidates.length;
+      const page = candidates.slice(offset, offset + limit);
+      if (page.length === 0) return { issues: [], total };
 
-    const issues: MultiremiIssueSearchResult[] = [];
-    for (const item of page) {
-      const issue = hydratedById.get(item.id);
-      if (!issue) continue;
-      const built = buildIssueSearchResult(issue, query, commentSnippetsByIssueId.get(item.id) ?? null);
-      if (built) issues.push(built);
-    }
-    return { issues, total };
+      const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id));
+      const commentPageIds = includeCommentBodies
+        ? page.filter((item) => item.hasCommentMatch).map((item) => item.id)
+        : [];
+      const commentSnippetsByIssueId = commentPageIds.length > 0
+        ? this.searchIssueCommentSnippets(commentPageIds, query, terms, patterns, isPostgres)
+        : new Map<string, string>();
+
+      const issues: MultiremiIssueSearchResult[] = [];
+      for (const item of page) {
+        const issue = hydratedById.get(item.id);
+        if (!issue) continue;
+        const built = buildIssueSearchResult(issue, query, commentSnippetsByIssueId.get(item.id) ?? null);
+        if (built) issues.push(built);
+      }
+      return { issues, total };
+    });
   }
 
   private hydrateIssuesByIdsInWorkspace(workspaceId: string, issueIds: string[]): Map<string, MultiremiIssue> {
@@ -1542,41 +1555,218 @@ export class IssuesRepo {
   }
 
   /**
-   * Fetch the latest matching visible issue-session comment snippet per issue.
+   * Fetch the latest matching visible issue-session comment snippet per issue,
+   * paginating by `postgresReplyMaxBytes()` so a single bridge reply never
+   * exceeds the configured reply ceiling.
    * Tie-breaking contract: when multiple matching comments for the same issue share
    * an identical `created_at`, deterministic ordering uses
    * `ORDER BY l.created_at DESC, l.seq DESC, l.id DESC` (latest session sequence first).
    */
-  private searchIssueCommentSnippets(issueIds: string[], query: string, terms: string[], patterns: string[]): Map<string, string> {
+  private searchIssueCommentSnippets(
+    issueIds: string[],
+    query: string,
+    terms: string[],
+    patterns: string[],
+    isPostgres: boolean,
+  ): Map<string, string> {
     const snippets = new Map<string, string>();
     if (issueIds.length === 0) return snippets;
     const placeholders = issueIds.map(() => "?").join(", ");
     const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
-    const rows = this.ctx.db.query(
-      `SELECT issue_id, body_md
-       FROM (
+    const budgetBytes = issueSearchReplyBudgetBytes();
+    const rowBytesSql = buildCommentSnippetRowBytesSql(isPostgres);
+    let afterIssueId: string | null = null;
+
+    while (true) {
+      const afterClause = afterIssueId !== null ? " AND s.issue_id > ?" : "";
+      const params: unknown[] = afterIssueId !== null
+        ? [...issueIds, afterIssueId, ...patterns, budgetBytes, budgetBytes, budgetBytes]
+        : [...issueIds, ...patterns, budgetBytes, budgetBytes, budgetBytes];
+      const rows = this.ctx.db.query(
+        `WITH latest_per_issue AS (
+           SELECT
+             s.issue_id AS issue_id,
+             l.body_md AS body_md,
+             ${rowBytesSql} AS row_bytes,
+             ROW_NUMBER() OVER (PARTITION BY s.issue_id ORDER BY l.created_at DESC, l.seq DESC, l.id DESC) AS issue_rn
+           FROM multiremi_conversation_log l
+           JOIN multiremi_issue_sessions s ON s.id = l.session_id
+           WHERE s.issue_id IN (${placeholders})${afterClause}
+             AND s.chat_id IS NULL
+             AND l.kind = 'message'
+             AND l.visibility = 'shown'
+             AND l.deleted_at IS NULL
+             AND (${commentLikeSql})
+         ),
+         sized AS (
+           SELECT
+             issue_id,
+             body_md,
+             row_bytes,
+             ROW_NUMBER() OVER (ORDER BY issue_id ASC) AS rn,
+             SUM(row_bytes) OVER (
+               ORDER BY issue_id ASC
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+             ) AS cum_bytes
+           FROM latest_per_issue
+           WHERE issue_rn = 1
+         )
          SELECT
-           s.issue_id AS issue_id,
-           l.body_md AS body_md,
-           ROW_NUMBER() OVER (PARTITION BY s.issue_id ORDER BY l.created_at DESC, l.seq DESC, l.id DESC) AS rn
-         FROM multiremi_conversation_log l
-         JOIN multiremi_issue_sessions s ON s.id = l.session_id
-         WHERE s.issue_id IN (${placeholders})
-           AND s.chat_id IS NULL
-           AND l.kind = 'message'
-           AND l.visibility = 'shown'
-           AND l.deleted_at IS NULL
-           AND (${commentLikeSql})
-       ) ranked
-       WHERE rn = 1`,
-    ).all(...issueIds, ...patterns) as Row[];
-    for (const row of rows) {
-      const body = String(row.body_md ?? "");
-      if (searchMatch(body, query)) {
-        snippets.set(String(row.issue_id), extractSearchSnippet(body, query));
+           issue_id,
+           CASE WHEN rn > 1 AND cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
+           CASE WHEN rn > 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS truncated
+         FROM sized
+         WHERE rn <= 2 OR (cum_bytes - row_bytes) <= ?
+         ORDER BY rn ASC`,
+      ).all(...params) as Row[];
+
+      if (rows.length === 0) break;
+
+      let truncated = false;
+      let lastIssueId: string | null = null;
+      for (const row of rows) {
+        if (Number(row.truncated) === 1) {
+          truncated = true;
+          break;
+        }
+        const issueId = String(row.issue_id);
+        lastIssueId = issueId;
+        const body = String(row.body_md ?? "");
+        if (searchMatch(body, query)) {
+          snippets.set(issueId, extractSearchSnippet(body, query));
+        }
       }
+      if (!truncated || lastIssueId === null) break;
+      afterIssueId = lastIssueId;
     }
+
     return snippets;
+  }
+
+  /**
+   * Scan visible issue-session comments in deterministic
+   * `(s.issue_id ASC, l.created_at DESC, l.seq DESC, l.id DESC)` order using a
+   * cumulative wire-byte window capped by `postgresReplyMaxBytes()`.
+   * Under normal datasets (< budgetBytes and < 2000 rows), completes in 1 SQL query.
+   */
+  private scanIssueCommentsBounded(input: {
+    scope:
+      | { kind: "workspace"; workspaceId: string; closedFilterSql: string }
+      | { kind: "issue_ids"; issueIds: string[] };
+    query: string;
+    isPostgres: boolean;
+    snippets: Map<string, string>;
+  }): void {
+    const { scope, query, isPostgres, snippets } = input;
+    if (scope.kind === "issue_ids" && scope.issueIds.length === 0) return;
+
+    const fromAndJoinSql = scope.kind === "workspace"
+      ? `multiremi_issues i
+         JOIN multiremi_issue_sessions s ON s.issue_id = i.id
+         JOIN multiremi_conversation_log l ON l.session_id = s.id`
+      : `multiremi_issue_sessions s
+         JOIN multiremi_conversation_log l ON l.session_id = s.id`;
+    const scopeWhereSql = scope.kind === "workspace"
+      ? `i.workspace_id = ?${scope.closedFilterSql}`
+      : `s.issue_id IN (${scope.issueIds.map(() => "?").join(", ")})`;
+    const baseParams: unknown[] = scope.kind === "workspace"
+      ? [scope.workspaceId]
+      : [...scope.issueIds];
+
+    const budgetBytes = issueSearchReplyBudgetBytes();
+    const rowBytesSql = buildCommentRowBytesSql(isPostgres);
+    let cursor: CommentScanCursor | null = null;
+
+    while (true) {
+      const cursorClause = buildCommentScanCursorSql(cursor);
+      const batchRows = this.ctx.db.query(
+        `WITH batch AS (
+           SELECT
+             s.issue_id AS issue_id,
+             l.created_at AS created_at,
+             l.seq AS seq,
+             l.id AS id,
+             l.body_md AS body_md,
+             ${rowBytesSql} AS row_bytes
+           FROM ${fromAndJoinSql}
+           WHERE ${scopeWhereSql}
+             AND s.chat_id IS NULL
+             AND l.kind = 'message'
+             AND l.visibility = 'shown'
+             AND l.deleted_at IS NULL${cursorClause.sql}
+           ORDER BY s.issue_id ASC, l.created_at DESC, l.seq DESC, l.id DESC
+           LIMIT ?
+         ),
+         sized AS (
+           SELECT
+             issue_id,
+             created_at,
+             seq,
+             id,
+             body_md,
+             row_bytes,
+             ROW_NUMBER() OVER (ORDER BY issue_id ASC, created_at DESC, seq DESC, id DESC) AS rn,
+             SUM(row_bytes) OVER (
+               ORDER BY issue_id ASC, created_at DESC, seq DESC, id DESC
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+             ) AS cum_bytes
+           FROM batch
+         )
+         SELECT
+           issue_id,
+           created_at,
+           seq,
+           id,
+           CASE WHEN rn > 1 AND cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
+           CASE WHEN rn > 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS truncated
+         FROM sized
+         WHERE rn <= 2 OR (cum_bytes - row_bytes) <= ?
+         ORDER BY rn ASC`,
+      ).all(
+        ...baseParams,
+        ...cursorClause.params,
+        ISSUE_SEARCH_COMMENT_BATCH_ROWS,
+        budgetBytes,
+        budgetBytes,
+        budgetBytes,
+      ) as Row[];
+
+      if (batchRows.length === 0) break;
+
+      let truncated = false;
+      let lastFullRow: { issueId: string; createdAt: string; seq: number; id: string } | null = null;
+      for (const row of batchRows) {
+        if (Number(row.truncated) === 1) {
+          truncated = true;
+          break;
+        }
+        const issueId = String(row.issue_id);
+        lastFullRow = {
+          issueId,
+          createdAt: String(row.created_at),
+          seq: Number(row.seq),
+          id: String(row.id),
+        };
+        if (snippets.has(issueId)) continue;
+        const body = String(row.body_md ?? "");
+        if (searchMatch(body, query)) {
+          snippets.set(issueId, extractSearchSnippet(body, query));
+        }
+      }
+
+      if (!truncated && batchRows.length < ISSUE_SEARCH_COMMENT_BATCH_ROWS) break;
+      if (!lastFullRow) break;
+
+      cursor = snippets.has(lastFullRow.issueId)
+        ? { kind: "after_issue", issueId: lastFullRow.issueId }
+        : {
+            kind: "after_row",
+            issueId: lastFullRow.issueId,
+            createdAt: lastFullRow.createdAt,
+            seq: lastFullRow.seq,
+            id: lastFullRow.id,
+          };
+    }
   }
 
   private searchIssuesWorkspaceScanFallback(input: {
@@ -1596,32 +1786,19 @@ export class IssuesRepo {
        WHERE i.workspace_id = ?${closedFilterSql}
        ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC`,
     ).all(workspaceId) as Row[];
-    const commentSnippetByIssueId = new Map<string, string>();
-    if (includeCommentBodies && rows.length > 0) {
-      // Same deterministic tie-breaking contract as searchIssueCommentSnippets:
-      // ORDER BY l.created_at DESC, l.seq DESC, l.id DESC picks the latest session seq on ties.
-      const commentRows = this.ctx.db.query(
-        `SELECT s.issue_id AS issue_id, l.body_md AS body_md
-         FROM multiremi_issues i
-         JOIN multiremi_issue_sessions s ON s.issue_id = i.id
-         JOIN multiremi_conversation_log l ON l.session_id = s.id
-         WHERE i.workspace_id = ?${closedFilterSql}
-           AND s.chat_id IS NULL
-           AND l.kind = 'message'
-           AND l.visibility = 'shown'
-           AND l.deleted_at IS NULL
-         ORDER BY s.issue_id ASC, l.created_at DESC, l.seq DESC, l.id DESC`,
-      ).all(workspaceId) as Row[];
-      for (const row of commentRows) {
-        const issueId = String(row.issue_id);
-        if (commentSnippetByIssueId.has(issueId)) continue;
-        const body = String(row.body_md ?? "");
-        if (searchMatch(body, query)) {
-          commentSnippetByIssueId.set(issueId, extractSearchSnippet(body, query));
-        }
-      }
-    }
-    const candidates: IssueSearchCandidate[] = [];
+
+    // Evaluate key/title/description matches in memory first: field-matched rows already have
+    // a fixed matchRank (0/1/2), so candidate discovery only needs comment scans for rows that
+    // did not match key/title/description. Field-matched rows on the final page fetch their
+    // comment snippets afterwards (bounded by `limit <= 100` and `postgresReplyMaxBytes()`).
+    const scannedRows: Array<{
+      id: string;
+      updatedAt: string;
+      issueOrd: number;
+      fieldMatchSource: "key" | "title" | "description" | null;
+    }> = [];
+    const fieldMatchedIds: string[] = [];
+    const nonFieldMatchedIds: string[] = [];
     for (let index = 0; index < rows.length; index += 1) {
       const row = rows[index]!;
       const id = String(row.id);
@@ -1629,22 +1806,56 @@ export class IssuesRepo {
       const key = String(row.issue_key || (number > 0 ? formatIssueKey(number) : id));
       const title = String(row.title ?? "");
       const description = nullableString(row.description) ?? "";
-      const hasComment = commentSnippetByIssueId.has(id);
-      const matchSource = searchMatch(key, query)
+      const fieldMatchSource = searchMatch(key, query)
         ? "key"
         : searchMatch(title, query)
           ? "title"
           : searchMatch(description, query)
             ? "description"
-            : hasComment
-              ? "comment"
-              : null;
-      if (!matchSource) continue;
-      candidates.push({
+            : null;
+      scannedRows.push({
         id,
-        matchRank: searchRank(matchSource),
         updatedAt: String(row.updated_at),
         issueOrd: index,
+        fieldMatchSource,
+      });
+      if (fieldMatchSource) fieldMatchedIds.push(id);
+      else nonFieldMatchedIds.push(id);
+    }
+
+    const commentSnippetByIssueId = new Map<string, string>();
+    let fieldMatchedCommentsScanned = false;
+    if (includeCommentBodies && rows.length > 0) {
+      if (nonFieldMatchedIds.length > 0) {
+        if (fieldMatchedIds.length === 0 || nonFieldMatchedIds.length > ISSUE_SEARCH_MAX_ISSUE_ID_FILTER) {
+          this.scanIssueCommentsBounded({
+            scope: { kind: "workspace", workspaceId, closedFilterSql },
+            query,
+            isPostgres,
+            snippets: commentSnippetByIssueId,
+          });
+          fieldMatchedCommentsScanned = true;
+        } else {
+          this.scanIssueCommentsBounded({
+            scope: { kind: "issue_ids", issueIds: nonFieldMatchedIds },
+            query,
+            isPostgres,
+            snippets: commentSnippetByIssueId,
+          });
+        }
+      }
+    }
+
+    const candidates: IssueSearchCandidate[] = [];
+    for (const row of scannedRows) {
+      const hasComment = commentSnippetByIssueId.has(row.id);
+      const matchSource = row.fieldMatchSource ?? (hasComment ? "comment" : null);
+      if (!matchSource) continue;
+      candidates.push({
+        id: row.id,
+        matchRank: searchRank(matchSource),
+        updatedAt: row.updatedAt,
+        issueOrd: row.issueOrd,
         hasCommentMatch: hasComment,
       });
     }
@@ -1652,6 +1863,21 @@ export class IssuesRepo {
     const total = candidates.length;
     const page = candidates.slice(offset, offset + limit);
     if (page.length === 0) return { issues: [], total };
+
+    if (includeCommentBodies && !fieldMatchedCommentsScanned) {
+      const pageFieldMatchedIds = page
+        .filter((item) => item.matchRank < 3)
+        .map((item) => item.id);
+      if (pageFieldMatchedIds.length > 0) {
+        this.scanIssueCommentsBounded({
+          scope: { kind: "issue_ids", issueIds: pageFieldMatchedIds },
+          query,
+          isPostgres,
+          snippets: commentSnippetByIssueId,
+        });
+      }
+    }
+
     const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id));
     const issues: MultiremiIssueSearchResult[] = [];
     for (const item of page) {
@@ -6864,6 +7090,64 @@ function compareIssueSearchCandidates(left: IssueSearchCandidate, right: IssueSe
 }
 
 const ISSUE_SEARCH_MAX_SQL_TERMS = 50;
+const ISSUE_SEARCH_COMMENT_BATCH_ROWS = 2000;
+const ISSUE_SEARCH_MAX_ISSUE_ID_FILTER = 500;
+
+type CommentScanCursor =
+  | { kind: "after_issue"; issueId: string }
+  | { kind: "after_row"; issueId: string; createdAt: string; seq: number; id: string };
+
+function issueSearchReplyBudgetBytes(): number {
+  const ceiling = postgresReplyMaxBytes();
+  const wrapperReserve = Math.min(64 * 1024, Math.floor(ceiling / 4));
+  return Math.max(512, ceiling - wrapperReserve);
+}
+
+function buildCommentRowBytesSql(isPostgres: boolean): string {
+  return isPostgres
+    ? "OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(COALESCE(s.issue_id, '')) + OCTET_LENGTH(COALESCE(l.created_at, '')) + OCTET_LENGTH(COALESCE(l.id, '')) + 128"
+    : "LENGTH(CAST(COALESCE(l.body_md, '') AS BLOB)) * 6 + LENGTH(COALESCE(s.issue_id, '')) + LENGTH(COALESCE(l.created_at, '')) + LENGTH(COALESCE(l.id, '')) + 128";
+}
+
+function buildCommentSnippetRowBytesSql(isPostgres: boolean): string {
+  return isPostgres
+    ? "OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(COALESCE(s.issue_id, '')) + 96"
+    : "LENGTH(CAST(COALESCE(l.body_md, '') AS BLOB)) * 6 + LENGTH(COALESCE(s.issue_id, '')) + 96";
+}
+
+function buildCommentScanCursorSql(cursor: CommentScanCursor | null): { sql: string; params: unknown[] } {
+  if (!cursor) return { sql: "", params: [] };
+  if (cursor.kind === "after_issue") {
+    return { sql: " AND s.issue_id > ?", params: [cursor.issueId] };
+  }
+  return {
+    sql: ` AND (
+             s.issue_id > ?
+             OR (
+               s.issue_id = ?
+               AND (
+                 l.created_at < ?
+                 OR (
+                   l.created_at = ?
+                   AND (
+                     l.seq < ?
+                     OR (l.seq = ? AND l.id < ?)
+                   )
+                 )
+               )
+             )
+           )`,
+    params: [
+      cursor.issueId,
+      cursor.issueId,
+      cursor.createdAt,
+      cursor.createdAt,
+      cursor.seq,
+      cursor.seq,
+      cursor.id,
+    ],
+  };
+}
 
 function extractSearchTerms(query: string): string[] {
   return [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];

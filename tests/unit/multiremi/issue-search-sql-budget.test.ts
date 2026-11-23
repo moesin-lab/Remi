@@ -1348,10 +1348,12 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
       expect(largeMissAfter.statements[0]).toContain("TYPEOF(i.archived_at) = 'text'");
       expect(largeMissAfter.statements[0]).toContain("ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.rowid ASC) AS issue_ord");
       expect(largeMissAfter.statements[0]).not.toContain("CROSS JOIN LATERAL");
-      expect(largeMissAfter.statements[0]).toContain("ZEROBLOB(1)");
+      expect(largeMissAfter.statements[0]).toContain("CHAR(0)");
       expect(largeMissAfter.statements[0]).not.toContain("X'00'");
-      expect(largeNoCommentAfter.statements[0]).toContain("ZEROBLOB(1)");
+      expect(largeMissAfter.statements[0]).not.toContain("ZEROBLOB(1)");
+      expect(largeNoCommentAfter.statements[0]).toContain("CHAR(0)");
       expect(largeNoCommentAfter.statements[0]).not.toContain("X'00'");
+      expect(largeNoCommentAfter.statements[0]).not.toContain("ZEROBLOB(1)");
     }
 
     // Every emitted SQL statement translates cleanly for PostgreSQL (numbered $N placeholders, intact ESCAPE '\' and AS MATERIALIZED).
@@ -2128,7 +2130,7 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(newerHit.matchedSnippet).toBe("\u0000archive newer");
 
     // 4. Raw NULL issue_key + issue_number=0 row whose effective key falls back to `i.id`
-    //    containing U+0000 must also trigger fallback via `ZEROBLOB(1)` check on `i.id`.
+    //    containing U+0000 must also trigger fallback via `CHAR(0)` check on `i.id`.
     const nulIdKey = "raw_nul\u0000id_tail_991";
     f.db.run(
       `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
@@ -2173,6 +2175,24 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     setCommentCreatedAt(f.db, comment.id, "2026-11-14T01:00:00.000Z");
     setUpdatedAt(f.db, nulOversizeIssue.id, "2026-11-14T01:00:00.000Z");
 
+    // Leading U+FEFF (BOM) on a >= 4113-byte UTF-8 comment containing U+0000 must be preserved
+    // (TextDecoder `{ ignoreBOM: true }`) so matchedCommentSnippet.codePointAt(0) === 0xfeff (65279).
+    const bomRest = `bomneedle café ${"y".repeat(4100)}\u0000bomtail`;
+    expect(Buffer.byteLength(`\uFEFF${bomRest}`, "utf8")).toBeGreaterThanOrEqual(4113);
+    const bomIssue = f.createIssue({
+      workspaceId: "local",
+      title: "Oversize leading BOM comment holder",
+      description: "Clean description",
+    });
+    const bomComment = f.store.createIssueComment(bomIssue.id, { body: "placeholder" });
+    // Persist raw leading U+FEFF via CHAR(65279) || ? (bun:sqlite strips one leading BOM on JS bind
+    // and createIssueComment trims leading ECMA whitespace; raw SQLite rows retain U+FEFF).
+    f.db.run("UPDATE multiremi_conversation_log SET body_md = CHAR(65279) || ? WHERE id = ?", [bomRest, bomComment.id]);
+    const persistedBom = f.db.query("SELECT body_md FROM multiremi_conversation_log WHERE id = ?").get(bomComment.id) as { body_md: string };
+    expect(persistedBom.body_md.codePointAt(0)).toBe(0xfeff);
+    setCommentCreatedAt(f.db, bomComment.id, "2026-11-14T02:00:00.000Z");
+    setUpdatedAt(f.db, bomIssue.id, "2026-11-14T02:00:00.000Z");
+
     const previousLimit = process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
     const previousEnforce = process.env.MULTIREMI_PG_REPLY_ENFORCE;
     process.env.MULTIREMI_PG_REPLY_MAX_BYTES = "4096";
@@ -2181,6 +2201,8 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
 
     let asciiActual: { issues: MultiremiIssueSearchResult[]; total: number };
     let unicodeActual: { issues: MultiremiIssueSearchResult[]; total: number };
+    let bomAsciiActual: { issues: MultiremiIssueSearchResult[]; total: number };
+    let bomUnicodeActual: { issues: MultiremiIssueSearchResult[]; total: number };
 
     try {
       const reviewApp = new Hono();
@@ -2209,13 +2231,31 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
       expect(asciiMeasured.statements.some((sql) => sql.includes("SELECT SUBSTR(CAST(COALESCE(body_md, '') AS BLOB)"))).toBe(true);
 
       const unicodeMeasured = await measureSqlAsync(f.db, async () => {
-        const resp = await reviewApp.request(`/api/review-fixture?q=${encodeURIComponent("café")}`);
+        const resp = await reviewApp.request(`/api/review-fixture?q=${encodeURIComponent("archive café")}`);
         expect(resp.status).toBe(200);
         return await resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
       });
       unicodeActual = unicodeMeasured.result;
       expect(unicodeMeasured.writes).toBe(0);
       expect(unicodeMeasured.statements.some((sql) => sql.includes("SELECT SUBSTR(CAST(COALESCE(body_md, '') AS BLOB)"))).toBe(true);
+
+      const bomAsciiMeasured = await measureSqlAsync(f.db, async () => {
+        const resp = await reviewApp.request(`/api/review-fixture?q=${encodeURIComponent("bomneedle")}`);
+        expect(resp.status).toBe(200);
+        return await resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
+      });
+      bomAsciiActual = bomAsciiMeasured.result;
+      expect(bomAsciiMeasured.writes).toBe(0);
+      expect(bomAsciiMeasured.statements.some((sql) => sql.includes("HEX(CAST('A' AS BLOB))"))).toBe(true);
+
+      const bomUnicodeMeasured = await measureSqlAsync(f.db, async () => {
+        const resp = await reviewApp.request(`/api/review-fixture?q=${encodeURIComponent("bomneedle café")}`);
+        expect(resp.status).toBe(200);
+        return await resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
+      });
+      bomUnicodeActual = bomUnicodeMeasured.result;
+      expect(bomUnicodeMeasured.writes).toBe(0);
+      expect(bomUnicodeMeasured.statements.some((sql) => sql.includes("HEX(CAST('A' AS BLOB))"))).toBe(true);
     } finally {
       if (previousLimit === undefined) delete process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
       else process.env.MULTIREMI_PG_REPLY_MAX_BYTES = previousLimit;
@@ -2225,15 +2265,309 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     }
 
     const asciiExpected = legacySearchIssuesOracle(f.store, f.db, { q: "archive", workspaceId: "local", limit: 10 });
-    const unicodeExpected = legacySearchIssuesOracle(f.store, f.db, { q: "café", workspaceId: "local", limit: 10 });
+    const unicodeExpected = legacySearchIssuesOracle(f.store, f.db, { q: "archive café", workspaceId: "local", limit: 10 });
+    const bomAsciiExpected = legacySearchIssuesOracle(f.store, f.db, { q: "bomneedle", workspaceId: "local", limit: 10 });
+    const bomUnicodeExpected = legacySearchIssuesOracle(f.store, f.db, { q: "bomneedle café", workspaceId: "local", limit: 10 });
 
     expect(asciiActual).toEqual(asciiExpected);
     expect(unicodeActual).toEqual(unicodeExpected);
+    expect(bomAsciiActual).toEqual(bomAsciiExpected);
+    expect(bomUnicodeActual).toEqual(bomUnicodeExpected);
     expect(asciiActual.total).toBe(1);
     expect(unicodeActual.total).toBe(1);
     expect(asciiActual.issues[0]?.id).toBe(nulOversizeIssue.id);
     expect(asciiActual.issues[0]?.matchedCommentSnippet).toContain("\u0000archive café 😀 tail-marker");
     expect(unicodeActual.issues[0]?.id).toBe(nulOversizeIssue.id);
     expect(unicodeActual.issues[0]?.matchedCommentSnippet).toContain("\u0000archive café 😀 tail-marker");
+    expect(bomAsciiActual.total).toBe(1);
+    expect(bomAsciiActual.issues[0]?.id).toBe(bomIssue.id);
+    expect(bomAsciiActual.issues[0]?.matchedCommentSnippet?.codePointAt(0)).toBe(0xfeff);
+    expect(bomUnicodeActual.total).toBe(1);
+    expect(bomUnicodeActual.issues[0]?.id).toBe(bomIssue.id);
+    expect(bomUnicodeActual.issues[0]?.matchedCommentSnippet?.codePointAt(0)).toBe(0xfeff);
+  }, 30_000);
+
+  it("keeps 1-SQL fast path and decodes chunked U+0000/U+FEFF/emoji comments accurately on file-backed SQLite UTF-16le and UTF-16be databases", async () => {
+    if (backend !== "SQLite") return;
+
+    const dir = mkdtempSync(join(tmpdir(), "mul331-utf16-"));
+    try {
+      for (const encoding of ["UTF-16le", "UTF-16be"] as const) {
+        const dbPath = join(dir, `search-${encoding.toLowerCase()}.sqlite`);
+        const db = openSqliteDatabase(dbPath) as unknown as SqlDatabase;
+        try {
+          db.exec(`PRAGMA encoding = '${encoding}'`);
+          const actualEncoding = String((db.query("PRAGMA encoding").get() as { encoding?: string } | null)?.encoding ?? "");
+          expect(actualEncoding).toBe(encoding);
+
+          const store = new MultiremiStore(db);
+          store.ensureLocalWorkspace();
+
+          // 1. NUL-free issues containing ASCII and supplementary-plane emoji ('😀' has 0x00 bytes
+          //    in UTF-16le/UTF-16be BLOB representation): CHAR(0) detection must NOT false-trigger.
+          const fastIssue = createResponsibleTestIssue(store, {
+            workspaceId: "local",
+            title: "UTF16FAST-101 ASCII & 😀 title",
+            description: "Normal UTF-16 description with 😀 emoji",
+          });
+          store.createIssueComment(fastIssue.id, { body: "UTF16FAST-101 normal comment 😀" });
+
+          const nulFreeMiss = measureSql(db, () => store.searchIssues({ q: "no-match-utf16", workspaceId: "local", limit: 5 }));
+          expect(nulFreeMiss.result).toEqual({ issues: [], total: 0 });
+          expect(nulFreeMiss).toMatchObject({ reads: 1, writes: 0 });
+
+          const nulFreeHit = measureSql(db, () => store.searchIssues({ q: "utf16fast-101", workspaceId: "local", limit: 5 }));
+          expect(nulFreeHit).toMatchObject({ reads: 4, writes: 0 });
+          expect(nulFreeHit.result).toEqual(legacySearchIssuesOracle(store, db, { q: "utf16fast-101", workspaceId: "local", limit: 5 }));
+
+          // 2. Neutral-titled issue with oversized comment carrying leading U+FEFF, emoji, U+0000, needle, café
+          const oversizeNeedleRest = `${"x".repeat(4095)}😀\u0000needle café`;
+          const needleIssue = createResponsibleTestIssue(store, {
+            workspaceId: "local",
+            title: "Neutral UTF-16 oversize holder",
+            description: "Clean neutral description",
+          });
+          const needleComment = store.createIssueComment(needleIssue.id, { body: "placeholder" });
+          // SQLite UTF-16 translation strips one leading U+FEFF BOM on >=2048-char values
+          // (including on subsequent row rewrites), so update body_md and created_at together
+          // with CHAR(65279, 65279) || ? to persist a single raw leading U+FEFF in the column.
+          db.run(
+            "UPDATE multiremi_conversation_log SET body_md = CHAR(65279, 65279) || ?, created_at = ? WHERE id = ?",
+            [oversizeNeedleRest, "2026-11-15T01:00:00.000Z", needleComment.id],
+          );
+          const persistedNeedle = db.query("SELECT body_md FROM multiremi_conversation_log WHERE id = ?").get(needleComment.id) as { body_md: string };
+          expect(persistedNeedle.body_md.codePointAt(0)).toBe(0xfeff);
+          expect(persistedNeedle.body_md.codePointAt(1)).toBe("x".codePointAt(0));
+          setUpdatedAt(db, needleIssue.id, "2026-11-15T01:00:00.000Z");
+
+          // 3. Neutral-titled issue with >= 4113 B comment starting with U+FEFF + match token to verify BOM preservation
+          const bomHeadRest = `bomhead ${"z".repeat(4100)}😀\u0000bomend`;
+          expect(Buffer.byteLength(`\uFEFF${bomHeadRest}`, "utf8")).toBeGreaterThanOrEqual(4113);
+          const bomHeadIssue = createResponsibleTestIssue(store, {
+            workspaceId: "local",
+            title: "Neutral UTF-16 BOM holder",
+            description: "Clean neutral description",
+          });
+          const bomHeadComment = store.createIssueComment(bomHeadIssue.id, { body: "placeholder" });
+          db.run(
+            "UPDATE multiremi_conversation_log SET body_md = CHAR(65279, 65279) || ?, created_at = ? WHERE id = ?",
+            [bomHeadRest, "2026-11-15T02:00:00.000Z", bomHeadComment.id],
+          );
+          const persistedBomHead = db.query("SELECT body_md FROM multiremi_conversation_log WHERE id = ?").get(bomHeadComment.id) as { body_md: string };
+          expect(persistedBomHead.body_md.codePointAt(0)).toBe(0xfeff);
+          expect(persistedBomHead.body_md.codePointAt(1)).toBe("b".codePointAt(0));
+          setUpdatedAt(db, bomHeadIssue.id, "2026-11-15T02:00:00.000Z");
+
+          const previousLimit = process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
+          const previousEnforce = process.env.MULTIREMI_PG_REPLY_ENFORCE;
+          const replyExceptions = DB_REPLY_TRANSITION_EXCEPTIONS as Set<string>;
+          const wasCompatExempt = replyExceptions.has("GET /api/issues/search");
+          replyExceptions.delete("GET /api/issues/search");
+          process.env.MULTIREMI_PG_REPLY_MAX_BYTES = "4096";
+          process.env.MULTIREMI_PG_REPLY_ENFORCE = "1";
+          resetDbReplyLimitForTest();
+
+          const reviewResults = new Map<string, { issues: MultiremiIssueSearchResult[]; total: number }>();
+          const compatResults = new Map<string, { issues: Array<{ id: string; match_source: string; matched_comment_snippet?: string; matched_snippet?: string }>; total: number }>();
+
+          try {
+            const reviewApp = new Hono();
+            reviewApp.use("*", createRequestMetricsMiddleware({
+              enabled: false,
+              slowRequestMs: 500,
+              summaryIntervalMs: 60_000,
+              summaryTopRoutes: 10,
+              bufferCapacity: 256,
+              role: "all",
+            }));
+            reviewApp.get("/api/review-fixture", (c) => {
+              expect(postgresReplyMaxBytes()).toBe(4096);
+              expect(currentDbReplyPolicy()).toMatchObject({ limitBytes: 4096, enforced: true, exempt: false });
+              const q = c.req.query("q") ?? "";
+              return c.json(store.searchIssues({ q, workspaceId: "local", limit: 10 }));
+            });
+
+            const app = createMultiremiApp({ store });
+
+            for (const q of ["needle", "café", "\u0000needle", "bomhead"]) {
+              const reviewMeasured = await measureSqlAsync(db, async () => {
+                const resp = await reviewApp.request(`/api/review-fixture?q=${encodeURIComponent(q)}`);
+                expect(resp.status).toBe(200);
+                return await resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
+              });
+              expect(reviewMeasured.writes).toBe(0);
+              expect(reviewMeasured.statements.some((sql) => sql.includes("HEX(CAST('A' AS BLOB))"))).toBe(true);
+              reviewResults.set(q, reviewMeasured.result);
+
+              const compatResp = await app.request(`/api/issues/search?q=${encodeURIComponent(q)}&workspace_id=local&limit=10`);
+              expect(compatResp.status).toBe(200);
+              expect(compatResp.headers.get("X-Total-Count")).toBe("1");
+              compatResults.set(
+                q,
+                await compatResp.json() as {
+                  issues: Array<{ id: string; match_source: string; matched_comment_snippet?: string; matched_snippet?: string }>;
+                  total: number;
+                },
+              );
+            }
+          } finally {
+            if (previousLimit === undefined) delete process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
+            else process.env.MULTIREMI_PG_REPLY_MAX_BYTES = previousLimit;
+            if (previousEnforce === undefined) delete process.env.MULTIREMI_PG_REPLY_ENFORCE;
+            else process.env.MULTIREMI_PG_REPLY_ENFORCE = previousEnforce;
+            if (wasCompatExempt) replyExceptions.add("GET /api/issues/search");
+            resetDbReplyLimitForTest();
+          }
+
+          for (const q of ["needle", "café", "\u0000needle"]) {
+            const expected = legacySearchIssuesOracle(store, db, { q, workspaceId: "local", limit: 10 });
+            const reviewActual = reviewResults.get(q)!;
+            const compatActual = compatResults.get(q)!;
+            expect(reviewActual).toEqual(expected);
+            expect(reviewActual.total).toBe(1);
+            expect(reviewActual.issues[0]?.id).toBe(needleIssue.id);
+            expect(reviewActual.issues[0]?.matchSource).toBe("comment");
+            expect(compatActual.total).toBe(1);
+            expect(compatActual.issues[0]?.id).toBe(needleIssue.id);
+            expect(compatActual.issues[0]?.match_source).toBe("comment");
+            expect(compatActual.issues[0]?.matched_comment_snippet).toBe(expected.issues[0]?.matchedCommentSnippet);
+            expect(compatActual.issues[0]?.matched_snippet).toBe(expected.issues[0]?.matchedSnippet);
+          }
+
+          const bomExpected = legacySearchIssuesOracle(store, db, { q: "bomhead", workspaceId: "local", limit: 10 });
+          const bomReviewActual = reviewResults.get("bomhead")!;
+          const bomCompatActual = compatResults.get("bomhead")!;
+          expect(bomReviewActual).toEqual(bomExpected);
+          expect(bomReviewActual.total).toBe(1);
+          expect(bomReviewActual.issues[0]?.id).toBe(bomHeadIssue.id);
+          expect(bomReviewActual.issues[0]?.matchSource).toBe("comment");
+          expect(bomReviewActual.issues[0]?.matchedCommentSnippet?.codePointAt(0)).toBe(0xfeff);
+          expect(bomCompatActual.total).toBe(1);
+          expect(bomCompatActual.issues[0]?.matched_comment_snippet?.codePointAt(0)).toBe(0xfeff);
+        } finally {
+          db.close();
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("enforces exact 6-read single-batch boundaries for SQLite persisted-NUL ASCII fallback and 1999->2000 short-comment continuation", () => {
+    const f = fixture();
+
+    // 1. SQLite persisted-NUL mixed field + comment hit under ASCII query:
+    //    1 candidate probe read (detects has_nul=1) + 5 fallback reads = 6 business reads, 0 writes.
+    if (backend === "SQLite") {
+      const nulBoundWs = f.store.createWorkspace({ name: "NUL 6-read boundary", slug: "nul-6-read" });
+      const titleHit = f.createIssue({
+        workspaceId: nulBoundWs.id,
+        title: "NULSIX-600 title hit",
+        description: "Clean description",
+      });
+      setUpdatedAt(f.db, titleHit.id, "2026-11-16T02:00:00.000Z");
+
+      const nulCommentHit = f.createIssue({
+        workspaceId: nulBoundWs.id,
+        title: "Neutral persisted NUL comment holder",
+        description: "Clean description",
+      });
+      f.store.createIssueComment(nulCommentHit.id, { body: "\u0000NULSIX-600 comment hit" });
+      setUpdatedAt(f.db, nulCommentHit.id, "2026-11-16T01:00:00.000Z");
+
+      const expected = legacySearchIssuesOracle(f.store, f.db, {
+        q: "NULSIX-600",
+        workspaceId: nulBoundWs.id,
+        limit: 1,
+      });
+      const measured = measureSql(f.db, () => f.store.searchIssues({
+        q: "NULSIX-600",
+        workspaceId: nulBoundWs.id,
+        limit: 1,
+      }));
+      expect(measured.result).toEqual(expected);
+      expect(measured.result.total).toBe(2);
+      expect(measured.result.issues.map((item) => item.id)).toEqual([titleHit.id]);
+      expect(measured).toMatchObject({ reads: 6, writes: 0, txControl: 0 });
+    }
+
+    // 2. Direct non-ASCII fallback (`q="café"`) across 1999 -> 2000 short visible comments:
+    //    - At 1999 rows (< ISSUE_SEARCH_COMMENT_BATCH_ROWS=2000): 5 business reads, 0 writes.
+    //    - At 2000 rows (=== ISSUE_SEARCH_COMMENT_BATCH_ROWS): 1 extra empty continuation probe -> 6 business reads, 0 writes.
+    const batchWs = f.store.createWorkspace({ name: "Batch 2000 boundary", slug: "batch-2000-boundary" });
+    const batchTitleHit = f.createIssue({
+      workspaceId: batchWs.id,
+      title: "CAFÉ-B2000 title hit",
+      description: "Clean description",
+    });
+    setUpdatedAt(f.db, batchTitleHit.id, "2026-11-17T02:00:00.000Z");
+
+    const batchCommentHolder = f.createIssue({
+      workspaceId: batchWs.id,
+      title: "Neutral B2000 comment holder",
+      description: "Clean description",
+    });
+    const firstMatch = f.store.createIssueComment(batchCommentHolder.id, { body: "CAFÉ-B2000 matching comment" });
+    setCommentCreatedAt(f.db, firstMatch.id, "2026-11-17T01:00:00.000Z");
+    setUpdatedAt(f.db, batchCommentHolder.id, "2026-11-17T01:00:00.000Z");
+
+    const seedRow = f.db.query("SELECT session_id, seq FROM multiremi_conversation_log WHERE id = ?").get(firstMatch.id) as {
+      session_id: string;
+      seq: number;
+    };
+    const sessionId = seedRow.session_id;
+    const baseSeq = Number(seedRow.seq);
+
+    // Insert 1998 additional short visible comments (total 1999 visible comments on nonFieldMatchedIds).
+    const insertShortComments = (startOffset: number, count: number) => {
+      f.transaction(() => {
+        const chunkSize = 200;
+        for (let offset = 0; offset < count; offset += chunkSize) {
+          const batchCount = Math.min(chunkSize, count - offset);
+          const valuePlaceholders: string[] = [];
+          const params: unknown[] = [];
+          for (let j = 0; j < batchCount; j += 1) {
+            const idx = startOffset + offset + j;
+            valuePlaceholders.push("(?, ?, ?, 'message', 'shown', 'member', 's', '2026-11-17T00:00:00.000Z', '2026-11-17T00:00:00.000Z')");
+            params.push(sessionId, baseSeq + idx, `msg_b2000_${idx}`);
+          }
+          f.db.run(
+            `INSERT INTO multiremi_conversation_log (session_id, seq, id, kind, visibility, sender_type, body_md, created_at, updated_at)
+             VALUES ${valuePlaceholders.join(", ")}`,
+            params,
+          );
+        }
+      });
+    };
+
+    insertShortComments(1, 1998);
+
+    const at1999 = measureSql(f.db, () => f.store.searchIssues({
+      q: "café-b2000",
+      workspaceId: batchWs.id,
+      limit: 1,
+    }));
+    expect(at1999.result.total).toBe(2);
+    expect(at1999.result.issues.map((item) => item.id)).toEqual([batchTitleHit.id]);
+    expect(at1999).toMatchObject({
+      reads: 5,
+      writes: 0,
+      txControl: backend === "PostgreSQL" ? 1 : 0,
+    });
+
+    // Insert the 2000th short visible comment -> triggers 1 empty continuation probe (5 -> 6 reads).
+    insertShortComments(1999, 1);
+
+    const at2000 = measureSql(f.db, () => f.store.searchIssues({
+      q: "café-b2000",
+      workspaceId: batchWs.id,
+      limit: 1,
+    }));
+    expect(at2000.result).toEqual(at1999.result);
+    expect(at2000).toMatchObject({
+      reads: 6,
+      writes: 0,
+      txControl: backend === "PostgreSQL" ? 1 : 0,
+    });
   }, 30_000);
 }, { isolation: "snapshot" });

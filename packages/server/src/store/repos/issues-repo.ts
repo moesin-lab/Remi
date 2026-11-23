@@ -1455,10 +1455,10 @@ export class IssuesRepo {
         ? ""
         : `,
                CASE
-                 WHEN INSTR(CAST(COALESCE(i.id, '') AS BLOB), ZEROBLOB(1)) > 0
-                   OR INSTR(CAST(COALESCE(i.issue_key, '') AS BLOB), ZEROBLOB(1)) > 0
-                   OR INSTR(CAST(COALESCE(i.title, '') AS BLOB), ZEROBLOB(1)) > 0
-                   OR (i.description IS NOT NULL AND INSTR(CAST(i.description AS BLOB), ZEROBLOB(1)) > 0)
+                 WHEN INSTR(COALESCE(i.id, ''), CHAR(0)) > 0
+                   OR INSTR(COALESCE(i.issue_key, ''), CHAR(0)) > 0
+                   OR INSTR(COALESCE(i.title, ''), CHAR(0)) > 0
+                   OR (i.description IS NOT NULL AND INSTR(i.description, CHAR(0)) > 0)
                  THEN 1
                  ELSE 0
                END AS has_nul`;
@@ -1471,9 +1471,11 @@ export class IssuesRepo {
         // On PostgreSQL, CROSS JOIN LATERAL (... LIMIT 1) keeps `l.session_id = s.id` inside
         // `l`'s base restriction clauses (preventing subquery pull-up) so the planner always
         // probes an index on session_id even when table statistics are stale (reltuples = 0).
-        // On SQLite, text operators truncate at U+0000; piggybacking BLOB `ZEROBLOB(1)` checks in
-        // the same candidate query triggers a same-snapshot JS fallback only when NUL exists
-        // (zero extra SQL or rows on normal NUL-free workspaces).
+        // On SQLite, text LIKE/LOWER operators truncate at U+0000; piggybacking character-level
+        // `INSTR(..., CHAR(0)) > 0` checks in the same candidate query detects real U+0000 code
+        // points safely across UTF-8, UTF-16le, and UTF-16be database encodings and triggers a
+        // same-snapshot JS fallback only when NUL exists (zero extra SQL or rows on normal
+        // NUL-free workspaces).
         const matchedCommentsSql = isPostgres
           ? `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
              FROM workspace_issues wi
@@ -1492,14 +1494,14 @@ export class IssuesRepo {
                wi.id,
                wi.updated_at,
                wi.issue_ord,
-               MAX(CASE WHEN INSTR(CAST(COALESCE(l.body_md, '') AS BLOB), ZEROBLOB(1)) > 0 THEN 1 ELSE 0 END) AS has_nul
+               MAX(CASE WHEN INSTR(COALESCE(l.body_md, ''), CHAR(0)) > 0 THEN 1 ELSE 0 END) AS has_nul
              FROM workspace_issues wi
              JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
              JOIN multiremi_conversation_log l ON l.session_id = s.id
              WHERE l.visibility = 'shown'
                AND l.kind = 'message'
                AND l.deleted_at IS NULL
-               AND ((${commentLikeSql}) OR INSTR(CAST(COALESCE(l.body_md, '') AS BLOB), ZEROBLOB(1)) > 0)
+               AND ((${commentLikeSql}) OR INSTR(COALESCE(l.body_md, ''), CHAR(0)) > 0)
              GROUP BY wi.id, wi.updated_at, wi.issue_ord`;
         const unionSelectSql = isPostgres
           ? `SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank
@@ -1633,21 +1635,28 @@ export class IssuesRepo {
    * bridge reply stays strictly below `postgresReplyMaxBytes()`.
    *
    * - PostgreSQL slices by Unicode code points via `SUBSTR(COALESCE(body_md, ''), ?, ?)`.
-   * - SQLite slices raw UTF-8 bytes via `SUBSTR(CAST(COALESCE(body_md, '') AS BLOB), ?, ?)`
-   *   and decodes once after concatenation so embedded `U+0000` bytes never truncate text
-   *   and multi-byte UTF-8 / emoji sequences never split across chunk boundaries.
+   * - SQLite slices raw database-encoded bytes via `SUBSTR(CAST(COALESCE(body_md, '') AS BLOB), ?, ?)`
+   *   with even byte chunks, detects the database encoding (`UTF-8` / `UTF-16le` / `UTF-16be`)
+   *   in the same query via `HEX(CAST('A' AS BLOB))`, and decodes once after concatenation with
+   *   `{ ignoreBOM: true }` so embedded `U+0000`, multi-byte UTF-8 / UTF-16 surrogate pairs, and
+   *   leading `U+FEFF` (BOM) code points are preserved identically to baseline.
    */
   private readConversationLogBodyBounded(logId: string, isPostgres: boolean): string {
     const ceiling = postgresReplyMaxBytes();
     if (!isPostgres) {
-      const chunkBytes = Math.max(64, Math.floor((Math.max(256, ceiling) - 192) / 6));
+      const chunkBytes = Math.max(64, Math.floor((Math.max(256, ceiling) - 192) / 6) & ~1);
       const chunks: Uint8Array[] = [];
+      let encoding: "utf-8" | "utf-16le" | "utf-16be" = "utf-8";
       let startByte = 1;
       while (true) {
         const row = this.ctx.db.query(
-          "SELECT SUBSTR(CAST(COALESCE(body_md, '') AS BLOB), ?, ?) AS c FROM multiremi_conversation_log WHERE id = ?",
+          "SELECT SUBSTR(CAST(COALESCE(body_md, '') AS BLOB), ?, ?) AS c, HEX(CAST('A' AS BLOB)) AS enc FROM multiremi_conversation_log WHERE id = ?",
         ).get(startByte, chunkBytes, logId) as Row | null;
         if (!row || row.c == null) break;
+        if (startByte === 1) {
+          const encHex = String(row.enc ?? "").toUpperCase();
+          encoding = encHex === "4100" ? "utf-16le" : encHex === "0041" ? "utf-16be" : "utf-8";
+        }
         const raw = row.c;
         const chunk = raw instanceof Uint8Array
           ? raw
@@ -1659,7 +1668,7 @@ export class IssuesRepo {
         startByte += chunk.byteLength;
         if (chunk.byteLength < chunkBytes) break;
       }
-      return new TextDecoder().decode(Buffer.concat(chunks));
+      return new TextDecoder(encoding, { ignoreBOM: true }).decode(Buffer.concat(chunks));
     }
 
     const chunkChars = Math.max(16, Math.floor((Math.max(256, ceiling) - 192) / 6));

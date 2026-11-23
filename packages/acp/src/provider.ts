@@ -1166,7 +1166,13 @@ export class AcpProvider implements Provider {
       if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
         trackToolCall(entry, update);
       }
-      antigravityBgCommands?.observe(update, this._adapter);
+      const bgObservation = antigravityBgCommands?.observe(update, this._adapter);
+      if (bgObservation?.releaseOpenToolCallId) {
+        openTools.delete(bgObservation.releaseOpenToolCallId);
+        if (entry.openToolCalls?.delete(bgObservation.releaseOpenToolCallId) && !entry.openToolCalls.size) {
+          wakeSteerWaiters(entry);
+        }
+      }
       if (update.sessionUpdate === "tool_call_update") {
         const status = (update as any).status;
         const compaction = record(record(update._meta)?.contextCompaction);
@@ -1291,6 +1297,8 @@ export class AcpProvider implements Provider {
 
         if (canContinue && continuations < MAX_ANTIGRAVITY_BG_CONTINUATIONS) {
           continuations++;
+          openTools.clear();
+          entry.openToolCalls?.clear();
           lastActivity = Date.now();
           const taskIds = antigravityBgCommands.pendingTaskIds();
           console.warn(
@@ -3185,13 +3193,24 @@ const ANTIGRAVITY_TASK_TERMINAL_STATUS_RE = /\bStatus["']?\s*:\s*["']?(?:DONE|CO
 const ANTIGRAVITY_TASK_RUNNING_STATUS_RE = /\bStatus["']?\s*:\s*["']?(?:RUNNING|PENDING|IN_PROGRESS)\b/i;
 const ANTIGRAVITY_COMMAND_EXITED_RE = /\bCommand\s+exited\s+with\s+(?:code\s+-?\d+|signal\s+\S+)\b/i;
 const ANTIGRAVITY_SYSTEM_MESSAGE_RE = /<SYSTEM_MESSAGE>([\s\S]*?)(?:<\/SYSTEM_MESSAGE>|$)/gi;
-const ANTIGRAVITY_TASK_FINISHED_HEADER_RE = /\bTask\s+id\s+[`"']?([A-Za-z0-9._:/-]+)[`"']?\s+(?:finished|completed|failed|exited|terminated|killed)\b/gi;
-const ANTIGRAVITY_MESSAGE_TASK_FINISHED_RE = /\[Message\][^\n]*\bcontent=Task\s+id\s+[`"']?([A-Za-z0-9._:/-]+)[`"']?\s+(?:finished|completed|failed|exited|terminated|killed)\b/gi;
+const ANTIGRAVITY_SYSTEM_MESSAGE_BODY_SEPARATOR_RE = /(?:\b(?:finished|was\s+cancell?ed)\s+with\s+result:|\r?\n(?:Command|Log)\s+output:)/i;
+const ANTIGRAVITY_EXPLICIT_TASK_ID_RE = /\b(?:Task(?:\s+id)?\s*[:#]\s*[`"']?[A-Za-z0-9._:/-]+|Task\s+id\s+[`"']?[A-Za-z0-9._:/-]+|Task\s+[`"']?[A-Za-z0-9._:/-]*[0-9/][A-Za-z0-9._:/-]*|sender=[`"']?[A-Za-z0-9._:/-]+)/i;
+const ANTIGRAVITY_TASK_FINISHED_HEADER_RE = /\bTask\s+id\s+[`"']?([A-Za-z0-9._:/-]+)[`"']?\s+(?:was\s+cancell?ed|finished|completed|failed|exited|terminated|killed|cancell?ed)\b/gi;
+const ANTIGRAVITY_MESSAGE_TASK_FINISHED_RE = /\[Message\][^\n]*\bcontent=Task\s+id\s+[`"']?([A-Za-z0-9._:/-]+)[`"']?\s+(?:was\s+cancell?ed|finished|completed|failed|exited|terminated|killed|cancell?ed)\b/gi;
 const ANTIGRAVITY_COMPLETION_WORD_RE = /\b(?:Status["']?\s*:\s*["']?(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELLED)|completed|finished|exited|terminated|killed|failed|stopped)\b/i;
 const ANTIGRAVITY_STILL_RUNNING_RE = /\b(?:Status["']?\s*:\s*["']?(?:RUNNING|PENDING|IN_PROGRESS)|still\s+running)\b/i;
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function splitAntigravityToolOutput(text: string): { envelope: string; tail: string } {
+  const match = ANTIGRAVITY_TOOL_OUTPUT_SEPARATOR_RE.exec(text);
+  if (!match) return { envelope: text, tail: "" };
+  return {
+    envelope: text.slice(0, match.index),
+    tail: text.slice(match.index + match[0].length),
+  };
 }
 
 /**
@@ -3201,8 +3220,32 @@ function escapeRegExp(value: string): string {
  * codes, or background task ids.
  */
 function extractAntigravityToolEnvelope(text: string): string {
-  const match = ANTIGRAVITY_TOOL_OUTPUT_SEPARATOR_RE.exec(text);
-  return match ? text.slice(0, match.index) : text;
+  return splitAntigravityToolOutput(text).envelope;
+}
+
+/**
+ * Extracts only the host notification header of a `<SYSTEM_MESSAGE>` body,
+ * stripping child task result payloads after `finished with result:` or
+ * `Command output:` / `Log output:` so cross-task mentions cannot clear
+ * unrelated pending background commands.
+ */
+function extractAntigravitySystemMessageHeader(body: string): string {
+  const match = ANTIGRAVITY_SYSTEM_MESSAGE_BODY_SEPARATOR_RE.exec(body);
+  if (!match) return body;
+  return /\b(?:finished|was\s+cancell?ed)\s+with\s+result:/i.test(match[0])
+    ? body.slice(0, match.index + match[0].length)
+    : body.slice(0, match.index);
+}
+
+function extractExplicitFinishedTaskIds(header: string): string[] {
+  ANTIGRAVITY_TASK_FINISHED_HEADER_RE.lastIndex = 0;
+  const ids: string[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = ANTIGRAVITY_TASK_FINISHED_HEADER_RE.exec(header)) !== null) {
+    const finishedId = match[1]?.replace(/[.:,]+$/, "");
+    if (finishedId && !ids.includes(finishedId)) ids.push(finishedId);
+  }
+  return ids;
 }
 
 /**
@@ -3318,10 +3361,10 @@ class AntigravityBackgroundCommandTracker {
     return ids;
   }
 
-  observe(update: SessionUpdate, adapter: AgentAdapter): void {
+  observe(update: SessionUpdate, adapter: AgentAdapter): { releaseOpenToolCallId?: string } | undefined {
     if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
       const id = typeof update.toolCallId === "string" ? update.toolCallId : null;
-      if (!id) return;
+      if (!id) return undefined;
       const status = typeof update.status === "string" ? update.status : undefined;
       const resolvedName = adapter.resolveToolName(update);
       const input = adapter.extractToolInput(update);
@@ -3329,35 +3372,42 @@ class AntigravityBackgroundCommandTracker {
 
       if (resolvedName === "run_command" || this.runCommandCalls.has(id)) {
         this.runCommandCalls.add(id);
+        let releaseOpenToolCallId: string | undefined;
         if (isDaemonToolInput(input)) {
           this.daemonCalls.add(id);
           this.pending.delete(id);
-          return;
-        }
-        if (this.daemonCalls.has(id)) return;
+        } else if (!this.daemonCalls.has(id)) {
+          const envelope = text ? extractAntigravityToolEnvelope(text) : "";
+          const bgTaskId = envelope ? extractAntigravityBackgroundTaskId(envelope) : null;
+          const existing = this.pending.get(id);
+          const hasTerminalExit = hasAntigravityTerminalExit(update, envelope);
 
-        const envelope = text ? extractAntigravityToolEnvelope(text) : "";
-        const bgTaskId = envelope ? extractAntigravityBackgroundTaskId(envelope) : null;
-        const existing = this.pending.get(id);
-
-        if (status === "failed") {
-          this.pending.delete(id);
-          return;
-        }
-        if (status === "completed") {
-          if (bgTaskId && !hasAntigravityTerminalExit(update, envelope)) {
-            this.pending.set(id, { toolCallId: id, taskId: bgTaskId });
-          } else {
+          if (status === "failed" || hasTerminalExit) {
             this.pending.delete(id);
+            releaseOpenToolCallId = id;
+          } else if (status === "completed") {
+            if (bgTaskId) {
+              this.pending.set(id, { toolCallId: id, taskId: bgTaskId });
+              releaseOpenToolCallId = id;
+            } else {
+              this.pending.delete(id);
+              releaseOpenToolCallId = id;
+            }
+          } else if (update.sessionUpdate === "tool_call_update" && status === undefined && !existing && !bgTaskId) {
+            // Do not re-add an already cleared call on status-less incremental updates.
+          } else {
+            const resolvedTaskId = bgTaskId ?? existing?.taskId ?? null;
+            this.pending.set(id, {
+              toolCallId: id,
+              taskId: resolvedTaskId,
+            });
+            if (resolvedTaskId) {
+              releaseOpenToolCallId = id;
+            }
           }
-          return;
         }
-
-        this.pending.set(id, {
-          toolCallId: id,
-          taskId: bgTaskId ?? existing?.taskId ?? null,
-        });
-        return;
+        if (text) this._observeToolSystemMessage(text);
+        return releaseOpenToolCallId ? { releaseOpenToolCallId } : undefined;
       }
 
       if (resolvedName === "manage_task" || this.manageTaskCalls.has(id)) {
@@ -3371,19 +3421,19 @@ class AntigravityBackgroundCommandTracker {
             this._clearByTaskId(taskId);
           } else if (text) {
             this._observeManageTaskOutput(text, taskId);
-            this._observeSystemMessage(text);
           }
+          if (text) this._observeToolSystemMessage(text);
         }
-        return;
+        return undefined;
       }
 
-      if (text) this._observeSystemMessage(text);
-      return;
+      if (text) this._observeToolSystemMessage(text);
+      return undefined;
     }
 
     if (update.sessionUpdate === "user_message_chunk" || update.sessionUpdate === "agent_message_chunk") {
       const text = extractChunkText(update.content);
-      if (!text) return;
+      if (!text) return undefined;
       this.systemMessageTail = (this.systemMessageTail + text).slice(-4096);
       if (this.systemMessageTail.includes("<SYSTEM_MESSAGE>")) {
         this._observeSystemMessage(this.systemMessageTail);
@@ -3395,6 +3445,7 @@ class AntigravityBackgroundCommandTracker {
         this._observeBareTaskFinishedMessages(this.systemMessageTail);
       }
     }
+    return undefined;
   }
 
   private _observeManageTaskOutput(text: string, inputTaskId: string | undefined): void {
@@ -3412,7 +3463,7 @@ class AntigravityBackgroundCommandTracker {
         matched = true;
       }
     }
-    if (!matched && this.pending.size === 1
+    if (!matched && !ANTIGRAVITY_EXPLICIT_TASK_ID_RE.test(envelope) && this.pending.size === 1
       && ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(envelope)
       && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(envelope)) {
       const [onlyId, only] = [...this.pending.entries()][0]!;
@@ -3422,14 +3473,8 @@ class AntigravityBackgroundCommandTracker {
 
   private _clearByTaskId(taskId: string | undefined): void {
     if (taskId) {
-      let matched = false;
-      for (const [callId, entry] of this.pending) {
-        if (entry.taskId === taskId || callId === taskId) {
-          this.pending.delete(callId);
-          matched = true;
-        }
-      }
-      if (matched) return;
+      this._clearExactTaskId(taskId);
+      return;
     }
     if (this.pending.size === 1) {
       const [onlyId, only] = [...this.pending.entries()][0]!;
@@ -3437,43 +3482,68 @@ class AntigravityBackgroundCommandTracker {
     }
   }
 
-  private _observeSystemMessage(text: string): void {
+  private _clearExactTaskId(taskId: string, options?: { requireKnownTaskId?: boolean }): boolean {
+    let matched = false;
+    for (const [callId, entry] of this.pending) {
+      if (options?.requireKnownTaskId) {
+        if (entry.taskId !== null && entry.taskId === taskId) {
+          this.pending.delete(callId);
+          matched = true;
+        }
+      } else if (entry.taskId === taskId || callId === taskId) {
+        this.pending.delete(callId);
+        matched = true;
+      }
+    }
+    return matched;
+  }
+
+  private _observeToolSystemMessage(text: string): void {
     if (!this.pending.size || !text.includes("<SYSTEM_MESSAGE>")) return;
+    const { envelope, tail } = splitAntigravityToolOutput(text);
+    if (envelope.includes("<SYSTEM_MESSAGE>")) {
+      this._observeSystemMessage(envelope);
+    }
+    if (tail.includes("<SYSTEM_MESSAGE>")) {
+      this._observeSystemMessage(tail, { strictHostAppended: true });
+    }
+  }
+
+  private _observeSystemMessage(text: string, options?: { strictHostAppended?: boolean }): void {
+    if (!this.pending.size || !text.includes("<SYSTEM_MESSAGE>")) return;
+    const strictHostAppended = options?.strictHostAppended === true;
     ANTIGRAVITY_SYSTEM_MESSAGE_RE.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = ANTIGRAVITY_SYSTEM_MESSAGE_RE.exec(text)) !== null) {
-      const body = match[1] ?? "";
-      let matched = this._clearExplicitFinishedTaskIds(body);
-      if (!ANTIGRAVITY_COMPLETION_WORD_RE.test(body) || ANTIGRAVITY_STILL_RUNNING_RE.test(body)) continue;
+      const header = extractAntigravitySystemMessageHeader(match[1] ?? "");
+      const explicitIds = extractExplicitFinishedTaskIds(header);
+      if (strictHostAppended) {
+        if (!header.includes("[Message]") || explicitIds.length === 0) continue;
+        for (const finishedId of explicitIds) {
+          this._clearExactTaskId(finishedId, { requireKnownTaskId: true });
+        }
+        continue;
+      }
+      if (explicitIds.length > 0) {
+        for (const finishedId of explicitIds) {
+          this._clearExactTaskId(finishedId);
+        }
+        continue;
+      }
+      if (!ANTIGRAVITY_COMPLETION_WORD_RE.test(header) || ANTIGRAVITY_STILL_RUNNING_RE.test(header)) continue;
+      let matched = false;
       for (const [callId, entry] of this.pending) {
-        if ((entry.taskId && containsExactTaskId(body, entry.taskId)) || containsExactTaskId(body, callId)) {
+        if ((entry.taskId && containsExactTaskId(header, entry.taskId)) || containsExactTaskId(header, callId)) {
           this.pending.delete(callId);
           matched = true;
         }
       }
-      if (!matched && this.pending.size === 1 && /\b(?:background\s+task|task|command)\b/i.test(body)) {
+      if (!matched && !ANTIGRAVITY_EXPLICIT_TASK_ID_RE.test(header)
+        && this.pending.size === 1 && /\b(?:background\s+task|task|command)\b/i.test(header)) {
         const [onlyId, only] = [...this.pending.entries()][0]!;
         if (only.taskId === null) this.pending.delete(onlyId);
       }
     }
-  }
-
-  private _clearExplicitFinishedTaskIds(body: string): boolean {
-    if (!this.pending.size) return false;
-    ANTIGRAVITY_TASK_FINISHED_HEADER_RE.lastIndex = 0;
-    let matched = false;
-    let match: RegExpExecArray | null;
-    while ((match = ANTIGRAVITY_TASK_FINISHED_HEADER_RE.exec(body)) !== null) {
-      const finishedId = match[1]?.replace(/[.:,]+$/, "");
-      if (!finishedId) continue;
-      for (const [callId, entry] of this.pending) {
-        if (entry.taskId === finishedId || callId === finishedId) {
-          this.pending.delete(callId);
-          matched = true;
-        }
-      }
-    }
-    return matched;
   }
 
   private _observeBareTaskFinishedMessages(text: string): void {

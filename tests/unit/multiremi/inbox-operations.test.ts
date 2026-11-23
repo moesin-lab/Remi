@@ -5,7 +5,7 @@ import {pendingTurnBackendTests} from './pending-turn-test-backends.js';
 import {StoreContext} from '@multiremi/store/context.js';
 import {acknowledgeInput} from '@multiremi/store/inbox/lane-machine.js';
 import {countMessageDelegationPairHops} from '@multiremi/store/inbox/send-message.js';
-pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
+pendingTurnBackendTests('MUL-506 message operations and dispatch',(fixture,backend)=>{
   function setup(){const {store,db}=fixture();const a=store.createAgent({name:'A',provider:'codex'}),b=store.createAgent({name:'B',provider:'codex'});
     const issue=createResponsibleTestIssue(store, {title:'Conversation',assigneeType:'agent',assigneeId:a.id}),session=store.getOrCreateDefaultIssueSession(issue.id);
     const send=(body:string,to=b.id)=>store.sendMessage({session_id:session.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:to},message_kind:'request',wake_requested:'now',body_md:body});
@@ -1076,10 +1076,17 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
           const pInB=store.getTurn(sameSessionDisp.turn_id!)!;
           store.completeTask(c1Turn.current_attempt_id!,{output:'Child done'});
           store.completeTask(p0.current_attempt_id!,{output:'Parent done'});
-          for(const pending of store.listTurns({workspace_id:'local',session_id:parentMain.id}).filter(t=>t.status==='pending')){
-            store.cancelTask(pending.current_attempt_id!);
+          let claimedParentAttempt:ReturnType<typeof store.claimTask>=null;
+          for(let i=0;i<8;i++){
+            const next=store.claimTask(parentRuntime.id);
+            if(!next)break;
+            if(next.id===pInB.current_attempt_id){
+              claimedParentAttempt=next;
+              break;
+            }
+            store.cancelTask(next.id);
           }
-          expect(store.claimTask(parentRuntime.id)?.id).toBe(pInB.current_attempt_id!);
+          expect(claimedParentAttempt?.id).toBe(pInB.current_attempt_id!);
           store.startTask(pInB.current_attempt_id!);
 
           const expectBlocked=writer==='new'&&order==='member_before_dispatch';
@@ -1329,5 +1336,288 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
     expect(delegatorReply.message.metadata.execution_scope).toBe(outerTurn.execution_scope);
     expect(delegatorReply.turn_id).toBe(outerTurn.id);
   });
+
+  it('MUL-335: soft-deleting a delivered/ACKed child to_parent_owner request preserves round-trip hops while deleting an undelivered/unACKed request does not miscount',()=>{
+    const prevLimit=process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+    process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+    try{
+      const {store,db}=fixture();
+      const ctx=new StoreContext(db,()=>store);
+      const makePair=(tag:string)=>{
+        const parentRuntime=store.registerRuntime({name:`Parent del ${tag}`,provider:'codex',workspaceId:'local'});
+        const childRuntime=store.registerRuntime({name:`Child del ${tag}`,provider:'codex',workspaceId:'local'});
+        const parentAgent=store.createAgent({name:`Parent del ${tag}`,provider:'codex',runtimeId:parentRuntime.id});
+        const childAgent=store.createAgent({name:`Child del ${tag}`,provider:'codex',runtimeId:childRuntime.id});
+        return {parentRuntime,childRuntime,parentAgent,childAgent};
+      };
+
+      // ① Delivered to running parent turn -> ACKed -> soft-deleted via store.deleteIssueComment => still 2 hops & blocked.
+      // ② Delivered to running parent turn -> before ACK -> soft-deleted via store.deleteMessage => still 2 hops & blocked.
+      for(const mode of ['after_ack_delete_comment','before_ack_delete_message'] as const){
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair(mode);
+        const parent=createResponsibleTestIssue(store,{title:`Parent ${mode}`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:`Child ${mode}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:`Start ${mode}`});
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+
+        const d1=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch 1'});
+        const c1=store.getTurn(d1.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(c1.current_attempt_id!);
+        store.startTask(c1.current_attempt_id!);
+
+        const req1=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:`Child request (${mode})`});
+        expect(req1.wake_reason).toBe('to_parent_owner');
+        expect(req1.turn_id).toBe(p0.id);
+        store.completeTask(c1.current_attempt_id!,{output:'Child done'});
+
+        if(mode==='after_ack_delete_comment'){
+          const headSeq=store.getConversationLogHead(parentMain.id)!.headSeq;
+          db.transaction(()=>{acknowledgeInput(ctx,p0.id,0,headSeq);})();
+          store.deleteIssueComment(req1.message.id);
+        }else{
+          expect(store.deleteMessage(req1.message.id).deleted_at).toBeTruthy();
+        }
+        expect(db.query('SELECT deleted_at FROM multiremi_conversation_log WHERE id=?').get(req1.message.id)?.deleted_at).toBeTruthy();
+
+        expect(countMessageDelegationPairHops(ctx,p0.id,childAgent.id,1)).toBe(2);
+        const blocked=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:`Dispatch 2 (${mode})`});
+        expect(blocked.wake_applied).toBe('next_turn');
+        expect(blocked.wake_reason).toBe('pair_round_trip_limit');
+        expect(blocked.turn_id).toBeUndefined();
+      }
+
+      // ③ Triggered new parent turn directly -> before ACK -> soft-deleted via store.deleteMessage => still 2 hops & blocked.
+      {
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair('direct-trigger-delete');
+        const parent=createResponsibleTestIssue(store,{title:'Parent direct trigger delete',status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:'Child direct trigger delete',parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start P0'});
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+
+        const d1=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch 1'});
+        const c1=store.getTurn(d1.turn_id!)!;
+        db.transaction(()=>{acknowledgeInput(ctx,p0.id,0,store.getConversationLogHead(parentMain.id)!.headSeq);})();
+        store.completeTask(p0.current_attempt_id!,{output:'P0 done'});
+
+        expect(store.claimTask(childRuntime.id)?.id).toBe(c1.current_attempt_id!);
+        store.startTask(c1.current_attempt_id!);
+        for(let i=0;i<8;i++){
+          const pending=store.listTurns({workspace_id:'local',session_id:parentMain.id}).find(t=>t.status==='pending');
+          if(!pending)break;
+          store.cancelTask(pending.current_attempt_id!);
+        }
+        const req1=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Direct trigger request'});
+        expect(req1.wake_reason).toBe('to_parent_owner');
+        const p1=store.getTurn(req1.turn_id!)!;
+        expect(p1.trigger_message_id).toBe(req1.message.id);
+        store.completeTask(c1.current_attempt_id!,{output:'Child done'});
+
+        expect(store.deleteMessage(req1.message.id).deleted_at).toBeTruthy();
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p1.current_attempt_id!);
+        store.startTask(p1.current_attempt_id!);
+        expect(countMessageDelegationPairHops(ctx,p1.id,childAgent.id,1)).toBe(2);
+        const blocked=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch 2 after direct trigger delete'});
+        expect(blocked.wake_applied).toBe('next_turn');
+        expect(blocked.wake_reason).toBe('pair_round_trip_limit');
+        expect(blocked.turn_id).toBeUndefined();
+      }
+
+      // ④ Interval-merged via re_ring:
+      //    - Control: soft-deleted BEFORE successor ACKs (and not trigger/delivery of successor) => 0 hops, NOT miscounted.
+      //    - Positive: soft-deleted AFTER successor ACKs covering its seq => 2 hops, blocked.
+      for(const ackBeforeDelete of [false,true] as const){
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair(`rering-del-${ackBeforeDelete}`);
+        const parent=createResponsibleTestIssue(store,{title:`Parent rering ${ackBeforeDelete}`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:`Child rering ${ackBeforeDelete}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start P0'});
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+        db.transaction(()=>{acknowledgeInput(ctx,p0.id,0,pStart.message.seq);})();
+
+        const d1=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch 1'});
+        const c1=store.getTurn(d1.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(c1.current_attempt_id!);
+        store.startTask(c1.current_attempt_id!);
+
+        const req1=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Child request during P0'});
+        expect(req1.turn_id).toBe(p0.id);
+        store.completeTask(c1.current_attempt_id!,{output:'Child done'});
+        const plat=store.sendMessage({session_id:parentMain.id,sender:{type:'platform',id:null},to:{type:'agent',ref:parentAgent.id},message_kind:'status',wake_requested:'now',body_md:'Later platform status'});
+        expect(plat.turn_id).toBe(p0.id);
+
+        if(!ackBeforeDelete){
+          // Soft-delete req1 BEFORE P0 finishes (so P1 never receives or ACKs req1).
+          expect(store.deleteMessage(req1.message.id).deleted_at).toBeTruthy();
+        }
+        store.completeTask(p0.current_attempt_id!,{output:'P0 done without ACKing req1'});
+        const p1=store.listTurns({workspace_id:'local',session_id:parentMain.id}).find(t=>t.status==='pending')!;
+        expect(p1).toBeTruthy();
+        expect(p1.id).not.toBe(p0.id);
+        expect(p1.trigger_message_id).toBe(plat.message.id);
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p1.current_attempt_id!);
+        store.startTask(p1.current_attempt_id!);
+
+        if(ackBeforeDelete){
+          const fromSeq=Number(store.getSessionAgentReadProgress(parentMain.id,parentAgent.id).seq);
+          db.transaction(()=>{acknowledgeInput(ctx,p1.id,fromSeq,plat.message.seq);})();
+          store.deleteIssueComment(req1.message.id);
+          expect(countMessageDelegationPairHops(ctx,p1.id,childAgent.id,1)).toBe(2);
+          const blocked=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Blocked after re_ring ACK + delete'});
+          expect(blocked.wake_applied).toBe('next_turn');
+          expect(blocked.wake_reason).toBe('pair_round_trip_limit');
+          expect(blocked.turn_id).toBeUndefined();
+        }else{
+          expect(countMessageDelegationPairHops(ctx,p1.id,childAgent.id,1)).toBe(0);
+          const allowed=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Allowed because deleted before successor ACK'});
+          expect(allowed.wake_applied).toBe('now');
+          expect(allowed.wake_reason).toBe('agent_dispatch');
+          expect(allowed.turn_id).toBeTruthy();
+        }
+      }
+    }finally{
+      if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+      else process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=prevLimit;
+    }
+  },{timeout:30_000});
+
+  it('MUL-335: same-session completion comment [@worker] replay after transient dispatch failure preserves round-trip cutoff across all three member timings',()=>{
+    const prevLimit=process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+    process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+    try{
+      const {store,db}=fixture();
+      const ctx=new StoreContext(db,()=>store);
+      const rejectWorkerAttempt=(workerId:string):(()=>void)=>{
+        const condition=`(SELECT agent_id FROM multiremi_turns WHERE id=NEW.turn_id) = '${workerId}'`;
+        if(backend==='PostgreSQL'){
+          db.run(`CREATE OR REPLACE FUNCTION mul335_reject_attempt() RETURNS trigger AS $$ BEGIN IF ${condition} THEN RAISE EXCEPTION 'injected dispatch attempt failure'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql`);
+          db.run('CREATE TRIGGER mul335_reject_attempt BEFORE INSERT ON multiremi_turn_attempts FOR EACH ROW EXECUTE FUNCTION mul335_reject_attempt()');
+          return ()=>db.exec('DROP TRIGGER IF EXISTS mul335_reject_attempt ON multiremi_turn_attempts; DROP FUNCTION IF EXISTS mul335_reject_attempt()');
+        }
+        db.exec(`CREATE TRIGGER mul335_reject_attempt BEFORE INSERT ON multiremi_turn_attempts FOR EACH ROW WHEN ${condition}
+          BEGIN SELECT RAISE(ABORT, 'injected dispatch attempt failure'); END`);
+        return ()=>db.exec('DROP TRIGGER IF EXISTS mul335_reject_attempt');
+      };
+
+      for(const mode of ['no_member','member_before_dispatch','member_after_dispatch'] as const){
+        const leaderRuntime=store.registerRuntime({name:`Leader replay ${mode}`,provider:'codex',workspaceId:'local'});
+        const workerRuntime=store.registerRuntime({name:`Worker replay ${mode}`,provider:'codex',workspaceId:'local'});
+        const leader=store.createAgent({name:`Leader replay ${mode}`,provider:'codex',runtimeId:leaderRuntime.id});
+        const worker=store.createAgent({name:`Worker replay ${mode}`,provider:'codex',runtimeId:workerRuntime.id});
+        const team=store.createSquad({name:`Replay squad ${mode}`,leaderId:leader.id,memberIds:[worker.id]});
+        const issue=createResponsibleTestIssue(store,{title:`Replay cutoff ${mode}`,status:'in_progress',assigneeType:'squad',assigneeId:team.id});
+        const session=store.getOrCreateDefaultIssueSession(issue.id);
+
+        const leaderTask=store.createSessionTask(session.id,{agentId:leader.id,prompt:'Lead initial round'});
+        expect(store.claimTask(leaderRuntime.id)?.id).toBe(leaderTask.id);
+        store.startTask(leaderTask.id);
+
+        const undo=rejectWorkerAttempt(worker.id);
+        const origWarn=console.warn;
+        console.warn=()=>{};
+        try{
+          store.completeTask(leaderTask.id,{output:`[@Worker](mention://agent/${worker.id}) Please verify`});
+        }finally{
+          console.warn=origWarn;
+          undo();
+        }
+
+        const reply=store.listIssueComments(issue.id).find(c=>c.taskId===leaderTask.id)!;
+        expect(reply).toBeTruthy();
+        const eventRow=db.query("SELECT id FROM multiremi_system_events WHERE resource = 'issue_comment' AND resource_id = ?").get(reply.id)!;
+        const event=store.getSystemEvent(String(eventRow.id))!;
+        expect(event.status).toBe('pending');
+        expect(store.listTasksForIssue(issue.id).filter(t=>t.agentId===worker.id)).toHaveLength(0);
+
+        if(mode==='member_before_dispatch'){
+          store.sendMessage({session_id:session.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:'Member speaks before delayed replay'});
+        }
+
+        store.dispatchPendingSystemEvents(new Date(Date.parse(event.availableAt)));
+        const workerTasks=store.listTasksForIssue(issue.id).filter(t=>t.agentId===worker.id);
+        expect(workerTasks).toHaveLength(1);
+        const workerTask=workerTasks[0]!;
+        expect(workerTask).toMatchObject({wakeSource:'agent_dispatch',triggerCommentId:reply.id});
+
+        const replyMsg=store.getMessage(reply.id)!;
+        expect(replyMsg.metadata.source_session_id).toBe(session.id);
+        expect(typeof replyMsg.metadata.source_session_seq).toBe('number');
+        expect(typeof replyMsg.metadata.target_session_seq).toBe('number');
+
+        if(mode==='member_after_dispatch'){
+          store.sendMessage({session_id:session.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:'Member speaks after delayed replay'});
+        }
+
+        const workerTurn=store.listTurns({workspace_id:'local',session_id:session.id}).find(t=>t.current_attempt_id===workerTask.id)!;
+        expect(workerTurn).toBeTruthy();
+        expect(store.claimTask(workerRuntime.id)?.id).toBe(workerTask.id);
+        store.startTask(workerTask.id);
+
+        const backToLeader=store.sendMessage({
+          session_id:session.id,
+          sender:{type:'agent',id:worker.id},
+          source_turn_id:workerTurn.id,
+          to:{type:'agent',ref:leader.id},
+          message_kind:'request',
+          wake_requested:'now',
+          body_md:'Worker dispatches back to leader',
+        });
+        expect(backToLeader.wake_applied).toBe('now');
+        expect(backToLeader.wake_reason).toBe('agent_dispatch');
+        const leaderTurn2=store.getTurn(backToLeader.turn_id!)!;
+        store.completeTask(workerTask.id,{output:'Worker done'});
+
+        let claimedLeader2:ReturnType<typeof store.claimTask>=null;
+        for(let i=0;i<8;i++){
+          const next=store.claimTask(leaderRuntime.id);
+          if(!next)break;
+          if(next.id===leaderTurn2.current_attempt_id){
+            claimedLeader2=next;
+            break;
+          }
+          store.cancelTask(next.id);
+        }
+        expect(claimedLeader2?.id).toBe(leaderTurn2.current_attempt_id!);
+        store.startTask(leaderTurn2.current_attempt_id!);
+
+        const expectBlocked=mode!=='member_after_dispatch';
+        expect(countMessageDelegationPairHops(ctx,leaderTurn2.id,worker.id,1)).toBe(expectBlocked?2:1);
+        const secondDispatch=store.sendMessage({
+          session_id:session.id,
+          sender:{type:'agent',id:leader.id},
+          source_turn_id:leaderTurn2.id,
+          to:{type:'agent',ref:worker.id},
+          message_kind:'request',
+          wake_requested:'now',
+          body_md:`Leader second dispatch (${mode})`,
+        });
+        if(expectBlocked){
+          expect(secondDispatch.wake_applied).toBe('next_turn');
+          expect(secondDispatch.wake_reason).toBe('pair_round_trip_limit');
+          expect(secondDispatch.turn_id).toBeUndefined();
+        }else{
+          expect(secondDispatch.wake_applied).toBe('now');
+          expect(secondDispatch.wake_reason).toBe('agent_dispatch');
+          expect(secondDispatch.turn_id).toBeTruthy();
+        }
+      }
+    }finally{
+      if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+      else process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=prevLimit;
+    }
+  },{timeout:30_000});
 
 }, { isolation: "snapshot" });

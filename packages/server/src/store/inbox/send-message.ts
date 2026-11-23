@@ -108,7 +108,6 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
     const clauses: string[] = [
       'session_id=?',
       "kind='message'",
-      'deleted_at IS NULL',
       "sender_type='agent'",
       'sender_id=?',
       'to_agent_id=?',
@@ -172,8 +171,8 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
       const scopeSql = ctx.db.dialect === 'postgres'
         ? "COALESCE(metadata::jsonb->>'execution_scope','')"
         : "COALESCE(json_extract(metadata,'$.execution_scope'),'')";
-      matchBranches.push(`(seq>? AND seq<=? AND ${scopeSql}=?)`);
-      matchParams.push(floorSeq, ceilSeq, turn.execution_scope);
+      matchBranches.push(`(seq>? AND seq<=? AND ${scopeSql}=? AND (deleted_at IS NULL OR seq<=?))`);
+      matchParams.push(floorSeq, ceilSeq, turn.execution_scope, Number(turn.input_to_seq ?? 0));
     }
 
     clauses.push(`(${matchBranches.join(' OR ')})`);
@@ -197,14 +196,19 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
       const reqMeta = parseJson(row.metadata, {}) as Record<string, unknown>;
       const hasReqWatermark = typeof reqMeta.source_session_id === 'string'
         && typeof reqMeta.source_session_seq === 'number';
-      if (turn.session_id === source.session_id) {
+      if (hasReqWatermark && reqMeta.source_session_id === source.session_id) {
+        if (Number(reqMeta.source_session_seq) >= lastMemberSeq!) return row;
+      } else if (turn.session_id === source.session_id) {
         if (hasReqWatermark) {
-          if (Number(row.seq) > lastMemberSeq!) return row;
+          const targetDispatchSeq = typeof reqMeta.target_session_seq === 'number'
+            ? Number(reqMeta.target_session_seq)
+            : null;
+          if (targetDispatchSeq !== null ? targetDispatchSeq >= lastMemberSeq! : Number(row.seq) > lastMemberSeq!) {
+            return row;
+          }
         } else if (row.created_at > lastMemberMaxAt!) {
           return row;
         }
-      } else if (hasReqWatermark && reqMeta.source_session_id === source.session_id) {
-        if (Number(reqMeta.source_session_seq) >= lastMemberSeq!) return row;
       } else if (row.created_at > lastMemberMaxAt!) {
         return row;
       }
@@ -240,14 +244,19 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
 
     if (turn.delegation_id && turn.delegated_by_agent_id) {
       if (hasMemberCutoff) {
-        if (turn.session_id === source.session_id) {
+        if (hasExplicitSourceSeqInSourceSession) {
+          if (Number(trigMeta.source_session_seq) < lastMemberSeq!) return null;
+        } else if (turn.session_id === source.session_id) {
           if (trigger && trigger.session_id === source.session_id && hasTriggerWatermark) {
-            if (Number(trigger.seq) <= lastMemberSeq!) return null;
+            const targetDispatchSeq = typeof trigMeta.target_session_seq === 'number'
+              ? Number(trigMeta.target_session_seq)
+              : null;
+            if (targetDispatchSeq !== null ? targetDispatchSeq < lastMemberSeq! : Number(trigger.seq) <= lastMemberSeq!) {
+              return null;
+            }
           } else if (turn.created_at <= lastMemberMaxAt!) {
             return null;
           }
-        } else if (hasExplicitSourceSeqInSourceSession) {
-          if (Number(trigMeta.source_session_seq) < lastMemberSeq!) return null;
         } else if (turn.created_at <= lastMemberMaxAt!) {
           return null;
         }
@@ -483,6 +492,7 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
   ) {
     metadata.source_session_id = source.session_id;
     metadata.source_session_seq = Number(ctx.conversationLog().getConversationLogHead(source.session_id)?.headSeq ?? 0);
+    metadata.target_session_seq = Number(ctx.conversationLog().getConversationLogHead(sessionId)?.headSeq ?? 0);
   }
   if(input.message_kind==='decision'){
     const key=metadata.human_request?'human_request':metadata.question?'question':isHistoricalIssueQuestionRecord(metadata.decision_record)?'decision_record':'message_choice';

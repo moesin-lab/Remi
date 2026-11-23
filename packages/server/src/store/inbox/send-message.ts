@@ -189,8 +189,23 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
   const hops=source&&recipientId?countMessageDelegationPairHops(ctx,source.id,recipientId,limit):0;
   const isLeader=recipientId&&input.sender.id?!!ctx.db.query(`SELECT 1 FROM multiremi_squads s JOIN multiremi_squad_members m ON m.squad_id=s.id
     WHERE s.leader_id=? AND m.member_id=? AND m.member_type='agent' AND s.workspace_id=? AND s.archived_at IS NULL`).get(recipientId,input.sender.id,workspaceId):false;
-  // The direct parent's execution owner, whatever the rest of the chain resolves to.
-  const parentAgent=issue?ctx.resolveIssueResponsibility(issue.id).chain[1]?.executionOwner??null:null;
+  // The direct parent's execution owner on the current Issue (for non-request
+  // notices inside a child Issue), plus ancestor coordinator recognition when a
+  // descendant Issue writes to an ancestor Issue's default coordination session.
+  const directParentAgent=input.sender.type==='agent'&&input.message_kind!=='request'&&issue
+    ?ctx.resolveIssueResponsibility(issue.id).chain[1]?.executionOwner??null:null;
+  const ancestorParentAgent=input.sender.type==='agent'&&recipientType==='agent'&&recipientId
+    &&source?.issue_id&&dispatchIssue&&source.issue_id!==dispatchIssue.id
+    &&finalSession&&!finalSession.chatId&&finalSession.isDefault&&finalSession.issueId===dispatchIssue.id
+    &&!input.execution_scope
+    ?ctx.resolveIssueResponsibility(source.issue_id).chain.slice(1)
+        .find((node)=>node.issueId===dispatchIssue.id)?.executionOwner??null
+    :null;
+  const isParentOwner=Boolean(recipientType==='agent'&&recipientId&&(
+    input.message_kind==='request'
+      ?ancestorParentAgent?.id===recipientId
+      :directParentAgent?.id===recipientId||ancestorParentAgent?.id===recipientId
+  ));
   const policy=resolveWake(input.sender,input.to,input.wake_requested,input.message_kind,{
     recipientType,recipientId,recipientAvailable:recipientType==='agent'?!!targetAgent&&!targetAgent.archivedAt:recipientType==='member'?!!member&&!member.archivedAt:false,
     // Structural platform reports retain main's dependency exemption. Agent
@@ -198,7 +213,7 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
     dependenciesMet:input.sender.type==='platform'||!!force||unmet.length===0,
     sourceSideSession:!!sourceSession&&sourceSession.inheritMode!=='none',sourceHasIssue:input.sender.type==='agent'?!!source?.issue_id:undefined,
     targetHasIssue:!!dispatchIssue,pairHops:hops,pairLimit:limit,
-    isReplyToDelegator:reply?.sender_type==='agent'&&reply.sender_id===recipientId||source?.delegated_by_agent_id===recipientId,isLeader:!!isLeader,isParentOwner:parentAgent?.id===recipientId,
+    isReplyToDelegator:reply?.sender_type==='agent'&&reply.sender_id===recipientId||source?.delegated_by_agent_id===recipientId,isLeader:!!isLeader,isParentOwner,
   });
   const header:MessageHeader={sender_type:input.sender.type,sender_id:input.sender.id,to_type:input.to.type,
     to_ref:input.to.type==='none'?null:input.to.ref,to_agent_id:recipientType==='agent'?recipientId:null,to_member_id:recipientType==='member'?recipientId:null,

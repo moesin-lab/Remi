@@ -12,7 +12,7 @@ summary: 消息唯一入口、lane 状态机、Issue 推导及 Daemon 和用户�
 
 [sendMessageWithinTransaction](../../packages/server/src/store/inbox/send-message.ts) 是唯一消息写入口。调用方先开启事务并传入 `CommitEventQueue`；消息、lane、轮、Issue 推导和说明活动同事务落库，事件在最外层 COMMIT 后发送。`Store.sendMessage(input)` 自行管理事务，返回 `{message,wake_applied,wake_reason,turn_id?}`。运行中的请求、评论、Chat、平台门铃、自动化结果与执行回复暂存均经此入口。历史迁移单独读取旧表，运行路径没有旧表回退。
 
-消息头在发送时冻结收件人。`source_turn_id` 验证发件轮的 agent 和工作区；`reply_to_id` 必须属于原对话。角色可能选择父单或委派来源对话。agent request 只有源为 Issue 轮、非旁支、目标在 Issue 上时才产生委派；符合条件的所有方向均为 `now / agent_dispatch`。self、不运行的收件人、依赖、来源和目标前置优先于派活规则。超过 `countDelegationPairHops` 的 `2L` 边界时消息保留，降为 `next_turn / pair_round_trip_limit`，不建或合并轮，说明通知和活动在同事务记录。L 默认 5，由 `MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT` 调整。
+消息头在发送时冻结收件人。`source_turn_id` 验证发件轮的 agent 和工作区；`reply_to_id` 必须属于原对话。角色可能选择父单或委派来源对话。agent request 只有源为 Issue 轮、非旁支、目标在 Issue 上时才产生委派；当子单向直接或间接祖先父单默认协调会话的执行负责人发送 request（未显式指定独立子 `execution_scope`），或显式指定 `to: { type: "role", ref: "parent_owner" }` 时，归入 `now / to_parent_owner`，不分配独立 `dlg_*` `execution_scope`、不写入反向 `delegation_id` / `delegated_by_agent_id`，落入父单协调者的默认 `execution_scope = ""` lane 串行合并、插话或排队；其余向下、平级或非祖先协调会话的合法方向均为 `now / agent_dispatch`。self、不运行的收件人、依赖、来源和目标前置优先于派活规则。超过 `countDelegationPairHops` 的 `2L` 边界时消息保留，降为 `next_turn / pair_round_trip_limit`，不建或合并轮，说明通知和活动在同事务记录。L 默认 5，由 `MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT` 调整。
 
 评论追加收件人时会按原 ID 重新寻址。调用方未提供 `reply_to_id` 时保留已有回复引用，显式传入 `null` 才清空；引用仍须通过同对话验证，评论线程和 daemon 输入使用同一引用。
 

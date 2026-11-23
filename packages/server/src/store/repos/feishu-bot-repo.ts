@@ -546,7 +546,11 @@ export class FeishuBotRepo {
           agentId: String(row.agent_id ?? ""),
           agentName: String(row.agent_name ?? row.agent_id ?? ""),
           workspaceId: nullableString(row.agent_workspace_id),
-          archivedAt: nullableString(row.agent_archived_at),
+          archivedAt: row.agent_archived_at == null
+            ? null
+            : (typeof row.agent_archived_at === "string"
+                ? (row.agent_archived_at || "archived")
+                : "archived"),
         } : null;
       },
       legacyDefault: () => {

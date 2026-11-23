@@ -19,7 +19,7 @@ export function resolveAssistantExecutor(
   input: { workspaceId: string; conversationKind: "p2p" | "group"; conversationId?: string | null },
   source: AssistantRoutingSource,
 ): AssistantExecutor | null {
-  const conversationId = input.conversationId?.trim();
+  const conversationId = input.conversationId == null ? undefined : String(input.conversationId).trim() || undefined;
   const scopes: Array<"conversation" | "direct" | "group"> = [];
   if (conversationId) scopes.push("conversation");
   scopes.push(input.conversationKind === "p2p" ? "direct" : "group");

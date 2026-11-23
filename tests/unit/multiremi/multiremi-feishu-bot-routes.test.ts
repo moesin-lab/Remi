@@ -123,6 +123,27 @@ describe("Feishu bot Agent route repository", () => {
     expect(store.resolveFeishuBotRouteAgent("local", "group", "oc_special")?.agentId).toBe(defaultAgent.id);
     expect(store.getFeishuBotConfig("local")?.enabled).toBe(true);
   });
+
+  it("treats any non-NULL archived_at SQLite value (including BLOBs and empty strings) as archived and coerces non-string chatId safely", () => {
+    const { store, groupAgent, chatAgent } = scaffold();
+    store.replaceFeishuBotAgentRoutes("local", [
+      { scope: "group_default", agentId: groupAgent.id },
+      { scope: "chat", chatId: "oc_special", agentId: chatAgent.id },
+      { scope: "chat", chatId: "42", agentId: chatAgent.id },
+    ]);
+
+    expect(store.resolveFeishuBotRouteAgent("local", "group", 42 as unknown as string)?.agentId).toBe(chatAgent.id);
+    expect(store.resolveFeishuBotRouteAgent("local", "group", 99 as unknown as string)?.agentId).toBe(groupAgent.id);
+
+    for (const sqlExpr of ["X'32303236'", "X''", "''", "1"]) {
+      db!.run(`UPDATE multiremi_agents SET archived_at = ${sqlExpr} WHERE id = ?`, [chatAgent.id]);
+      expect(store.resolveFeishuBotRouteAgent("local", "group", "oc_special")?.agentId).toBe(groupAgent.id);
+      expect(store.resolveFeishuBotRouteAgent("local", "group", 42 as unknown as string)?.agentId).toBe(groupAgent.id);
+    }
+
+    db!.run("UPDATE multiremi_agents SET archived_at = NULL WHERE id = ?", [chatAgent.id]);
+    expect(store.resolveFeishuBotRouteAgent("local", "group", "oc_special")?.agentId).toBe(chatAgent.id);
+  });
 });
 
 describe("Feishu bot Agent route API", () => {

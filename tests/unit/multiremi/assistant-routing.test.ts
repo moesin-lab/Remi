@@ -42,6 +42,9 @@ describe("Assistant routing policy", () => {
     lookedUp.length = 0;
     resolveAssistantExecutor({ workspaceId: "local", conversationKind: "group", conversationId: "  thread  " }, routes);
     expect(lookedUp).toEqual([["conversation", "thread"], ["group", "thread"]]);
+    lookedUp.length = 0;
+    resolveAssistantExecutor({ workspaceId: "local", conversationKind: "group", conversationId: 42 as unknown as string }, routes);
+    expect(lookedUp).toEqual([["conversation", "42"], ["group", "42"]]);
   });
 
   it("does not read a legacy binding when a valid route already selected an executor", () => {

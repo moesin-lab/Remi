@@ -1372,8 +1372,30 @@ export class IssuesRepo {
     return { deleted };
   }
 
+  /**
+   * Run issue search (candidate discovery, `total`, page hydration, labels, and
+   * comment snippet reads) inside a single read snapshot.
+   *
+   * - Top-level calls open `BEGIN DEFERRED` on SQLite WAL or
+   *   `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY` on PostgreSQL.
+   * - When called inside an already-open outer transaction (`db.inTransaction`):
+   *   - SQLite reuses the outer transaction directly (zero extra SQL).
+   *   - PostgreSQL verifies `current_setting('transaction_isolation')` and only
+   *     reuses the outer transaction under `REPEATABLE READ` or `SERIALIZABLE`
+   *     isolation; calling `searchIssues` inside an outer `READ COMMITTED`
+   *     transaction throws to prevent cross-statement snapshot tearing.
+   */
   private withIssueSearchReadSnapshot<T>(fn: () => T): T {
-    if (this.ctx.db.inTransaction) return fn();
+    if (this.ctx.db.inTransaction) {
+      if (this.ctx.db.dialect === "postgres") {
+        const row = this.ctx.db.query("SELECT current_setting('transaction_isolation') AS iso").get() as Row | null;
+        const iso = String(row?.iso ?? "").trim().toLowerCase();
+        if (iso !== "repeatable read" && iso !== "serializable") {
+          throw new Error("searchIssues inside an open PostgreSQL transaction requires REPEATABLE READ or SERIALIZABLE isolation");
+        }
+      }
+      return fn();
+    }
     const snapshot = this.ctx.db.transaction(() => {
       if (this.ctx.db.dialect === "postgres") {
         this.ctx.db.exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -1404,12 +1426,13 @@ export class IssuesRepo {
     return this.withIssueSearchReadSnapshot(() => {
       const isPostgres = this.ctx.db.dialect === "postgres";
       const closedFilterSql = includeClosed ? "" : buildIssueSearchExcludeUnarchivedClosedSql(isPostgres);
-      const issueTieBreakCol = isPostgres ? "i.ctid" : "i.rowid";
+      const issueTieBreakCol = isPostgres ? "i.id" : "i.rowid";
       const canPushLike = terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS && !terms.some(hasNonAsciiCasedChar);
       if (!canPushLike) {
         return this.searchIssuesWorkspaceScanFallback({
           query,
           workspaceId,
+          includeClosed,
           closedFilterSql,
           isPostgres,
           includeCommentBodies,
@@ -1427,7 +1450,7 @@ export class IssuesRepo {
       if (includeCommentBodies) {
         const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
         // Materialize workspace_issues once (preserving database-native ORDER BY updated_at DESC
-        // via ROW_NUMBER() + ctid/rowid) and materialize matched_comments before UNION ALL.
+        // via ROW_NUMBER() + id/rowid) and materialize matched_comments before UNION ALL.
         // On PostgreSQL, CROSS JOIN LATERAL (... LIMIT 1) keeps `l.session_id = s.id` inside
         // `l`'s base restriction clauses (preventing subquery pull-up) so the planner always
         // probes an index on session_id even when table statistics are stale (reltuples = 0).
@@ -1522,7 +1545,7 @@ export class IssuesRepo {
       const page = candidates.slice(offset, offset + limit);
       if (page.length === 0) return { issues: [], total };
 
-      const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id));
+      const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id), closedFilterSql);
       const commentPageIds = includeCommentBodies
         ? page.filter((item) => item.hasCommentMatch).map((item) => item.id)
         : [];
@@ -1534,6 +1557,7 @@ export class IssuesRepo {
       for (const item of page) {
         const issue = hydratedById.get(item.id);
         if (!issue) continue;
+        if (!includeClosed && CLOSED_ISSUE_STATUSES.has(issue.status) && !issue.archivedAt) continue;
         const built = buildIssueSearchResult(issue, query, commentSnippetsByIssueId.get(item.id) ?? null);
         if (built) issues.push(built);
       }
@@ -1541,12 +1565,16 @@ export class IssuesRepo {
     });
   }
 
-  private hydrateIssuesByIdsInWorkspace(workspaceId: string, issueIds: string[]): Map<string, MultiremiIssue> {
+  private hydrateIssuesByIdsInWorkspace(
+    workspaceId: string,
+    issueIds: string[],
+    closedFilterSql = "",
+  ): Map<string, MultiremiIssue> {
     const byId = new Map<string, MultiremiIssue>();
     if (issueIds.length === 0) return byId;
     const placeholders = issueIds.map(() => "?").join(", ");
     const rows = this.ctx.db.query(
-      `SELECT * FROM multiremi_issues WHERE workspace_id = ? AND id IN (${placeholders})`,
+      `SELECT i.* FROM multiremi_issues i WHERE i.workspace_id = ? AND i.id IN (${placeholders})${closedFilterSql}`,
     ).all(workspaceId, ...issueIds) as Row[];
     for (const issue of this.hydrateIssues(rows.map((row) => toIssue(row)))) {
       byId.set(issue.id, issue);
@@ -1555,9 +1583,34 @@ export class IssuesRepo {
   }
 
   /**
+   * Read a single oversized conversation log `body_md` in bounded Unicode code-point
+   * chunks so each bridge reply stays strictly below `postgresReplyMaxBytes()`.
+   */
+  private readConversationLogBodyBounded(logId: string): string {
+    const ceiling = postgresReplyMaxBytes();
+    const chunkChars = Math.max(16, Math.floor((Math.max(256, ceiling) - 192) / 6));
+    const parts: string[] = [];
+    let start = 1;
+    while (true) {
+      const row = this.ctx.db.query(
+        "SELECT SUBSTR(COALESCE(body_md, ''), ?, ?) AS c FROM multiremi_conversation_log WHERE id = ?",
+      ).get(start, chunkChars, logId) as Row | null;
+      if (!row) break;
+      const chunk = String(row.c ?? "");
+      if (!chunk) break;
+      parts.push(chunk);
+      const cpLen = Array.from(chunk).length;
+      start += cpLen;
+      if (cpLen < chunkChars) break;
+    }
+    return parts.join("");
+  }
+
+  /**
    * Fetch the latest matching visible issue-session comment snippet per issue,
-   * paginating by `postgresReplyMaxBytes()` so a single bridge reply never
-   * exceeds the configured reply ceiling.
+   * paginating by `postgresReplyMaxBytes()` (and chunking any single oversized
+   * comment body via `SUBSTR`) so a single bridge reply never exceeds the
+   * configured reply ceiling.
    * Tie-breaking contract: when multiple matching comments for the same issue share
    * an identical `created_at`, deterministic ordering uses
    * `ORDER BY l.created_at DESC, l.seq DESC, l.id DESC` (latest session sequence first).
@@ -1570,22 +1623,25 @@ export class IssuesRepo {
     isPostgres: boolean,
   ): Map<string, string> {
     const snippets = new Map<string, string>();
-    if (issueIds.length === 0) return snippets;
-    const placeholders = issueIds.map(() => "?").join(", ");
+    const uniqueIssueIds = [...new Set(issueIds)];
+    if (uniqueIssueIds.length === 0) return snippets;
+    const placeholders = uniqueIssueIds.map(() => "?").join(", ");
     const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
     const budgetBytes = issueSearchReplyBudgetBytes();
     const rowBytesSql = buildCommentSnippetRowBytesSql(isPostgres);
     let afterIssueId: string | null = null;
+    let processedIssueCount = 0;
 
     while (true) {
       const afterClause = afterIssueId !== null ? " AND s.issue_id > ?" : "";
       const params: unknown[] = afterIssueId !== null
-        ? [...issueIds, afterIssueId, ...patterns, budgetBytes, budgetBytes, budgetBytes]
-        : [...issueIds, ...patterns, budgetBytes, budgetBytes, budgetBytes];
+        ? [...uniqueIssueIds, afterIssueId, ...patterns, budgetBytes, budgetBytes, budgetBytes, budgetBytes]
+        : [...uniqueIssueIds, ...patterns, budgetBytes, budgetBytes, budgetBytes, budgetBytes];
       const rows = this.ctx.db.query(
         `WITH latest_per_issue AS (
            SELECT
              s.issue_id AS issue_id,
+             l.id AS id,
              l.body_md AS body_md,
              ${rowBytesSql} AS row_bytes,
              ROW_NUMBER() OVER (PARTITION BY s.issue_id ORDER BY l.created_at DESC, l.seq DESC, l.id DESC) AS issue_rn
@@ -1601,6 +1657,7 @@ export class IssuesRepo {
          sized AS (
            SELECT
              issue_id,
+             id,
              body_md,
              row_bytes,
              ROW_NUMBER() OVER (ORDER BY issue_id ASC) AS rn,
@@ -1613,16 +1670,19 @@ export class IssuesRepo {
          )
          SELECT
            issue_id,
-           CASE WHEN rn > 1 AND cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
+           id,
+           CASE WHEN cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
+           CASE WHEN rn = 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS oversize,
            CASE WHEN rn > 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS truncated
          FROM sized
-         WHERE rn <= 2 OR (cum_bytes - row_bytes) <= ?
+         WHERE rn = 1 OR (cum_bytes - row_bytes) <= ?
          ORDER BY rn ASC`,
       ).all(...params) as Row[];
 
       if (rows.length === 0) break;
 
       let truncated = false;
+      let hadOversize = false;
       let lastIssueId: string | null = null;
       for (const row of rows) {
         if (Number(row.truncated) === 1) {
@@ -1631,12 +1691,17 @@ export class IssuesRepo {
         }
         const issueId = String(row.issue_id);
         lastIssueId = issueId;
-        const body = String(row.body_md ?? "");
+        processedIssueCount += 1;
+        const isOversize = Number(row.oversize) === 1;
+        if (isOversize) hadOversize = true;
+        const body = isOversize
+          ? this.readConversationLogBodyBounded(String(row.id))
+          : String(row.body_md ?? "");
         if (searchMatch(body, query)) {
           snippets.set(issueId, extractSearchSnippet(body, query));
         }
       }
-      if (!truncated || lastIssueId === null) break;
+      if ((!truncated && !hadOversize) || lastIssueId === null || processedIssueCount >= uniqueIssueIds.length) break;
       afterIssueId = lastIssueId;
     }
 
@@ -1646,7 +1711,8 @@ export class IssuesRepo {
   /**
    * Scan visible issue-session comments in deterministic
    * `(s.issue_id ASC, l.created_at DESC, l.seq DESC, l.id DESC)` order using a
-   * cumulative wire-byte window capped by `postgresReplyMaxBytes()`.
+   * cumulative wire-byte window capped by `postgresReplyMaxBytes()`. Any single
+   * comment exceeding the batch budget is read via bounded `SUBSTR` chunks.
    * Under normal datasets (< budgetBytes and < 2000 rows), completes in 1 SQL query.
    */
   private scanIssueCommentsBounded(input: {
@@ -1717,10 +1783,11 @@ export class IssuesRepo {
            created_at,
            seq,
            id,
-           CASE WHEN rn > 1 AND cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
+           CASE WHEN cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
+           CASE WHEN rn = 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS oversize,
            CASE WHEN rn > 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS truncated
          FROM sized
-         WHERE rn <= 2 OR (cum_bytes - row_bytes) <= ?
+         WHERE rn = 1 OR (cum_bytes - row_bytes) <= ?
          ORDER BY rn ASC`,
       ).all(
         ...baseParams,
@@ -1729,11 +1796,13 @@ export class IssuesRepo {
         budgetBytes,
         budgetBytes,
         budgetBytes,
+        budgetBytes,
       ) as Row[];
 
       if (batchRows.length === 0) break;
 
       let truncated = false;
+      let hadOversize = false;
       let lastFullRow: { issueId: string; createdAt: string; seq: number; id: string } | null = null;
       for (const row of batchRows) {
         if (Number(row.truncated) === 1) {
@@ -1741,20 +1810,25 @@ export class IssuesRepo {
           break;
         }
         const issueId = String(row.issue_id);
+        const logId = String(row.id);
         lastFullRow = {
           issueId,
           createdAt: String(row.created_at),
           seq: Number(row.seq),
-          id: String(row.id),
+          id: logId,
         };
+        const isOversize = Number(row.oversize) === 1;
+        if (isOversize) hadOversize = true;
         if (snippets.has(issueId)) continue;
-        const body = String(row.body_md ?? "");
+        const body = isOversize
+          ? this.readConversationLogBodyBounded(logId)
+          : String(row.body_md ?? "");
         if (searchMatch(body, query)) {
           snippets.set(issueId, extractSearchSnippet(body, query));
         }
       }
 
-      if (!truncated && batchRows.length < ISSUE_SEARCH_COMMENT_BATCH_ROWS) break;
+      if (!truncated && !hadOversize && batchRows.length < ISSUE_SEARCH_COMMENT_BATCH_ROWS) break;
       if (!lastFullRow) break;
 
       cursor = snippets.has(lastFullRow.issueId)
@@ -1772,14 +1846,15 @@ export class IssuesRepo {
   private searchIssuesWorkspaceScanFallback(input: {
     query: string;
     workspaceId: string;
+    includeClosed: boolean;
     closedFilterSql: string;
     isPostgres: boolean;
     includeCommentBodies: boolean;
     limit: number;
     offset: number;
   }): { issues: MultiremiIssueSearchResult[]; total: number } {
-    const { query, workspaceId, closedFilterSql, isPostgres, includeCommentBodies, limit, offset } = input;
-    const issueTieBreakCol = isPostgres ? "i.ctid" : "i.rowid";
+    const { query, workspaceId, includeClosed, closedFilterSql, isPostgres, includeCommentBodies, limit, offset } = input;
+    const issueTieBreakCol = isPostgres ? "i.id" : "i.rowid";
     const rows = this.ctx.db.query(
       `SELECT i.id, i.issue_number, i.issue_key, i.title, i.description, i.updated_at
        FROM multiremi_issues i
@@ -1878,11 +1953,12 @@ export class IssuesRepo {
       }
     }
 
-    const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id));
+    const hydratedById = this.hydrateIssuesByIdsInWorkspace(workspaceId, page.map((item) => item.id), closedFilterSql);
     const issues: MultiremiIssueSearchResult[] = [];
     for (const item of page) {
       const issue = hydratedById.get(item.id);
       if (!issue) continue;
+      if (!includeClosed && CLOSED_ISSUE_STATUSES.has(issue.status) && !issue.archivedAt) continue;
       const built = buildIssueSearchResult(issue, query, commentSnippetByIssueId.get(item.id) ?? null);
       if (built) issues.push(built);
     }
@@ -7080,10 +7156,11 @@ function compareIssueSearchCandidates(left: IssueSearchCandidate, right: IssueSe
   if (rankDiff !== 0) return rankDiff;
   const timeDiff = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
   if (timeDiff) return timeDiff;
-  // Tie-breaker matching baseline listIssues({ includeArchived: true }) (`ORDER BY updated_at DESC`
-  // followed by stable JS sort): rely on the database's native `ORDER BY i.updated_at DESC, ctid/rowid ASC`
-  // rank (`issueOrd`) instead of JS UTF-16 code-unit comparison so SQLite (BINARY + rowid) and
-  // PostgreSQL (locale collation such as en_US.utf8 + ctid) stay 100% page-identical on equal instants.
+  // Tie-breaker: rely on the database's native `ORDER BY i.updated_at DESC, <i.id | i.rowid> ASC`
+  // rank (`issueOrd`) instead of JS UTF-16 code-unit comparison so equal-instant ISO variants
+  // follow native DB collation (SQLite BINARY, PostgreSQL locale collation such as en_US.utf8),
+  // while identical `updated_at` strings break ties deterministically by `i.rowid ASC` on SQLite
+  // and logical primary key `i.id ASC` on PostgreSQL (avoiding physical heap/ctid drift).
   const ordDiff = left.issueOrd - right.issueOrd;
   if (ordDiff !== 0) return ordDiff;
   return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
@@ -7099,20 +7176,20 @@ type CommentScanCursor =
 
 function issueSearchReplyBudgetBytes(): number {
   const ceiling = postgresReplyMaxBytes();
-  const wrapperReserve = Math.min(64 * 1024, Math.floor(ceiling / 4));
-  return Math.max(512, ceiling - wrapperReserve);
+  const wrapperReserve = Math.max(512, Math.min(64 * 1024, Math.floor(ceiling / 4)));
+  return Math.max(256, ceiling - wrapperReserve);
 }
 
 function buildCommentRowBytesSql(isPostgres: boolean): string {
   return isPostgres
-    ? "OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(COALESCE(s.issue_id, '')) + OCTET_LENGTH(COALESCE(l.created_at, '')) + OCTET_LENGTH(COALESCE(l.id, '')) + 128"
-    : "LENGTH(CAST(COALESCE(l.body_md, '') AS BLOB)) * 6 + LENGTH(COALESCE(s.issue_id, '')) + LENGTH(COALESCE(l.created_at, '')) + LENGTH(COALESCE(l.id, '')) + 128";
+    ? "OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(to_json(COALESCE(s.issue_id, ''))::text) + OCTET_LENGTH(to_json(COALESCE(l.created_at, ''))::text) + OCTET_LENGTH(to_json(COALESCE(l.id, ''))::text) + 160"
+    : "LENGTH(CAST(COALESCE(l.body_md, '') AS BLOB)) * 6 + LENGTH(COALESCE(s.issue_id, '')) + LENGTH(COALESCE(l.created_at, '')) + LENGTH(COALESCE(l.id, '')) + 160";
 }
 
 function buildCommentSnippetRowBytesSql(isPostgres: boolean): string {
   return isPostgres
-    ? "OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(COALESCE(s.issue_id, '')) + 96"
-    : "LENGTH(CAST(COALESCE(l.body_md, '') AS BLOB)) * 6 + LENGTH(COALESCE(s.issue_id, '')) + 96";
+    ? "OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(to_json(COALESCE(s.issue_id, ''))::text) + OCTET_LENGTH(to_json(COALESCE(l.id, ''))::text) + 128"
+    : "LENGTH(CAST(COALESCE(l.body_md, '') AS BLOB)) * 6 + LENGTH(COALESCE(s.issue_id, '')) + LENGTH(COALESCE(l.id, '')) + 128";
 }
 
 function buildCommentScanCursorSql(cursor: CommentScanCursor | null): { sql: string; params: unknown[] } {

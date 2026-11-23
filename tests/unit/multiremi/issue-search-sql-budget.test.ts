@@ -905,7 +905,7 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     }
   }, 30_000);
 
-  it("matches legacy tie-breaking for equal Date.parse(updatedAt) timezone variants and identical timestamps across limit=1 paging", () => {
+  it("matches tie-breaking for equal Date.parse(updatedAt) timezone variants and deterministic identical-timestamp paging across store and HTTP routes", async () => {
     const f = fixture();
 
     // Two comment-only matches with the exact same UTC instant (2026-10-15T12:00:00Z),
@@ -965,25 +965,106 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
       expect(page1Actual.issues.map((item) => item.id)).toEqual([expectedSecond]);
     }
 
-    if (backend === "SQLite") {
-      // Identical updated_at text: SQLite baseline ORDER BY updated_at DESC preserves rowid ASC
-      // even when the earlier-inserted row has a lexicographically larger id.
-      f.db.run(
-        `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
-         VALUES ('iss_zz_rowid_first', 9901, 'MUL-9901', 'ROWIDTIE-777 first inserted', NULL, 'todo', 'local', '2026-10-17T00:00:00.000Z', '2026-10-17T00:00:00.000Z')`,
-      );
-      f.db.run(
-        `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
-         VALUES ('iss_aa_rowid_second', 9902, 'MUL-9902', 'ROWIDTIE-777 second inserted', NULL, 'todo', 'local', '2026-10-17T00:00:00.000Z', '2026-10-17T00:00:00.000Z')`,
-      );
-      const rowidPage0Expected = legacySearchIssuesOracle(f.store, f.db, { q: "ROWIDTIE-777", workspaceId: "local", limit: 1, offset: 0 });
-      const rowidPage0Actual = f.store.searchIssues({ q: "ROWIDTIE-777", workspaceId: "local", limit: 1, offset: 0 });
-      const rowidPage1Expected = legacySearchIssuesOracle(f.store, f.db, { q: "ROWIDTIE-777", workspaceId: "local", limit: 1, offset: 1 });
-      const rowidPage1Actual = f.store.searchIssues({ q: "ROWIDTIE-777", workspaceId: "local", limit: 1, offset: 1 });
-      expect(rowidPage0Actual).toEqual(rowidPage0Expected);
-      expect(rowidPage1Actual).toEqual(rowidPage1Expected);
-      expect(rowidPage0Actual.issues.map((item) => item.id)).toEqual(["iss_zz_rowid_first"]);
-      expect(rowidPage1Actual.issues.map((item) => item.id)).toEqual(["iss_aa_rowid_second"]);
+    // Identical updated_at text on two comment-only hits that each also have a newer hidden draft:
+    // - SQLite preserves legacy `i.rowid ASC` insertion order (`iss_zz_ident_first` -> `iss_aa_ident_second`).
+    // - PostgreSQL defines deterministic logical primary-key tie-breaking `i.id ASC`
+    //   (`iss_aa_ident_second` -> `iss_zz_ident_first`), avoiding physical heap/ctid drift
+    //   and undefined PG baseline quicksort ties.
+    const identTimestamp = "2026-10-17T00:00:00.000Z";
+    f.db.run(
+      `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
+       VALUES ('iss_zz_ident_first', 9901, 'MUL-9901', 'Neutral identical-ts first inserted', NULL, 'todo', 'local', ?, ?)`,
+      [identTimestamp, identTimestamp],
+    );
+    f.db.run(
+      `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
+       VALUES ('iss_aa_ident_second', 9902, 'MUL-9902', 'Neutral identical-ts second inserted', NULL, 'todo', 'local', ?, ?)`,
+      [identTimestamp, identTimestamp],
+    );
+    for (const [issueId, label] of [
+      ["iss_zz_ident_first", "first-inserted-zz"],
+      ["iss_aa_ident_second", "second-inserted-aa"],
+    ] as const) {
+      const visible = f.store.createIssueComment(issueId, {
+        body: `IDENTTIE-777 café visible winner ${label}`,
+      });
+      setCommentCreatedAt(f.db, visible.id, "2026-10-17T01:00:00.000Z");
+      const hiddenDraft = f.store.createIssueComment(issueId, {
+        body: `IDENTTIE-777 café hidden newer draft ${label}`,
+      });
+      setCommentCreatedAt(f.db, hiddenDraft.id, "2026-10-17T02:00:00.000Z");
+      f.db.run("UPDATE multiremi_conversation_log SET visibility = 'hidden' WHERE id = ?", [hiddenDraft.id]);
+      setUpdatedAt(f.db, issueId, identTimestamp);
+    }
+
+    const expectedIdentOrder = backend === "PostgreSQL"
+      ? ["iss_aa_ident_second", "iss_zz_ident_first"]
+      : ["iss_zz_ident_first", "iss_aa_ident_second"];
+
+    const app = createMultiremiApp({ store: f.store });
+    for (const q of ["IDENTTIE-777", "IDENTTIE-777 café"]) {
+      // 1. Store pagination: limit=1, offset=0/1/2
+      const p0 = f.store.searchIssues({ q, workspaceId: "local", limit: 1, offset: 0 });
+      const p1 = f.store.searchIssues({ q, workspaceId: "local", limit: 1, offset: 1 });
+      const p2 = f.store.searchIssues({ q, workspaceId: "local", limit: 1, offset: 2 });
+      expect(p0.total).toBe(2);
+      expect(p1.total).toBe(2);
+      expect(p2.total).toBe(2);
+      expect(p0.issues.map((item) => item.id)).toEqual([expectedIdentOrder[0]]);
+      expect(p1.issues.map((item) => item.id)).toEqual([expectedIdentOrder[1]]);
+      expect(p2.issues).toEqual([]);
+      expect(p0.issues[0]?.matchedCommentSnippet).toContain("visible winner");
+      expect(p0.issues[0]?.matchedCommentSnippet).not.toContain("hidden newer draft");
+      expect(p1.issues[0]?.matchedCommentSnippet).toContain("visible winner");
+      expect(p1.issues[0]?.matchedCommentSnippet).not.toContain("hidden newer draft");
+
+      if (backend === "SQLite") {
+        expect(p0).toEqual(legacySearchIssuesOracle(f.store, f.db, { q, workspaceId: "local", limit: 1, offset: 0 }));
+        expect(p1).toEqual(legacySearchIssuesOracle(f.store, f.db, { q, workspaceId: "local", limit: 1, offset: 1 }));
+        expect(p2).toEqual(legacySearchIssuesOracle(f.store, f.db, { q, workspaceId: "local", limit: 1, offset: 2 }));
+      }
+
+      // 2. Compatibility HTTP route GET /api/issues/search (limit=1, offset=0/1/2)
+      const identPages: Array<[number, string[]]> = [
+        [0, [expectedIdentOrder[0]!]],
+        [1, [expectedIdentOrder[1]!]],
+        [2, []],
+      ];
+      for (const [offset, expectedIds] of identPages) {
+        const compatResp = await app.request(
+          `/api/issues/search?q=${encodeURIComponent(q)}&workspace_id=local&limit=1&offset=${offset}`,
+        );
+        expect(compatResp.status).toBe(200);
+        expect(compatResp.headers.get("X-Total-Count")).toBe("2");
+        const compatBody = await compatResp.json() as {
+          issues: Array<{ id: string; matched_comment_snippet?: string }>;
+          total: number;
+        };
+        expect(compatBody.total).toBe(2);
+        expect(compatBody.issues.map((item) => item.id)).toEqual(expectedIds);
+        if (expectedIds.length === 1) {
+          expect(compatBody.issues[0]?.matched_comment_snippet).toContain("visible winner");
+          expect(compatBody.issues[0]?.matched_comment_snippet).not.toContain("hidden newer draft");
+        }
+      }
+
+      // 3. Canonical HTTP route GET /api/multiremi/issues/search (limit=1, offset=0/1/2)
+      for (const [offset, expectedIds] of identPages) {
+        const canonicalResp = await app.request(
+          `/api/multiremi/issues/search?q=${encodeURIComponent(q)}&workspaceId=local&limit=1&offset=${offset}`,
+        );
+        expect(canonicalResp.status).toBe(200);
+        const canonicalBody = await canonicalResp.json() as {
+          issues: Array<{ id: string; matchedCommentSnippet?: string }>;
+          total: number;
+        };
+        expect(canonicalBody.total).toBe(2);
+        expect(canonicalBody.issues.map((item) => item.id)).toEqual(expectedIds);
+        if (expectedIds.length === 1) {
+          expect(canonicalBody.issues[0]?.matchedCommentSnippet).toContain("visible winner");
+          expect(canonicalBody.issues[0]?.matchedCommentSnippet).not.toContain("hidden newer draft");
+        }
+      }
     }
   }, 30_000);
 
@@ -1104,7 +1185,7 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
         for (let i = startIndex; i < startIndex + localCount; i += 1) {
           const id = `scale_local_${i}`;
           const num = 1000 + i;
-          const updatedAt = `2026-11-${String(1 + (i % 20)).padStart(2, "0")}T${String(i % 24).padStart(2, "0")}:00:00.000Z`;
+          const updatedAt = `2026-11-${String(1 + (i % 20)).padStart(2, "0")}T${String(i % 24).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.${String(i % 1000).padStart(3, "0")}Z`;
           const isTitleMatch = i % 5 === 0;
           const isCommentMatch = i % 7 === 0;
           const title = isTitleMatch ? `Target titlehit batch ${i}` : `Ordinary local issue ${i}`;
@@ -1221,13 +1302,25 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(largeMissBefore.reads).toBeGreaterThanOrEqual(300);
 
     // Calling searchIssues inside an existing outer transaction reuses that transaction
-    // without issuing a nested SET TRANSACTION ISOLATION LEVEL statement.
-    const nestedSearch = measureSql(f.db, () =>
-      f.transaction(() => f.store.searchIssues({ q: "no-match-anywhere", workspaceId: "local", limit: 5 })),
-    );
+    // without issuing a nested SET TRANSACTION ISOLATION LEVEL statement (PostgreSQL
+    // requires REPEATABLE READ or SERIALIZABLE isolation and verifies it via current_setting).
+    const nestedSearch = f.transaction(() => {
+      if (backend === "PostgreSQL") {
+        f.db.exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+      }
+      return measureSql(f.db, () => f.store.searchIssues({ q: "no-match-anywhere", workspaceId: "local", limit: 5 }));
+    });
     expect(nestedSearch.result).toEqual(largeMissAfter.result);
     expect(nestedSearch.txControl).toBe(0);
-    expect(nestedSearch).toMatchObject({ reads: 1, writes: 0 });
+    expect(nestedSearch).toMatchObject({ reads: backend === "PostgreSQL" ? 2 : 1, writes: 0 });
+
+    if (backend === "PostgreSQL") {
+      // Calling searchIssues inside a default READ COMMITTED outer transaction must fail fast
+      // rather than silently allowing cross-statement snapshot tearing.
+      expect(() =>
+        f.transaction(() => f.store.searchIssues({ q: "no-match-anywhere", workspaceId: "local", limit: 5 })),
+      ).toThrow("searchIssues inside an open PostgreSQL transaction requires REPEATABLE READ or SERIALIZABLE isolation");
+    }
 
     // Candidate query with comment bodies materializes workspace_issues once + matched_comments via UNION ALL
     expect(largeMissAfter.statements[0]).toContain("workspace_issues AS MATERIALIZED");
@@ -1237,7 +1330,8 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
       expect(largeMissAfter.statements[0]).toContain("BTRIM(");
       expect(largeMissAfter.statements[0]).not.toContain("TYPEOF(");
       expect(largeMissAfter.statements[0]).not.toContain("i.rowid");
-      expect(largeMissAfter.statements[0]).toContain("ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.ctid ASC) AS issue_ord");
+      expect(largeMissAfter.statements[0]).not.toContain("i.ctid");
+      expect(largeMissAfter.statements[0]).toContain("ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.id ASC) AS issue_ord");
       expect(largeMissAfter.statements[0]).toContain("CROSS JOIN LATERAL");
       expect(largeMissAfter.statements[0]).toContain("LIMIT 1");
 
@@ -1269,10 +1363,10 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
       }
     }
 
-    // Explicitly verify translateSqliteToPg preserves the PostgreSQL LATERAL + ROW_NUMBER(i.ctid) candidate shape
+    // Explicitly verify translateSqliteToPg preserves the PostgreSQL LATERAL + ROW_NUMBER(i.id) candidate shape
     // even when this test runs on SQLite locally without MULTIREMI_TEST_POSTGRES_URL.
     const pgCandidateTemplate = `WITH workspace_issues AS MATERIALIZED (
-      SELECT i.id, i.updated_at, ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.ctid ASC) AS issue_ord,
+      SELECT i.id, i.updated_at, ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.id ASC) AS issue_ord,
         CASE WHEN (LOWER(i.title) LIKE ? ESCAPE '\\') THEN 1 ELSE NULL END AS match_rank
       FROM multiremi_issues i
       WHERE i.workspace_id = ?
@@ -1302,15 +1396,16 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(translatedPgCandidate).toContain("$3");
     expect(translatedPgCandidate).toContain("workspace_issues AS MATERIALIZED");
     expect(translatedPgCandidate).toContain("matched_comments AS MATERIALIZED");
-    expect(translatedPgCandidate).toContain("ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.ctid ASC) AS issue_ord");
+    expect(translatedPgCandidate).toContain("ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.id ASC) AS issue_ord");
     expect(translatedPgCandidate).toContain("CROSS JOIN LATERAL");
     expect(translatedPgCandidate).toContain("LIMIT 1");
     expect(translatedPgCandidate).toContain("ESCAPE '\\'");
 
-    // Also verify translateSqliteToPg preserves the bounded PostgreSQL comment-scan window SQL.
+    // Also verify translateSqliteToPg preserves the bounded PostgreSQL comment-scan window SQL,
+    // oversize SUBSTR chunking SQL, and transaction_isolation check.
     const pgBoundedCommentTemplate = `WITH batch AS (
       SELECT s.issue_id AS issue_id, l.created_at AS created_at, l.seq AS seq, l.id AS id, l.body_md AS body_md,
-        OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(COALESCE(s.issue_id, '')) + OCTET_LENGTH(COALESCE(l.created_at, '')) + OCTET_LENGTH(COALESCE(l.id, '')) + 128 AS row_bytes
+        OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text) + OCTET_LENGTH(to_json(COALESCE(s.issue_id, ''))::text) + OCTET_LENGTH(to_json(COALESCE(l.created_at, ''))::text) + OCTET_LENGTH(to_json(COALESCE(l.id, ''))::text) + 160 AS row_bytes
       FROM multiremi_issue_sessions s
       JOIN multiremi_conversation_log l ON l.session_id = s.id
       WHERE s.issue_id IN (?, ?) AND s.chat_id IS NULL AND l.kind = 'message' AND l.visibility = 'shown' AND l.deleted_at IS NULL
@@ -1324,17 +1419,25 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
       FROM batch
     )
     SELECT issue_id, created_at, seq, id,
-      CASE WHEN rn > 1 AND cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
+      CASE WHEN cum_bytes > ? THEN NULL ELSE body_md END AS body_md,
+      CASE WHEN rn = 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS oversize,
       CASE WHEN rn > 1 AND cum_bytes > ? THEN 1 ELSE 0 END AS truncated
     FROM sized
-    WHERE rn <= 2 OR (cum_bytes - row_bytes) <= ?
+    WHERE rn = 1 OR (cum_bytes - row_bytes) <= ?
     ORDER BY rn ASC`;
     const translatedPgBounded = translateSqliteToPg(pgBoundedCommentTemplate);
     expect(translatedPgBounded).not.toContain("?");
-    expect(translatedPgBounded).toContain("$6");
+    expect(translatedPgBounded).toContain("$7");
     expect(translatedPgBounded).toContain("OCTET_LENGTH(to_json(COALESCE(l.body_md, ''))::text)");
     expect(translatedPgBounded).toContain("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW");
-    expect(translatedPgBounded).toContain("WHERE rn <= 2 OR (cum_bytes - row_bytes) <= $6");
+    expect(translatedPgBounded).toContain("CASE WHEN rn = 1 AND cum_bytes > $5 THEN 1 ELSE 0 END AS oversize");
+    expect(translatedPgBounded).toContain("WHERE rn = 1 OR (cum_bytes - row_bytes) <= $7");
+    expect(
+      translateSqliteToPg("SELECT SUBSTR(COALESCE(body_md, ''), ?, ?) AS c FROM multiremi_conversation_log WHERE id = ?"),
+    ).toBe("SELECT SUBSTR(COALESCE(body_md, ''), $1, $2) AS c FROM multiremi_conversation_log WHERE id = $3");
+    expect(
+      translateSqliteToPg("SELECT current_setting('transaction_isolation') AS iso"),
+    ).toBe("SELECT current_setting('transaction_isolation') AS iso");
 
     // HTTP route smoke check on the 300-issue dataset
     const app = createMultiremiApp({ store: f.store });
@@ -1576,7 +1679,119 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(pushdownPage1Actual).toEqual(legacySearchIssuesOracle(f.store, f.db, { q: "budgethit-900", workspaceId: "local", limit: 4, offset: 4 }));
   }, 30_000);
 
-  it("keeps candidate discovery, total, and page hydration inside one consistent read snapshot under concurrent status transition", () => {
+  it("chunks single oversized 4,000-byte comments (with emoji, quotes, control chars) via SUBSTR under non-exempt 4096B reply budget across both paths", async () => {
+    const f = fixture();
+    // Place supplementary-plane emoji '😀' right across the 650-code-point chunk boundary
+    // (ceiling=4096 -> chunkChars=650) alongside quotes, backslashes, and control chars so
+    // UTF-16 length bugs or unescaped JSON-expansion overflows would fail immediately.
+    const emojiBridge = "a".repeat(645) + "😀😀😀😀😀😀😀😀😀😀" + "\x01\t\"quoted\"\\'\\n" + "b".repeat(1200);
+    const oversizeBody1 = `${emojiBridge} ${"z".repeat(2200)} OVERSIZE-ARCHIVE-TAIL archive CAFÉ 😀 "end"`;
+    expect(Buffer.byteLength(oversizeBody1, "utf8")).toBeGreaterThanOrEqual(4000);
+
+    const oversizeNonMatch = `${"😀".repeat(200)} ${"\x02\t\"noise\"\\".repeat(80)} ${"m".repeat(2600)} unrelated latest comment`;
+    expect(Buffer.byteLength(oversizeNonMatch, "utf8")).toBeGreaterThanOrEqual(4000);
+
+    // Issue 1 (lexicographically first): single 4,000+ UTF-8 byte matching comment
+    f.db.run(
+      `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
+       VALUES ('iss_oversize_01', 9951, 'MUL-9951', 'Oversize comment holder 1', 'Clean description 1', 'todo', 'local', '2026-11-11T01:00:00.000Z', '2026-11-11T03:00:00.000Z')`,
+    );
+    const o1c1 = f.store.createIssueComment("iss_oversize_01", { body: oversizeBody1 });
+    setCommentCreatedAt(f.db, o1c1.id, "2026-11-11T01:00:00.000Z");
+    setUpdatedAt(f.db, "iss_oversize_01", "2026-11-11T03:00:00.000Z");
+
+    // Issue 2 (lexicographically second): newer 4,000+ byte NON-matching comment + older matching comment
+    // Proves `oversize = 1` on rn=1 does not stop cursor advancement and `after_row` reaches older comments.
+    f.db.run(
+      `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
+       VALUES ('iss_oversize_02', 9952, 'MUL-9952', 'Oversize comment holder 2', 'Clean description 2', 'todo', 'local', '2026-11-11T02:00:00.000Z', '2026-11-11T02:00:00.000Z')`,
+    );
+    const o2cOld = f.store.createIssueComment("iss_oversize_02", {
+      body: `Older matching OVERSIZE-ARCHIVE-TAIL archive CAFÉ 😀 "older-winner" after 4KB noise`,
+    });
+    const o2cNew = f.store.createIssueComment("iss_oversize_02", { body: oversizeNonMatch });
+    setCommentCreatedAt(f.db, o2cOld.id, "2026-11-11T01:00:00.000Z");
+    setCommentCreatedAt(f.db, o2cNew.id, "2026-11-11T02:00:00.000Z");
+    setUpdatedAt(f.db, "iss_oversize_02", "2026-11-11T02:00:00.000Z");
+
+    // Issue 3 (lexicographically third): normal-sized matching comment after two oversize issues
+    f.db.run(
+      `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
+       VALUES ('iss_oversize_03', 9953, 'MUL-9953', 'Oversize follower 3', 'Clean description 3', 'todo', 'local', '2026-11-11T01:00:00.000Z', '2026-11-11T01:00:00.000Z')`,
+    );
+    const o3c1 = f.store.createIssueComment("iss_oversize_03", {
+      body: `Short follower OVERSIZE-ARCHIVE-TAIL archive CAFÉ 😀`,
+    });
+    setCommentCreatedAt(f.db, o3c1.id, "2026-11-11T01:00:00.000Z");
+    setUpdatedAt(f.db, "iss_oversize_03", "2026-11-11T01:00:00.000Z");
+
+    const previousLimit = process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
+    const previousEnforce = process.env.MULTIREMI_PG_REPLY_ENFORCE;
+    process.env.MULTIREMI_PG_REPLY_MAX_BYTES = "4096";
+    process.env.MULTIREMI_PG_REPLY_ENFORCE = "1";
+    resetDbReplyLimitForTest();
+
+    let asciiActual: { issues: MultiremiIssueSearchResult[]; total: number };
+    let fallbackActual: { issues: MultiremiIssueSearchResult[]; total: number };
+
+    try {
+      // Non-exempt request context (GET /api/review-fixture is NOT in DB_REPLY_TRANSITION_EXCEPTIONS).
+      const reviewApp = new Hono();
+      reviewApp.use("*", createRequestMetricsMiddleware({
+        enabled: false,
+        slowRequestMs: 500,
+        summaryIntervalMs: 60_000,
+        summaryTopRoutes: 10,
+        bufferCapacity: 256,
+        role: "all",
+      }));
+      reviewApp.get("/api/review-fixture", (c) => {
+        expect(postgresReplyMaxBytes()).toBe(4096);
+        expect(currentDbReplyPolicy()).toMatchObject({ limitBytes: 4096, enforced: true, exempt: false });
+        const q = c.req.query("q") ?? "";
+        const result = f.store.searchIssues({ q, workspaceId: "local", limit: 10 });
+        return c.json(result);
+      });
+
+      const asciiMeasured = await measureSqlAsync(f.db, async () => {
+        const resp = await reviewApp.request(`/api/review-fixture?q=${encodeURIComponent("archive")}`);
+        expect(resp.status).toBe(200);
+        return await resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
+      });
+      asciiActual = asciiMeasured.result;
+      expect(asciiMeasured.writes).toBe(0);
+      expect(asciiMeasured.statements.some((sql) => sql.includes("SELECT SUBSTR(COALESCE(body_md, '')"))).toBe(true);
+
+      const fallbackMeasured = await measureSqlAsync(f.db, async () => {
+        const resp = await reviewApp.request(`/api/review-fixture?q=${encodeURIComponent("café")}`);
+        expect(resp.status).toBe(200);
+        return await resp.json() as { issues: MultiremiIssueSearchResult[]; total: number };
+      });
+      fallbackActual = fallbackMeasured.result;
+      expect(fallbackMeasured.writes).toBe(0);
+      expect(fallbackMeasured.statements.some((sql) => sql.includes("SELECT SUBSTR(COALESCE(body_md, '')"))).toBe(true);
+    } finally {
+      if (previousLimit === undefined) delete process.env.MULTIREMI_PG_REPLY_MAX_BYTES;
+      else process.env.MULTIREMI_PG_REPLY_MAX_BYTES = previousLimit;
+      if (previousEnforce === undefined) delete process.env.MULTIREMI_PG_REPLY_ENFORCE;
+      else process.env.MULTIREMI_PG_REPLY_ENFORCE = previousEnforce;
+      resetDbReplyLimitForTest();
+    }
+
+    const asciiExpected = legacySearchIssuesOracle(f.store, f.db, { q: "archive", workspaceId: "local", limit: 10 });
+    const fallbackExpected = legacySearchIssuesOracle(f.store, f.db, { q: "café", workspaceId: "local", limit: 10 });
+
+    expect(asciiActual).toEqual(asciiExpected);
+    expect(fallbackActual).toEqual(fallbackExpected);
+    expect(asciiActual.issues.map((item) => item.id)).toEqual(["iss_oversize_01", "iss_oversize_02", "iss_oversize_03"]);
+    expect(fallbackActual.issues.map((item) => item.id)).toEqual(["iss_oversize_01", "iss_oversize_02", "iss_oversize_03"]);
+    expect(asciiActual.issues[0]?.matchedCommentSnippet).toContain("OVERSIZE-ARCHIVE-TAIL archive CAFÉ 😀");
+    expect(asciiActual.issues[1]?.matchedCommentSnippet).toContain("older-winner");
+    expect(fallbackActual.issues[0]?.matchedCommentSnippet).toContain("OVERSIZE-ARCHIVE-TAIL archive CAFÉ 😀");
+    expect(fallbackActual.issues[1]?.matchedCommentSnippet).toContain("older-winner");
+  }, 30_000);
+
+  it("keeps candidate discovery, total, page hydration, and comment snippets inside one consistent read snapshot under concurrent status and comment mutations", () => {
     const f = fixture();
 
     const verifyConcurrentTransition = (
@@ -1584,63 +1799,87 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
       store1: MultiremiStore,
       db2: SqlDatabase,
       createIssue: (title: string, updatedAt: string) => string,
+      modes: Array<{ name: string; runSearch: (fn: () => { issues: MultiremiIssueSearchResult[]; total: number }) => { issues: MultiremiIssueSearchResult[]; total: number } }>,
     ) => {
-      const scenarios: Array<{ label: string; token: string; query: string }> = [
-        { label: "sql-pushdown", token: "SNAPRACE-ASCII", query: "SNAPRACE-ASCII" },
-        { label: "non-ascii-fallback", token: "SNAPRACE-CAFÉ", query: "snaprace-café" },
-      ];
+      for (const mode of modes) {
+        const scenarios: Array<{ label: string; token: string; query: string }> = [
+          { label: `${mode.name}:sql-pushdown`, token: `SNAPRACE-ASCII-${mode.name}`, query: `SNAPRACE-ASCII-${mode.name}` },
+          { label: `${mode.name}:non-ascii-fallback`, token: `SNAPRACE-CAFÉ-${mode.name}`, query: `snaprace-café-${mode.name}` },
+        ];
 
-      for (const scenario of scenarios) {
-        const id1 = createIssue(`${scenario.token} issue 1`, "2026-11-12T01:00:00.000Z");
-        const id2 = createIssue(`${scenario.token} issue 2`, "2026-11-12T02:00:00.000Z");
-        const id3 = createIssue(`${scenario.token} issue 3`, "2026-11-12T03:00:00.000Z");
-        store1.createIssueComment(id2, { body: `Comment mentioning ${scenario.token}` });
-        setUpdatedAt(db1, id2, "2026-11-12T02:00:00.000Z");
+        for (const scenario of scenarios) {
+          const id1 = createIssue(`${scenario.token} issue 1`, "2026-11-12T01:00:00.000Z");
+          const id2 = createIssue(`${scenario.token} issue 2`, "2026-11-12T02:00:00.000Z");
+          const id3 = createIssue(`${scenario.token} issue 3`, "2026-11-12T03:00:00.000Z");
+          const comment = store1.createIssueComment(id2, { body: `OLD-SNAP-COMMENT mentioning ${scenario.token}` });
+          setUpdatedAt(db1, id2, "2026-11-12T02:00:00.000Z");
 
-        // Inject a concurrent commit on connection 2 right after candidate discovery
-        // and immediately before page hydration reads multiremi_issues.
-        let mutated = false;
-        const originalQuery = db1.query.bind(db1);
-        const querySpy = spyOn(db1, "query").mockImplementation((sql) => {
-          if (!mutated && sql.includes("SELECT * FROM multiremi_issues WHERE workspace_id = ? AND id IN (")) {
-            mutated = true;
-            db2.run("UPDATE multiremi_issues SET status = 'done' WHERE id = ?", [id2]);
+          // Inject a concurrent commit on connection 2 right after candidate discovery
+          // and immediately before page hydration reads multiremi_issues: both
+          // status (`todo -> done`) and comment body (`OLD -> NEW`) mutate together.
+          let mutated = false;
+          const originalQuery = db1.query.bind(db1);
+          const querySpy = spyOn(db1, "query").mockImplementation((sql) => {
+            if (!mutated && sql.includes("SELECT i.* FROM multiremi_issues i WHERE i.workspace_id = ? AND i.id IN (")) {
+              mutated = true;
+              db2.run("UPDATE multiremi_issues SET status = 'done' WHERE id = ?", [id2]);
+              db2.run("UPDATE multiremi_conversation_log SET body_md = ? WHERE id = ?", [
+                `NEW-SNAP-COMMENT mentioning ${scenario.token}`,
+                comment.id,
+              ]);
+            }
+            return originalQuery(sql);
+          });
+
+          let duringMutation: { issues: MultiremiIssueSearchResult[]; total: number };
+          try {
+            duringMutation = mode.runSearch(() => store1.searchIssues({
+              q: scenario.query,
+              workspaceId: "local",
+              includeClosed: false,
+              includeCommentBodies: true,
+              limit: 10,
+            }));
+          } finally {
+            querySpy.mockRestore();
           }
-          return originalQuery(sql);
-        });
 
-        let duringMutation: { issues: MultiremiIssueSearchResult[]; total: number };
-        try {
-          duringMutation = store1.searchIssues({
+          expect(mutated, `${scenario.label}: concurrent writer should fire before hydration`).toBe(true);
+          // Consistent pre-commit snapshot: all 3 open issues returned, no unarchived done leaked,
+          // no short page, and comment snippet reflects the pre-commit OLD text.
+          expect(duringMutation.total).toBe(3);
+          expect(duringMutation.issues).toHaveLength(3);
+          expect(duringMutation.issues.map((item) => item.id)).toEqual([id3, id2, id1]);
+          expect(duringMutation.issues.every((item) => item.status === "todo")).toBe(true);
+          const id2During = duringMutation.issues.find((item) => item.id === id2)!;
+          expect(id2During.matchedCommentSnippet).toContain("OLD-SNAP-COMMENT");
+          expect(id2During.matchedCommentSnippet).not.toContain("NEW-SNAP-COMMENT");
+
+          // Next search starts a fresh snapshot and observes the committed todo -> done transition.
+          const afterMutation = store1.searchIssues({
             q: scenario.query,
             workspaceId: "local",
             includeClosed: false,
             includeCommentBodies: true,
             limit: 10,
           });
-        } finally {
-          querySpy.mockRestore();
+          expect(afterMutation.total).toBe(2);
+          expect(afterMutation.issues).toHaveLength(2);
+          expect(afterMutation.issues.map((item) => item.id)).toEqual([id3, id1]);
+          expect(afterMutation.issues.map((item) => item.id)).not.toContain(id2);
+
+          // And includeClosed=true on the fresh snapshot observes both `done` and NEW comment body.
+          const afterClosed = store1.searchIssues({
+            q: scenario.query,
+            workspaceId: "local",
+            includeClosed: true,
+            includeCommentBodies: true,
+            limit: 10,
+          });
+          const id2After = afterClosed.issues.find((item) => item.id === id2)!;
+          expect(id2After.status).toBe("done");
+          expect(id2After.matchedCommentSnippet).toContain("NEW-SNAP-COMMENT");
         }
-
-        expect(mutated, `${scenario.label}: concurrent writer should fire before hydration`).toBe(true);
-        // Consistent pre-commit snapshot: all 3 open issues returned, no unarchived done leaked, no short page.
-        expect(duringMutation.total).toBe(3);
-        expect(duringMutation.issues).toHaveLength(3);
-        expect(duringMutation.issues.map((item) => item.id)).toEqual([id3, id2, id1]);
-        expect(duringMutation.issues.every((item) => item.status === "todo")).toBe(true);
-
-        // Next search starts a fresh snapshot and observes the committed todo -> done transition.
-        const afterMutation = store1.searchIssues({
-          q: scenario.query,
-          workspaceId: "local",
-          includeClosed: false,
-          includeCommentBodies: true,
-          limit: 10,
-        });
-        expect(afterMutation.total).toBe(2);
-        expect(afterMutation.issues).toHaveLength(2);
-        expect(afterMutation.issues.map((item) => item.id)).toEqual([id3, id1]);
-        expect(afterMutation.issues.map((item) => item.id)).not.toContain(id2);
       }
     };
 
@@ -1648,11 +1887,26 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
       expect(f.databaseUrl).toBeTruthy();
       const db2 = new PostgresSyncDatabase(f.databaseUrl!);
       try {
-        verifyConcurrentTransition(f.db, f.store, db2, (title, updatedAt) => {
-          const issue = f.createIssue({ workspaceId: "local", title, description: "Concurrent PG snapshot check" });
-          setUpdatedAt(f.db, issue.id, updatedAt);
-          return issue.id;
-        });
+        verifyConcurrentTransition(
+          f.db,
+          f.store,
+          db2,
+          (title, updatedAt) => {
+            const issue = f.createIssue({ workspaceId: "local", title, description: "Concurrent PG snapshot check" });
+            setUpdatedAt(f.db, issue.id, updatedAt);
+            return issue.id;
+          },
+          [
+            { name: "pg-top-level", runSearch: (fn) => fn() },
+            {
+              name: "pg-outer-rr",
+              runSearch: (fn) => f.transaction(() => {
+                f.db.exec("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+                return fn();
+              }),
+            },
+          ],
+        );
       } finally {
         db2.close();
       }
@@ -1668,11 +1922,26 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
         db2.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 30000");
         const store1 = new MultiremiStore(db1);
         store1.ensureLocalWorkspace();
-        verifyConcurrentTransition(db1, store1, db2, (title, updatedAt) => {
-          const issue = createResponsibleTestIssue(store1, { workspaceId: "local", title, description: "Concurrent SQLite WAL snapshot check" });
-          setUpdatedAt(db1, issue.id, updatedAt);
-          return issue.id;
-        });
+        verifyConcurrentTransition(
+          db1,
+          store1,
+          db2,
+          (title, updatedAt) => {
+            const issue = createResponsibleTestIssue(store1, { workspaceId: "local", title, description: "Concurrent SQLite WAL snapshot check" });
+            setUpdatedAt(db1, issue.id, updatedAt);
+            return issue.id;
+          },
+          [
+            { name: "sqlite-top-level", runSearch: (fn) => fn() },
+            {
+              name: "sqlite-outer-tx",
+              runSearch: (fn) => {
+                const tx = db1.transaction(fn);
+                return (tx.deferred ?? tx)();
+              },
+            },
+          ],
+        );
       } finally {
         db2.close();
         db1.close();

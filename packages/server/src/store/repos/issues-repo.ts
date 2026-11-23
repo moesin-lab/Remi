@@ -1392,14 +1392,13 @@ export class IssuesRepo {
 
     const isPostgres = this.ctx.db.dialect === "postgres";
     const closedFilterSql = includeClosed ? "" : buildIssueSearchExcludeUnarchivedClosedSql(isPostgres);
-    const issueOrdSql = isPostgres ? "0" : "i.rowid";
+    const issueTieBreakCol = isPostgres ? "i.ctid" : "i.rowid";
     const canPushLike = terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS && !terms.some(hasNonAsciiCasedChar);
     if (!canPushLike) {
       return this.searchIssuesWorkspaceScanFallback({
         query,
         workspaceId,
         closedFilterSql,
-        issueOrdSql,
         isPostgres,
         includeCommentBodies,
         limit,
@@ -1415,15 +1414,39 @@ export class IssuesRepo {
     let candidateRows: Row[];
     if (includeCommentBodies) {
       const commentLikeSql = buildSearchLikeAllTermsSql("l.body_md", terms);
-      // Materialize matched_comments and UNION ALL instead of LEFT JOIN so PostgreSQL 12+
-      // never inlines a single-reference CTE into a correlated Nested Loop when table stats
-      // are stale (e.g. reltuples = 0 immediately after bulk inserts). Both branches scan once.
+      // Materialize workspace_issues once (preserving database-native ORDER BY updated_at DESC
+      // via ROW_NUMBER() + ctid/rowid) and materialize matched_comments before UNION ALL.
+      // On PostgreSQL, CROSS JOIN LATERAL (... LIMIT 1) keeps `l.session_id = s.id` inside
+      // `l`'s base restriction clauses (preventing subquery pull-up) so the planner always
+      // probes an index on session_id even when table statistics are stale (reltuples = 0).
+      const matchedCommentsSql = isPostgres
+        ? `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
+           FROM workspace_issues wi
+           JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
+           CROSS JOIN LATERAL (
+             SELECT 1 AS hit
+             FROM multiremi_conversation_log l
+             WHERE l.session_id = s.id
+               AND l.visibility = 'shown'
+               AND l.kind = 'message'
+               AND l.deleted_at IS NULL
+               AND (${commentLikeSql})
+             LIMIT 1
+           ) cm`
+        : `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
+           FROM workspace_issues wi
+           JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
+           JOIN multiremi_conversation_log l ON l.session_id = s.id
+           WHERE l.visibility = 'shown'
+             AND l.kind = 'message'
+             AND l.deleted_at IS NULL
+             AND (${commentLikeSql})`;
       candidateRows = this.ctx.db.query(
-        `WITH issue_matches AS (
+        `WITH workspace_issues AS MATERIALIZED (
            SELECT
              i.id,
              i.updated_at,
-             ${issueOrdSql} AS issue_ord,
+             ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC) AS issue_ord,
              CASE
                WHEN (${keyLikeSql}) THEN 0
                WHEN (${titleLikeSql}) THEN 1
@@ -1434,32 +1457,22 @@ export class IssuesRepo {
            WHERE i.workspace_id = ?${closedFilterSql}
          ),
          matched_comments AS MATERIALIZED (
-           SELECT DISTINCT s.issue_id
-           FROM multiremi_issues i
-           JOIN multiremi_issue_sessions s ON s.issue_id = i.id
-           JOIN multiremi_conversation_log l ON l.session_id = s.id
-           WHERE i.workspace_id = ?${closedFilterSql}
-             AND s.chat_id IS NULL
-             AND l.kind = 'message'
-             AND l.visibility = 'shown'
-             AND l.deleted_at IS NULL
-             AND (${commentLikeSql})
+           ${matchedCommentsSql}
          )
          SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank
-         FROM issue_matches
+         FROM workspace_issues
          WHERE match_rank IS NOT NULL
          UNION ALL
-         SELECT i.id, i.updated_at, ${issueOrdSql} AS issue_ord, 1 AS has_comment_match, 3 AS match_rank
-         FROM matched_comments mc
-         JOIN multiremi_issues i ON i.id = mc.issue_id`,
-      ).all(...patterns, ...patterns, ...patterns, workspaceId, workspaceId, ...patterns) as Row[];
+         SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank
+         FROM matched_comments`,
+      ).all(...patterns, ...patterns, ...patterns, workspaceId, ...patterns) as Row[];
     } else {
       candidateRows = this.ctx.db.query(
-        `WITH scored AS (
+        `WITH workspace_issues AS (
            SELECT
              i.id,
              i.updated_at,
-             ${issueOrdSql} AS issue_ord,
+             ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC) AS issue_ord,
              0 AS has_comment_match,
              CASE
                WHEN (${keyLikeSql}) THEN 0
@@ -1471,7 +1484,7 @@ export class IssuesRepo {
            WHERE i.workspace_id = ?${closedFilterSql}
          )
          SELECT id, updated_at, issue_ord, has_comment_match, match_rank
-         FROM scored
+         FROM workspace_issues
          WHERE match_rank IS NOT NULL`,
       ).all(...patterns, ...patterns, ...patterns, workspaceId) as Row[];
     }
@@ -1570,18 +1583,18 @@ export class IssuesRepo {
     query: string;
     workspaceId: string;
     closedFilterSql: string;
-    issueOrdSql: string;
     isPostgres: boolean;
     includeCommentBodies: boolean;
     limit: number;
     offset: number;
   }): { issues: MultiremiIssueSearchResult[]; total: number } {
-    const { query, workspaceId, closedFilterSql, issueOrdSql, isPostgres, includeCommentBodies, limit, offset } = input;
+    const { query, workspaceId, closedFilterSql, isPostgres, includeCommentBodies, limit, offset } = input;
+    const issueTieBreakCol = isPostgres ? "i.ctid" : "i.rowid";
     const rows = this.ctx.db.query(
-      `SELECT i.id, i.issue_number, i.issue_key, i.title, i.description, i.updated_at, ${issueOrdSql} AS issue_ord
+      `SELECT i.id, i.issue_number, i.issue_key, i.title, i.description, i.updated_at
        FROM multiremi_issues i
        WHERE i.workspace_id = ?${closedFilterSql}
-       ORDER BY i.updated_at DESC`,
+       ORDER BY i.updated_at DESC, ${issueTieBreakCol} ASC`,
     ).all(workspaceId) as Row[];
     const commentSnippetByIssueId = new Map<string, string>();
     if (includeCommentBodies && rows.length > 0) {
@@ -1631,7 +1644,7 @@ export class IssuesRepo {
         id,
         matchRank: searchRank(matchSource),
         updatedAt: String(row.updated_at),
-        issueOrd: isPostgres ? index : Number(row.issue_ord ?? 0),
+        issueOrd: index,
         hasCommentMatch: hasComment,
       });
     }
@@ -6842,8 +6855,9 @@ function compareIssueSearchCandidates(left: IssueSearchCandidate, right: IssueSe
   const timeDiff = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
   if (timeDiff) return timeDiff;
   // Tie-breaker matching baseline listIssues({ includeArchived: true }) (`ORDER BY updated_at DESC`
-  // followed by stable JS sort): descending raw updated_at code-unit order, then SQLite rowid ASC.
-  if (right.updatedAt !== left.updatedAt) return right.updatedAt > left.updatedAt ? 1 : -1;
+  // followed by stable JS sort): rely on the database's native `ORDER BY i.updated_at DESC, ctid/rowid ASC`
+  // rank (`issueOrd`) instead of JS UTF-16 code-unit comparison so SQLite (BINARY + rowid) and
+  // PostgreSQL (locale collation such as en_US.utf8 + ctid) stay 100% page-identical on equal instants.
   const ordDiff = left.issueOrd - right.issueOrd;
   if (ordDiff !== 0) return ordDiff;
   return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;

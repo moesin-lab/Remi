@@ -95,8 +95,17 @@ function legacySearchIssuesOracle(
 const SQL_WRITE_RE =
   /\b(?:INSERT\s+(?:OR\s+\w+\s+)?INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|REPLACE\s+INTO|CREATE\s+(?:TABLE|INDEX|VIEW|TRIGGER|UNIQUE)|DROP\s+(?:TABLE|INDEX|VIEW|TRIGGER)|ALTER\s+TABLE)\b/i;
 
-function measureSql<T>(db: SqlDatabase, fn: () => T): { result: T; reads: number; writes: number; total: number; elapsedMs: number; statements: string[] } {
+function measureSql<T>(db: SqlDatabase, fn: () => T): {
+  result: T;
+  reads: number;
+  writes: number;
+  total: number;
+  elapsedMs: number;
+  statements: string[];
+  calls: Array<{ sql: string; params: unknown[] }>;
+} {
   const statements: string[] = [];
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
   const wrapped = new WeakSet<object>();
   const wrap = (statement: SqlStatement, text: string): SqlStatement => {
     if (wrapped.has(statement)) return statement;
@@ -106,6 +115,7 @@ function measureSql<T>(db: SqlDatabase, fn: () => T): { result: T; reads: number
         if (["get", "all", "run", "values"].includes(String(key))) {
           return (...args: unknown[]) => {
             statements.push(text);
+            calls.push({ sql: text, params: args });
             return (value as (...a: unknown[]) => unknown).apply(target, args);
           };
         }
@@ -123,10 +133,12 @@ function measureSql<T>(db: SqlDatabase, fn: () => T): { result: T; reads: number
   const prepareSpy = spyOn(db, "prepare").mockImplementation((text) => wrap(prepare(text), text));
   const runSpy = spyOn(db, "run").mockImplementation((text, ...args) => {
     statements.push(text);
+    calls.push({ sql: text, params: args });
     return run(text, ...args);
   });
   const execSpy = spyOn(db, "exec").mockImplementation((text) => {
     statements.push(text);
+    calls.push({ sql: text, params: [] });
     exec(text);
   });
   const startedAt = performance.now();
@@ -134,7 +146,7 @@ function measureSql<T>(db: SqlDatabase, fn: () => T): { result: T; reads: number
     const result = fn();
     const elapsedMs = performance.now() - startedAt;
     const writes = statements.filter((text) => SQL_WRITE_RE.test(text)).length;
-    return { result, reads: statements.length - writes, writes, total: statements.length, elapsedMs, statements };
+    return { result, reads: statements.length - writes, writes, total: statements.length, elapsedMs, statements, calls };
   } finally {
     querySpy.mockRestore();
     prepareSpy.mockRestore();
@@ -933,6 +945,113 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     }
   }, 30_000);
 
+  it("matches native DB collation tie-breaking for equal-instant ISO strings (with vs without fractional seconds) across store paths and HTTP", async () => {
+    const f = fixture();
+    // Same UTC instant (2026-01-01T12:00:00Z), but SQLite BINARY ('.' 0x2E > '+' 0x2B)
+    // and PostgreSQL en_US.utf8 UCA collation order these two strings in opposite directions
+    // under native `ORDER BY updated_at DESC`. Relying on database-native ROW_NUMBER() /
+    // ORDER BY instead of JS code-unit comparison keeps every page identical to legacy oracle.
+    const isoWithoutMs = "2026-01-01T13:00:00+01:00";
+    const isoWithMs = "2026-01-01T13:00:00.000+01:00";
+    expect(Date.parse(isoWithoutMs)).toBe(Date.parse(isoWithMs));
+
+    const titleNoMs = f.createIssue({
+      workspaceId: "local",
+      title: "ISOTIE-TITLE-999 café without fractional seconds",
+      description: "Clean description",
+    });
+    setUpdatedAt(f.db, titleNoMs.id, isoWithoutMs);
+
+    const titleWithMs = f.createIssue({
+      workspaceId: "local",
+      title: "ISOTIE-TITLE-999 café with fractional seconds",
+      description: "Clean description",
+    });
+    setUpdatedAt(f.db, titleWithMs.id, isoWithMs);
+
+    const commentNoMs = f.createIssue({
+      workspaceId: "local",
+      title: "Neutral ISO comment tie A",
+      description: "Clean description",
+    });
+    f.store.createIssueComment(commentNoMs.id, { body: "ISOTIE-COMMENT-999 café without fractional seconds" });
+    setUpdatedAt(f.db, commentNoMs.id, isoWithoutMs);
+
+    const commentWithMs = f.createIssue({
+      workspaceId: "local",
+      title: "Neutral ISO comment tie B",
+      description: "Clean description",
+    });
+    f.store.createIssueComment(commentWithMs.id, { body: "ISOTIE-COMMENT-999 café with fractional seconds" });
+    setUpdatedAt(f.db, commentWithMs.id, isoWithMs);
+
+    // 1. Store paths: title hit, comment-only hit, SQL pushdown, non-ASCII fallback
+    for (const input of [
+      { q: "ISOTIE-TITLE-999", includeCommentBodies: true, pair: [titleNoMs.id, titleWithMs.id] },
+      { q: "ISOTIE-TITLE-999", includeCommentBodies: false, pair: [titleNoMs.id, titleWithMs.id] },
+      { q: "ISOTIE-TITLE-999 café", includeCommentBodies: false, pair: [titleNoMs.id, titleWithMs.id] },
+      { q: "ISOTIE-COMMENT-999", includeCommentBodies: true, pair: [commentNoMs.id, commentWithMs.id] },
+      { q: "ISOTIE-COMMENT-999 café", includeCommentBodies: true, pair: [commentNoMs.id, commentWithMs.id] },
+    ]) {
+      const page0Expected = legacySearchIssuesOracle(f.store, f.db, {
+        q: input.q,
+        includeCommentBodies: input.includeCommentBodies,
+        workspaceId: "local",
+        limit: 1,
+        offset: 0,
+      });
+      const page0Actual = f.store.searchIssues({
+        q: input.q,
+        includeCommentBodies: input.includeCommentBodies,
+        workspaceId: "local",
+        limit: 1,
+        offset: 0,
+      });
+      const page1Expected = legacySearchIssuesOracle(f.store, f.db, {
+        q: input.q,
+        includeCommentBodies: input.includeCommentBodies,
+        workspaceId: "local",
+        limit: 1,
+        offset: 1,
+      });
+      const page1Actual = f.store.searchIssues({
+        q: input.q,
+        includeCommentBodies: input.includeCommentBodies,
+        workspaceId: "local",
+        limit: 1,
+        offset: 1,
+      });
+
+      expect(page0Actual).toEqual(page0Expected);
+      expect(page1Actual).toEqual(page1Expected);
+      expect(page0Actual.total).toBe(2);
+      expect(page1Actual.total).toBe(2);
+      expect([...page0Actual.issues.map((i) => i.id), ...page1Actual.issues.map((i) => i.id)].sort()).toEqual([...input.pair].sort());
+    }
+
+    // 2. HTTP /api/issues/search page 1 and page 2 parity against legacy oracle
+    const app = createMultiremiApp({ store: f.store });
+    for (const q of ["ISOTIE-TITLE-999", "ISOTIE-COMMENT-999", "ISOTIE-COMMENT-999 café"]) {
+      const expected0 = legacySearchIssuesOracle(f.store, f.db, { q, workspaceId: "local", limit: 1, offset: 0 });
+      const expected1 = legacySearchIssuesOracle(f.store, f.db, { q, workspaceId: "local", limit: 1, offset: 1 });
+
+      const resp0 = await app.request(`/api/issues/search?q=${encodeURIComponent(q)}&workspace_id=local&limit=1&offset=0`);
+      expect(resp0.status).toBe(200);
+      expect(resp0.headers.get("X-Total-Count")).toBe("2");
+      const body0 = await resp0.json() as { issues: Array<{ id: string }>; total: number };
+
+      const resp1 = await app.request(`/api/issues/search?q=${encodeURIComponent(q)}&workspace_id=local&limit=1&offset=1`);
+      expect(resp1.status).toBe(200);
+      expect(resp1.headers.get("X-Total-Count")).toBe("2");
+      const body1 = await resp1.json() as { issues: Array<{ id: string }>; total: number };
+
+      expect(body0.total).toBe(2);
+      expect(body1.total).toBe(2);
+      expect(body0.issues.map((item) => item.id)).toEqual(expected0.issues.map((item) => item.id));
+      expect(body1.issues.map((item) => item.id)).toEqual(expected1.issues.map((item) => item.id));
+    }
+  }, 30_000);
+
   it("keeps SQL query count O(1) across growing workspace and foreign issue counts", async () => {
     const f = fixture();
     const foreignWs = f.store.createWorkspace({ name: "Foreign Scale", slug: "scale-foreign" });
@@ -1056,21 +1175,35 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(largeCommentAfter.writes).toBe(0);
     expect(largeMissBefore.reads).toBeGreaterThanOrEqual(300);
 
-    // Candidate query with comment bodies uses MATERIALIZED CTE + UNION ALL (never LEFT JOIN CTE inlining)
-    expect(largeMissAfter.statements[0]).toContain("AS MATERIALIZED");
+    // Candidate query with comment bodies materializes workspace_issues once + matched_comments via UNION ALL
+    expect(largeMissAfter.statements[0]).toContain("workspace_issues AS MATERIALIZED");
+    expect(largeMissAfter.statements[0]).toContain("matched_comments AS MATERIALIZED");
     expect(largeMissAfter.statements[0]).toContain("UNION ALL");
     if (backend === "PostgreSQL") {
       expect(largeMissAfter.statements[0]).toContain("BTRIM(");
       expect(largeMissAfter.statements[0]).not.toContain("TYPEOF(");
       expect(largeMissAfter.statements[0]).not.toContain("i.rowid");
+      expect(largeMissAfter.statements[0]).toContain("ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.ctid ASC) AS issue_ord");
+      expect(largeMissAfter.statements[0]).toContain("CROSS JOIN LATERAL");
+      expect(largeMissAfter.statements[0]).toContain("LIMIT 1");
+
+      // Under un-analyzed bulk inserts (reltuples = 0), CROSS JOIN LATERAL (... LIMIT 1) must force
+      // an Index Cond probe on multiremi_conversation_log.session_id (no unindexed Join Filter / Seq Scan).
+      const candidateCall = largeMissAfter.calls[0]!;
+      const explainRows = f.db.query(`EXPLAIN ${candidateCall.sql}`).all(...candidateCall.params) as Array<Record<string, unknown>>;
+      const explainText = explainRows.map((row) => String(Object.values(row)[0] ?? "")).join("\n");
+      expect(explainText).toMatch(/Index Cond:.*session_id/i);
+      expect(explainText).not.toMatch(/Join Filter:.*session_id/i);
+      expect(explainText).not.toContain("Seq Scan on multiremi_conversation_log");
     } else {
       expect(largeMissAfter.statements[0]).toContain("TRIM(");
       expect(largeMissAfter.statements[0]).toContain("TYPEOF(i.archived_at) = 'text'");
-      expect(largeMissAfter.statements[0]).toContain("i.rowid AS issue_ord");
+      expect(largeMissAfter.statements[0]).toContain("ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.rowid ASC) AS issue_ord");
+      expect(largeMissAfter.statements[0]).not.toContain("CROSS JOIN LATERAL");
     }
 
     // Every emitted SQL statement translates cleanly for PostgreSQL (numbered $N placeholders, intact ESCAPE '\' and AS MATERIALIZED).
-    for (const sql of [...largeMissAfter.statements, ...largeCommentAfter.statements, ...largeMultiTermAfter.statements]) {
+    for (const sql of [...largeMissAfter.statements, ...largeCommentAfter.statements, ...largeMultiTermAfter.statements, ...largeNoCommentAfter.statements]) {
       const pgSql = translateSqliteToPg(sql);
       expect(pgSql).not.toContain("?");
       if (sql.includes("AS MATERIALIZED")) {
@@ -1081,6 +1214,44 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
         expect(pgSql).toContain("ESCAPE '\\'");
       }
     }
+
+    // Explicitly verify translateSqliteToPg preserves the PostgreSQL LATERAL + ROW_NUMBER(i.ctid) candidate shape
+    // even when this test runs on SQLite locally without MULTIREMI_TEST_POSTGRES_URL.
+    const pgCandidateTemplate = `WITH workspace_issues AS MATERIALIZED (
+      SELECT i.id, i.updated_at, ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.ctid ASC) AS issue_ord,
+        CASE WHEN (LOWER(i.title) LIKE ? ESCAPE '\\') THEN 1 ELSE NULL END AS match_rank
+      FROM multiremi_issues i
+      WHERE i.workspace_id = ?
+    ),
+    matched_comments AS MATERIALIZED (
+      SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
+      FROM workspace_issues wi
+      JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
+      CROSS JOIN LATERAL (
+        SELECT 1 AS hit
+        FROM multiremi_conversation_log l
+        WHERE l.session_id = s.id
+          AND l.visibility = 'shown'
+          AND l.kind = 'message'
+          AND l.deleted_at IS NULL
+          AND (LOWER(l.body_md) LIKE ? ESCAPE '\\')
+        LIMIT 1
+      ) cm
+    )
+    SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank FROM workspace_issues WHERE match_rank IS NOT NULL
+    UNION ALL
+    SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank FROM matched_comments`;
+    const translatedPgCandidate = translateSqliteToPg(pgCandidateTemplate);
+    expect(translatedPgCandidate).not.toContain("?");
+    expect(translatedPgCandidate).toContain("$1");
+    expect(translatedPgCandidate).toContain("$2");
+    expect(translatedPgCandidate).toContain("$3");
+    expect(translatedPgCandidate).toContain("workspace_issues AS MATERIALIZED");
+    expect(translatedPgCandidate).toContain("matched_comments AS MATERIALIZED");
+    expect(translatedPgCandidate).toContain("ROW_NUMBER() OVER (ORDER BY i.updated_at DESC, i.ctid ASC) AS issue_ord");
+    expect(translatedPgCandidate).toContain("CROSS JOIN LATERAL");
+    expect(translatedPgCandidate).toContain("LIMIT 1");
+    expect(translatedPgCandidate).toContain("ESCAPE '\\'");
 
     // HTTP route smoke check on the 300-issue dataset
     const app = createMultiremiApp({ store: f.store });

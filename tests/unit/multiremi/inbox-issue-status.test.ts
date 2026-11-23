@@ -1,4 +1,4 @@
-import {it,expect} from 'bun:test';
+import {it,expect,spyOn} from 'bun:test';
 import {pendingTurnBackendTests} from './pending-turn-test-backends.js';
 import {StoreContext,createCommitEventQueue} from '@multiremi/store/context.js';
 import {deriveIssueStatusWithinTransaction} from '@multiremi/store/inbox/issue-status.js';
@@ -135,6 +135,75 @@ pendingTurnBackendTests('MUL-506 Issue derivation and read progress',fixture=>{
     expect(blockedSucc).toBeTruthy();
     expect(blockedSucc!.wake_source).toBe('re_ring');
     expect(store.getIssue(blockedParent.id)?.status).toBe('blocked');
+  });
+  it('MUL-335: batched pending work-trigger check uses <= 2 turn/pending queries across 8 notification-only pending sessions',()=>{
+    const {store,db}=fixture();
+    const agent=store.createAgent({name:'Multi-session Owner',provider:'codex'});
+    const issue=store.createIssue({title:'Multi-session notifications',status:'blocked',assigneeType:'agent',assigneeId:agent.id});
+    const ctx=new StoreContext(db,()=>store);
+
+    const sessions=[store.getOrCreateDefaultIssueSession(issue.id)];
+    for(let i=1;i<8;i++){
+      sessions.push(store.createIssueSession(issue.id,{title:`Side notice ${i}`,inheritMode:'none'}));
+    }
+    for(const sess of sessions){
+      const sent=store.sendMessage({
+        session_id:sess.id,
+        sender:{type:'platform',id:null},
+        to:{type:'agent',ref:agent.id},
+        message_kind:'status',
+        wake_requested:'now',
+        body_md:`Status notice in ${sess.id}`,
+      });
+      expect(sent.wake_reason).toBe('platform_to_owner');
+      expect(sent.turn_id).toBeTruthy();
+    }
+    expect(store.getIssue(issue.id)?.status).toBe('blocked');
+
+    const countDeriveQueries=(targetIssueId:string)=>{
+      const executedSql:string[]=[];
+      const origQuery=db.query.bind(db);
+      const querySpy=spyOn(db,'query').mockImplementation((sql:string)=>{
+        executedSql.push(sql);
+        return origQuery(sql);
+      });
+      let derived:{changed:boolean;previousStatus:string|null};
+      try{
+        derived=db.transaction(()=>{
+          ctx.lockWorkspaceRuntimeLifecycle('local');
+          return deriveIssueStatusWithinTransaction(ctx,targetIssueId,createCommitEventQueue());
+        })();
+      }finally{
+        querySpy.mockRestore();
+      }
+      return {derived,executedSql};
+    };
+
+    const singleIssue=store.createIssue({title:'Single-session notification',status:'blocked',assigneeType:'agent',assigneeId:agent.id});
+    const singleSession=store.getOrCreateDefaultIssueSession(singleIssue.id);
+    store.sendMessage({
+      session_id:singleSession.id,
+      sender:{type:'platform',id:null},
+      to:{type:'agent',ref:agent.id},
+      message_kind:'status',
+      wake_requested:'now',
+      body_md:'Single status notice',
+    });
+
+    const singleRun=countDeriveQueries(singleIssue.id);
+    const eightRun=countDeriveQueries(issue.id);
+    expect(eightRun.derived.changed).toBe(false);
+    expect(store.getIssue(issue.id)?.status).toBe('blocked');
+    expect(eightRun.executedSql.length).toBe(singleRun.executedSql.length);
+
+    const turnsAndPendingWorkQueries=eightRun.executedSql.filter((sql)=>
+      sql.includes('AS trigger_sender')
+      || sql.includes('WITH pending_checks')
+      || sql.includes('multiremi_session_lanes')
+      || sql.includes('delivery_turn_id'),
+    );
+    expect(turnsAndPendingWorkQueries.length).toBeLessThanOrEqual(2);
+    expect(turnsAndPendingWorkQueries.filter((sql)=>sql.includes('WITH pending_checks'))).toHaveLength(1);
   });
   // An owner question at the human stage needs a human: in_review until running work resumes.
   it('unanswered owner decision at the human stage parks the Issue in_review until work resumes',()=>{const f=setup();

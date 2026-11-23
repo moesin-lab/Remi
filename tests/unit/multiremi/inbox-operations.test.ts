@@ -1,7 +1,10 @@
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
-import {it,expect} from 'bun:test';
+import {it,expect,spyOn} from 'bun:test';
 import {pendingTurnBackendTests} from './pending-turn-test-backends.js';
+import {StoreContext} from '@multiremi/store/context.js';
+import {acknowledgeInput} from '@multiremi/store/inbox/lane-machine.js';
+import {countMessageDelegationPairHops} from '@multiremi/store/inbox/send-message.js';
 pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
   function setup(){const {store,db}=fixture();const a=store.createAgent({name:'A',provider:'codex'}),b=store.createAgent({name:'B',provider:'codex'});
     const issue=createResponsibleTestIssue(store, {title:'Conversation',assigneeType:'agent',assigneeId:a.id}),session=store.getOrCreateDefaultIssueSession(issue.id);
@@ -415,7 +418,7 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
       if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
       else process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=prevLimit;
     }
-  });
+  },{timeout:30_000});
 
   it('MUL-335: member-started running P0 enforces pair_round_trip_limit for L=1 and L=2 (resetting on member intervention) and ignores non-request parent_owner reports',()=>{
     const prevLimit=process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
@@ -633,7 +636,283 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
       if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
       else process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=prevLimit;
     }
-  });
+  },{timeout:30_000});
+
+  it('MUL-335: sweepIdleLanes successor counts unread child request at L=1 across pending/running/ACK, while prior-ACKed request before failed/cancelled turn stays 0 hops',()=>{
+    const prevLimit=process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+    process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+    try{
+      const {store,db}=fixture();
+      const ctx=new StoreContext(db,()=>store);
+      const makePair=(tag:string)=>{
+        const parentRuntime=store.registerRuntime({name:`Parent rt ${tag}`,provider:'codex',workspaceId:'local'});
+        const childRuntime=store.registerRuntime({name:`Child rt ${tag}`,provider:'codex',workspaceId:'local'});
+        const parentAgent=store.createAgent({name:`Parent ${tag}`,provider:'codex',runtimeId:parentRuntime.id});
+        const childAgent=store.createAgent({name:`Child ${tag}`,provider:'codex',runtimeId:childRuntime.id});
+        return {parentRuntime,childRuntime,parentAgent,childAgent};
+      };
+
+      // ① Unread child request + platform status, archive before parent ends, restore, then sweepIdleLanes rings
+      //    with wake_source='platform_to_owner' (NOT 're_ring'): must count 2 hops in pending, running, and after ACK.
+      {
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair('sweep-unread');
+        const parent=createResponsibleTestIssue(store,{title:'Sweep Unread Parent',status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:'Sweep Unread Child',parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start parent'});
+        expect(pStart.message.metadata.source_session_id).toBeUndefined();
+        expect(pStart.message.metadata.source_session_seq).toBeUndefined();
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+
+        const headBeforeD1=store.getConversationLogHead(parentMain.id)!.headSeq;
+        const d1=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch 1'});
+        expect(d1.message.metadata.source_session_id).toBe(parentMain.id);
+        expect(d1.message.metadata.source_session_seq).toBe(headBeforeD1);
+        const c1=store.getTurn(d1.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(c1.current_attempt_id!);
+        store.startTask(c1.current_attempt_id!);
+
+        const req1=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Unread child request'});
+        expect(req1.wake_reason).toBe('to_parent_owner');
+        expect(req1.turn_id).toBe(p0.id);
+        const plat=store.sendMessage({session_id:parentMain.id,sender:{type:'platform',id:null},to:{type:'agent',ref:parentAgent.id},message_kind:'status',wake_requested:'now',body_md:'Later platform status'});
+        expect(plat.message.metadata.source_session_id).toBeUndefined();
+        expect(plat.turn_id).toBe(p0.id);
+        store.completeTask(c1.current_attempt_id!,{output:'Child done'});
+
+        // Archive agent briefly while P0 completes so reRingAfterTurnEnd skips creating a re_ring successor.
+        db.run('UPDATE multiremi_agents SET archived_at=? WHERE id=?',[new Date().toISOString(),parentAgent.id]);
+        store.completeTask(p0.current_attempt_id!,{output:'P0 ended without reading req1'});
+        expect(store.listTurns({workspace_id:'local',session_id:parentMain.id}).filter(t=>t.status==='pending')).toHaveLength(0);
+
+        // Restore agent and let sweepIdleIssueLanes ring after 60s idle.
+        db.run('UPDATE multiremi_agents SET archived_at=NULL WHERE id=?',[parentAgent.id]);
+        const swept=store.sweepIdleIssueLanes(Date.now()+120_000);
+        expect(swept.rang).toBeGreaterThanOrEqual(1);
+        const pSucc=store.listTurns({workspace_id:'local',session_id:parentMain.id}).find(t=>t.status==='pending')!;
+        expect(pSucc).toBeTruthy();
+        expect(pSucc.wake_source).toBe('platform_to_owner');
+        expect(pSucc.trigger_message_id).not.toBe(req1.message.id);
+        expect(store.getMessage(pSucc.trigger_message_id!)?.message_kind).toBe('status');
+
+        // Stage A: pending successor still counts 2 hops.
+        expect(countMessageDelegationPairHops(ctx,pSucc.id,childAgent.id,1)).toBe(2);
+
+        // Stage B: running successor before ACK counts 2 hops.
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(pSucc.current_attempt_id!);
+        store.startTask(pSucc.current_attempt_id!);
+        expect(countMessageDelegationPairHops(ctx,pSucc.id,childAgent.id,1)).toBe(2);
+
+        // Stage C: running successor after ACK across req1 + status still counts 2 hops and blocks dispatch.
+        const fromSeq=Number(store.getSessionAgentReadProgress(parentMain.id,parentAgent.id).seq);
+        const headSeq=store.getConversationLogHead(parentMain.id)!.headSeq;
+        db.transaction(()=>{acknowledgeInput(ctx,pSucc.id,fromSeq,headSeq);})();
+        expect(countMessageDelegationPairHops(ctx,pSucc.id,childAgent.id,1)).toBe(2);
+        const blocked=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:pSucc.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Must hit limit after sweep+ACK'});
+        expect(blocked.wake_applied).toBe('next_turn');
+        expect(blocked.wake_reason).toBe('pair_round_trip_limit');
+        expect(blocked.turn_id).toBeUndefined();
+      }
+
+      // ② Previous turn T1 ACKs covering child request, then receives platform status and fails/cancels:
+      //    successor T2 must have 0 hops across pending, running, warm ACK, and cold ACK, and blocked stays blocked.
+      for(const endKind of ['failed','cancelled'] as const){
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair(`acked-${endKind}`);
+        const parent=createResponsibleTestIssue(store,{title:`Acked ${endKind} Parent`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:`Acked ${endKind} Child`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:`Start ${endKind}`});
+        const t1=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(t1.current_attempt_id!);
+        store.startTask(t1.current_attempt_id!);
+
+        const d1=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:t1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch 1'});
+        const c1=store.getTurn(d1.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(c1.current_attempt_id!);
+        store.startTask(c1.current_attempt_id!);
+
+        const req1=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Child request consumed by T1'});
+        expect(req1.turn_id).toBe(t1.id);
+        store.completeTask(c1.current_attempt_id!,{output:'Child done'});
+
+        // T1 acknowledges input covering req1 (and c1's completion notices) before receiving later platform status.
+        const ackedToSeq=store.getConversationLogHead(parentMain.id)!.headSeq;
+        expect(ackedToSeq).toBeGreaterThanOrEqual(req1.message.seq);
+        db.transaction(()=>{acknowledgeInput(ctx,t1.id,0,ackedToSeq);})();
+        const plat=store.sendMessage({session_id:parentMain.id,sender:{type:'platform',id:null},to:{type:'agent',ref:parentAgent.id},message_kind:'status',wake_requested:'now',body_md:'Platform status after ACK'});
+        expect(plat.turn_id).toBe(t1.id);
+
+        if(endKind==='failed'){
+          db.run("UPDATE multiremi_issues SET status='blocked' WHERE id=?",[parent.id]);
+          store.failTask(t1.current_attempt_id!,{error:'T1 failed after consuming req1'});
+        }else{
+          db.run("UPDATE multiremi_issues SET status='blocked' WHERE id=?",[parent.id]);
+          store.cancelTask(t1.current_attempt_id!);
+        }
+
+        const t2=store.listTurns({workspace_id:'local',session_id:parentMain.id}).find(t=>t.status==='pending')!;
+        expect(t2).toBeTruthy();
+        expect(t2.id).not.toBe(t1.id);
+        expect(store.getMessage(t2.trigger_message_id!)?.sender_type).toBe('platform');
+        if(endKind==='failed')expect(t2.trigger_message_id).toBe(plat.message.id);
+        // Blocked parent must NOT falsely escalate to todo because req1 was already ACKed by T1.
+        expect(store.getIssue(parent.id)?.status).toBe('blocked');
+
+        // Stage A: T2 pending -> 0 hops.
+        expect(countMessageDelegationPairHops(ctx,t2.id,childAgent.id,1)).toBe(0);
+
+        // Stage B: T2 running before ACK -> 0 hops.
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(t2.current_attempt_id!);
+        store.startTask(t2.current_attempt_id!);
+        expect(countMessageDelegationPairHops(ctx,t2.id,childAgent.id,1)).toBe(0);
+
+        // Stage C: T2 running after warm ACK -> 0 hops.
+        db.transaction(()=>{acknowledgeInput(ctx,t2.id,ackedToSeq,plat.message.seq);})();
+        expect(countMessageDelegationPairHops(ctx,t2.id,childAgent.id,1)).toBe(0);
+
+        // Stage D: T2 cold ACK (input_from_seq = 0 after cursor reset) -> still 0 hops, dispatch allowed.
+        db.run('UPDATE multiremi_turns SET input_from_seq=0,input_to_seq=? WHERE id=?',[plat.message.seq,t2.id]);
+        expect(countMessageDelegationPairHops(ctx,t2.id,childAgent.id,1)).toBe(0);
+        const allowed=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:t2.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:`Fresh dispatch after ${endKind}`});
+        expect(allowed.wake_applied).toBe('now');
+        expect(allowed.wake_reason).toBe('agent_dispatch');
+        expect(allowed.turn_id).toBeTruthy();
+      }
+    }finally{
+      if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+      else process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=prevLimit;
+    }
+  },{timeout:30_000});
+
+  it('MUL-335: frozen same-millisecond clock enforces causal ordering for parallel sibling children (L=2) and member intervention cutoff (L=1)',()=>{
+    const prevLimit=process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+    const isoSpy=spyOn(Date.prototype,'toISOString').mockReturnValue('2026-11-23T08:00:00.005Z');
+    try{
+      const {store,db}=fixture();
+      const ctx=new StoreContext(db,()=>store);
+      const makePair=(tag:string)=>{
+        const parentRuntime=store.registerRuntime({name:`Parent clk ${tag}`,provider:'codex',workspaceId:'local'});
+        const childRuntime=store.registerRuntime({name:`Child clk ${tag}`,provider:'codex',workspaceId:'local'});
+        const parentAgent=store.createAgent({name:`Parent clk ${tag}`,provider:'codex',runtimeId:parentRuntime.id});
+        const childAgent=store.createAgent({name:`Child clk ${tag}`,provider:'codex',runtimeId:childRuntime.id});
+        return {parentRuntime,childRuntime,parentAgent,childAgent};
+      };
+
+      // ③ Frozen same-ms clock under L=2 with parallel sibling children A & B sharing childAgent:
+      //    - B dispatched BEFORE A replies => 2 hops (allowed)
+      //    - A replies BEFORE B dispatched => 4 hops (blocked)
+      process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='2';
+      for(const order of ['dispatch_b_before_a_reply','a_reply_before_dispatch_b'] as const){
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair(order);
+        const parent=createResponsibleTestIssue(store,{title:`Parent ${order}`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const childA=createResponsibleTestIssue(store,{title:`Child A ${order}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childAMain=store.getOrCreateDefaultIssueSession(childA.id);
+        const childB=createResponsibleTestIssue(store,{title:`Child B ${order}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childBMain=store.getOrCreateDefaultIssueSession(childB.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start P0'});
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+
+        const dispA=store.sendMessage({session_id:childAMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch A'});
+        const turnA=store.getTurn(dispA.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(turnA.current_attempt_id!);
+        store.startTask(turnA.current_attempt_id!);
+
+        let turnB:NonNullable<ReturnType<typeof store.getTurn>>;
+        if(order==='dispatch_b_before_a_reply'){
+          const dispB=store.sendMessage({session_id:childBMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch B before A replies'});
+          turnB=store.getTurn(dispB.turn_id!)!;
+          store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:turnA.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'A replies after B dispatched'});
+          store.completeTask(turnA.current_attempt_id!,{output:'A done'});
+          expect(store.claimTask(childRuntime.id)?.id).toBe(turnB.current_attempt_id!);
+          store.startTask(turnB.current_attempt_id!);
+        }else{
+          store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:turnA.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'A replies before B dispatched'});
+          store.completeTask(turnA.current_attempt_id!,{output:'A done'});
+
+          const dispB=store.sendMessage({session_id:childBMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch B after A replies'});
+          turnB=store.getTurn(dispB.turn_id!)!;
+          expect(store.claimTask(childRuntime.id)?.id).toBe(turnB.current_attempt_id!);
+          store.startTask(turnB.current_attempt_id!);
+        }
+
+        store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:turnB.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'B replies'});
+        store.completeTask(turnB.current_attempt_id!,{output:'B done'});
+
+        const expectedHops=order==='dispatch_b_before_a_reply'?2:4;
+        expect(countMessageDelegationPairHops(ctx,p0.id,childAgent.id,2)).toBe(expectedHops);
+        const nextDisp=store.sendMessage({session_id:childBMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:`Next dispatch (${order})`});
+        if(order==='dispatch_b_before_a_reply'){
+          expect(nextDisp.wake_applied).toBe('now');
+          expect(nextDisp.wake_reason).toBe('agent_dispatch');
+          expect(nextDisp.turn_id).toBeTruthy();
+        }else{
+          expect(nextDisp.wake_applied).toBe('next_turn');
+          expect(nextDisp.wake_reason).toBe('pair_round_trip_limit');
+          expect(nextDisp.turn_id).toBeUndefined();
+        }
+      }
+
+      // ④ Frozen same-ms clock under L=1 for member intervention cutoff:
+      //    - dispatch -> member intervenes -> child replies => 1 hop (allowed)
+      //    - member intervenes -> dispatch -> child replies => 2 hops (blocked)
+      process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+      for(const order of ['dispatch_before_member','member_before_dispatch'] as const){
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair(order);
+        const parent=createResponsibleTestIssue(store,{title:`Parent ${order}`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:`Child ${order}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start P0'});
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+
+        let childTurn:NonNullable<ReturnType<typeof store.getTurn>>;
+        if(order==='dispatch_before_member'){
+          const disp=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch before member'});
+          childTurn=store.getTurn(disp.turn_id!)!;
+          store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:'Member intervenes after dispatch'});
+        }else{
+          store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:'Member intervenes before dispatch'});
+          const disp=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch after member'});
+          childTurn=store.getTurn(disp.turn_id!)!;
+        }
+
+        expect(store.claimTask(childRuntime.id)?.id).toBe(childTurn.current_attempt_id!);
+        store.startTask(childTurn.current_attempt_id!);
+        store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:childTurn.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Child replies'});
+        store.completeTask(childTurn.current_attempt_id!,{output:'Child done'});
+
+        const expectedHops=order==='dispatch_before_member'?1:2;
+        expect(countMessageDelegationPairHops(ctx,p0.id,childAgent.id,1)).toBe(expectedHops);
+        const secondDisp=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:`Second dispatch (${order})`});
+        if(order==='dispatch_before_member'){
+          expect(secondDisp.wake_applied).toBe('now');
+          expect(secondDisp.wake_reason).toBe('agent_dispatch');
+          expect(secondDisp.turn_id).toBeTruthy();
+        }else{
+          expect(secondDisp.wake_applied).toBe('next_turn');
+          expect(secondDisp.wake_reason).toBe('pair_round_trip_limit');
+          expect(secondDisp.turn_id).toBeUndefined();
+        }
+      }
+    }finally{
+      isoSpy.mockRestore();
+      if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+      else process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=prevLimit;
+    }
+  },{timeout:30_000});
 
   it('MUL-335: sibling request via another issue child parent_owner role and grandchild --to delegator preserve delegation semantics',()=>{
     const {store}=fixture();

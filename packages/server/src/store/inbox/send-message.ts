@@ -77,14 +77,22 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
   interface HopStep {
     turnId: string;
     beforeCreatedAt: string | null;
+    beforeSessionId: string | null;
+    beforeSessionSeq: number | null;
     excludeTaskId: string | null;
   }
   const steps = new Map<string, HopStep>();
   let stepSeq = 0;
-  const enqueueStep = (turnId: string | null, beforeCreatedAt: string | null, excludeTaskId: string | null): string | null => {
+  const enqueueStep = (
+    turnId: string | null,
+    beforeCreatedAt: string | null,
+    beforeSessionId: string | null,
+    beforeSessionSeq: number | null,
+    excludeTaskId: string | null,
+  ): string | null => {
     if (!turnId) return null;
     const key = `step:${++stepSeq}`;
-    steps.set(key, { turnId, beforeCreatedAt, excludeTaskId });
+    steps.set(key, { turnId, beforeCreatedAt, beforeSessionId, beforeSessionSeq, excludeTaskId });
     return key;
   };
   const prevReqSeqByTurn = new Map<string, number>();
@@ -93,7 +101,7 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
     turn: any,
     counterpart: string,
     step: HopStep,
-  ): { id: string; seq: number; created_at: string; task_id: string; sender_id: string } | null => {
+  ): { id: string; session_id: string; seq: number; created_at: string; task_id: string; sender_id: string; metadata: string | null } | null => {
     const clauses: string[] = [
       'session_id=?',
       "kind='message'",
@@ -118,7 +126,10 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
       clauses.push('seq<?');
       params.push(prevReqSeq);
     }
-    if (step.beforeCreatedAt !== null) {
+    if (step.beforeSessionId === turn.session_id && step.beforeSessionSeq !== null) {
+      clauses.push('seq<=?');
+      params.push(step.beforeSessionSeq);
+    } else if (step.beforeCreatedAt !== null) {
       clauses.push('created_at<=?');
       params.push(step.beforeCreatedAt);
     }
@@ -142,48 +153,72 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
     matchBranches.push(delivery.sql);
     matchParams.push(...delivery.params);
 
-    if (turn.wake_source === 're_ring') {
-      const ceilSeq = Number(turn.input_to_seq ?? turn.wake_seq ?? 0);
-      const covered = ctx.db.query(`SELECT MAX(CASE WHEN prev.status='completed' THEN COALESCE(prev.input_to_seq,0)
-        ELSE COALESCE(prev_m.seq,0) END) AS seq
-        FROM multiremi_turns prev
-        LEFT JOIN multiremi_conversation_log prev_m ON prev_m.id=prev.trigger_message_id
-        WHERE prev.session_id=? AND prev.agent_id=? AND prev.execution_scope=?
-          AND prev.status IN ('completed','failed','cancelled') AND prev.seq<?`)
-        .get(turn.session_id, turn.agent_id, turn.execution_scope, turn.seq);
-      let floorSeq = Math.max(Number(covered?.seq ?? 0), turn.input_from_seq != null ? Number(turn.input_from_seq) : 0);
-      if (turn.status === 'pending') {
-        const lane = ctx.db.query(`SELECT cursor_seq FROM multiremi_session_lanes
-          WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`)
-          .get(turn.session_id, turn.agent_id, turn.execution_scope);
-        floorSeq = Math.max(floorSeq, Number(lane?.cursor_seq ?? 0));
-      }
-      if (ceilSeq > floorSeq) {
-        const scopeSql = ctx.db.dialect === 'postgres'
-          ? "COALESCE(metadata::jsonb->>'execution_scope','')"
-          : "COALESCE(json_extract(metadata,'$.execution_scope'),'')";
-        matchBranches.push(`(seq>? AND seq<=? AND ${scopeSql}=?)`);
-        matchParams.push(floorSeq, ceilSeq, turn.execution_scope);
-      }
+    const covered = ctx.db.query(`SELECT MAX(
+        CASE
+          WHEN prev.status='completed' THEN COALESCE(prev.input_to_seq,0)
+          WHEN COALESCE(prev.input_to_seq,0)>COALESCE(prev_m.seq,0) THEN COALESCE(prev.input_to_seq,0)
+          ELSE COALESCE(prev_m.seq,0)
+        END
+      ) AS seq
+      FROM multiremi_turns prev
+      LEFT JOIN multiremi_conversation_log prev_m ON prev_m.id=prev.trigger_message_id
+      WHERE prev.session_id=? AND prev.agent_id=? AND prev.execution_scope=?
+        AND prev.status IN ('completed','failed','cancelled') AND prev.seq<?`)
+      .get(turn.session_id, turn.agent_id, turn.execution_scope, turn.seq);
+    const priorCoveredSeq = Number(covered?.seq ?? 0);
+    let floorSeq = Math.max(priorCoveredSeq, turn.input_from_seq != null ? Number(turn.input_from_seq) : 0);
+    if (turn.status === 'pending') {
+      const lane = ctx.db.query(`SELECT cursor_seq FROM multiremi_session_lanes
+        WHERE session_id=? AND reader_type='agent' AND reader_id=? AND execution_scope=?`)
+        .get(turn.session_id, turn.agent_id, turn.execution_scope);
+      floorSeq = Math.max(floorSeq, Number(lane?.cursor_seq ?? 0));
+    }
+    const ceilSeq = Math.max(Number(turn.input_to_seq ?? 0), Number(turn.wake_seq ?? 0));
+    if (ceilSeq > floorSeq) {
+      const scopeSql = ctx.db.dialect === 'postgres'
+        ? "COALESCE(metadata::jsonb->>'execution_scope','')"
+        : "COALESCE(json_extract(metadata,'$.execution_scope'),'')";
+      matchBranches.push(`(seq>? AND seq<=? AND ${scopeSql}=?)`);
+      matchParams.push(floorSeq, ceilSeq, turn.execution_scope);
     }
 
     clauses.push(`(${matchBranches.join(' OR ')})`);
     params.push(...matchParams);
 
-    return (ctx.db.query(`SELECT id, seq, created_at, task_id, sender_id
+    const row = (ctx.db.query(`SELECT id, session_id, seq, created_at, task_id, sender_id, metadata
       FROM multiremi_conversation_log
       WHERE ${clauses.join(' AND ')}
-      ORDER BY seq DESC LIMIT 1`).get(...params) as { id: string; seq: number; created_at: string; task_id: string; sender_id: string } | null) ?? null;
+      ORDER BY seq DESC LIMIT 1`).get(...params) as {
+        id: string; session_id: string; seq: number; created_at: string; task_id: string; sender_id: string; metadata: string | null;
+      } | null) ?? null;
+    if (row && lastMember && turn.session_id !== source.session_id) {
+      const reqMeta = parseJson(row.metadata, {}) as Record<string, unknown>;
+      if (
+        reqMeta.source_session_id === source.session_id
+        && typeof reqMeta.source_session_seq === 'number'
+        && reqMeta.source_session_seq < Number(lastMember.seq)
+      ) {
+        return null;
+      }
+    }
+    return row;
   };
 
   const resolveNode = (step: HopStep) => {
     const turn = readTurnRow(ctx.db, step.turnId);
     if (!turn) return null;
     const trigger = turn.trigger_message_id
-      ? ctx.db.query('SELECT id, session_id, seq, created_at, task_id FROM multiremi_conversation_log WHERE id=?').get(turn.trigger_message_id) as {
-          id: string; session_id: string; seq: number; created_at: string; task_id: string | null;
+      ? ctx.db.query('SELECT id, session_id, seq, created_at, task_id, metadata FROM multiremi_conversation_log WHERE id=?').get(turn.trigger_message_id) as {
+          id: string; session_id: string; seq: number; created_at: string; task_id: string | null; metadata: string | null;
         } | null
       : null;
+    const trigMeta = trigger ? parseJson(trigger.metadata, {}) as Record<string, unknown> : {};
+    const trigSrcSession = typeof trigMeta.source_session_id === 'string'
+      ? trigMeta.source_session_id
+      : (trigger?.session_id ?? null);
+    const trigSrcSeq = typeof trigMeta.source_session_seq === 'number'
+      ? trigMeta.source_session_seq
+      : (trigger ? Number(trigger.seq) : null);
 
     if (turn.delegation_id && turn.delegated_by_agent_id) {
       if (lastMember) {
@@ -193,6 +228,8 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
           } else if (turn.created_at <= lastMember.created_at) {
             return null;
           }
+        } else if (trigSrcSession === source.session_id && trigSrcSeq !== null) {
+          if (trigSrcSeq < Number(lastMember.seq)) return null;
         } else if (turn.created_at < lastMember.created_at) {
           return null;
         }
@@ -204,7 +241,7 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
         createdAt: turn.created_at,
         delegationId: turn.delegation_id,
         delegatedByAgentId: turn.delegated_by_agent_id,
-        parentTaskId: enqueueStep(trigger?.task_id ?? null, trigger?.created_at ?? null, turn.id),
+        parentTaskId: enqueueStep(trigger?.task_id ?? null, trigger?.created_at ?? null, trigSrcSession, trigSrcSeq, turn.id),
       };
     }
 
@@ -213,6 +250,13 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
       const parentReq = counterpart ? findParentRequestTrigger(turn, counterpart, step) : null;
       if (parentReq) {
         prevReqSeqByTurn.set(turn.id, Number(parentReq.seq));
+        const reqMeta = parseJson(parentReq.metadata, {}) as Record<string, unknown>;
+        const reqSrcSession = typeof reqMeta.source_session_id === 'string'
+          ? reqMeta.source_session_id
+          : parentReq.session_id;
+        const reqSrcSeq = typeof reqMeta.source_session_seq === 'number'
+          ? reqMeta.source_session_seq
+          : Number(parentReq.seq);
         return {
           id: `parent_req:${parentReq.id}`,
           agentId: turn.agent_id,
@@ -220,7 +264,7 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
           createdAt: parentReq.created_at,
           delegationId: `parent_req:${parentReq.id}`,
           delegatedByAgentId: parentReq.sender_id,
-          parentTaskId: enqueueStep(parentReq.task_id, parentReq.created_at, turn.id),
+          parentTaskId: enqueueStep(parentReq.task_id, parentReq.created_at, reqSrcSession, reqSrcSeq, turn.id),
         };
       }
     }
@@ -232,11 +276,11 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
       createdAt: turn.created_at,
       delegationId: turn.delegation_id ?? null,
       delegatedByAgentId: turn.delegated_by_agent_id ?? null,
-      parentTaskId: enqueueStep(trigger?.task_id ?? null, trigger?.created_at ?? null, turn.id),
+      parentTaskId: enqueueStep(trigger?.task_id ?? null, trigger?.created_at ?? null, trigSrcSession, trigSrcSeq, turn.id),
     };
   };
 
-  const initialNode = resolveNode({ turnId: source.id, beforeCreatedAt: null, excludeTaskId: null });
+  const initialNode = resolveNode({ turnId: source.id, beforeCreatedAt: null, beforeSessionId: null, beforeSessionSeq: null, excludeTaskId: null });
   if (!initialNode) return 0;
   return countDelegationPairHops(
     initialNode,
@@ -411,6 +455,16 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
   // Freeze the resolved scope in the initial row; an insert followed by a scope patch
   // can let Hub observers see the patch before the new message itself.
   const metadata:Record<string,any>={...input.metadata,execution_scope:scope};
+  if (
+    input.sender.type === 'agent'
+    && input.message_kind === 'request'
+    && source
+    && source.session_id !== sessionId
+    && (policy.reason === 'agent_dispatch' || policy.reason === 'to_parent_owner')
+  ) {
+    metadata.source_session_id = source.session_id;
+    metadata.source_session_seq = Number(ctx.conversationLog().getConversationLogHead(source.session_id)?.headSeq ?? 0);
+  }
   if(input.message_kind==='decision'){
     const key=metadata.human_request?'human_request':metadata.question?'question':isHistoricalIssueQuestionRecord(metadata.decision_record)?'decision_record':'message_choice';
     metadata[key]={status:'pending',...(metadata[key] as object)};

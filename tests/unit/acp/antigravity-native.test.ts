@@ -671,6 +671,258 @@ for await (const line of createInterface({ input: process.stdin })) {
         update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Long bare receipt cleared.' } });
         result = { stopReason: 'end_turn' };
       }
+    } else if (mode === 'manage-task-statusless-transient-done-then-completed-running') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        // Call enters in_progress, streams a status-less intermediate frame claiming DONE, then finishes completed with RUNNING.
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_transient', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'status', TaskId: TASK_10 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_transient',
+          rawOutput: 'Task ID: ' + TASK_10 + '\\nStatus: DONE' });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_transient', status: 'completed',
+          rawOutput: 'Task ID: ' + TASK_10 + '\\nStatus: RUNNING' });
+        result = { stopReason: 'end_turn' };
+      } else {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_final_done', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'status', TaskId: TASK_10 } });
+        // Status-less final update without completed frame still clears at prompt boundary.
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_final_done',
+          rawOutput: 'Task ID: ' + TASK_10 + '\\nStatus: DONE' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Transient intermediate DONE safely ignored.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'manage-task-metadata-and-phrase-status-spoof') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_meta_spoof', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'status', TaskId: TASK_10 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_meta_spoof', status: 'completed',
+          rawOutput: [
+            'Task ID: ' + TASK_10,
+            'Log: Previous status: DONE',
+            'Command: echo "Status: DONE"',
+            'Summary: State: COMPLETED',
+            'Note: Previous status: DONE',
+          ].join('\\n') });
+        result = { stopReason: 'end_turn' };
+      } else {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_real_done', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'status', TaskId: TASK_10 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_real_done', status: 'completed',
+          rawOutput: 'Task ID: ' + TASK_10 + '\\nLog: Previous status: RUNNING\\nStatus: DONE' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Metadata spoofs ignored.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'manage-task-json-nested-output-spoof' || mode === 'manage-task-json-fallback-nested-output-spoof') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_9', title: 'job9', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job9', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_9', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_9 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        const payload = [
+          {
+            taskId: TASK_9,
+            status: 'DONE',
+            output: { id: TASK_10, status: 'DONE' },
+            result: { taskId: TASK_10, state: 'COMPLETED' },
+          },
+          {
+            taskId: TASK_10,
+            status: 'RUNNING',
+            payload: { taskId: TASK_10, status: 'DONE' },
+          },
+        ];
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_nested', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'list' } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_nested', status: 'completed',
+          rawOutput: mode === 'manage-task-json-nested-output-spoof'
+            ? JSON.stringify(payload)
+            : 'Tasks: ' + JSON.stringify(payload) + ' (trailing)' });
+        result = { stopReason: 'end_turn' };
+      } else {
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'completed',
+          rawOutput: 'Command exited with code 0.' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Nested JSON output spoof ignored.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'manage-task-hr-mixed-order' || mode === 'manage-task-unseparated-ambiguous-order') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_9', title: 'job9', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job9', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_9', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_9 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_order', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'list' } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_order', status: 'completed',
+          rawOutput: mode === 'manage-task-hr-mixed-order'
+            ? ['Task ID: ' + TASK_10, '---', 'Status: DONE', 'Task ID: ' + TASK_9, '----', 'Task ID: ' + TASK_10, 'Status: RUNNING'].join('\\n')
+            : ['Task ID: ' + TASK_10, 'Status: DONE', 'Task ID: ' + TASK_9].join('\\n') });
+        result = { stopReason: 'end_turn' };
+      } else {
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_9', status: 'completed', rawOutput: 'Command exited with code 0.' });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'completed', rawOutput: 'Command exited with code 0.' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Order case handled: ' + mode } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'cross-prompt-bare-message-no-newline' || mode === 'same-prompt-back-to-back-bare-no-newline') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'job1', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job1', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_1', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        if (mode === 'cross-prompt-bare-message-no-newline') {
+          // Bare [Message] ends without trailing newline before prompt 1 returns end_turn.
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text',
+            text: '[Message] timestamp=2026-11-23T09:00:00Z sender=' + TASK_1
+              + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_1 + '" finished with result: ok' } });
+        }
+        result = { stopReason: 'end_turn' };
+      } else {
+        if (mode === 'cross-prompt-bare-message-no-newline') {
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text',
+            text: '[Message] timestamp=2026-11-23T09:00:02Z sender=' + TASK_10
+              + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_10 + '" finished with result: ok' } });
+        } else {
+          const joined = '[Message] timestamp=2026-11-23T09:00:00Z sender=' + TASK_1
+            + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_1 + '" finished with result: ok'
+            + '[Message] timestamp=2026-11-23T09:00:02Z sender=' + TASK_10
+            + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_10 + '" finished with result: ok';
+          const splitAt = joined.indexOf('[Message] timestamp=2026-11-23T09:00:02Z') + 4;
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: joined.slice(0, splitAt) } });
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: joined.slice(splitAt) } });
+        }
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Bare receipts without newline cleared.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'unicode-dotted-i-sysmsg-single' || mode === 'unicode-dotted-i-sysmsg-split') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_1', title: 'job1', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job1', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_1', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_1 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else {
+        const full = '<SYSTEM_MESSAGE>[Message] timestamp=2026-11-23T09:00:00Z sender=' + TASK_1
+          + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_1
+          + '" finished with result: İzmir, İstanbul</SYSTEM_MESSAGE>'
+          + '[Message] timestamp=2026-11-23T09:00:01Z sender=' + TASK_10
+          + ' priority=MESSAGE_PRIORITY_HIGH content=Task id "' + TASK_10 + '" finished with result: ok';
+        if (mode === 'unicode-dotted-i-sysmsg-single') {
+          update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: full } });
+        } else {
+          const idxCity = full.indexOf('İstanbul') + 1;
+          const idxClose = full.indexOf('</SYSTEM_MESSAGE>') + 6;
+          const idxBare = full.indexOf('</SYSTEM_MESSAGE>') + '</SYSTEM_MESSAGE>'.length + 3;
+          for (const piece of [full.slice(0, idxCity), full.slice(idxCity, idxClose), full.slice(idxClose, idxBare), full.slice(idxBare)]) {
+            update({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: piece } });
+          }
+        }
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Unicode dotted-I receipt cleared.' } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode === 'manage-task-padded-table' || mode === 'manage-task-single-space-columns' || mode === 'manage-task-chunked-json-array' || mode === 'manage-task-chunked-json-array-3-parts') {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_9', title: 'job9', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job9', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_9', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_9 });
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_10', title: 'job10', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job10', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_10 });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_tbl', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: { Action: 'list' } });
+        if (mode === 'manage-task-padded-table') {
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_tbl', status: 'completed',
+            rawOutput: '| Task | Status | Duration |\\n| --- | --- | --- |\\n| ' + TASK_9 + ' | DONE | 12s |\\n| ' + TASK_10 + ' | RUNNING | 5s |' });
+        } else if (mode === 'manage-task-single-space-columns') {
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_tbl', status: 'completed',
+            rawOutput: TASK_9 + ' DONE 12s\\n' + TASK_10 + ' RUNNING 5s' });
+        } else if (mode === 'manage-task-chunked-json-array') {
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_tbl', status: 'in_progress',
+            rawOutput: '[\\n  {"taskId": "' + TASK_9 + '", "status": "DONE"},\\n' });
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_tbl', status: 'completed',
+            rawOutput: '  {"taskId": "' + TASK_10 + '", "status": "RUNNING"}\\n]' });
+        } else {
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_tbl', status: 'in_progress', rawOutput: '[\\n' });
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_tbl', status: 'in_progress',
+            rawOutput: '{"taskId": "' + TASK_9 + '", "status": "DONE"}' });
+          update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_tbl', status: 'completed',
+            rawOutput: ',{"taskId": "' + TASK_10 + '", "status": "RUNNING"}]' });
+        }
+        result = { stopReason: 'end_turn' };
+      } else {
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_10', status: 'completed',
+          rawOutput: 'Command exited with code 0.' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Table/JSON mode cleared: ' + mode } });
+        result = { stopReason: 'end_turn' };
+      }
+    } else if (mode.startsWith('manage-task-status-delta-')) {
+      if (promptCount === 1) {
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_delta', title: 'job26', kind: 'execute', status: 'in_progress',
+          rawInput: { CommandLine: 'job26', WaitMsBeforeAsync: 10000 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_delta', status: 'in_progress',
+          rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+        result = { stopReason: 'end_turn' };
+      } else if (promptCount === 2) {
+        const lateTaskId = mode === 'manage-task-status-delta-late-taskid';
+        const revertToRunning = mode === 'manage-task-status-delta-revert-running';
+        update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_delta', title: 'manage_task', kind: 'other', status: 'in_progress',
+          rawInput: lateTaskId ? { Action: 'status' } : { Action: 'status', TaskId: TASK_26 } });
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_delta', status: 'in_progress',
+          rawOutput: 'Task ID: ' + TASK_26 + '\\nStatus: ' + (revertToRunning ? 'DONE' : 'RUNNING') });
+        const finalOutput = mode === 'manage-task-status-delta-bare-done'
+          ? 'DONE'
+          : mode === 'manage-task-status-delta-json-done'
+            ? '{"status":"DONE"}'
+            : revertToRunning
+              ? 'Status: RUNNING'
+              : 'Status: DONE';
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_delta', status: 'completed',
+          rawInput: lateTaskId ? { Action: 'status', TaskId: TASK_26 } : undefined,
+          rawOutput: finalOutput });
+        if (!revertToRunning) {
+          update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Delta cleared: ' + mode } });
+        }
+        result = { stopReason: 'end_turn' };
+      } else {
+        update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_delta', status: 'completed',
+          rawOutput: 'Command exited with code 0.' });
+        update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Reverted delta stayed pending.' } });
+        result = { stopReason: 'end_turn' };
+      }
     }
   }
   if (r.id !== undefined) send({ jsonrpc: '2.0', id: r.id, result });
@@ -1378,6 +1630,239 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         for await (const _ of p.sendStream("run long bare receipt", { chatId: mode })) {}
         expect(fake.readPrompts()).toHaveLength(2);
         expect(p.getLastResponse()?.text).toContain("Long bare receipt cleared.");
+      } finally { await p.close(); }
+    }
+  });
+
+  it("does not trigger turn_stalled or session/cancel when a slow consumer drains queued events longer than 2x turnStallTimeoutMs between prompts", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const script = join(root, "native-slow-consumer-fake.mjs");
+    const logFile = join(root, "native-slow-consumer-fake.jsonl");
+    writeFileSync(script, `#!/usr/bin/env node
+import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+const logFile = ${JSON.stringify(logFile)};
+const TASK_26 = ${JSON.stringify(TASK_26)};
+const send = obj => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...obj }) + '\\n');
+const update = body => send({ method: 'session/update', params: { sessionId: 'slow-consumer-session', update: body } });
+let promptCount = 0;
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const r = JSON.parse(line);
+  appendFileSync(logFile, JSON.stringify({ method: r.method, promptCount }) + '\\n');
+  if (r.method === 'initialize') {
+    send({ id: r.id, result: { protocolVersion: 1, agentInfo: { name: 'antigravity-native-fake', version: '1.0.0' },
+      agentCapabilities: { loadSession: true } } });
+  } else if (r.method === 'session/new' || r.method === 'session/resume') {
+    send({ id: r.id, result: { sessionId: 'slow-consumer-session', configOptions: [],
+      modes: { currentModeId: 'yolo', availableModes: [{ id: 'yolo', name: 'YOLO' }] } } });
+  } else if (r.method === 'session/prompt') {
+    promptCount++;
+    if (promptCount === 1) {
+      update({ sessionUpdate: 'tool_call', toolCallId: 'call_slow', title: 'sleep 20', kind: 'execute', status: 'in_progress',
+        rawInput: { CommandLine: 'sleep 20', WaitMsBeforeAsync: 10000 } });
+      update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_slow', status: 'in_progress',
+        rawOutput: 'Tool is running as a background task with task id: ' + TASK_26 });
+      update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Waiting... ' } });
+      send({ id: r.id, result: { stopReason: 'end_turn' } });
+    } else {
+      update({ sessionUpdate: 'tool_call', toolCallId: 'call_mt_slow', title: 'manage_task', kind: 'other', status: 'in_progress',
+        rawInput: { Action: 'status', TaskId: TASK_26 } });
+      update({ sessionUpdate: 'tool_call_update', toolCallId: 'call_mt_slow', status: 'completed',
+        rawOutput: 'Task: ' + TASK_26 + '\\nStatus: DONE' });
+      update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Slow consumer succeeded.' } });
+      send({ id: r.id, result: { stopReason: 'end_turn' } });
+    }
+  } else if (r.id !== undefined) {
+    send({ id: r.id, result: {} });
+  }
+});
+`, { mode: 0o755 });
+    chmodSync(script, 0o755);
+    const p = new AcpProvider({
+      agentType: "antigravity",
+      antigravityNative: true,
+      providerHome: home.home,
+      cwd: root,
+      executable: script,
+      turnStallTimeoutMs: 80,
+    });
+    try {
+      for await (const evt of p.sendStream("run slow consumer test", { chatId: "slow-consumer" })) {
+        if (evt.sessionUpdate === "agent_message_chunk") {
+          // Exceed 2.5x turnStallTimeoutMs while draining queued events after prompt 1 returned end_turn.
+          await new Promise((r) => setTimeout(r, 220));
+        }
+      }
+      const events = readFileSync(logFile, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as { method: string });
+      expect(events.filter(e => e.method === "session/prompt")).toHaveLength(2);
+      expect(events.filter(e => e.method === "session/cancel")).toHaveLength(0);
+      expect(p.getLastResponse()?.text).toContain("Slow consumer succeeded.");
+    } finally { await p.close(); }
+  });
+
+  it("defers status-less manage_task updates after in_progress until completed or prompt boundary", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "manage-task-statusless-transient-done-then-completed-running");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("run transient done check", { chatId: "transient-done" })) {}
+      const prompts = fake.readPrompts();
+      expect(prompts).toHaveLength(3);
+      expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_10}.`);
+      expect(p.getLastResponse()?.text).toContain("Transient intermediate DONE safely ignored.");
+    } finally { await p.close(); }
+  });
+
+  it("ignores non-status metadata lines and phrase suffixes like 'Log: Previous status: DONE'", async () => {
+    const { root, base, home } = fixture();
+    await seedIssueSessionNativeAntigravityHome(home, base);
+    const fake = writeContinuationFake(root, "manage-task-metadata-and-phrase-status-spoof");
+    const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+    try {
+      for await (const _ of p.sendStream("run metadata spoof check", { chatId: "meta-spoof" })) {}
+      const prompts = fake.readPrompts();
+      expect(prompts).toHaveLength(3);
+      expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_10}.`);
+      expect(p.getLastResponse()?.text).toContain("Metadata spoofs ignored.");
+    } finally { await p.close(); }
+  });
+
+  it("never clears a pending task from another task's nested JSON output/result/payload object", async () => {
+    for (const mode of ["manage-task-json-nested-output-spoof", "manage-task-json-fallback-nested-output-spoof"] as const) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, mode);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run nested json spoof check", { chatId: mode })) {}
+        const prompts = fake.readPrompts();
+        expect(prompts).toHaveLength(3);
+        expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_10}.`);
+        expect(prompts[2]?.text).not.toContain(TASK_9);
+        expect(p.getLastResponse()?.text).toContain("Nested JSON output spoof ignored.");
+      } finally { await p.close(); }
+    }
+  });
+
+  it("splits records on horizontal rules and refuses ambiguous status borrowing in unseparated mixed-order blocks", async () => {
+    {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, "manage-task-hr-mixed-order");
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run hr mixed order", { chatId: "hr-mixed" })) {}
+        const prompts = fake.readPrompts();
+        expect(prompts).toHaveLength(3);
+        expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_10}.`);
+        expect(prompts[2]?.text).not.toContain(TASK_9);
+        expect(p.getLastResponse()?.text).toContain("Order case handled: manage-task-hr-mixed-order");
+      } finally { await p.close(); }
+    }
+    {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, "manage-task-unseparated-ambiguous-order");
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run ambiguous order", { chatId: "ambiguous-order" })) {}
+        const prompts = fake.readPrompts();
+        expect(prompts).toHaveLength(3);
+        expect(prompts[2]?.text).toContain(TASK_9);
+        expect(prompts[2]?.text).toContain(TASK_10);
+        expect(p.getLastResponse()?.text).toContain("Order case handled: manage-task-unseparated-ambiguous-order");
+      } finally { await p.close(); }
+    }
+  });
+
+  it("consumes bare [Message] receipts without trailing newlines across prompt boundaries and back-to-back in one stream", async () => {
+    for (const mode of ["cross-prompt-bare-message-no-newline", "same-prompt-back-to-back-bare-no-newline"] as const) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, mode);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run bare no newline", { chatId: mode })) {}
+        const prompts = fake.readPrompts();
+        expect(prompts).toHaveLength(2);
+        if (mode === "cross-prompt-bare-message-no-newline") {
+          expect(prompts[1]?.text).toContain(`Pending task id(s): ${TASK_10}.`);
+          expect(prompts[1]?.text).not.toContain(`${TASK_1}.`);
+        }
+        expect(p.getLastResponse()?.text).toContain("Bare receipts without newline cleared.");
+      } finally { await p.close(); }
+    }
+  });
+
+  it("handles Unicode U+0130 ('İzmir, İstanbul') before </SYSTEM_MESSAGE> equivalently in single and split chunks", async () => {
+    for (const mode of ["unicode-dotted-i-sysmsg-single", "unicode-dotted-i-sysmsg-split"] as const) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, mode);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run unicode dotted I", { chatId: mode })) {}
+        expect(fake.readPrompts()).toHaveLength(2);
+        expect(p.getLastResponse()?.text).toContain("Unicode dotted-I receipt cleared.");
+      } finally { await p.close(); }
+    }
+  });
+
+  it("clears tasks from space-padded tables, single-space aligned columns, and chunked JSON arrays", async () => {
+    const modes = [
+      "manage-task-padded-table",
+      "manage-task-single-space-columns",
+      "manage-task-chunked-json-array",
+      "manage-task-chunked-json-array-3-parts",
+    ] as const;
+    for (const mode of modes) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, mode);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run table/json", { chatId: mode })) {}
+        const prompts = fake.readPrompts();
+        expect(prompts).toHaveLength(3);
+        expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_10}.`);
+        expect(prompts[2]?.text).not.toContain(TASK_9);
+        expect(p.getLastResponse()?.text).toContain(`Table/JSON mode cleared: ${mode}`);
+      } finally { await p.close(); }
+    }
+  });
+
+  it("applies single-task final status deltas with TaskId (Status: DONE, bare DONE, JSON status, late TaskId, and RUNNING revert)", async () => {
+    const terminalModes = [
+      "manage-task-status-delta-status-done",
+      "manage-task-status-delta-bare-done",
+      "manage-task-status-delta-json-done",
+      "manage-task-status-delta-late-taskid",
+    ] as const;
+    for (const mode of terminalModes) {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, mode);
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run delta", { chatId: mode })) {}
+        expect(fake.readPrompts()).toHaveLength(2);
+        expect(p.getLastResponse()?.text).toContain(`Delta cleared: ${mode}`);
+      } finally { await p.close(); }
+    }
+    // Negative control: reverting from DONE to RUNNING on completed frame keeps the task pending.
+    {
+      const { root, base, home } = fixture();
+      await seedIssueSessionNativeAntigravityHome(home, base);
+      const fake = writeContinuationFake(root, "manage-task-status-delta-revert-running");
+      const p = new AcpProvider({ agentType: "antigravity", antigravityNative: true, providerHome: home.home, cwd: root, executable: fake.script });
+      try {
+        for await (const _ of p.sendStream("run revert delta", { chatId: "delta-revert" })) {}
+        const prompts = fake.readPrompts();
+        expect(prompts).toHaveLength(3);
+        expect(prompts[2]?.text).toContain(`Pending task id(s): ${TASK_26}.`);
+        expect(p.getLastResponse()?.text).toContain("Reverted delta stayed pending.");
       } finally { await p.close(); }
     }
   });

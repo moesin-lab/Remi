@@ -1045,6 +1045,8 @@ export class AcpProvider implements Provider {
     let lastActivity = Date.now();
     let stalled = false;
     let inAntigravityContinuation = false;
+    /** True only while a `session/prompt` RPC is actively awaiting a reply from the ACP process. */
+    let rpcPromptInFlight = false;
     /** The opened shim breaker asked to stop the turn. */
     let gatewayStop = false;
     /** A cancel is waiting for the prompt to settle (a stop, a steer fallback, the breaker or the watchdog). */
@@ -1295,7 +1297,24 @@ export class AcpProvider implements Provider {
       let continuations = 0;
 
       while (true) {
-        const result: PromptResult = await entry.client.prompt(entry.acpSessionId, currentMessage, currentMedia);
+        let result: PromptResult;
+        rpcPromptInFlight = true;
+        lastActivity = Date.now();
+        try {
+          result = await entry.client.prompt(entry.acpSessionId, currentMessage, currentMedia);
+        } finally {
+          rpcPromptInFlight = false;
+          lastActivity = Date.now();
+        }
+        const boundaryObservation = antigravityBgCommands?.onPromptBoundary();
+        if (boundaryObservation?.releaseOpenToolCallIds.length) {
+          for (const releasedId of boundaryObservation.releaseOpenToolCallIds) {
+            openTools.delete(releasedId);
+            if (entry.openToolCalls?.delete(releasedId) && !entry.openToolCalls.size) {
+              wakeSteerWaiters(entry);
+            }
+          }
+        }
         const failure = readSessionFailure(result._meta, credentials);
         if (failure && (failure.severity === "error" || failureState.failure?.severity !== "error")) failureState.failure = failure;
 
@@ -1430,6 +1449,10 @@ export class AcpProvider implements Provider {
     const watchdog = watchdogBasisMs === null ? null : setInterval(() => {
       // A stop, a steer fallback or the breaker is already ending the turn through the settle path.
       if (promptDone || stalled || settling || gatewayStop || options?.signal?.aborted) return;
+      if (!rpcPromptInFlight) {
+        lastActivity = Date.now();
+        return;
+      }
       const activeStallMs = inAntigravityContinuation
         ? (configuredStallMs ?? ANTIGRAVITY_CONTINUATION_STALL_MS)
         : configuredStallMs;
@@ -3232,14 +3255,19 @@ const ANTIGRAVITY_SYSTEM_MESSAGE_CLOSE_TAG = "</SYSTEM_MESSAGE>";
 const ANTIGRAVITY_BARE_MESSAGE_TAG = "[Message]";
 const ANTIGRAVITY_BG_TASK_ID_RE = /Tool is running as a background task with task id:\s*[`"']?([A-Za-z0-9._:/-]+)[`"']?/i;
 const ANTIGRAVITY_TOOL_OUTPUT_SEPARATOR_RE = /(?:^|\r?\n)(?:Log|Command) output:[ \t]*(?:\r?\n|$)/;
-const ANTIGRAVITY_TASK_TERMINAL_STATUS_RE = /\bStatus["']?\s*[:=]\s*["']?(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)\b/i;
-const ANTIGRAVITY_TASK_RUNNING_STATUS_RE = /\bStatus["']?\s*[:=]\s*["']?(?:RUNNING|PENDING|IN_PROGRESS)\b/i;
-const ANTIGRAVITY_INLINE_TERMINAL_STATUS_RE = /(?:(?:\||\[|\(|:\s+|[-–—]\s+|\t|\s{2,})(?:DONE|COMPLETED(?!\s+At\b)|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)(?=\s*(?:\||\]|\)|$|\t|\s{2,}|,|;))|^(?:DONE|COMPLETED(?!\s+At\b)|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)(?=\s*(?:\||:|\t|\s{2,}))|\s+(?:DONE|COMPLETED(?!\s+At\b)|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)\s*$)/i;
-const ANTIGRAVITY_INLINE_RUNNING_STATUS_RE = /(?:(?:\||\[|\(|:\s+|[-–—]\s+|\t|\s{2,})(?:RUNNING|PENDING|IN_PROGRESS)(?=\s*(?:\||\]|\)|$|\t|\s{2,}|,|;))|^(?:RUNNING|PENDING|IN_PROGRESS)(?=\s*(?:\||:|\t|\s{2,}))|\s+(?:RUNNING|PENDING|IN_PROGRESS)\s*$)/i;
+const ANTIGRAVITY_RECORD_BLOCK_SEPARATOR_RE = /(?:^|\r?\n)(?:[ \t]*\r?\n|[ \t]*[-=*_]{3,}[ \t]*(?:\r?\n|$))+/;
+const ANTIGRAVITY_NON_STATUS_METADATA_LINE_RE = /^\s*(?:Log|Task logs(?:\s+are\s+available\s+at)?|Command|Cmd|Summary|Title|Cwd|Working directory|Created At|Completed At|Output|Preview)\s*:/i;
+const ANTIGRAVITY_TASK_TERMINAL_STATUS_RE = /(?:(?:^|[\r\n|,\t;({\[]|[ \t]{2,})[ \t]*|(?:^|\r?\n)[ \t]*[-*•][ \t]+)["']?(?:Status|State)["']?\s*[:=]\s*["']?(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)\b/i;
+const ANTIGRAVITY_TASK_RUNNING_STATUS_RE = /(?:(?:^|[\r\n|,\t;({\[]|[ \t]{2,})[ \t]*|(?:^|\r?\n)[ \t]*[-*•][ \t]+)["']?(?:Status|State)["']?\s*[:=]\s*["']?(?:RUNNING|PENDING|IN_PROGRESS)\b/i;
+const ANTIGRAVITY_STANDALONE_TERMINAL_STATUS_LINE_RE = /^\s*["']?(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)["']?\s*$/im;
+const ANTIGRAVITY_STANDALONE_RUNNING_STATUS_LINE_RE = /^\s*["']?(?:RUNNING|PENDING|IN_PROGRESS)["']?\s*$/im;
+const ANTIGRAVITY_INLINE_TERMINAL_STATUS_RE = /(?:(?:\|\s*|\[\s*|\(\s*|\t|\s{2,})(?:DONE|COMPLETED(?!\s+At\b)|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)(?=\s*(?:\||\]|\)|$|\t|\s{2,}|,|;))|^(?:DONE|COMPLETED(?!\s+At\b)|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)(?=\s*(?:\||:|\t|\s{2,})))/i;
+const ANTIGRAVITY_INLINE_RUNNING_STATUS_RE = /(?:(?:\|\s*|\[\s*|\(\s*|\t|\s{2,})(?:RUNNING|PENDING|IN_PROGRESS)(?=\s*(?:\||\]|\)|$|\t|\s{2,}|,|;))|^(?:RUNNING|PENDING|IN_PROGRESS)(?=\s*(?:\||:|\t|\s{2,})))/i;
 const ANTIGRAVITY_COMMAND_EXITED_RE = /\bCommand\s+exited\s+with\s+(?:code\s+-?\d+|signal\s+\S+)\b/i;
 const ANTIGRAVITY_SYSTEM_MESSAGE_RE = /<SYSTEM_MESSAGE>([\s\S]*?)(?:<\/SYSTEM_MESSAGE>|$)/gi;
 const ANTIGRAVITY_SYSTEM_MESSAGE_BODY_SEPARATOR_RE = /(?:\b(?:finished|was\s+cancell?ed)\s+with\s+result:|\r?\n(?:Command|Log)\s+output:)/i;
 const ANTIGRAVITY_BARE_MESSAGE_BODY_SEPARATOR_RE = /\b(?:finished|was\s+cancell?ed)\s+with\s+result:/i;
+const ANTIGRAVITY_NEW_BARE_MESSAGE_RE = /\[Message\][ \t]+timestamp=/;
 const ANTIGRAVITY_EXPLICIT_TASK_ID_RE = /\b(?:Task(?:\s+id)?\s*[:#]\s*[`"']?[A-Za-z0-9._:/-]+|Task\s+id\s+[`"']?[A-Za-z0-9._:/-]+|Task\s+[`"']?[A-Za-z0-9._:/-]*[0-9/][A-Za-z0-9._:/-]*|sender=[`"']?[A-Za-z0-9._:/-]+)/i;
 const ANTIGRAVITY_TASK_FINISHED_HEADER_RE = /\bTask\s+id\s+[`"']?([A-Za-z0-9._:/-]+)[`"']?\s+(?:was\s+cancell?ed|finished|completed|failed|exited|terminated|killed|cancell?ed)\b/gi;
 const ANTIGRAVITY_MESSAGE_TASK_FINISHED_RE = /\[Message\][^\n]*\bcontent=Task\s+id\s+[`"']?([A-Za-z0-9._:/-]+)[`"']?\s+(?:was\s+cancell?ed|finished|completed|failed|exited|terminated|killed|cancell?ed)\b/gi;
@@ -3247,6 +3275,8 @@ const ANTIGRAVITY_COMPLETION_WORD_RE = /\b(?:Status["']?\s*[:=]\s*["']?(?:DONE|C
 const ANTIGRAVITY_STILL_RUNNING_RE = /\b(?:Status["']?\s*[:=]\s*["']?(?:RUNNING|PENDING|IN_PROGRESS)|still\s+running)\b/i;
 const ANTIGRAVITY_LOG_LINE_RE = /^\s*(?:Log|Task logs(?:\s+are\s+available\s+at)?)\s*:.*$/gim;
 const ANTIGRAVITY_URL_RE = /(?:file|https?):\/\/\S+/gi;
+const ANTIGRAVITY_JSON_SKIP_PAYLOAD_KEY_RE = /^(?:log|logs|logpath|log_path|logurl|log_url|output|rawoutput|raw_output|formatted_output|combinedoutput|stdout|stderr|result|results|command|cmd|input|rawinput|raw_input|args|env|summary|message|preview|payload)$/i;
+const ANTIGRAVITY_JSON_PAYLOAD_SUBVALUE_RE = /"(?:log|logs|logpath|log_path|logurl|log_url|output|rawoutput|raw_output|formatted_output|combinedoutput|stdout|stderr|result|results|command|cmd|input|rawinput|raw_input|args|env|summary|message|preview|payload)"\s*:\s*(?:\{[^{}]*\}|\[[^\[\]]*\])/gi;
 const ANTIGRAVITY_CONV_TASK_TOKEN_RE = /\b([A-Za-z0-9._-]+\/task-[A-Za-z0-9._-]+)\b/gi;
 const ANTIGRAVITY_STANDALONE_TASK_TOKEN_RE = /(?<![A-Za-z0-9._:/-])(task-\d+)(?![A-Za-z0-9._:/-])/gi;
 const ANTIGRAVITY_LABELED_TASK_TOKEN_RE = /\bTask(?:\s+ID)?\s*[:#]\s*[`"']?([A-Za-z0-9._:/-]+)[`"']?/gi;
@@ -3257,20 +3287,37 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * ASCII-only lowercasing that preserves UTF-16 code-unit length 1:1
+ * (`asciiLower(s).length === s.length` even for characters like `İ` U+0130
+ * whose `String.prototype.toLowerCase()` expands to two code units).
+ */
+function asciiLower(text: string): string {
+  return text.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
+}
+
 function indexOfCaseInsensitive(haystack: string, needle: string): number {
-  return haystack.toLowerCase().indexOf(needle.toLowerCase());
+  return asciiLower(haystack).indexOf(asciiLower(needle));
 }
 
 /** Longest suffix of `text` that could be the start of `tag` split across chunks. */
 function partialTagSuffixLength(text: string, tag: string, caseInsensitive = true): number {
   const maxLen = Math.min(text.length, tag.length - 1);
   if (maxLen <= 0) return 0;
-  const hay = caseInsensitive ? text.slice(text.length - maxLen).toLowerCase() : text.slice(text.length - maxLen);
-  const needle = caseInsensitive ? tag.toLowerCase() : tag;
+  const hay = caseInsensitive ? asciiLower(text.slice(text.length - maxLen)) : text.slice(text.length - maxLen);
+  const needle = caseInsensitive ? asciiLower(tag) : tag;
   for (let len = maxLen; len > 0; len--) {
     if (needle.startsWith(hay.slice(hay.length - len))) return len;
   }
   return 0;
+}
+
+function stripNonStatusMetadataLines(text: string): string {
+  if (!text) return "";
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !ANTIGRAVITY_NON_STATUS_METADATA_LINE_RE.test(line))
+    .join("\n");
 }
 
 function splitAntigravityToolOutput(text: string): { envelope: string; tail: string } {
@@ -3370,12 +3417,86 @@ function extractTaskIdTokens(text: string, knownIds?: ReadonlySet<string>): stri
   return [...found];
 }
 
-function lineHasTerminalStatus(line: string): boolean {
-  return ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(line) || ANTIGRAVITY_INLINE_TERMINAL_STATUS_RE.test(line);
+function lineHasAdjacentTaskColumnStatus(line: string, taskId: string, kind: "terminal" | "running"): boolean {
+  if (!taskId || ANTIGRAVITY_NON_STATUS_METADATA_LINE_RE.test(line)) return false;
+  const statusGroup = kind === "terminal"
+    ? "(?:DONE|COMPLETED(?!\\s+At\\b)|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)"
+    : "(?:RUNNING|PENDING|IN_PROGRESS)";
+  const escapedId = escapeRegExp(taskId);
+  const afterIdRe = new RegExp(`(?<![A-Za-z0-9._:/-])${escapedId}(?:[ \\t]*[:|–—-][ \\t]*|[ \\t]+)${statusGroup}(?=$|[ \\t|,;\\])])`, "i");
+  const beforeIdRe = new RegExp(`(?:^|[ \\t|(\\[])` + `${statusGroup}(?:[ \\t]*[:|–—-][ \\t]*|[ \\t]+)${escapedId}(?![A-Za-z0-9_/-]|[.:][A-Za-z0-9._:/-])`, "i");
+  return afterIdRe.test(line) || beforeIdRe.test(line);
 }
 
-function lineHasRunningStatus(line: string): boolean {
-  return ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(line) || ANTIGRAVITY_INLINE_RUNNING_STATUS_RE.test(line);
+function lineHasTerminalStatus(line: string, taskId?: string): boolean {
+  if (ANTIGRAVITY_NON_STATUS_METADATA_LINE_RE.test(line)) return false;
+  return ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(line)
+    || ANTIGRAVITY_INLINE_TERMINAL_STATUS_RE.test(line)
+    || (taskId ? lineHasAdjacentTaskColumnStatus(line, taskId, "terminal") : false);
+}
+
+function lineHasRunningStatus(line: string, taskId?: string): boolean {
+  if (ANTIGRAVITY_NON_STATUS_METADATA_LINE_RE.test(line)) return false;
+  return ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(line)
+    || ANTIGRAVITY_INLINE_RUNNING_STATUS_RE.test(line)
+    || (taskId ? lineHasAdjacentTaskColumnStatus(line, taskId, "running") : false);
+}
+
+function isValidJsonContainer(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return false;
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function stripJsonPayloadSubvalues(text: string): string {
+  let current = text;
+  for (let pass = 0; pass < 6; pass++) {
+    const next = current.replace(ANTIGRAVITY_JSON_PAYLOAD_SUBVALUE_RE, "");
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
+function classifySingleTaskEnvelopeStatus(envelope: string): { terminal: boolean; running: boolean } {
+  const trimmed = envelope.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("\"")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed === "string") {
+        const val = parsed.trim();
+        return {
+          running: /^(?:RUNNING|PENDING|IN_PROGRESS)$/i.test(val),
+          terminal: /^(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)$/i.test(val),
+        };
+      }
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const obj = parsed as Record<string, unknown>;
+        const statusVal = obj.status ?? obj.Status ?? obj.state ?? obj.State;
+        if (typeof statusVal === "string") {
+          const val = statusVal.trim();
+          return {
+            running: /^(?:RUNNING|PENDING|IN_PROGRESS)$/i.test(val),
+            terminal: /^(?:DONE|COMPLETED|FAILED|KILLED|STOPPED|ERROR|CANCELL?ED)$/i.test(val),
+          };
+        }
+        return { terminal: false, running: false };
+      }
+    } catch {
+      // Fall through to text matching.
+    }
+  }
+  const cleaned = stripNonStatusMetadataLines(envelope);
+  const running = ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(cleaned)
+    || ANTIGRAVITY_STANDALONE_RUNNING_STATUS_LINE_RE.test(cleaned);
+  const terminal = ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(cleaned)
+    || ANTIGRAVITY_STANDALONE_TERMINAL_STATUS_LINE_RE.test(cleaned);
+  return { terminal, running };
 }
 
 function jsonValueIndicatesTaskTerminal(
@@ -3394,7 +3515,8 @@ function jsonValueIndicatesTaskTerminal(
     const obj = node as Record<string, unknown>;
     const primitiveTexts: string[] = [];
     for (const [key, val] of Object.entries(obj)) {
-      if (typeof val === "string" && !/^(?:log|logpath|log_path|logurl|log_url|output|command|cmd)$/i.test(key)) {
+      if (ANTIGRAVITY_JSON_SKIP_PAYLOAD_KEY_RE.test(key)) continue;
+      if (typeof val === "string") {
         primitiveTexts.push(val);
       }
     }
@@ -3410,7 +3532,8 @@ function jsonValueIndicatesTaskTerminal(
         }
       }
     }
-    for (const val of Object.values(obj)) {
+    for (const [key, val] of Object.entries(obj)) {
+      if (ANTIGRAVITY_JSON_SKIP_PAYLOAD_KEY_RE.test(key)) continue;
       if (val && typeof val === "object") visit(val);
     }
   };
@@ -3433,12 +3556,13 @@ function jsonIndicatesTaskTerminal(
       // Fall through to flat JSON object extraction.
     }
   }
+  const stripped = stripJsonPayloadSubvalues(envelope);
   const flatObjRe = /\{[^{}]*\}/g;
   let sawObjForTask = false;
   let sawTerminal = false;
   let sawRunning = false;
   let match: RegExpExecArray | null;
-  while ((match = flatObjRe.exec(envelope)) !== null) {
+  while ((match = flatObjRe.exec(stripped)) !== null) {
     const snippet = match[0];
     if (!containsExactTaskId(snippet, taskId)) continue;
     const ids = extractTaskIdTokens(snippet, knownIds);
@@ -3460,7 +3584,8 @@ function jsonIndicatesTaskTerminal(
 
 function hasAntigravityTerminalExit(update: SessionUpdate, text: string): boolean {
   const envelope = extractAntigravityToolEnvelope(text);
-  if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(envelope) || ANTIGRAVITY_COMMAND_EXITED_RE.test(envelope)) return true;
+  const statusText = stripNonStatusMetadataLines(envelope);
+  if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(statusText) || ANTIGRAVITY_COMMAND_EXITED_RE.test(statusText)) return true;
   const frame = update as { _meta?: Record<string, unknown>; rawOutput?: unknown };
   const terminalExitMeta = record(record(frame._meta)?.terminal_exit);
   if (terminalExitMeta) {
@@ -3511,20 +3636,56 @@ function extractAntigravityBackgroundTaskId(text: string): string | null {
   return id || null;
 }
 
-function mergeManageTaskOutput(prev: string | undefined, next: string, knownIds: ReadonlySet<string>): string {
+function mergeManageTaskOutput(
+  prev: string | undefined,
+  next: string,
+  knownIds: ReadonlySet<string>,
+  inputTaskId?: string,
+): string {
   if (!next) return prev ?? "";
   if (!prev) return next;
   if (next === prev || next.includes(prev)) return next;
   if (prev.endsWith(next)) return prev;
+  const prevTrimmed = prev.trimStart();
+  const prevIsIncompleteJson = (prevTrimmed.startsWith("[") || prevTrimmed.startsWith("{"))
+    && !isValidJsonContainer(prev);
   const prevIds = extractTaskIdTokens(prev, knownIds);
   const nextIds = extractTaskIdTokens(next, knownIds);
-  const nextStartsFreshSnapshot = /^\s*(?:[\[{]|Created At\s*:)/i.test(next);
   const nextRepeatsPrevTask = nextIds.some((id) => prevIds.includes(id));
+
+  if (prevIsIncompleteJson) {
+    const nextIsCompleteJson = isValidJsonContainer(next);
+    const nextReplacesIncomplete = nextIsCompleteJson && (
+      nextRepeatsPrevTask
+      || (prevTrimmed.startsWith("[") && next.trimStart().startsWith("["))
+    );
+    return nextReplacesIncomplete ? next : prev + next;
+  }
+
+  const nextStartsFreshSnapshot = /^\s*(?:[\[{]|Created At\s*:)/i.test(next);
   if (nextStartsFreshSnapshot || nextRepeatsPrevTask) return next;
-  const prevHasStatus = ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(prev) || ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(prev);
-  const nextHasStatus = ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(next) || ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(next);
-  if (prevIds.length === 0 && nextIds.length === 0 && prevHasStatus && nextHasStatus) return next;
-  if (!/\s$/.test(prev) && /^(?:Status|Task(?:\s+ID)?|Log|Created At|Completed At)\s*[:=]/i.test(next)) {
+
+  const prevStatus = classifySingleTaskEnvelopeStatus(extractAntigravityToolEnvelope(prev));
+  const nextStatus = classifySingleTaskEnvelopeStatus(extractAntigravityToolEnvelope(next));
+  const prevHasStatus = prevStatus.terminal || prevStatus.running;
+  const nextHasStatus = nextStatus.terminal || nextStatus.running;
+
+  if (inputTaskId) {
+    const prevOnlyTarget = prevIds.every((id) => id === inputTaskId);
+    const nextHasNoOtherTask = nextIds.every((id) => id === inputTaskId);
+    if (prevOnlyTarget && nextHasNoOtherTask && prevHasStatus && nextHasStatus) {
+      return next;
+    }
+  } else if (prevIds.length === 0 && nextIds.length === 0 && prevHasStatus && nextHasStatus) {
+    return next;
+  }
+
+  const firstNextLine = next.split(/\r?\n/, 1)[0] ?? "";
+  if (!/\s$/.test(prev) && (
+    /^(?:Status|State|Task(?:\s+ID)?|Log|Command\s+output|Log\s+output|Created At|Completed At)\s*[:=]/i.test(next)
+    || ANTIGRAVITY_STANDALONE_TERMINAL_STATUS_LINE_RE.test(firstNextLine)
+    || ANTIGRAVITY_STANDALONE_RUNNING_STATUS_LINE_RE.test(firstNextLine)
+  )) {
     return `${prev}\n${next}`;
   }
   return prev + next;
@@ -3547,69 +3708,96 @@ function textIndicatesTaskTerminal(text: string, taskId: string, knownIds?: Read
 
   let sawTerminal = false;
   let sawRunning = false;
-  const paragraphs = envelope.split(/\r?\n[ \t]*\r?\n/);
+  const blocks = envelope.split(ANTIGRAVITY_RECORD_BLOCK_SEPARATOR_RE);
 
-  for (const para of paragraphs) {
-    if (!containsExactTaskId(para, taskId)) continue;
-    const paraIds = extractTaskIdTokens(para, allKnown);
-    const lines = para.split(/\r?\n/);
+  for (const rawBlock of blocks) {
+    const block = stripNonStatusMetadataLines(rawBlock);
+    if (!containsExactTaskId(block, taskId)) continue;
+    const blockIds = extractTaskIdTokens(block, allKnown);
+    const lines = block.split(/\r?\n/);
 
-    if (paraIds.length === 1 && paraIds[0] === taskId) {
+    if (blockIds.length === 1 && blockIds[0] === taskId) {
       let inlineTerminal = false;
       let inlineRunning = false;
       for (const line of lines) {
         if (!containsExactTaskId(line, taskId)) continue;
-        if (lineHasRunningStatus(line)) inlineRunning = true;
-        else if (lineHasTerminalStatus(line)) inlineTerminal = true;
+        if (lineHasRunningStatus(line, taskId)) inlineRunning = true;
+        else if (lineHasTerminalStatus(line, taskId)) inlineTerminal = true;
       }
-      if (ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(para) || inlineRunning) {
+      if (ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(block) || inlineRunning) {
         sawRunning = true;
-      } else if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(para) || inlineTerminal) {
+      } else if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(block) || inlineTerminal) {
         sawTerminal = true;
       }
       continue;
     }
 
-    const lineIds = lines.map((line) => extractTaskIdTokens(line, allKnown));
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i]!;
-      if (!containsExactTaskId(line, taskId)) continue;
-      if (!lineIds[i]!.every((id) => id === taskId)) continue;
-      if (lineHasRunningStatus(line)) sawRunning = true;
-      else if (lineHasTerminalStatus(line)) sawTerminal = true;
+    type LineEvent =
+      | { kind: "task"; id: string }
+      | { kind: "status"; running: boolean; terminal: boolean }
+      | { kind: "barrier" };
+    const events: LineEvent[] = [];
+
+    for (const line of lines) {
+      const ids = extractTaskIdTokens(line, allKnown);
+      if (ids.length === 1) {
+        const lineId = ids[0]!;
+        const running = lineHasRunningStatus(line, lineId);
+        const terminal = lineHasTerminalStatus(line, lineId);
+        if (running || terminal) {
+          if (lineId === taskId) {
+            if (running) sawRunning = true;
+            else if (terminal) sawTerminal = true;
+          }
+          events.push({ kind: "barrier" });
+        } else {
+          const prevEvent = events.at(-1);
+          if (!(prevEvent?.kind === "task" && prevEvent.id === lineId)) {
+            events.push({ kind: "task", id: lineId });
+          }
+        }
+      } else if (ids.length > 1) {
+        events.push({ kind: "barrier" });
+      } else {
+        const running = ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(line);
+        const terminal = ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(line);
+        if (running || terminal) {
+          events.push({ kind: "status", running, terminal });
+        }
+      }
     }
 
-    const firstTaskLine = lineIds.findIndex((ids) => ids.length > 0);
-    const firstStatusLine = lines.findIndex((line) =>
-      ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(line) || ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(line));
-    if (firstTaskLine === -1 || firstStatusLine === -1) continue;
+    let segStart = 0;
+    while (segStart < events.length) {
+      while (segStart < events.length && events[segStart]!.kind === "barrier") segStart++;
+      let segEnd = segStart;
+      while (segEnd < events.length && events[segEnd]!.kind !== "barrier") segEnd++;
+      const segment = events.slice(segStart, segEnd);
+      segStart = segEnd;
+      if (segment.length < 2 || segment.length % 2 !== 0) continue;
 
-    const evaluateRecord = (recordLines: string[]) => {
-      const recordText = recordLines.join("\n");
-      if (!containsExactTaskId(recordText, taskId)) return;
-      const recordIds = extractTaskIdTokens(recordText, allKnown);
-      if (recordIds.length !== 1 || recordIds[0] !== taskId) return;
-      if (ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(recordText)) sawRunning = true;
-      else if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(recordText)) sawTerminal = true;
-    };
-
-    if (firstTaskLine <= firstStatusLine) {
-      for (let i = 0; i < lines.length; i++) {
-        if (lineIds[i]!.length !== 1 || lineIds[i]![0] !== taskId) continue;
-        const recordLines = [lines[i]!];
-        for (let j = i + 1; j < lines.length; j++) {
-          if (lineIds[j]!.some((id) => id !== taskId)) break;
-          recordLines.push(lines[j]!);
+      const isIdThenStatus = segment.every((ev, idx) =>
+        idx % 2 === 0 ? ev.kind === "task" : ev.kind === "status");
+      if (isIdThenStatus) {
+        for (let i = 0; i < segment.length; i += 2) {
+          const t = segment[i] as { kind: "task"; id: string };
+          const s = segment[i + 1] as { kind: "status"; running: boolean; terminal: boolean };
+          if (t.id !== taskId) continue;
+          if (s.running) sawRunning = true;
+          else if (s.terminal) sawTerminal = true;
         }
-        evaluateRecord(recordLines);
+        continue;
       }
-    } else {
-      let currentBlock: string[] = [];
-      for (let i = 0; i < lines.length; i++) {
-        currentBlock.push(lines[i]!);
-        if (lineIds[i]!.length > 0) {
-          evaluateRecord(currentBlock);
-          currentBlock = [];
+
+      const isStatusThenId = segment.every((ev, idx) =>
+        idx % 2 === 0 ? ev.kind === "status" : ev.kind === "task");
+      if (isStatusThenId) {
+        for (let i = 0; i < segment.length; i += 2) {
+          const s = segment[i] as { kind: "status"; running: boolean; terminal: boolean };
+          const t = segment[i + 1] as { kind: "task"; id: string };
+          if (t.id !== taskId) continue;
+          if (s.running) sawRunning = true;
+          else if (s.terminal) sawTerminal = true;
         }
       }
     }
@@ -3707,38 +3895,119 @@ class AntigravityReceiptStreamParser {
     }
   }
 
+  onPromptBoundary(callbacks: {
+    onSystemHeader: (header: string) => void;
+    onSystemEarlyExplicitId: (taskId: string) => void;
+    onBareFinishedId: (taskId: string) => void;
+  }): void {
+    if (this.allowBareMessages) {
+      this._flushBareLineOnBoundary(callbacks.onBareFinishedId);
+    }
+  }
+
   private _flushBareLineOnBoundary(onBareFinishedId: (taskId: string) => void): void {
     if (this.bareLineMode === "header" && this.bareLineBuf) {
-      this._tryConsumeBareHeader(onBareFinishedId);
+      const remainder = this._tryConsumeBareHeader(onBareFinishedId);
+      if (remainder) {
+        this._feedBareLineSegment(remainder, onBareFinishedId);
+        if (this.bareLineMode === "header" && this.bareLineBuf) {
+          this._tryConsumeBareHeader(onBareFinishedId);
+        }
+      }
     }
     this.bareLineMode = "none";
     this.bareLineBuf = "";
   }
 
-  private _tryConsumeBareHeader(onBareFinishedId: (taskId: string) => void): boolean {
+  private _tryConsumeBareHeader(onBareFinishedId: (taskId: string) => void): string | null {
     const sepMatch = ANTIGRAVITY_BARE_MESSAGE_BODY_SEPARATOR_RE.exec(this.bareLineBuf);
     if (sepMatch) {
-      const header = this.bareLineBuf.slice(0, sepMatch.index + sepMatch[0].length);
+      const headerEnd = sepMatch.index + sepMatch[0].length;
+      const header = this.bareLineBuf.slice(0, headerEnd);
+      const remainder = this.bareLineBuf.slice(headerEnd);
       for (const finishedId of extractBareFinishedTaskIds(header)) {
         onBareFinishedId(finishedId);
       }
       this.bareLineBuf = "";
       this.bareLineMode = "body";
-      return true;
+      return remainder;
     }
-    const ids = extractBareFinishedTaskIds(this.bareLineBuf);
+    ANTIGRAVITY_MESSAGE_TASK_FINISHED_RE.lastIndex = 0;
+    const ids: string[] = [];
+    let lastEnd = 0;
+    let match: RegExpExecArray | null;
+    while ((match = ANTIGRAVITY_MESSAGE_TASK_FINISHED_RE.exec(this.bareLineBuf)) !== null) {
+      const finishedId = match[1]?.replace(/[.:,]+$/, "");
+      if (finishedId && !ids.includes(finishedId)) ids.push(finishedId);
+      lastEnd = match.index + match[0].length;
+    }
     if (ids.length > 0) {
+      const remainder = this.bareLineBuf.slice(lastEnd);
       for (const finishedId of ids) onBareFinishedId(finishedId);
       this.bareLineBuf = "";
       this.bareLineMode = "body";
-      return true;
+      return remainder;
     }
     if (this.bareLineBuf.length >= ANTIGRAVITY_RECEIPT_HEADER_MAX) {
       this.bareLineBuf = "";
       this.bareLineMode = "body";
-      return true;
+      return "";
     }
-    return false;
+    return null;
+  }
+
+  private _feedBareLineSegment(seg: string, onBareFinishedId: (taskId: string) => void): void {
+    let pending = seg;
+    while (pending.length > 0) {
+      if (this.bareLineMode === "body") {
+        const combined = this.bareLineBuf + pending;
+        const nextMatch = ANTIGRAVITY_NEW_BARE_MESSAGE_RE.exec(combined);
+        if (nextMatch) {
+          this.bareLineMode = "header";
+          this.bareLineBuf = combined.slice(nextMatch.index);
+          const remainder = this._tryConsumeBareHeader(onBareFinishedId);
+          if (remainder !== null) {
+            pending = remainder;
+            continue;
+          }
+          break;
+        }
+        const tagIdx = combined.lastIndexOf(ANTIGRAVITY_BARE_MESSAGE_TAG);
+        if (tagIdx !== -1 && combined.length - tagIdx <= 32) {
+          this.bareLineBuf = combined.slice(tagIdx);
+        } else {
+          const keepLen = partialTagSuffixLength(combined, ANTIGRAVITY_BARE_MESSAGE_TAG, false);
+          this.bareLineBuf = keepLen > 0 ? combined.slice(combined.length - keepLen) : "";
+        }
+        break;
+      }
+
+      if (this.bareLineMode === "header") {
+        this.bareLineBuf += pending;
+        const remainder = this._tryConsumeBareHeader(onBareFinishedId);
+        if (remainder !== null) {
+          pending = remainder;
+          continue;
+        }
+        break;
+      }
+
+      const combined = this.bareLineBuf + pending;
+      const tagIdx = combined.indexOf(ANTIGRAVITY_BARE_MESSAGE_TAG);
+      if (tagIdx !== -1) {
+        this.bareLineMode = "header";
+        this.bareLineBuf = combined.slice(tagIdx);
+        const remainder = this._tryConsumeBareHeader(onBareFinishedId);
+        if (remainder !== null) {
+          pending = remainder;
+          continue;
+        }
+      } else {
+        const keepLen = partialTagSuffixLength(combined, ANTIGRAVITY_BARE_MESSAGE_TAG, false);
+        this.bareLineBuf = keepLen > 0 ? combined.slice(combined.length - keepLen) : "";
+      }
+      break;
+    }
   }
 
   private _feedOutsideBareText(text: string, onBareFinishedId: (taskId: string) => void): void {
@@ -3749,23 +4018,7 @@ class AntigravityReceiptStreamParser {
       const seg = text.slice(pos, segEnd);
 
       if (seg.length > 0) {
-        if (this.bareLineMode === "body") {
-          // Ignore the remainder of an already-consumed `[Message]` result line until `\n`.
-        } else if (this.bareLineMode === "header") {
-          this.bareLineBuf += seg;
-          this._tryConsumeBareHeader(onBareFinishedId);
-        } else {
-          const combined = this.bareLineBuf + seg;
-          const tagIdx = combined.indexOf(ANTIGRAVITY_BARE_MESSAGE_TAG);
-          if (tagIdx !== -1) {
-            this.bareLineMode = "header";
-            this.bareLineBuf = combined.slice(tagIdx);
-            this._tryConsumeBareHeader(onBareFinishedId);
-          } else {
-            const keepLen = partialTagSuffixLength(combined, ANTIGRAVITY_BARE_MESSAGE_TAG, false);
-            this.bareLineBuf = keepLen > 0 ? combined.slice(combined.length - keepLen) : "";
-          }
-        }
+        this._feedBareLineSegment(seg, onBareFinishedId);
       }
 
       if (nlIdx !== -1) {
@@ -3791,9 +4044,33 @@ class AntigravityBackgroundCommandTracker {
   private readonly releasedDaemonCalls = new Set<string>();
   private readonly clearedCallIds = new Set<string>();
   private readonly clearedTaskIds = new Set<string>();
-  private readonly manageTaskCalls = new Map<string, { action?: string; taskId?: string; output?: string }>();
+  private readonly manageTaskCalls = new Map<string, {
+    action?: string;
+    taskId?: string;
+    sawNonTerminal?: boolean;
+    settled?: boolean;
+    output?: string;
+  }>();
   private readonly userReceiptStream = new AntigravityReceiptStreamParser(true);
   private readonly agentReceiptStream = new AntigravityReceiptStreamParser(false);
+
+  onPromptBoundary(): { releaseOpenToolCallIds: string[] } | undefined {
+    const released = new Set<string>();
+    const callbacks = {
+      onSystemHeader: (header: string) => this._observeSystemMessageHeader(header, released),
+      onSystemEarlyExplicitId: (finishedId: string) => { this._clearExactTaskId(finishedId, released); },
+      onBareFinishedId: (finishedId: string) => { this._clearExactTaskId(finishedId, released); },
+    };
+    this.userReceiptStream.onPromptBoundary(callbacks);
+    this.agentReceiptStream.onPromptBoundary(callbacks);
+    for (const call of this.manageTaskCalls.values()) {
+      if (!call.settled && call.output) {
+        this._observeManageTaskOutput(call.output, call.taskId, released);
+        call.settled = true;
+      }
+    }
+    return released.size > 0 ? { releaseOpenToolCallIds: [...released] } : undefined;
+  }
 
   get hasPending(): boolean {
     return this.pending.size > 0;
@@ -3899,19 +4176,27 @@ class AntigravityBackgroundCommandTracker {
         const prev = this.manageTaskCalls.get(id) ?? {};
         const action = readStringField(input, ["Action", "action"])?.toLowerCase() ?? prev.action;
         const taskId = readStringField(input, ["TaskId", "task_id", "taskId"]) ?? prev.taskId;
-        const mergedOutput = text ? mergeManageTaskOutput(prev.output, text, this._knownTaskIds(taskId)) : prev.output;
-        this.manageTaskCalls.set(id, { action, taskId, output: mergedOutput });
+        const sawNonTerminal = prev.sawNonTerminal === true || status === "pending" || status === "in_progress";
+        const mergedOutput = text ? mergeManageTaskOutput(prev.output, text, this._knownTaskIds(taskId), taskId) : prev.output;
+        let settled = status === "failed" ? true : (text ? false : (prev.settled ?? false));
 
         if (status !== "failed") {
-          if (status !== "pending" && status !== "in_progress") {
-            if (action === "kill" && status === "completed") {
+          if (status === "completed") {
+            settled = true;
+            if (action === "kill") {
               this._clearByTaskId(taskId, released);
             } else if (mergedOutput) {
+              this._observeManageTaskOutput(mergedOutput, taskId, released);
+            }
+          } else if (status === undefined && !sawNonTerminal) {
+            if (mergedOutput) {
+              settled = true;
               this._observeManageTaskOutput(mergedOutput, taskId, released);
             }
           }
           if (text) this._observeToolSystemMessage(text, released);
         }
+        this.manageTaskCalls.set(id, { action, taskId, sawNonTerminal, settled, output: mergedOutput });
         return finish();
       }
 
@@ -3939,12 +4224,20 @@ class AntigravityBackgroundCommandTracker {
     if (inputTaskId) {
       const envelopeTaskIds = extractTaskIdTokens(envelope, knownIds);
       const hasOtherTaskId = envelopeTaskIds.some((tid) => tid !== inputTaskId);
-      if (hasOtherTaskId || containsExactTaskId(envelope, inputTaskId)) {
+      if (hasOtherTaskId) {
         if (textIndicatesTaskTerminal(envelope, inputTaskId, knownIds)) {
           this._clearByTaskId(inputTaskId, released);
         }
-      } else if (ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(envelope) && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(envelope)) {
-        this._clearByTaskId(inputTaskId, released);
+      } else if (containsExactTaskId(envelope, inputTaskId)) {
+        const status = classifySingleTaskEnvelopeStatus(envelope);
+        if (textIndicatesTaskTerminal(envelope, inputTaskId, knownIds) || (status.terminal && !status.running)) {
+          this._clearByTaskId(inputTaskId, released);
+        }
+      } else {
+        const status = classifySingleTaskEnvelopeStatus(envelope);
+        if (status.terminal && !status.running) {
+          this._clearByTaskId(inputTaskId, released);
+        }
       }
       return;
     }
@@ -3956,11 +4249,12 @@ class AntigravityBackgroundCommandTracker {
         matched = true;
       }
     }
+    const cleanedEnvelope = stripNonStatusMetadataLines(envelope);
     if (!matched && !ANTIGRAVITY_EXPLICIT_TASK_ID_RE.test(envelope)
       && extractTaskIdTokens(envelope, knownIds).length === 0
       && this.pending.size === 1
-      && ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(envelope)
-      && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(envelope)) {
+      && ANTIGRAVITY_TASK_TERMINAL_STATUS_RE.test(cleanedEnvelope)
+      && !ANTIGRAVITY_TASK_RUNNING_STATUS_RE.test(cleanedEnvelope)) {
       const [onlyId, only] = [...this.pending.entries()][0]!;
       if (only.taskId === null) this._markCleared(onlyId, null, released);
     }

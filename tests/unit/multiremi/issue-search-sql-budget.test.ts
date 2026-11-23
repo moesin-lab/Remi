@@ -413,6 +413,13 @@ function seedEquivalenceFixture(f: PendingTurnTestFixture) {
   });
   setUpdatedAt(db, istanbulTitleIssue.id, "2026-10-07T06:00:00.000Z");
 
+  const istanbulDescIssue = f.createIssue({
+    workspaceId: "local",
+    title: "Neutral edge POP capacity",
+    description: "Description references \u0130stanbul region",
+  });
+  setUpdatedAt(db, istanbulDescIssue.id, "2026-10-07T06:15:00.000Z");
+
   const istanbulCommentIssue = f.createIssue({
     workspaceId: "local",
     title: "Neutral edge note",
@@ -496,6 +503,7 @@ function seedEquivalenceFixture(f: PendingTurnTestFixture) {
     kelvinTitleIssue,
     kelvinCommentIssue,
     istanbulTitleIssue,
+    istanbulDescIssue,
     istanbulCommentIssue,
     wsOpenControl,
     wsTabNewlineDone,
@@ -625,12 +633,36 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     const istanbulExactHit = assertMatchesOracle({ q: "\u0130stanbul", workspaceId: "local", includeCommentBodies: true });
     expect(istanbulExactHit.issues.map((item) => item.id)).toEqual([
       seeded.istanbulTitleIssue.id,
+      seeded.istanbulDescIssue.id,
       seeded.istanbulCommentIssue.id,
     ]);
     expect(istanbulExactHit.issues[0]?.matchSource).toBe("title");
-    expect(istanbulExactHit.issues[1]?.matchSource).toBe("comment");
+    expect(istanbulExactHit.issues[1]?.matchSource).toBe("description");
+    expect(istanbulExactHit.issues[2]?.matchSource).toBe("comment");
     const istanbulExactNoComments = assertMatchesOracle({ q: "\u0130stanbul", workspaceId: "local", includeCommentBodies: false });
-    expect(istanbulExactNoComments.issues.map((item) => item.id)).toEqual([seeded.istanbulTitleIssue.id]);
+    expect(istanbulExactNoComments.issues.map((item) => item.id)).toEqual([
+      seeded.istanbulTitleIssue.id,
+      seeded.istanbulDescIssue.id,
+    ]);
+
+    // Queries containing only combining dot above ('\u0307' or '\u0307stan', without 'i')
+    // still match 'İstanbul' via SQL pushdown because JS 'İ'.toLowerCase() === 'i\u0307'.
+    for (const dotQuery of ["\u0307", "\u0307stan"]) {
+      const dotWithComments = assertMatchesOracle({ q: dotQuery, workspaceId: "local", includeCommentBodies: true });
+      expect(dotWithComments.issues.map((item) => item.id)).toEqual([
+        seeded.istanbulTitleIssue.id,
+        seeded.istanbulDescIssue.id,
+        seeded.istanbulCommentIssue.id,
+      ]);
+      expect(dotWithComments.issues.map((item) => item.matchSource)).toEqual(["title", "description", "comment"]);
+
+      const dotNoComments = assertMatchesOracle({ q: dotQuery, workspaceId: "local", includeCommentBodies: false });
+      expect(dotNoComments.issues.map((item) => item.id)).toEqual([
+        seeded.istanbulTitleIssue.id,
+        seeded.istanbulDescIssue.id,
+      ]);
+      expect(dotNoComments.issues.map((item) => item.matchSource)).toEqual(["title", "description"]);
+    }
 
     // Whitespace-padded raw closed statuses (\t, \n, \r, \v, \f) align with normalizeIssueStatus (.trim())
     const wsClosedExcluded = assertMatchesOracle({ q: "WSCLOSED-99", workspaceId: "local", includeClosed: false });
@@ -705,6 +737,200 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     expect(fallbackPath.issues[0]?.matchSource).toBe("comment");
     expect(fallbackPath.issues[0]?.matchedCommentSnippet).toContain("later seq 2 winner snippet");
     expect(fallbackPath.issues[0]?.matchedSnippet).toBe(fallbackPath.issues[0]?.matchedCommentSnippet);
+  }, 30_000);
+
+  it("filters all 25 ECMAScript whitespace-padded closed statuses and SQLite non-text archived_at identically to legacy oracle", () => {
+    const f = fixture();
+    const ecmaWhitespaceChars = [
+      "\t", "\n", "\v", "\f", "\r", " ",
+      "\u00a0", "\u1680",
+      "\u2000", "\u2001", "\u2002", "\u2003", "\u2004", "\u2005", "\u2006", "\u2007", "\u2008", "\u2009", "\u200a",
+      "\u2028", "\u2029", "\u202f", "\u205f", "\u3000", "\ufeff",
+    ];
+    expect(ecmaWhitespaceChars).toHaveLength(25);
+
+    const openControl = f.createIssue({
+      workspaceId: "local",
+      title: "UNIWS-25 open control",
+      description: "Must stay visible when includeClosed=false",
+    });
+    setUpdatedAt(f.db, openControl.id, "2026-10-12T00:00:00.000Z");
+
+    const archivedUnicodeClosed = f.createIssue({
+      workspaceId: "local",
+      title: "UNIWS-25 archived nbsp bom done",
+      description: "Archived closed row stays visible even when includeClosed=false",
+    });
+    f.db.run("UPDATE multiremi_issues SET status = ?, archived_at = ? WHERE id = ?", [
+      "\u00a0\u3000done\ufeff",
+      "2026-10-12T00:01:00.000Z",
+      archivedUnicodeClosed.id,
+    ]);
+    setUpdatedAt(f.db, archivedUnicodeClosed.id, "2026-10-12T00:01:00.000Z");
+
+    const unarchivedClosedIds: string[] = [];
+    ecmaWhitespaceChars.forEach((wsChar, idx) => {
+      const closedStatus = idx % 2 === 0 ? "done" : "cancelled";
+      const issue = f.createIssue({
+        workspaceId: "local",
+        title: `UNIWS-25 padded ${closedStatus} #${idx}`,
+        description: `Wrapped with U+${wsChar.codePointAt(0)!.toString(16).toUpperCase()}`,
+      });
+      f.db.run("UPDATE multiremi_issues SET status = ? WHERE id = ?", [`${wsChar}${closedStatus}${wsChar}`, issue.id]);
+      setUpdatedAt(f.db, issue.id, `2026-10-12T01:${String(idx).padStart(2, "0")}:00.000Z`);
+      unarchivedClosedIds.push(issue.id);
+    });
+
+    const emptyArchivedCancelled = f.createIssue({
+      workspaceId: "local",
+      title: "UNIWS-25 empty-string archived_at cancelled",
+      description: "Empty string archived_at is falsy in !issue.archivedAt and must not exempt closed row",
+    });
+    f.db.run("UPDATE multiremi_issues SET status = ?, archived_at = ? WHERE id = ?", [
+      "\u3000cancelled\u202f",
+      "",
+      emptyArchivedCancelled.id,
+    ]);
+    setUpdatedAt(f.db, emptyArchivedCancelled.id, "2026-10-12T01:59:00.000Z");
+    unarchivedClosedIds.push(emptyArchivedCancelled.id);
+
+    if (backend === "SQLite") {
+      // Non-text SQLite BLOB stored in TEXT column archived_at: SQLite TEXT affinity preserves BLOBs,
+      // and baseline nullableString(row.archived_at) returns null for Uint8Array so !issue.archivedAt is true.
+      const blobArchivedDone = f.createIssue({
+        workspaceId: "local",
+        title: "UNIWS-25 sqlite blob archived_at done",
+        description: "SQLite BLOB archived_at must not exempt closed row",
+      });
+      f.db.run("UPDATE multiremi_issues SET status = ?, archived_at = ? WHERE id = ?", [
+        "\u00a0done\ufeff",
+        new Uint8Array([50, 48, 50, 54]),
+        blobArchivedDone.id,
+      ]);
+      setUpdatedAt(f.db, blobArchivedDone.id, "2026-10-12T02:00:00.000Z");
+      unarchivedClosedIds.push(blobArchivedDone.id);
+    }
+
+    for (const includeCommentBodies of [true, false]) {
+      const closedExcludedExpected = legacySearchIssuesOracle(f.store, f.db, {
+        q: "UNIWS-25",
+        workspaceId: "local",
+        includeClosed: false,
+        includeCommentBodies,
+        limit: 50,
+      });
+      const closedExcludedActual = f.store.searchIssues({
+        q: "UNIWS-25",
+        workspaceId: "local",
+        includeClosed: false,
+        includeCommentBodies,
+        limit: 50,
+      });
+      expect(closedExcludedActual).toEqual(closedExcludedExpected);
+      expect(closedExcludedActual.issues.map((item) => item.id)).toEqual([
+        archivedUnicodeClosed.id,
+        openControl.id,
+      ]);
+
+      const closedIncludedExpected = legacySearchIssuesOracle(f.store, f.db, {
+        q: "UNIWS-25",
+        workspaceId: "local",
+        includeClosed: true,
+        includeCommentBodies,
+        limit: 50,
+      });
+      const closedIncludedActual = f.store.searchIssues({
+        q: "UNIWS-25",
+        workspaceId: "local",
+        includeClosed: true,
+        includeCommentBodies,
+        limit: 50,
+      });
+      expect(closedIncludedActual).toEqual(closedIncludedExpected);
+      expect(closedIncludedActual.total).toBe(2 + unarchivedClosedIds.length);
+    }
+  }, 30_000);
+
+  it("matches legacy tie-breaking for equal Date.parse(updatedAt) timezone variants and identical timestamps across limit=1 paging", () => {
+    const f = fixture();
+
+    // Two comment-only matches with the exact same UTC instant (2026-10-15T12:00:00Z),
+    // written with different timezone offsets. Lexicographically "...14:00:00+02:00" > "...12:00:00Z",
+    // so baseline ORDER BY updated_at DESC + stable JS sort places offsetIssue before utcIssue
+    // even though utcIssue was inserted first (smaller rowid).
+    const commentUtcIssue = f.createIssue({
+      workspaceId: "local",
+      title: "Timezone comment tie A",
+      description: "Clean description",
+    });
+    f.store.createIssueComment(commentUtcIssue.id, { body: "TZTIE-COMMENT-888 café utc variant" });
+    setUpdatedAt(f.db, commentUtcIssue.id, "2026-10-15T12:00:00Z");
+
+    const commentOffsetIssue = f.createIssue({
+      workspaceId: "local",
+      title: "Timezone comment tie B",
+      description: "Clean description",
+    });
+    f.store.createIssueComment(commentOffsetIssue.id, { body: "TZTIE-COMMENT-888 café +02:00 variant" });
+    setUpdatedAt(f.db, commentOffsetIssue.id, "2026-10-15T14:00:00+02:00");
+
+    // Two title matches with the exact same UTC instant and different timezone spellings
+    const titleUtcIssue = f.createIssue({
+      workspaceId: "local",
+      title: "TZTIE-TITLE-888 café utc variant",
+      description: "Clean description",
+    });
+    setUpdatedAt(f.db, titleUtcIssue.id, "2026-10-16T08:00:00.000Z");
+
+    const titleOffsetIssue = f.createIssue({
+      workspaceId: "local",
+      title: "TZTIE-TITLE-888 café +03:00 variant",
+      description: "Clean description",
+    });
+    setUpdatedAt(f.db, titleOffsetIssue.id, "2026-10-16T11:00:00+03:00");
+
+    // Verify both SQL pushdown path and non-ASCII fallback path across limit=1 pagination
+    for (const input of [
+      { q: "TZTIE-COMMENT-888", includeCommentBodies: true },
+      { q: "TZTIE-COMMENT-888 café", includeCommentBodies: true },
+      { q: "TZTIE-TITLE-888", includeCommentBodies: true },
+      { q: "TZTIE-TITLE-888", includeCommentBodies: false },
+      { q: "TZTIE-TITLE-888 café", includeCommentBodies: false },
+    ]) {
+      const expectedFirst = input.q.includes("COMMENT") ? commentOffsetIssue.id : titleOffsetIssue.id;
+      const expectedSecond = input.q.includes("COMMENT") ? commentUtcIssue.id : titleUtcIssue.id;
+
+      const page0Expected = legacySearchIssuesOracle(f.store, f.db, { ...input, workspaceId: "local", limit: 1, offset: 0 });
+      const page0Actual = f.store.searchIssues({ ...input, workspaceId: "local", limit: 1, offset: 0 });
+      const page1Expected = legacySearchIssuesOracle(f.store, f.db, { ...input, workspaceId: "local", limit: 1, offset: 1 });
+      const page1Actual = f.store.searchIssues({ ...input, workspaceId: "local", limit: 1, offset: 1 });
+
+      expect(page0Actual).toEqual(page0Expected);
+      expect(page1Actual).toEqual(page1Expected);
+      expect(page0Actual.issues.map((item) => item.id)).toEqual([expectedFirst]);
+      expect(page1Actual.issues.map((item) => item.id)).toEqual([expectedSecond]);
+    }
+
+    if (backend === "SQLite") {
+      // Identical updated_at text: SQLite baseline ORDER BY updated_at DESC preserves rowid ASC
+      // even when the earlier-inserted row has a lexicographically larger id.
+      f.db.run(
+        `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
+         VALUES ('iss_zz_rowid_first', 9901, 'MUL-9901', 'ROWIDTIE-777 first inserted', NULL, 'todo', 'local', '2026-10-17T00:00:00.000Z', '2026-10-17T00:00:00.000Z')`,
+      );
+      f.db.run(
+        `INSERT INTO multiremi_issues (id, issue_number, issue_key, title, description, status, workspace_id, created_at, updated_at)
+         VALUES ('iss_aa_rowid_second', 9902, 'MUL-9902', 'ROWIDTIE-777 second inserted', NULL, 'todo', 'local', '2026-10-17T00:00:00.000Z', '2026-10-17T00:00:00.000Z')`,
+      );
+      const rowidPage0Expected = legacySearchIssuesOracle(f.store, f.db, { q: "ROWIDTIE-777", workspaceId: "local", limit: 1, offset: 0 });
+      const rowidPage0Actual = f.store.searchIssues({ q: "ROWIDTIE-777", workspaceId: "local", limit: 1, offset: 0 });
+      const rowidPage1Expected = legacySearchIssuesOracle(f.store, f.db, { q: "ROWIDTIE-777", workspaceId: "local", limit: 1, offset: 1 });
+      const rowidPage1Actual = f.store.searchIssues({ q: "ROWIDTIE-777", workspaceId: "local", limit: 1, offset: 1 });
+      expect(rowidPage0Actual).toEqual(rowidPage0Expected);
+      expect(rowidPage1Actual).toEqual(rowidPage1Expected);
+      expect(rowidPage0Actual.issues.map((item) => item.id)).toEqual(["iss_zz_rowid_first"]);
+      expect(rowidPage1Actual.issues.map((item) => item.id)).toEqual(["iss_aa_rowid_second"]);
+    }
   }, 30_000);
 
   it("keeps SQL query count O(1) across growing workspace and foreign issue counts", async () => {
@@ -833,6 +1059,15 @@ pendingTurnBackendTests("MUL-331 issue search SQL pushdown & query budget", (fix
     // Candidate query with comment bodies uses MATERIALIZED CTE + UNION ALL (never LEFT JOIN CTE inlining)
     expect(largeMissAfter.statements[0]).toContain("AS MATERIALIZED");
     expect(largeMissAfter.statements[0]).toContain("UNION ALL");
+    if (backend === "PostgreSQL") {
+      expect(largeMissAfter.statements[0]).toContain("BTRIM(");
+      expect(largeMissAfter.statements[0]).not.toContain("TYPEOF(");
+      expect(largeMissAfter.statements[0]).not.toContain("i.rowid");
+    } else {
+      expect(largeMissAfter.statements[0]).toContain("TRIM(");
+      expect(largeMissAfter.statements[0]).toContain("TYPEOF(i.archived_at) = 'text'");
+      expect(largeMissAfter.statements[0]).toContain("i.rowid AS issue_ord");
+    }
 
     // Every emitted SQL statement translates cleanly for PostgreSQL (numbered $N placeholders, intact ESCAPE '\' and AS MATERIALIZED).
     for (const sql of [...largeMissAfter.statements, ...largeCommentAfter.statements, ...largeMultiTermAfter.statements]) {

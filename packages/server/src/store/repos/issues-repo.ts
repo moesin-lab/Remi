@@ -1390,13 +1390,17 @@ export class IssuesRepo {
     const terms = extractSearchTerms(query);
     if (terms.length === 0) return { issues: [], total: 0 };
 
-    const closedFilterSql = includeClosed ? "" : ISSUE_SEARCH_EXCLUDE_UNARCHIVED_CLOSED_SQL;
+    const isPostgres = this.ctx.db.dialect === "postgres";
+    const closedFilterSql = includeClosed ? "" : buildIssueSearchExcludeUnarchivedClosedSql(isPostgres);
+    const issueOrdSql = isPostgres ? "0" : "i.rowid";
     const canPushLike = terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS && !terms.some(hasNonAsciiCasedChar);
     if (!canPushLike) {
       return this.searchIssuesWorkspaceScanFallback({
         query,
         workspaceId,
         closedFilterSql,
+        issueOrdSql,
+        isPostgres,
         includeCommentBodies,
         limit,
         offset,
@@ -1419,6 +1423,7 @@ export class IssuesRepo {
            SELECT
              i.id,
              i.updated_at,
+             ${issueOrdSql} AS issue_ord,
              CASE
                WHEN (${keyLikeSql}) THEN 0
                WHEN (${titleLikeSql}) THEN 1
@@ -1440,11 +1445,11 @@ export class IssuesRepo {
              AND l.deleted_at IS NULL
              AND (${commentLikeSql})
          )
-         SELECT id, updated_at, 0 AS has_comment_match, match_rank
+         SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank
          FROM issue_matches
          WHERE match_rank IS NOT NULL
          UNION ALL
-         SELECT i.id, i.updated_at, 1 AS has_comment_match, 3 AS match_rank
+         SELECT i.id, i.updated_at, ${issueOrdSql} AS issue_ord, 1 AS has_comment_match, 3 AS match_rank
          FROM matched_comments mc
          JOIN multiremi_issues i ON i.id = mc.issue_id`,
       ).all(...patterns, ...patterns, ...patterns, workspaceId, workspaceId, ...patterns) as Row[];
@@ -1454,6 +1459,7 @@ export class IssuesRepo {
            SELECT
              i.id,
              i.updated_at,
+             ${issueOrdSql} AS issue_ord,
              0 AS has_comment_match,
              CASE
                WHEN (${keyLikeSql}) THEN 0
@@ -1464,16 +1470,17 @@ export class IssuesRepo {
            FROM multiremi_issues i
            WHERE i.workspace_id = ?${closedFilterSql}
          )
-         SELECT id, updated_at, has_comment_match, match_rank
+         SELECT id, updated_at, issue_ord, has_comment_match, match_rank
          FROM scored
          WHERE match_rank IS NOT NULL`,
       ).all(...patterns, ...patterns, ...patterns, workspaceId) as Row[];
     }
 
-    const mergedById = new Map<string, { id: string; updatedAt: string; matchRank: number; hasCommentMatch: boolean }>();
+    const mergedById = new Map<string, IssueSearchCandidate>();
     for (const row of candidateRows) {
       const id = String(row.id);
       const updatedAt = String(row.updated_at);
+      const issueOrd = Number(row.issue_ord ?? 0);
       const matchRank = Number(row.match_rank);
       const hasCommentMatch = Number(row.has_comment_match) === 1;
       const existing = mergedById.get(id);
@@ -1481,12 +1488,10 @@ export class IssuesRepo {
         existing.matchRank = Math.min(existing.matchRank, matchRank);
         existing.hasCommentMatch = existing.hasCommentMatch || hasCommentMatch;
       } else {
-        mergedById.set(id, { id, updatedAt, matchRank, hasCommentMatch });
+        mergedById.set(id, { id, updatedAt, issueOrd, matchRank, hasCommentMatch });
       }
     }
-    const candidates = [...mergedById.values()].sort(
-      (left, right) => left.matchRank - right.matchRank || Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
-    );
+    const candidates = [...mergedById.values()].sort(compareIssueSearchCandidates);
 
     const total = candidates.length;
     const page = candidates.slice(offset, offset + limit);
@@ -1565,13 +1570,15 @@ export class IssuesRepo {
     query: string;
     workspaceId: string;
     closedFilterSql: string;
+    issueOrdSql: string;
+    isPostgres: boolean;
     includeCommentBodies: boolean;
     limit: number;
     offset: number;
   }): { issues: MultiremiIssueSearchResult[]; total: number } {
-    const { query, workspaceId, closedFilterSql, includeCommentBodies, limit, offset } = input;
+    const { query, workspaceId, closedFilterSql, issueOrdSql, isPostgres, includeCommentBodies, limit, offset } = input;
     const rows = this.ctx.db.query(
-      `SELECT id, issue_number, issue_key, title, description, updated_at
+      `SELECT i.id, i.issue_number, i.issue_key, i.title, i.description, i.updated_at, ${issueOrdSql} AS issue_ord
        FROM multiremi_issues i
        WHERE i.workspace_id = ?${closedFilterSql}
        ORDER BY i.updated_at DESC`,
@@ -1601,8 +1608,9 @@ export class IssuesRepo {
         }
       }
     }
-    const candidates: Array<{ id: string; matchRank: number; updatedAt: string }> = [];
-    for (const row of rows) {
+    const candidates: IssueSearchCandidate[] = [];
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]!;
       const id = String(row.id);
       const number = Number(row.issue_number ?? 0);
       const key = String(row.issue_key || (number > 0 ? formatIssueKey(number) : id));
@@ -1619,9 +1627,15 @@ export class IssuesRepo {
               ? "comment"
               : null;
       if (!matchSource) continue;
-      candidates.push({ id, matchRank: searchRank(matchSource), updatedAt: String(row.updated_at) });
+      candidates.push({
+        id,
+        matchRank: searchRank(matchSource),
+        updatedAt: String(row.updated_at),
+        issueOrd: isPostgres ? index : Number(row.issue_ord ?? 0),
+        hasCommentMatch: hasComment,
+      });
     }
-    candidates.sort((left, right) => left.matchRank - right.matchRank || Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
+    candidates.sort(compareIssueSearchCandidates);
     const total = candidates.length;
     const page = candidates.slice(offset, offset + limit);
     if (page.length === 0) return { issues: [], total };
@@ -6797,16 +6811,43 @@ const ISSUE_SEARCH_CLOSED_NORMALIZED_SQL = [...CLOSED_ISSUE_STATUSES]
   .map((status) => `'${status}'`)
   .join(", ");
 
-// Match JS String.prototype.trim() ASCII whitespace stripping on status before comparing
-// against normalized closed statuses (SQL single-arg TRIM() only strips 0x20 space).
-const ISSUE_SEARCH_NORMALIZED_STATUS_SQL =
-  "TRIM(" +
-  "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(i.status, 'todo'), '\t', ' '), '\n', ' '), '\r', ' '), '\v', ' '), '\f', ' ')" +
-  ")";
+// All 25 ECMAScript WhiteSpace + LineTerminator code points stripped by String.prototype.trim()
+// so SQL closed-status filtering matches normalizeIssueStatus(row.status) on SQLite and PostgreSQL.
+const ECMA_WHITESPACE_CHARS =
+  "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
 
-const ISSUE_SEARCH_EXCLUDE_UNARCHIVED_CLOSED_SQL =
-  ` AND (${ISSUE_SEARCH_NORMALIZED_STATUS_SQL} NOT IN (${ISSUE_SEARCH_CLOSED_NORMALIZED_SQL}) ` +
-  "OR (i.archived_at IS NOT NULL AND i.archived_at <> ''))";
+function buildIssueSearchExcludeUnarchivedClosedSql(isPostgres: boolean): string {
+  const normalizedStatusSql = isPostgres
+    ? `BTRIM(COALESCE(i.status, 'todo'), '${ECMA_WHITESPACE_CHARS}')`
+    : `TRIM(COALESCE(i.status, 'todo'), '${ECMA_WHITESPACE_CHARS}')`;
+  // Baseline toIssue(row) maps archivedAt via nullableString(row.archived_at), so only non-empty text
+  // counts as archived (non-text SQLite affinities such as BLOB evaluate as !issue.archivedAt).
+  const archivedExemptionSql = isPostgres
+    ? "(i.archived_at IS NOT NULL AND i.archived_at <> '')"
+    : "(TYPEOF(i.archived_at) = 'text' AND i.archived_at <> '')";
+  return ` AND (${normalizedStatusSql} NOT IN (${ISSUE_SEARCH_CLOSED_NORMALIZED_SQL}) OR ${archivedExemptionSql})`;
+}
+
+interface IssueSearchCandidate {
+  id: string;
+  updatedAt: string;
+  issueOrd: number;
+  matchRank: number;
+  hasCommentMatch: boolean;
+}
+
+function compareIssueSearchCandidates(left: IssueSearchCandidate, right: IssueSearchCandidate): number {
+  const rankDiff = left.matchRank - right.matchRank;
+  if (rankDiff !== 0) return rankDiff;
+  const timeDiff = Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
+  if (timeDiff) return timeDiff;
+  // Tie-breaker matching baseline listIssues({ includeArchived: true }) (`ORDER BY updated_at DESC`
+  // followed by stable JS sort): descending raw updated_at code-unit order, then SQLite rowid ASC.
+  if (right.updatedAt !== left.updatedAt) return right.updatedAt > left.updatedAt ? 1 : -1;
+  const ordDiff = left.issueOrd - right.issueOrd;
+  if (ordDiff !== 0) return ordDiff;
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+}
 
 const ISSUE_SEARCH_MAX_SQL_TERMS = 50;
 
@@ -6827,16 +6868,16 @@ function hasNonAsciiCasedChar(value: string): boolean {
 
 function buildSearchLikeAllTermsSql(columnSql: string, terms: string[]): string {
   // Across all Unicode (U+0080..U+10FFFF), ECMAScript String.prototype.toLowerCase()
-  // folds only two non-ASCII code points into ASCII letters:
+  // folds only two non-ASCII code points into ASCII or uncased characters:
   //   - U+212A ('K' Kelvin Sign) -> 'k' (SQLite LOWER() leaves U+212A unchanged)
   //   - U+0130 ('İ' Latin Capital I With Dot Above) -> 'i\u0307' (PG en_US.utf8 LOWER() drops '\u0307' -> 'i')
-  // Normalizing those two code points before LOWER() keeps both SQLite and PostgreSQL
+  // Expanding U+0130 whenever any term contains 'i' OR '\u0307' keeps both SQLite and PostgreSQL
   // exact-equivalent with JS searchMatch() without losing O(1) SQL pushdown.
   let normalizedColumnSql = columnSql;
   if (terms.some((term) => term.includes("k"))) {
     normalizedColumnSql = `REPLACE(${normalizedColumnSql}, '\u212A', 'k')`;
   }
-  if (terms.some((term) => term.includes("i"))) {
+  if (terms.some((term) => term.includes("i") || term.includes("\u0307"))) {
     normalizedColumnSql = `REPLACE(${normalizedColumnSql}, '\u0130', 'i\u0307')`;
   }
   return terms.map(() => `LOWER(${normalizedColumnSql}) LIKE ? ESCAPE '\\'`).join(" AND ");

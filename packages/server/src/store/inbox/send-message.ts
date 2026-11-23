@@ -70,9 +70,12 @@ function deliveryTurnMatchSql(ctx: StoreContext, column: string, turnId: string)
 export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,targetId:string,limit=pairRoundTripLimit()):number {
   const source=readTurnRow(ctx.db, sourceId);
   if(!source)return 0;
-  const lastMember=ctx.db.query(`SELECT id, seq, created_at FROM multiremi_conversation_log
-    WHERE session_id=? AND kind='message' AND sender_type='member' AND deleted_at IS NULL
-    ORDER BY seq DESC LIMIT 1`).get(source.session_id) as { id: string; seq: number; created_at: string } | null;
+  const memberCutoffRow = ctx.db.query(`SELECT MAX(seq) AS seq, MAX(created_at) AS created_at
+    FROM multiremi_conversation_log
+    WHERE session_id=? AND sender_type='member'`).get(source.session_id) as { seq: number | null; created_at: string | null } | null;
+  const hasMemberCutoff = memberCutoffRow?.seq != null && memberCutoffRow?.created_at != null;
+  const lastMemberSeq = hasMemberCutoff ? Number(memberCutoffRow!.seq) : null;
+  const lastMemberMaxAt = hasMemberCutoff ? String(memberCutoffRow!.created_at) : null;
 
   interface HopStep {
     turnId: string;
@@ -133,15 +136,6 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
       clauses.push('created_at<=?');
       params.push(step.beforeCreatedAt);
     }
-    if (lastMember) {
-      if (turn.session_id === source.session_id) {
-        clauses.push('seq>?');
-        params.push(Number(lastMember.seq));
-      } else {
-        clauses.push('created_at>=?');
-        params.push(lastMember.created_at);
-      }
-    }
 
     const matchBranches: string[] = [];
     const matchParams: Array<string | number> = [];
@@ -188,7 +182,7 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
     type ParentReqRow = {
       id: string; session_id: string; seq: number; created_at: string; task_id: string; sender_id: string; metadata: string | null;
     };
-    if (!lastMember || turn.session_id === source.session_id) {
+    if (!hasMemberCutoff) {
       return (ctx.db.query(`SELECT id, session_id, seq, created_at, task_id, sender_id, metadata
         FROM multiremi_conversation_log
         WHERE ${clauses.join(' AND ')}
@@ -201,13 +195,17 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
       ORDER BY seq DESC`).all(...params) as ParentReqRow[];
     for (const row of rows) {
       const reqMeta = parseJson(row.metadata, {}) as Record<string, unknown>;
-      if (
-        typeof reqMeta.source_session_id === 'string'
-        && reqMeta.source_session_id === source.session_id
-        && typeof reqMeta.source_session_seq === 'number'
-      ) {
-        if (reqMeta.source_session_seq >= Number(lastMember.seq)) return row;
-      } else if (row.created_at > lastMember.created_at) {
+      const hasReqWatermark = typeof reqMeta.source_session_id === 'string'
+        && typeof reqMeta.source_session_seq === 'number';
+      if (turn.session_id === source.session_id) {
+        if (hasReqWatermark) {
+          if (Number(row.seq) > lastMemberSeq!) return row;
+        } else if (row.created_at > lastMemberMaxAt!) {
+          return row;
+        }
+      } else if (hasReqWatermark && reqMeta.source_session_id === source.session_id) {
+        if (Number(reqMeta.source_session_seq) >= lastMemberSeq!) return row;
+      } else if (row.created_at > lastMemberMaxAt!) {
         return row;
       }
     }
@@ -223,30 +221,34 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
         } | null
       : null;
     const trigMeta = trigger ? parseJson(trigger.metadata, {}) as Record<string, unknown> : {};
-    const hasExplicitSourceSeqInSourceSession = Boolean(
-      lastMember
+    const hasTriggerWatermark = Boolean(
+      trigger
       && typeof trigMeta.source_session_id === 'string'
-      && trigMeta.source_session_id === source.session_id
       && typeof trigMeta.source_session_seq === 'number',
     );
-    const trigSrcSession = typeof trigMeta.source_session_id === 'string'
-      ? trigMeta.source_session_id
-      : (trigger?.session_id ?? null);
-    const trigSrcSeq = typeof trigMeta.source_session_seq === 'number'
-      ? trigMeta.source_session_seq
-      : (trigger ? Number(trigger.seq) : null);
+    const hasExplicitSourceSeqInSourceSession = Boolean(
+      hasMemberCutoff
+      && hasTriggerWatermark
+      && trigMeta.source_session_id === source.session_id,
+    );
+    const trigSrcSession = hasTriggerWatermark
+      ? (trigMeta.source_session_id as string)
+      : null;
+    const trigSrcSeq = hasTriggerWatermark
+      ? (trigMeta.source_session_seq as number)
+      : null;
 
     if (turn.delegation_id && turn.delegated_by_agent_id) {
-      if (lastMember) {
+      if (hasMemberCutoff) {
         if (turn.session_id === source.session_id) {
-          if (trigger && trigger.session_id === source.session_id) {
-            if (Number(trigger.seq) <= Number(lastMember.seq)) return null;
-          } else if (turn.created_at <= lastMember.created_at) {
+          if (trigger && trigger.session_id === source.session_id && hasTriggerWatermark) {
+            if (Number(trigger.seq) <= lastMemberSeq!) return null;
+          } else if (turn.created_at <= lastMemberMaxAt!) {
             return null;
           }
         } else if (hasExplicitSourceSeqInSourceSession) {
-          if (Number(trigMeta.source_session_seq) < Number(lastMember.seq)) return null;
-        } else if (turn.created_at <= lastMember.created_at) {
+          if (Number(trigMeta.source_session_seq) < lastMemberSeq!) return null;
+        } else if (turn.created_at <= lastMemberMaxAt!) {
           return null;
         }
       }
@@ -267,12 +269,14 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
       if (parentReq) {
         prevReqSeqByTurn.set(turn.id, Number(parentReq.seq));
         const reqMeta = parseJson(parentReq.metadata, {}) as Record<string, unknown>;
-        const reqSrcSession = typeof reqMeta.source_session_id === 'string'
-          ? reqMeta.source_session_id
-          : parentReq.session_id;
-        const reqSrcSeq = typeof reqMeta.source_session_seq === 'number'
-          ? reqMeta.source_session_seq
-          : Number(parentReq.seq);
+        const hasReqWatermark = typeof reqMeta.source_session_id === 'string'
+          && typeof reqMeta.source_session_seq === 'number';
+        const reqSrcSession = hasReqWatermark
+          ? (reqMeta.source_session_id as string)
+          : null;
+        const reqSrcSeq = hasReqWatermark
+          ? (reqMeta.source_session_seq as number)
+          : null;
         return {
           id: `parent_req:${parentReq.id}`,
           agentId: turn.agent_id,
@@ -475,7 +479,6 @@ export function sendMessageWithinTransaction(ctx:StoreContext,input:SendMessageI
     input.sender.type === 'agent'
     && input.message_kind === 'request'
     && source
-    && source.session_id !== sessionId
     && (policy.reason === 'agent_dispatch' || policy.reason === 'to_parent_owner')
   ) {
     metadata.source_session_id = source.session_id;

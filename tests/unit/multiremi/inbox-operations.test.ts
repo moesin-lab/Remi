@@ -1011,6 +1011,217 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
     }
   },{timeout:30_000});
 
+  it('MUL-335: receiver-side legacy vs new same-ms cutoff, deleted member comment tombstone, and 1ms wall-clock rollback',()=>{
+    const prevLimit=process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+    process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+    let fakeIso='2026-11-23T08:10:00.005Z';
+    const isoSpy=spyOn(Date.prototype,'toISOString').mockImplementation(()=>fakeIso);
+    try{
+      const {store,db}=fixture();
+      const ctx=new StoreContext(db,()=>store);
+      const makePair=(tag:string)=>{
+        const parentRuntime=store.registerRuntime({name:`Parent p2 ${tag}`,provider:'codex',workspaceId:'local'});
+        const childRuntime=store.registerRuntime({name:`Child p2 ${tag}`,provider:'codex',workspaceId:'local'});
+        const parentAgent=store.createAgent({name:`Parent p2 ${tag}`,provider:'codex',runtimeId:parentRuntime.id});
+        const childAgent=store.createAgent({name:`Child p2 ${tag}`,provider:'codex',runtimeId:childRuntime.id});
+        return {parentRuntime,childRuntime,parentAgent,childAgent};
+      };
+
+      // ① Receiver-side legacy cross-session dispatch vs new writer in session B at same ms (both orders):
+      //    - Legacy row (no source_session_id/source_session_seq) falls back to created_at <= MAX(member.created_at) => 1 hop in both orders.
+      //    - New writer records source_session_* on all agent request dispatches (including same-session) => member_before_dispatch = 2 hops (blocked), dispatch_before_member = 1 hop (allowed).
+      for(const writer of ['legacy','new'] as const){
+        for(const order of ['member_before_dispatch','dispatch_before_member'] as const){
+          fakeIso='2026-11-23T08:10:00.005Z';
+          const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair(`rx-${writer}-${order}`);
+          const parent=createResponsibleTestIssue(store,{title:`Parent ${writer} ${order}`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+          const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+          const childB=createResponsibleTestIssue(store,{title:`Child B ${writer} ${order}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+          const childBMain=store.getOrCreateDefaultIssueSession(childB.id);
+
+          const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start parent'});
+          const p0=store.getTurn(pStart.turn_id!)!;
+          expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+          store.startTask(p0.current_attempt_id!);
+
+          let c1Turn:NonNullable<ReturnType<typeof store.getTurn>>;
+          let c1MsgId:string;
+          if(order==='member_before_dispatch'){
+            store.sendMessage({session_id:childBMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:'Member in B before dispatch'});
+            const disp=store.sendMessage({session_id:childBMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Cross-session dispatch to B'});
+            c1MsgId=disp.message.id;
+            c1Turn=store.getTurn(disp.turn_id!)!;
+          }else{
+            const disp=store.sendMessage({session_id:childBMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Cross-session dispatch to B'});
+            c1MsgId=disp.message.id;
+            c1Turn=store.getTurn(disp.turn_id!)!;
+            store.sendMessage({session_id:childBMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:'Member in B after dispatch'});
+          }
+          if(writer==='legacy'){
+            const rawMeta=JSON.parse(String(db.query('SELECT metadata FROM multiremi_conversation_log WHERE id=?').get(c1MsgId).metadata??'{}'));
+            delete rawMeta.source_session_id;
+            delete rawMeta.source_session_seq;
+            db.run('UPDATE multiremi_conversation_log SET metadata=? WHERE id=?',[JSON.stringify(rawMeta),c1MsgId]);
+          }
+
+          // Advance wall clock to T1; child dispatches parentAgent inside session B (same-session dispatch must also carry watermark).
+          fakeIso='2026-11-23T08:10:01.000Z';
+          expect(store.claimTask(childRuntime.id)?.id).toBe(c1Turn.current_attempt_id!);
+          store.startTask(c1Turn.current_attempt_id!);
+          const headBeforeSameSession=store.getConversationLogHead(childBMain.id)!.headSeq;
+          const sameSessionDisp=store.sendMessage({session_id:childBMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c1Turn.id,to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Same-session dispatch to parent agent in B'});
+          expect(sameSessionDisp.wake_reason).toBe('agent_dispatch');
+          expect(sameSessionDisp.message.metadata.source_session_id).toBe(childBMain.id);
+          expect(sameSessionDisp.message.metadata.source_session_seq).toBe(headBeforeSameSession);
+          const pInB=store.getTurn(sameSessionDisp.turn_id!)!;
+          store.completeTask(c1Turn.current_attempt_id!,{output:'Child done'});
+          store.completeTask(p0.current_attempt_id!,{output:'Parent done'});
+          for(const pending of store.listTurns({workspace_id:'local',session_id:parentMain.id}).filter(t=>t.status==='pending')){
+            store.cancelTask(pending.current_attempt_id!);
+          }
+          expect(store.claimTask(parentRuntime.id)?.id).toBe(pInB.current_attempt_id!);
+          store.startTask(pInB.current_attempt_id!);
+
+          const expectBlocked=writer==='new'&&order==='member_before_dispatch';
+          expect(countMessageDelegationPairHops(ctx,pInB.id,childAgent.id,1)).toBe(expectBlocked?2:1);
+          const nextDisp=store.sendMessage({session_id:childBMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:pInB.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:`Next dispatch (${writer}/${order})`});
+          if(expectBlocked){
+            expect(nextDisp.wake_applied).toBe('next_turn');
+            expect(nextDisp.wake_reason).toBe('pair_round_trip_limit');
+            expect(nextDisp.turn_id).toBeUndefined();
+          }else{
+            expect(nextDisp.wake_applied).toBe('now');
+            expect(nextDisp.wake_reason).toBe('agent_dispatch');
+            expect(nextDisp.turn_id).toBeTruthy();
+          }
+        }
+      }
+
+      // ② Deleted member comment via public store.deleteIssueComment retains tombstone cutoff (both new and legacy rows).
+      for(const writer of ['new','legacy'] as const){
+        fakeIso='2026-11-23T08:20:00.000Z';
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair(`deleted-member-${writer}`);
+        const parent=createResponsibleTestIssue(store,{title:`Deleted Member Parent ${writer}`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:`Deleted Member Child ${writer}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start parent'});
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+
+        const disp1=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch 1'});
+        const c1=store.getTurn(disp1.turn_id!)!;
+        if(writer==='legacy'){
+          const rawMeta=JSON.parse(String(db.query('SELECT metadata FROM multiremi_conversation_log WHERE id=?').get(disp1.message.id).metadata??'{}'));
+          delete rawMeta.source_session_id;
+          delete rawMeta.source_session_seq;
+          db.run('UPDATE multiremi_conversation_log SET metadata=? WHERE id=?',[JSON.stringify(rawMeta),disp1.message.id]);
+        }
+
+        // Member posts comment in parentMain, child replies, then member comment is soft-deleted via public API.
+        fakeIso='2026-11-23T08:20:01.000Z';
+        const memberComment=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:'Member intervention to be deleted'});
+
+        fakeIso='2026-11-23T08:20:02.000Z';
+        expect(store.claimTask(childRuntime.id)?.id).toBe(c1.current_attempt_id!);
+        store.startTask(c1.current_attempt_id!);
+        const childReq=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Child replies after member comment'});
+        expect(childReq.wake_reason).toBe('to_parent_owner');
+        if(writer==='legacy'){
+          const rawMeta=JSON.parse(String(db.query('SELECT metadata FROM multiremi_conversation_log WHERE id=?').get(childReq.message.id).metadata??'{}'));
+          delete rawMeta.source_session_id;
+          delete rawMeta.source_session_seq;
+          db.run('UPDATE multiremi_conversation_log SET metadata=? WHERE id=?',[JSON.stringify(rawMeta),childReq.message.id]);
+        }
+        store.completeTask(c1.current_attempt_id!,{output:'Child done'});
+
+        store.deleteIssueComment(memberComment.message.id);
+        expect(countMessageDelegationPairHops(ctx,p0.id,childAgent.id,1)).toBe(1);
+        const disp2=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:`Dispatch 2 after deleted member comment (${writer})`});
+        expect(disp2.wake_applied).toBe('now');
+        expect(disp2.wake_reason).toBe('agent_dispatch');
+        expect(disp2.turn_id).toBeTruthy();
+      }
+
+      // ③ 1ms wall-clock rollback: child to_parent_owner request carrying valid source_session_seq
+      //    still counts 2 hops and hits pair_round_trip_limit at L=1 (both child->parent and parent->child directions).
+      {
+        fakeIso='2026-11-23T08:30:00.005Z';
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair('rollback-child-source');
+        const parent=createResponsibleTestIssue(store,{title:'Rollback Parent (child source)',status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:'Rollback Child (child source)',parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start parent at .005Z'});
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+
+        const cStart=store.sendMessage({session_id:childMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:childAgent.id},message_kind:'request',wake_requested:'now',body_md:'Member starts child at .005Z'});
+        const c1=store.getTurn(cStart.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(c1.current_attempt_id!);
+        store.startTask(c1.current_attempt_id!);
+
+        // Wall clock rolls back by 1ms to .004Z (< lastMemberMaxAt .005Z).
+        fakeIso='2026-11-23T08:30:00.004Z';
+        const req1=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Child request at .004Z rollback'});
+        expect(req1.wake_reason).toBe('to_parent_owner');
+        expect(req1.message.metadata.source_session_id).toBe(childMain.id);
+        expect(req1.message.metadata.source_session_seq).toBeGreaterThanOrEqual(cStart.message.seq);
+        store.completeTask(c1.current_attempt_id!,{output:'Child c1 done'});
+
+        const disp2=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Parent dispatches c2 at .004Z rollback'});
+        expect(disp2.wake_reason).toBe('agent_dispatch');
+        const c2=store.getTurn(disp2.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(c2.current_attempt_id!);
+        store.startTask(c2.current_attempt_id!);
+
+        // From c2 (in childMain), walking c2 -> p0 (via req1 at .004Z) must NOT drop req1 on SQL created_at prefilter => 2 hops blocked.
+        expect(countMessageDelegationPairHops(ctx,c2.id,parentAgent.id,1)).toBe(2);
+        const blockedReq=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c2.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Child c2 request must hit L=1 despite 1ms clock rollback'});
+        expect(blockedReq.wake_applied).toBe('next_turn');
+        expect(blockedReq.wake_reason).toBe('pair_round_trip_limit');
+        expect(blockedReq.turn_id).toBeUndefined();
+      }
+
+      {
+        fakeIso='2026-11-23T08:31:00.005Z';
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair('rollback-parent-source');
+        const parent=createResponsibleTestIssue(store,{title:'Rollback Parent (parent source)',status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:'Rollback Child (parent source)',parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start parent at .005Z'});
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+
+        // Wall clock rolls back by 1ms to .004Z.
+        fakeIso='2026-11-23T08:31:00.004Z';
+        const d1=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Dispatch c1 at .004Z rollback'});
+        const c1=store.getTurn(d1.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(c1.current_attempt_id!);
+        store.startTask(c1.current_attempt_id!);
+        store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:c1.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Child request at .004Z rollback'});
+        store.completeTask(c1.current_attempt_id!,{output:'Child c1 done'});
+
+        expect(countMessageDelegationPairHops(ctx,p0.id,childAgent.id,1)).toBe(2);
+        const blockedDisp=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Parent dispatch 2 must hit L=1 despite 1ms clock rollback'});
+        expect(blockedDisp.wake_applied).toBe('next_turn');
+        expect(blockedDisp.wake_reason).toBe('pair_round_trip_limit');
+        expect(blockedDisp.turn_id).toBeUndefined();
+      }
+    }finally{
+      isoSpy.mockRestore();
+      if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+      else process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=prevLimit;
+    }
+  },{timeout:30_000});
+
   it('MUL-335: sibling request via another issue child parent_owner role and grandchild --to delegator preserve delegation semantics',()=>{
     const {store}=fixture();
     const rtA=store.registerRuntime({name:'RT A',provider:'codex',workspaceId:'local'});

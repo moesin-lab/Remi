@@ -185,23 +185,33 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
     clauses.push(`(${matchBranches.join(' OR ')})`);
     params.push(...matchParams);
 
-    const row = (ctx.db.query(`SELECT id, session_id, seq, created_at, task_id, sender_id, metadata
+    type ParentReqRow = {
+      id: string; session_id: string; seq: number; created_at: string; task_id: string; sender_id: string; metadata: string | null;
+    };
+    if (!lastMember || turn.session_id === source.session_id) {
+      return (ctx.db.query(`SELECT id, session_id, seq, created_at, task_id, sender_id, metadata
+        FROM multiremi_conversation_log
+        WHERE ${clauses.join(' AND ')}
+        ORDER BY seq DESC LIMIT 1`).get(...params) as ParentReqRow | null) ?? null;
+    }
+
+    const rows = ctx.db.query(`SELECT id, session_id, seq, created_at, task_id, sender_id, metadata
       FROM multiremi_conversation_log
       WHERE ${clauses.join(' AND ')}
-      ORDER BY seq DESC LIMIT 1`).get(...params) as {
-        id: string; session_id: string; seq: number; created_at: string; task_id: string; sender_id: string; metadata: string | null;
-      } | null) ?? null;
-    if (row && lastMember && turn.session_id !== source.session_id) {
+      ORDER BY seq DESC`).all(...params) as ParentReqRow[];
+    for (const row of rows) {
       const reqMeta = parseJson(row.metadata, {}) as Record<string, unknown>;
       if (
-        reqMeta.source_session_id === source.session_id
+        typeof reqMeta.source_session_id === 'string'
+        && reqMeta.source_session_id === source.session_id
         && typeof reqMeta.source_session_seq === 'number'
-        && reqMeta.source_session_seq < Number(lastMember.seq)
       ) {
-        return null;
+        if (reqMeta.source_session_seq >= Number(lastMember.seq)) return row;
+      } else if (row.created_at > lastMember.created_at) {
+        return row;
       }
     }
-    return row;
+    return null;
   };
 
   const resolveNode = (step: HopStep) => {
@@ -213,6 +223,12 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
         } | null
       : null;
     const trigMeta = trigger ? parseJson(trigger.metadata, {}) as Record<string, unknown> : {};
+    const hasExplicitSourceSeqInSourceSession = Boolean(
+      lastMember
+      && typeof trigMeta.source_session_id === 'string'
+      && trigMeta.source_session_id === source.session_id
+      && typeof trigMeta.source_session_seq === 'number',
+    );
     const trigSrcSession = typeof trigMeta.source_session_id === 'string'
       ? trigMeta.source_session_id
       : (trigger?.session_id ?? null);
@@ -228,9 +244,9 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
           } else if (turn.created_at <= lastMember.created_at) {
             return null;
           }
-        } else if (trigSrcSession === source.session_id && trigSrcSeq !== null) {
-          if (trigSrcSeq < Number(lastMember.seq)) return null;
-        } else if (turn.created_at < lastMember.created_at) {
+        } else if (hasExplicitSourceSeqInSourceSession) {
+          if (Number(trigMeta.source_session_seq) < Number(lastMember.seq)) return null;
+        } else if (turn.created_at <= lastMember.created_at) {
           return null;
         }
       }

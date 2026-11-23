@@ -205,6 +205,48 @@ pendingTurnBackendTests('MUL-506 Issue derivation and read progress',fixture=>{
     expect(turnsAndPendingWorkQueries.length).toBeLessThanOrEqual(2);
     expect(turnsAndPendingWorkQueries.filter((sql)=>sql.includes('WITH pending_checks'))).toHaveLength(1);
   });
+  it('MUL-335: blocked Issue with 505 independent pending notification sessions avoids SQLITE_MAX_COMPOUND_SELECT and transitions to todo when 505th coalesces a request',()=>{
+    const {store,db}=fixture();
+    const agent=store.createAgent({name:'High-fanout Owner',provider:'codex'});
+    const issue=store.createIssue({title:'505 pending sessions',status:'blocked',assigneeType:'agent',assigneeId:agent.id});
+
+    const sessions=[store.getOrCreateDefaultIssueSession(issue.id)];
+    for(let i=1;i<505;i++){
+      sessions.push(store.createIssueSession(issue.id,{title:`Notice session ${i}`,inheritMode:'none'}));
+    }
+    const pendingTurnIds:string[]=[];
+    for(let i=0;i<sessions.length;i++){
+      const sent=store.sendMessage({
+        session_id:sessions[i]!.id,
+        sender:{type:'platform',id:null},
+        to:{type:'agent',ref:agent.id},
+        message_kind:'status',
+        wake_requested:'now',
+        body_md:`Platform status notice #${i+1}`,
+      });
+      expect(sent.wake_reason).toBe('platform_to_owner');
+      expect(sent.turn_id).toBeTruthy();
+      pendingTurnIds.push(sent.turn_id!);
+    }
+    expect(store.getIssue(issue.id)?.status).toBe('blocked');
+    const pendingCountRow=db.query("SELECT COUNT(*) AS cnt FROM multiremi_turns WHERE issue_id=? AND status='pending'").get(issue.id) as {cnt:number};
+    expect(Number(pendingCountRow.cnt)).toBe(505);
+
+    const lastSession=sessions[504]!;
+    const mergedReq=store.sendMessage({
+      session_id:lastSession.id,
+      sender:{type:'member',id:'mem_local_local'},
+      to:{type:'agent',ref:agent.id},
+      message_kind:'request',
+      wake_requested:'now',
+      body_md:'Work request coalesced into 505th pending session',
+    });
+    expect(mergedReq.wake_reason).toBe('human_sender');
+    expect(mergedReq.turn_id).toBe(pendingTurnIds[504]);
+    expect(store.getIssue(issue.id)?.status).toBe('todo');
+    const afterCountRow=db.query("SELECT COUNT(*) AS cnt FROM multiremi_turns WHERE issue_id=? AND status='pending'").get(issue.id) as {cnt:number};
+    expect(Number(afterCountRow.cnt)).toBe(505);
+  },{timeout:120_000});
   // An owner question at the human stage needs a human: in_review until running work resumes.
   it('unanswered owner decision at the human stage parks the Issue in_review until work resumes',()=>{const f=setup();
     const runtime=f.store.registerRuntime({name:'Derivation native host',provider:'codex',daemonId:'derive-native'});

@@ -30,19 +30,31 @@ function pendingTurnsHaveWorkTrigger(ctx: StoreContext, pendingTurns: any[], tur
     return maxCovered;
   };
 
-  const params: Array<string | number> = [];
-  const cteRows = pendingTurns.map((pending, idx) => {
-    params.push(
-      String(pending.id),
-      String(pending.session_id),
-      String(pending.agent_id),
-      String(pending.execution_scope ?? ''),
-      coveredSeqFor(pending),
-    );
-    return idx === 0
-      ? 'SELECT CAST(? AS TEXT) AS turn_id, CAST(? AS TEXT) AS session_id, CAST(? AS TEXT) AS agent_id, CAST(? AS TEXT) AS execution_scope, CAST(? AS INTEGER) AS covered_seq'
-      : 'SELECT CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS INTEGER)';
-  });
+  const rows = pendingTurns.map((pending) => [
+    String(pending.id),
+    String(pending.session_id),
+    String(pending.agent_id),
+    String(pending.execution_scope ?? ''),
+    coveredSeqFor(pending),
+  ]);
+
+  // Bind serialized JSON as TEXT first on PostgreSQL so Bun.SQL sends the raw
+  // array string rather than encoding a JSONB string scalar.
+  const pendingChecksCte = ctx.db.dialect === 'postgres'
+    ? `SELECT
+        batch.elem->>0 AS turn_id,
+        batch.elem->>1 AS session_id,
+        batch.elem->>2 AS agent_id,
+        batch.elem->>3 AS execution_scope,
+        (batch.elem->>4)::bigint AS covered_seq
+      FROM jsonb_array_elements(CAST(CAST(? AS TEXT) AS JSONB)) AS batch(elem)`
+    : `SELECT
+        CAST(json_extract(value, '$[0]') AS TEXT) AS turn_id,
+        CAST(json_extract(value, '$[1]') AS TEXT) AS session_id,
+        CAST(json_extract(value, '$[2]') AS TEXT) AS agent_id,
+        CAST(json_extract(value, '$[3]') AS TEXT) AS execution_scope,
+        CAST(json_extract(value, '$[4]') AS INTEGER) AS covered_seq
+      FROM json_each(?)`;
 
   const scopeSql = (alias: string) => ctx.db.dialect === 'postgres'
     ? `COALESCE(${alias}.metadata::jsonb->>'execution_scope','')`
@@ -56,7 +68,7 @@ function pendingTurnsHaveWorkTrigger(ctx: StoreContext, pendingTurns: any[], tur
     : exactDeliverySql;
 
   const hit = ctx.db.query(`WITH pending_checks AS (
-      ${cteRows.join('\n      UNION ALL\n      ')}
+      ${pendingChecksCte}
     )
     SELECT 1
     FROM pending_checks p
@@ -78,7 +90,7 @@ function pendingTurnsHaveWorkTrigger(ctx: StoreContext, pendingTurns: any[], tur
         AND ${workTriggerSql('merged')}
         AND ${deliveryMatchSql}
     )
-    LIMIT 1`).get(...params);
+    LIMIT 1`).get(JSON.stringify(rows));
 
   return Boolean(hit);
 }

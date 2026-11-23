@@ -907,6 +907,103 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
           expect(secondDisp.turn_id).toBeUndefined();
         }
       }
+
+      // ⑤ Finding #1 (cross-sibling same-ms member intervention under L=1):
+      //    Sibling A sends request to parent Main (running parent turn or merged into platform pending turn),
+      //    same-ms member intervenes in sibling B Main, parent dispatches B, then B replies to parent:
+      //    sibling A's request has source_session_id = childAMain !== childBMain and created_at === lastMember.created_at,
+      //    so it must NOT be counted as hop 2 (hops === 1, wake_applied === 'now', creates delivery turn).
+      process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+      for(const mode of ['running_parent','merged_platform_pending'] as const){
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair(`sibling-cutoff-${mode}`);
+        const parent=createResponsibleTestIssue(store,{title:`Parent ${mode}`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const childA=createResponsibleTestIssue(store,{title:`Child A ${mode}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childAMain=store.getOrCreateDefaultIssueSession(childA.id);
+        const childB=createResponsibleTestIssue(store,{title:`Child B ${mode}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childBMain=store.getOrCreateDefaultIssueSession(childB.id);
+
+        const aStart=store.sendMessage({session_id:childAMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:childAgent.id},message_kind:'request',wake_requested:'now',body_md:`Start A (${mode})`});
+        const turnA=store.getTurn(aStart.turn_id!)!;
+        expect(store.claimTask(childRuntime.id)?.id).toBe(turnA.current_attempt_id!);
+        store.startTask(turnA.current_attempt_id!);
+
+        let parentTurn:NonNullable<ReturnType<typeof store.getTurn>>;
+        if(mode==='running_parent'){
+          const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start running parent'});
+          parentTurn=store.getTurn(pStart.turn_id!)!;
+          expect(store.claimTask(parentRuntime.id)?.id).toBe(parentTurn.current_attempt_id!);
+          store.startTask(parentTurn.current_attempt_id!);
+          const reqA=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:turnA.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Sibling A request into running parent'});
+          expect(reqA.wake_reason).toBe('to_parent_owner');
+          expect(reqA.turn_id).toBe(parentTurn.id);
+        }else{
+          const plat=store.sendMessage({session_id:parentMain.id,sender:{type:'platform',id:null},to:{type:'agent',ref:parentAgent.id},message_kind:'status',wake_requested:'now',body_md:'Platform status creates pending parent'});
+          const reqA=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:turnA.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Sibling A request coalesced into pending parent'});
+          expect(reqA.wake_reason).toBe('to_parent_owner');
+          expect(reqA.turn_id).toBe(plat.turn_id);
+          parentTurn=store.getTurn(plat.turn_id!)!;
+          expect(store.claimTask(parentRuntime.id)?.id).toBe(parentTurn.current_attempt_id!);
+          store.startTask(parentTurn.current_attempt_id!);
+        }
+        store.completeTask(turnA.current_attempt_id!,{output:'Child A done'});
+
+        // Same-ms member intervention in sibling B's Main session before parent dispatches B.
+        store.sendMessage({session_id:childBMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:'Member intervenes in child B Main'});
+        const dispB=store.sendMessage({session_id:childBMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:parentTurn.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Parent dispatches sibling B'});
+        expect(dispB.wake_reason).toBe('agent_dispatch');
+        const turnB=store.getTurn(dispB.turn_id!)!;
+        store.completeTask(parentTurn.current_attempt_id!,{output:'Parent dispatched B'});
+        for(const pending of store.listTurns({workspace_id:'local',session_id:parentMain.id}).filter(t=>t.status==='pending')){
+          store.cancelTask(pending.current_attempt_id!);
+        }
+
+        expect(store.claimTask(childRuntime.id)?.id).toBe(turnB.current_attempt_id!);
+        store.startTask(turnB.current_attempt_id!);
+        expect(countMessageDelegationPairHops(ctx,turnB.id,parentAgent.id,1)).toBe(1);
+        const reqB=store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:turnB.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Sibling B replies to parent'});
+        expect(reqB.wake_applied).toBe('now');
+        expect(reqB.wake_reason).toBe('to_parent_owner');
+        expect(reqB.turn_id).toBeTruthy();
+        expect(reqB.turn_id).not.toBe(parentTurn.id);
+      }
+
+      // ⑥ Finding #2 (pre-upgrade legacy dispatch row without metadata.source_session_id/source_session_seq under L=1):
+      //    Parent dispatches child at T0 (legacy row missing source_session_*), same-ms member intervenes in parent Main,
+      //    child replies, then parent dispatches child again => baseline created_at <= lastMember.created_at cutoff (hops === 1, allowed).
+      process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+      {
+        const {parentRuntime,childRuntime,parentAgent,childAgent}=makePair('legacy-cutoff');
+        const parent=createResponsibleTestIssue(store,{title:'Legacy Parent',status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+        const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+        const child=createResponsibleTestIssue(store,{title:'Legacy Child',parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+        const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+        const pStart=store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'agent',ref:parentAgent.id},message_kind:'request',wake_requested:'now',body_md:'Start legacy P0'});
+        const p0=store.getTurn(pStart.turn_id!)!;
+        expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+        store.startTask(p0.current_attempt_id!);
+
+        const disp=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Legacy dispatch before member'});
+        const childTurn=store.getTurn(disp.turn_id!)!;
+        // Strip source_session_id/source_session_seq to simulate a pre-upgrade baseline writer row.
+        const rawMeta=JSON.parse(String(db.query('SELECT metadata FROM multiremi_conversation_log WHERE id=?').get(disp.message.id).metadata??'{}'));
+        delete rawMeta.source_session_id;
+        delete rawMeta.source_session_seq;
+        db.run('UPDATE multiremi_conversation_log SET metadata=? WHERE id=?',[JSON.stringify(rawMeta),disp.message.id]);
+
+        store.sendMessage({session_id:parentMain.id,sender:{type:'member',id:'mem_local_local'},to:{type:'none'},message_kind:'request',wake_requested:'inbox_only',body_md:'Same-ms member intervention after legacy dispatch'});
+        expect(store.claimTask(childRuntime.id)?.id).toBe(childTurn.current_attempt_id!);
+        store.startTask(childTurn.current_attempt_id!);
+        store.sendMessage({session_id:parentMain.id,sender:{type:'agent',id:childAgent.id},source_turn_id:childTurn.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Child replies after upgrade'});
+        store.completeTask(childTurn.current_attempt_id!,{output:'Legacy child done'});
+
+        expect(countMessageDelegationPairHops(ctx,p0.id,childAgent.id,1)).toBe(1);
+        const secondDisp=store.sendMessage({session_id:childMain.id,sender:{type:'agent',id:parentAgent.id},source_turn_id:p0.id,to:{type:'role',ref:'issue_owner'},message_kind:'request',wake_requested:'now',body_md:'Second dispatch after legacy cutoff must succeed'});
+        expect(secondDisp.wake_applied).toBe('now');
+        expect(secondDisp.wake_reason).toBe('agent_dispatch');
+        expect(secondDisp.turn_id).toBeTruthy();
+      }
     }finally{
       isoSpy.mockRestore();
       if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
@@ -1022,4 +1119,4 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',fixture=>{
     expect(delegatorReply.turn_id).toBe(outerTurn.id);
   });
 
-}, { isolation: "snapshot", file: import.meta.path });
+}, { isolation: "snapshot" });

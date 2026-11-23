@@ -621,6 +621,29 @@ export class ConversationLogRepo {
     const fields = { ...input.fields };
     if(current.kind==='turn'&&(fields.metadata!==undefined||fields.body_md!==undefined||fields.body_html!==undefined))
       throw new Error('Turn log rows are pointers; update the turn or attempt instead');
+    if (current.kind === "message" && !current.deleted_at && fields.deleted_at) {
+      const header = this.ctx.db.query(
+        "SELECT sender_type, message_kind, wake_reason, to_agent_id FROM multiremi_conversation_log WHERE session_id = ? AND seq = ?",
+      ).get(sessionId, seq) as {
+        sender_type: string | null;
+        message_kind: string | null;
+        wake_reason: string | null;
+        to_agent_id: string | null;
+      } | null;
+      if (
+        header?.sender_type === "agent"
+        && header.message_kind === "request"
+        && header.wake_reason === "to_parent_owner"
+        && header.to_agent_id
+      ) {
+        const nextMeta = (fields.metadata ?? current.metadata ?? {}) as Record<string, unknown>;
+        const scope = typeof nextMeta.execution_scope === "string" ? nextMeta.execution_scope : "";
+        const ackRow = this.ctx.db.query(
+          "SELECT COALESCE(MAX(input_to_seq), 0) AS seq FROM multiremi_turns WHERE session_id = ? AND agent_id = ? AND execution_scope = ?",
+        ).get(sessionId, header.to_agent_id, scope) as { seq: number | null } | null;
+        fields.metadata = { ...nextMeta, deleted_at_ack_seq: Number(ackRow?.seq ?? 0) };
+      }
+    }
     if (fields.body_md !== undefined || fields.body_html !== undefined || fields.render_version !== undefined) {
       const rendered = renderMarkdown(fields.body_md ?? current.body_md);
       fields.body_html = rendered.html;

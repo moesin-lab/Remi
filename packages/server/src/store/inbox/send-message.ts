@@ -104,7 +104,7 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
     turn: any,
     counterpart: string,
     step: HopStep,
-  ): { id: string; session_id: string; seq: number; created_at: string; task_id: string; sender_id: string; metadata: string | null } | null => {
+  ): { id: string; session_id: string; seq: number; created_at: string; deleted_at: string | null; task_id: string; sender_id: string; metadata: string | null } | null => {
     const clauses: string[] = [
       'session_id=?',
       "kind='message'",
@@ -179,21 +179,24 @@ export function countMessageDelegationPairHops(ctx:StoreContext,sourceId:string,
     params.push(...matchParams);
 
     type ParentReqRow = {
-      id: string; session_id: string; seq: number; created_at: string; task_id: string; sender_id: string; metadata: string | null;
+      id: string; session_id: string; seq: number; created_at: string; deleted_at: string | null; task_id: string; sender_id: string; metadata: string | null;
     };
-    if (!hasMemberCutoff) {
-      return (ctx.db.query(`SELECT id, session_id, seq, created_at, task_id, sender_id, metadata
-        FROM multiremi_conversation_log
-        WHERE ${clauses.join(' AND ')}
-        ORDER BY seq DESC LIMIT 1`).get(...params) as ParentReqRow | null) ?? null;
-    }
-
-    const rows = ctx.db.query(`SELECT id, session_id, seq, created_at, task_id, sender_id, metadata
+    const rows = ctx.db.query(`SELECT id, session_id, seq, created_at, deleted_at, task_id, sender_id, metadata
       FROM multiremi_conversation_log
       WHERE ${clauses.join(' AND ')}
       ORDER BY seq DESC`).all(...params) as ParentReqRow[];
     for (const row of rows) {
       const reqMeta = parseJson(row.metadata, {}) as Record<string, unknown>;
+      const deliveryTurnId = typeof reqMeta.delivery_turn_id === 'string' ? reqMeta.delivery_turn_id : null;
+      const isDirectDeliveryForTurn = deliveryTurnId === turn.id
+        || (deliveryTurnId === null && turn.trigger_message_id === row.id && turn.wake_source !== 're_ring');
+      if (!isDirectDeliveryForTurn && row.deleted_at != null) {
+        const ackAtDelete = typeof reqMeta.deleted_at_ack_seq === 'number' ? reqMeta.deleted_at_ack_seq : -1;
+        if (Number(row.seq) > Number(turn.input_to_seq ?? 0) || Number(row.seq) > ackAtDelete) {
+          continue;
+        }
+      }
+      if (!hasMemberCutoff) return row;
       const hasReqWatermark = typeof reqMeta.source_session_id === 'string'
         && typeof reqMeta.source_session_seq === 'number';
       if (hasReqWatermark && reqMeta.source_session_id === source.session_id) {

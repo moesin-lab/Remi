@@ -1620,4 +1620,228 @@ pendingTurnBackendTests('MUL-506 message operations and dispatch',(fixture,backe
     }
   },{timeout:30_000});
 
+  it('MUL-335: successor re_ring turn real DaemonTurnBridge ACK accurately distinguishes deleted-before-consume vs deleted-after-ACK (with and without member cutoff)',()=>{
+    const prevLimit=process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+    process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT='1';
+    try{
+      const {store,db}=fixture();
+      const ctx=new StoreContext(db,()=>store);
+      const bridge=store.getDaemonTurnBridge();
+
+      type Cell='before-original-end'|'before-successor-offer-status'|'before-successor-offer-req-trigger-delete-message'|'before-successor-offer-req-trigger-delete-comment'|'after-successor-ack'|'keep';
+      const cells:Cell[]=[
+        'before-original-end',
+        'before-successor-offer-status',
+        'before-successor-offer-req-trigger-delete-message',
+        'before-successor-offer-req-trigger-delete-comment',
+        'after-successor-ack',
+        'keep',
+      ];
+
+      for(const withMemberCutoff of [true,false] as const){
+        for(const cell of cells){
+          const tag=`${withMemberCutoff?'mem':'nomem'}-${cell}`;
+          const parentRuntime=store.registerRuntime({name:`Parent succ ${tag}`,provider:'codex',daemonId:`daemon-parent-${tag}`,workspaceId:'local'});
+          const childRuntime=store.registerRuntime({name:`Child succ ${tag}`,provider:'codex',daemonId:`daemon-child-${tag}`,workspaceId:'local'});
+          const parentAgent=store.createAgent({name:`Parent succ ${tag}`,provider:'codex',runtimeId:parentRuntime.id});
+          const childAgent=store.createAgent({name:`Child succ ${tag}`,provider:'codex',runtimeId:childRuntime.id});
+          const parentScope={runtimeId:parentRuntime.id,daemonId:parentRuntime.daemonId!,workspaceId:'local'};
+
+          const parent=createResponsibleTestIssue(store,{title:`Parent ${tag}`,status:'in_progress',assigneeType:'agent',assigneeId:parentAgent.id});
+          const parentMain=store.getOrCreateDefaultIssueSession(parent.id);
+          const child=createResponsibleTestIssue(store,{title:`Child ${tag}`,parentIssueId:parent.id,status:'in_progress',assigneeType:'agent',assigneeId:childAgent.id});
+          const childMain=store.getOrCreateDefaultIssueSession(child.id);
+
+          // Start P0 either with a member request (hasMemberCutoff = true) or platform request (hasMemberCutoff = false).
+          const pStart=store.sendMessage({
+            session_id:parentMain.id,
+            sender:withMemberCutoff?{type:'member',id:'mem_local_local'}:{type:'platform',id:null},
+            to:{type:'agent',ref:parentAgent.id},
+            message_kind:'request',
+            wake_requested:'now',
+            body_md:`Start P0 (${tag})`,
+          });
+          const p0=store.getTurn(pStart.turn_id!)!;
+          expect(store.claimTask(parentRuntime.id)?.id).toBe(p0.current_attempt_id!);
+          store.startTask(p0.current_attempt_id!);
+          const p0Offer=bridge.offerInput(store.getTaskWithAgent(p0.current_attempt_id!)!);
+          const p0Ack=bridge.rpc('turn.input',{
+            turn_id:p0.id,
+            attempt_id:p0.current_attempt_id!,
+            input_to_seq:p0Offer.input_to_seq,
+            message_ids:p0Offer.input_messages.map(m=>m.id),
+          },parentScope);
+          expect(p0Ack.ok).toBe(true);
+
+          // P0 dispatches C1 -> C1 sends to_parent_owner request delivered to running P0.
+          const d1=store.sendMessage({
+            session_id:childMain.id,
+            sender:{type:'agent',id:parentAgent.id},
+            source_turn_id:p0.id,
+            to:{type:'role',ref:'issue_owner'},
+            message_kind:'request',
+            wake_requested:'now',
+            body_md:`Dispatch 1 (${tag})`,
+          });
+          const c1=store.getTurn(d1.turn_id!)!;
+          expect(store.claimTask(childRuntime.id)?.id).toBe(c1.current_attempt_id!);
+          store.startTask(c1.current_attempt_id!);
+
+          const req=store.sendMessage({
+            session_id:parentMain.id,
+            sender:{type:'agent',id:childAgent.id},
+            source_turn_id:c1.id,
+            to:{type:'role',ref:'issue_owner'},
+            message_kind:'request',
+            wake_requested:'now',
+            body_md:`Child request (${tag})`,
+          });
+          expect(req.wake_reason).toBe('to_parent_owner');
+          expect(req.turn_id).toBe(p0.id);
+
+          let p1:NonNullable<ReturnType<typeof store.getTurn>>;
+          if(cell==='before-successor-offer-req-trigger-delete-message'||cell==='before-successor-offer-req-trigger-delete-comment'){
+            // P0 completes without ACKing req while no later status has arrived, so re_ring creates P1 triggered by req itself.
+            store.completeTask(p0.current_attempt_id!,{output:'P0 done before child status'});
+            const pendingP1=store.listTurns({workspace_id:'local',session_id:parentMain.id}).find(t=>t.status==='pending')!;
+            expect(pendingP1).toBeTruthy();
+            expect(pendingP1.id).not.toBe(p0.id);
+            expect(pendingP1.wake_source).toBe('re_ring');
+            expect(pendingP1.trigger_message_id).toBe(req.message.id);
+            store.completeTask(c1.current_attempt_id!,{output:'Child done after P1 created'});
+            const laterStatus=store.sendMessage({
+              session_id:parentMain.id,
+              sender:{type:'platform',id:null},
+              to:{type:'agent',ref:parentAgent.id},
+              message_kind:'status',
+              wake_requested:'now',
+              body_md:`Later status coalesced into req-triggered P1 (${tag})`,
+            });
+            expect(laterStatus.message.seq).toBeGreaterThan(req.message.seq);
+            let activeSuccessor=pendingP1;
+            if(cell==='before-successor-offer-req-trigger-delete-message'){
+              // deleteMessage keeps the req-triggered re_ring turn P1 itself alive while tombstoning req before offerInput.
+              expect(store.deleteMessage(req.message.id).deleted_at).toBeTruthy();
+              expect(store.getTurn(pendingP1.id)?.status).toBe('pending');
+            }else{
+              // deleteIssueComment keeps pendingP1 alive when a later unread status has already coalesced into it,
+              // while tombstoning req with deleted_at_ack_seq frozen before P1's first offerInput.
+              store.deleteIssueComment(req.message.id);
+              activeSuccessor=store.listTurns({workspace_id:'local',session_id:parentMain.id}).find(t=>t.status==='pending')!;
+              expect(activeSuccessor).toBeTruthy();
+              expect(activeSuccessor.id).toBe(pendingP1.id);
+              expect(activeSuccessor.wake_source).toBe('re_ring');
+              expect(activeSuccessor.trigger_message_id).toBe(req.message.id);
+            }
+            expect(store.claimTask(parentRuntime.id)?.id).toBe(activeSuccessor.current_attempt_id!);
+            store.startTask(activeSuccessor.current_attempt_id!);
+            p1=store.getTurn(activeSuccessor.id)!;
+          }else{
+            store.completeTask(c1.current_attempt_id!,{output:'Child done'});
+            const plat=store.sendMessage({
+              session_id:parentMain.id,
+              sender:{type:'platform',id:null},
+              to:{type:'agent',ref:parentAgent.id},
+              message_kind:'status',
+              wake_requested:'now',
+              body_md:`Platform status (${tag})`,
+            });
+            expect(plat.turn_id).toBe(p0.id);
+
+            if(cell==='before-original-end'){
+              expect(store.deleteMessage(req.message.id).deleted_at).toBeTruthy();
+            }
+
+            store.completeTask(p0.current_attempt_id!,{output:'P0 done without ACKing req'});
+            const pendingP1=store.listTurns({workspace_id:'local',session_id:parentMain.id}).find(t=>t.status==='pending')!;
+            expect(pendingP1).toBeTruthy();
+            expect(pendingP1.id).not.toBe(p0.id);
+            expect(pendingP1.trigger_message_id).toBe(plat.message.id);
+
+            if(cell==='before-successor-offer-status'){
+              store.deleteIssueComment(req.message.id);
+            }
+
+            expect(store.claimTask(parentRuntime.id)?.id).toBe(pendingP1.current_attempt_id!);
+            store.startTask(pendingP1.current_attempt_id!);
+            p1=store.getTurn(pendingP1.id)!;
+          }
+
+          const deletedBeforeConsume=cell==='before-original-end'
+            ||cell==='before-successor-offer-status'
+            ||cell==='before-successor-offer-req-trigger-delete-message'
+            ||cell==='before-successor-offer-req-trigger-delete-comment';
+          // Verify pre-ACK hops first.
+          expect(countMessageDelegationPairHops(ctx,p1.id,childAgent.id,1)).toBe(deletedBeforeConsume?0:2);
+
+          // Real DaemonTurnBridge offerInput + turn.input ACK on P1.
+          const p1Offer=bridge.offerInput(store.getTaskWithAgent(p1.current_attempt_id!)!);
+          expect(p1Offer.input_to_seq).toBeGreaterThan(req.message.seq);
+          if(deletedBeforeConsume){
+            expect(p1Offer.input_messages.some(m=>m.id===req.message.id)).toBe(false);
+            const rawMeta=JSON.parse(String(db.query('SELECT metadata FROM multiremi_conversation_log WHERE id=?').get(req.message.id)?.metadata??'{}'));
+            expect(rawMeta.deleted_at_ack_seq).toBe(p0Offer.input_to_seq);
+            expect(rawMeta.deleted_at_ack_seq).toBeLessThan(req.message.seq);
+          }else{
+            expect(p1Offer.input_messages.some(m=>m.id===req.message.id)).toBe(true);
+          }
+          const p1Ack=bridge.rpc('turn.input',{
+            turn_id:p1.id,
+            attempt_id:p1.current_attempt_id!,
+            input_to_seq:p1Offer.input_to_seq,
+            message_ids:p1Offer.input_messages.map(m=>m.id),
+          },parentScope);
+          expect({tag,p1Ack}).toMatchObject({tag,p1Ack:{ok:true}});
+
+          if(cell==='after-successor-ack'){
+            store.deleteIssueComment(req.message.id);
+            const rawMeta=JSON.parse(String(db.query('SELECT metadata FROM multiremi_conversation_log WHERE id=?').get(req.message.id)?.metadata??'{}'));
+            expect(rawMeta.deleted_at_ack_seq).toBeGreaterThanOrEqual(req.message.seq);
+            const followStatus=store.sendMessage({
+              session_id:parentMain.id,
+              sender:{type:'platform',id:null},
+              to:{type:'agent',ref:parentAgent.id},
+              message_kind:'status',
+              wake_requested:'now',
+              body_md:`Second status after ACK+delete (${tag})`,
+            });
+            expect(followStatus.message.seq).toBeGreaterThan(p1Offer.input_to_seq);
+            const p1Offer2=bridge.offerInput(store.getTaskWithAgent(p1.current_attempt_id!)!);
+            const p1Ack2=bridge.rpc('turn.input',{
+              turn_id:p1.id,
+              attempt_id:p1.current_attempt_id!,
+              input_to_seq:p1Offer2.input_to_seq,
+              message_ids:p1Offer2.input_messages.map(m=>m.id),
+            },parentScope);
+            expect(p1Ack2.ok).toBe(true);
+          }
+
+          // Post-ACK real downward dispatch assertion.
+          expect(countMessageDelegationPairHops(ctx,p1.id,childAgent.id,1)).toBe(deletedBeforeConsume?0:2);
+          const nextDisp=store.sendMessage({
+            session_id:childMain.id,
+            sender:{type:'agent',id:parentAgent.id},
+            source_turn_id:p1.id,
+            to:{type:'role',ref:'issue_owner'},
+            message_kind:'request',
+            wake_requested:'now',
+            body_md:`Post-ACK dispatch (${tag})`,
+          });
+          if(deletedBeforeConsume){
+            expect(nextDisp.wake_applied).toBe('now');
+            expect(nextDisp.wake_reason).toBe('agent_dispatch');
+            expect(nextDisp.turn_id).toBeTruthy();
+          }else{
+            expect(nextDisp.wake_applied).toBe('next_turn');
+            expect(nextDisp.wake_reason).toBe('pair_round_trip_limit');
+            expect(nextDisp.turn_id).toBeUndefined();
+          }
+        }
+      }
+    }finally{
+      if(prevLimit===undefined)delete process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT;
+      else process.env.MULTIREMI_AGENT_PAIR_ROUND_TRIP_LIMIT=prevLimit;
+    }
+  },{timeout:30_000});
+
 }, { isolation: "snapshot" });

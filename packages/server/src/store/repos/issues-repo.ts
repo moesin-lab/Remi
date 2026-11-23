@@ -1425,9 +1425,15 @@ export class IssuesRepo {
 
     return this.withIssueSearchReadSnapshot(() => {
       const isPostgres = this.ctx.db.dialect === "postgres";
+      const hasNulTerm = terms.some((term) => term.includes("\u0000"));
+      if (hasNulTerm && isPostgres) {
+        // PostgreSQL TEXT columns cannot store U+0000 and reject NUL in UTF-8 bind params;
+        // matches baseline JS searchMatch() across PG rows (always 0 hits).
+        return { issues: [], total: 0 };
+      }
       const closedFilterSql = includeClosed ? "" : buildIssueSearchExcludeUnarchivedClosedSql(isPostgres);
       const issueTieBreakCol = isPostgres ? "i.id" : "i.rowid";
-      const canPushLike = terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS && !terms.some(hasNonAsciiCasedChar);
+      const canPushLike = !hasNulTerm && terms.length <= ISSUE_SEARCH_MAX_SQL_TERMS && !terms.some(hasNonAsciiCasedChar);
       if (!canPushLike) {
         return this.searchIssuesWorkspaceScanFallback({
           query,
@@ -1445,6 +1451,16 @@ export class IssuesRepo {
       const keyLikeSql = buildSearchLikeAllTermsSql(ISSUE_SEARCH_EFFECTIVE_KEY_SQL, terms);
       const titleLikeSql = buildSearchLikeAllTermsSql("i.title", terms);
       const descriptionLikeSql = buildSearchLikeAllTermsSql("i.description", terms);
+      const sqliteFieldHasNulSql = isPostgres
+        ? ""
+        : `,
+               CASE
+                 WHEN INSTR(CAST(COALESCE(i.issue_key, '') AS BLOB), X'00') > 0
+                   OR INSTR(CAST(COALESCE(i.title, '') AS BLOB), X'00') > 0
+                   OR (i.description IS NOT NULL AND INSTR(CAST(i.description AS BLOB), X'00') > 0)
+                 THEN 1
+                 ELSE 0
+               END AS has_nul`;
 
       let candidateRows: Row[];
       if (includeCommentBodies) {
@@ -1454,6 +1470,9 @@ export class IssuesRepo {
         // On PostgreSQL, CROSS JOIN LATERAL (... LIMIT 1) keeps `l.session_id = s.id` inside
         // `l`'s base restriction clauses (preventing subquery pull-up) so the planner always
         // probes an index on session_id even when table statistics are stale (reltuples = 0).
+        // On SQLite, text operators truncate at U+0000; piggybacking BLOB `X'00'` checks in
+        // the same candidate query triggers a same-snapshot JS fallback only when NUL exists
+        // (zero extra SQL or rows on normal NUL-free workspaces).
         const matchedCommentsSql = isPostgres
           ? `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
              FROM workspace_issues wi
@@ -1468,14 +1487,32 @@ export class IssuesRepo {
                  AND (${commentLikeSql})
                LIMIT 1
              ) cm`
-          : `SELECT DISTINCT wi.id, wi.updated_at, wi.issue_ord
+          : `SELECT
+               wi.id,
+               wi.updated_at,
+               wi.issue_ord,
+               MAX(CASE WHEN INSTR(CAST(COALESCE(l.body_md, '') AS BLOB), X'00') > 0 THEN 1 ELSE 0 END) AS has_nul
              FROM workspace_issues wi
              JOIN multiremi_issue_sessions s ON s.issue_id = wi.id AND s.chat_id IS NULL
              JOIN multiremi_conversation_log l ON l.session_id = s.id
              WHERE l.visibility = 'shown'
                AND l.kind = 'message'
                AND l.deleted_at IS NULL
-               AND (${commentLikeSql})`;
+               AND ((${commentLikeSql}) OR INSTR(CAST(COALESCE(l.body_md, '') AS BLOB), X'00') > 0)
+             GROUP BY wi.id, wi.updated_at, wi.issue_ord`;
+        const unionSelectSql = isPostgres
+          ? `SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank
+             FROM workspace_issues
+             WHERE match_rank IS NOT NULL
+             UNION ALL
+             SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank
+             FROM matched_comments`
+          : `SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank, has_nul
+             FROM workspace_issues
+             WHERE match_rank IS NOT NULL OR has_nul = 1
+             UNION ALL
+             SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank, has_nul
+             FROM matched_comments`;
         candidateRows = this.ctx.db.query(
           `WITH workspace_issues AS MATERIALIZED (
              SELECT
@@ -1487,19 +1524,14 @@ export class IssuesRepo {
                  WHEN (${titleLikeSql}) THEN 1
                  WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
                  ELSE NULL
-               END AS match_rank
+               END AS match_rank${sqliteFieldHasNulSql}
              FROM multiremi_issues i
              WHERE i.workspace_id = ?${closedFilterSql}
            ),
            matched_comments AS MATERIALIZED (
              ${matchedCommentsSql}
            )
-           SELECT id, updated_at, issue_ord, 0 AS has_comment_match, match_rank
-           FROM workspace_issues
-           WHERE match_rank IS NOT NULL
-           UNION ALL
-           SELECT id, updated_at, issue_ord, 1 AS has_comment_match, 3 AS match_rank
-           FROM matched_comments`,
+           ${unionSelectSql}`,
         ).all(...patterns, ...patterns, ...patterns, workspaceId, ...patterns) as Row[];
       } else {
         candidateRows = this.ctx.db.query(
@@ -1514,14 +1546,27 @@ export class IssuesRepo {
                  WHEN (${titleLikeSql}) THEN 1
                  WHEN (i.description IS NOT NULL AND ${descriptionLikeSql}) THEN 2
                  ELSE NULL
-               END AS match_rank
+               END AS match_rank${sqliteFieldHasNulSql}
              FROM multiremi_issues i
              WHERE i.workspace_id = ?${closedFilterSql}
            )
-           SELECT id, updated_at, issue_ord, has_comment_match, match_rank
+           SELECT id, updated_at, issue_ord, has_comment_match, match_rank${isPostgres ? "" : ", has_nul"}
            FROM workspace_issues
-           WHERE match_rank IS NOT NULL`,
+           WHERE match_rank IS NOT NULL${isPostgres ? "" : " OR has_nul = 1"}`,
         ).all(...patterns, ...patterns, ...patterns, workspaceId) as Row[];
+      }
+
+      if (!isPostgres && candidateRows.some((row) => Number(row.has_nul) === 1)) {
+        return this.searchIssuesWorkspaceScanFallback({
+          query,
+          workspaceId,
+          includeClosed,
+          closedFilterSql,
+          isPostgres,
+          includeCommentBodies,
+          limit,
+          offset,
+        });
       }
 
       const mergedById = new Map<string, IssueSearchCandidate>();
@@ -1583,11 +1628,39 @@ export class IssuesRepo {
   }
 
   /**
-   * Read a single oversized conversation log `body_md` in bounded Unicode code-point
-   * chunks so each bridge reply stays strictly below `postgresReplyMaxBytes()`.
+   * Read a single oversized conversation log `body_md` in bounded chunks so each
+   * bridge reply stays strictly below `postgresReplyMaxBytes()`.
+   *
+   * - PostgreSQL slices by Unicode code points via `SUBSTR(COALESCE(body_md, ''), ?, ?)`.
+   * - SQLite slices raw UTF-8 bytes via `SUBSTR(CAST(COALESCE(body_md, '') AS BLOB), ?, ?)`
+   *   and decodes once after concatenation so embedded `U+0000` bytes never truncate text
+   *   and multi-byte UTF-8 / emoji sequences never split across chunk boundaries.
    */
-  private readConversationLogBodyBounded(logId: string): string {
+  private readConversationLogBodyBounded(logId: string, isPostgres: boolean): string {
     const ceiling = postgresReplyMaxBytes();
+    if (!isPostgres) {
+      const chunkBytes = Math.max(64, Math.floor((Math.max(256, ceiling) - 192) / 6));
+      const chunks: Uint8Array[] = [];
+      let startByte = 1;
+      while (true) {
+        const row = this.ctx.db.query(
+          "SELECT SUBSTR(CAST(COALESCE(body_md, '') AS BLOB), ?, ?) AS c FROM multiremi_conversation_log WHERE id = ?",
+        ).get(startByte, chunkBytes, logId) as Row | null;
+        if (!row || row.c == null) break;
+        const raw = row.c;
+        const chunk = raw instanceof Uint8Array
+          ? raw
+          : typeof raw === "string"
+            ? Buffer.from(raw, "utf8")
+            : new Uint8Array(raw as ArrayBufferLike);
+        if (chunk.byteLength === 0) break;
+        chunks.push(chunk);
+        startByte += chunk.byteLength;
+        if (chunk.byteLength < chunkBytes) break;
+      }
+      return new TextDecoder().decode(Buffer.concat(chunks));
+    }
+
     const chunkChars = Math.max(16, Math.floor((Math.max(256, ceiling) - 192) / 6));
     const parts: string[] = [];
     let start = 1;
@@ -1695,7 +1768,7 @@ export class IssuesRepo {
         const isOversize = Number(row.oversize) === 1;
         if (isOversize) hadOversize = true;
         const body = isOversize
-          ? this.readConversationLogBodyBounded(String(row.id))
+          ? this.readConversationLogBodyBounded(String(row.id), isPostgres)
           : String(row.body_md ?? "");
         if (searchMatch(body, query)) {
           snippets.set(issueId, extractSearchSnippet(body, query));
@@ -1821,7 +1894,7 @@ export class IssuesRepo {
         if (isOversize) hadOversize = true;
         if (snippets.has(issueId)) continue;
         const body = isOversize
-          ? this.readConversationLogBodyBounded(logId)
+          ? this.readConversationLogBodyBounded(logId, isPostgres)
           : String(row.body_md ?? "");
         if (searchMatch(body, query)) {
           snippets.set(issueId, extractSearchSnippet(body, query));

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { configureKindBot } from "../../tests/unit/multiremi/feishu-outbound-kind-fixture";
 import { chromium, firefox } from "playwright-core";
 import { startMultiremiServer } from "@multiremi/api.js";
 import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
@@ -16,6 +17,7 @@ process.env.MULTIREMI_STATE_DIR = join(root, "state");
 process.env.MULTIREMI_WORKSPACE_ROOT = join(root, "workspaces");
 process.env.MULTIREMI_UPLOAD_DIR = join(root, "uploads");
 process.env.NODE_ENV = "test";
+process.env.MULTIREMI_FEISHU_BOT_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 const db = openSqliteDatabase(join(root, "smoke.sqlite"));
 const store = new MultiremiStore(db);
 store.ensureLocalWorkspace();
@@ -24,7 +26,13 @@ const workspace = store.createWorkspace({ name: "Delivery smoke", slug: "deliver
 const agent = store.createAgent({ workspaceId: workspace.id, ownerId: user.id, name: "Reporter", provider: "codex" });
 const makeTarget = (title: string) => store.createChatSession({ workspaceId: workspace.id, creatorId: user.id, agentId: agent.id, title });
 const first = makeTarget("Morning reports");
-const second = makeTarget("Evening reports");
+const member = store.getWorkspaceOperator(workspace.id);
+assert(member);
+const bot = configureKindBot(store, workspace.id, "rt_browser_fixture", member.id);
+const inbound = bot.inbound("browser-fixture");
+store.completeTask(inbound.taskId, { output: "Fixture initialized" });
+const second = store.updateChatSession(inbound.chatSessionId, { title: "Evening reports" });
+assert(second);
 const autopilot = store.createAutopilot({ workspaceId: workspace.id, assigneeId: agent.id, title: "Browser report", executionMode: "run_only" });
 const { token } = await store.createAccessToken({ type: "pat", name: "Browser smoke", workspaceId: workspace.id, userId: user.id });
 const server = startMultiremiServer({ store, authToken: randomUUID(), hostname: "127.0.0.1", port: 0, backgroundJobs: false, scheduler: null, messaging: null, scmPolling: null, controlPlaneSshMesh: null });
@@ -73,14 +81,14 @@ try {
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
     return await response;
   };
-  for (const target of [first, second]) {
+  for (const [target, channel] of [[first, "Web Chat"], [second, "Feishu"]] as const) {
     await edit();
     await choose(target.id);
     assert((await save()).ok());
     await dialog.waitFor({ state: "hidden" });
     assert.equal(store.getAutopilot(autopilot.id)?.deliveryChatSessionId, target.id);
     await page.reload();
-    await page.getByText(`${target.title} · Web Chat · ${target.id}`, { exact: true }).waitFor();
+    await page.getByText(`${target.title} · ${channel} · ${target.id}`, { exact: true }).waitFor();
   }
   await edit();
   await choose(first.id);
@@ -102,7 +110,7 @@ try {
   await dialog.getByRole("button", { name: /^Run only/ }).click();
   await choose(second.id);
   await dialog.getByRole("button", { name: /^Create issue/ }).click();
-  await dialog.getByText(`${second.title} · Web Chat · ${second.id}`, { exact: true }).waitFor();
+  await dialog.getByText(`${second.title} · Feishu · ${second.id}`, { exact: true }).waitFor();
   const creation = page.waitForResponse(item => item.request().method() === "POST" && item.url().endsWith("/api/autopilots"));
   await dialog.getByRole("button", { name: "Create autopilot", exact: true }).click();
   const created = await creation;
@@ -111,13 +119,13 @@ try {
   assert.equal(store.getAutopilot(createdId)?.deliveryChatSessionId, second.id);
   await dialog.waitFor({ state: "hidden" });
   await page.reload();
-  await page.getByRole("link", { name: /Created in browser/ }).getByText(`${second.title} · Web Chat · ${second.id}`).waitFor();
+  await page.getByRole("link", { name: /Created in browser/ }).getByText(`${second.title} · Feishu · ${second.id}`).waitFor();
   console.log("PASS list, create, bind, change, reload, rejected archived target, retained draft, mode guard and explicit clear");
 } finally {
   await browser?.close();
   next.kill();
   await next.exited;
   server.stop(true);
-  db.close(true);
+  db.close();
   rmSync(root, { recursive: true, force: true });
 }

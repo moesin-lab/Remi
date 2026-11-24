@@ -61,10 +61,10 @@ function handler(store: MultiremiStore, revision: number) {
       rev: number, key: string,
       options?: { chatId?: string | null; senderOpenId?: string | null; target?: string | null },
     ) => store.cancelFeishuBotSessionTask("local", "rt_bot", rev, key, options),
-    inspectFeishuBotSession: async (rev: number, key: string) =>
-      store.inspectFeishuBotSession("local", "rt_bot", rev, key),
-    resetFeishuBotSession: async (rev: number, key: string) =>
-      store.resetFeishuBotSession("local", "rt_bot", rev, key),
+    inspectFeishuBotSession: async (rev: number, key: string, sender: string) =>
+      store.inspectFeishuBotSession("local", "rt_bot", rev, key, sender),
+    resetFeishuBotSession: async (rev: number, key: string, sender: string) =>
+      store.resetFeishuBotSession("local", "rt_bot", rev, key, sender, true),
     getFeishuBotHumanRequest: async () => null,
     respondFeishuBotHumanRequest: async () => { throw new Error("not expected"); },
     uploadFeishuBotAttachment: async () => { throw new Error("not expected"); },
@@ -105,6 +105,18 @@ describe("Feishu Task command handler", () => {
       expect(response.text.length).toBe(monitored || fromHistory ? 0 : 1);
     }
   });
+  it("preserves denial notification intent when a command loses access after admission", async () => {
+    const revoked = async () => { throw new MultiremiDaemonHttpError(403, "POST", "session", "denied", "sender_not_allowed"); };
+    const handle = createFeishuTaskHandler({ inspectFeishuBotSession: revoked, cancelFeishuBotSessionTask: revoked } as unknown as MultiremiDaemon, 1, "Concierge");
+    for (const command of ["/stop", "/new", "/status"]) {
+      for (const monitored of [false, true]) {
+        const response = await run(handle, { chatId: CHAT, text: command, metadata: { rawContent: command, senderOpenId: "ou_revoked", monitored } }, CHAT);
+        expect(response.text).toHaveLength(monitored ? 0 : 1);
+        if (!monitored) expect(response.text[0]).not.toContain("停止请求失败");
+      }
+    }
+  });
+
   it("answers /stop without filing new work", async () => {
     const { store, revision } = scaffold();
     const submitted = store.submitFeishuBotMessage("local", "rt_bot", {

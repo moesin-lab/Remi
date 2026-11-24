@@ -124,7 +124,7 @@ describe("Feishu stop resolution", () => {
     });
     start(store, submitted.taskId);
 
-    const result = store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey);
+    const result = store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey, { senderOpenId: "ou_owner" });
     expect(result).toMatchObject({ outcome: "cancelled", taskId: submitted.taskId });
     expect(store.getTask(submitted.taskId)?.status).toBe("cancelled");
   });
@@ -267,7 +267,7 @@ describe("Feishu stop resolution", () => {
     });
     const before = census();
 
-    const result = store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey);
+    const result = store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey, { senderOpenId: "ou_owner" });
     expect(result).toMatchObject({ outcome: "cancelled", taskId: leaderTask.id });
 
     // Only the conversation's own run stopped; the Issue work is untouched.
@@ -303,7 +303,7 @@ describe("Feishu stop resolution", () => {
     });
 
     store.completeTask(issueLeader.id, { output: "Delegated the verification." });
-    store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey);
+    store.cancelFeishuBotSessionTask("local", "rt_bot", revision, sessionKey, { senderOpenId: "ou_owner" });
     expect(store.getTask(leaderTask.id)?.status).toBe("cancelled");
     expect(store.getTask(child.id)?.status).toBe("queued");
 

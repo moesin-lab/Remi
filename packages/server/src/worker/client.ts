@@ -778,10 +778,10 @@ export class MultiremiDaemonClient {
     return readChatAttachmentBytes(response);
   }
 
-  async resetFeishuBotSession(runtimeId: string, revision: number, externalSessionKey: string): Promise<boolean> {
+  async resetFeishuBotSession(runtimeId: string, revision: number, externalSessionKey: string, senderOpenId: string | null): Promise<boolean> {
     const response = await this.post<{ reset: boolean }>(
       `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/session/reset`,
-      { revision, external_session_key: externalSessionKey },
+      { revision, external_session_key: externalSessionKey, sender_open_id: senderOpenId, cancel_current: true },
     );
     return response.reset === true;
   }
@@ -861,6 +861,7 @@ export class MultiremiDaemonClient {
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
   ): Promise<FeishuBotSessionSnapshot> {
     const response = await this.post<{
       chat_session_id?: string | null;
@@ -876,6 +877,7 @@ export class MultiremiDaemonClient {
         usage?: TaskUsageEntry[];
       } | null;
     }>(`/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/session/inspect`, {
+      sender_open_id: senderOpenId,
       revision,
       external_session_key: externalSessionKey,
     });

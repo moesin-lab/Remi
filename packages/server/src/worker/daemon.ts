@@ -1914,8 +1914,8 @@ export class MultiremiDaemon {
     return this.client.respondTaskHumanRequest(requestId, response, credential);
   }
 
-  resetFeishuBotSession(revision: number, externalSessionKey: string): Promise<boolean> {
-    return this.client.resetFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey);
+  resetFeishuBotSession(revision: number, externalSessionKey: string, senderOpenId: string | null): Promise<boolean> {
+    return this.client.resetFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey, senderOpenId);
   }
 
   cancelFeishuBotSessionTask(
@@ -1932,8 +1932,8 @@ export class MultiremiDaemon {
     return this.client.authorizeFeishuBotSender(this.options.runtimeId!, input);
   }
 
-  inspectFeishuBotSession(revision: number, externalSessionKey: string) {
-    return this.client.inspectFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey);
+  inspectFeishuBotSession(revision: number, externalSessionKey: string, senderOpenId: string | null) {
+    return this.client.inspectFeishuBotSession(this.options.runtimeId!, revision, externalSessionKey, senderOpenId);
   }
 
   async ensureTopicWorkspace(sessionKey: string, topicId: string): Promise<string | null> {

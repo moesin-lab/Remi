@@ -890,6 +890,44 @@ describe("Feishu bot control-plane delivery", () => {
     expect(await asAdmin.json()).toMatchObject({ code: "daemon_token_required" });
   });
 
+  it("rechecks a preauthorized sender under the command lock after same-revision revocation", async () => {
+    const { app, store, tokens, agentId } = await scaffold();
+    const config = store.upsertFeishuBotConfig("local", { agentId, runtimeId: "rt_a", domain: "feishu",
+      appId: "cli_a1b2c3d4e5f6g7h8", appSecretOp: "keep", enabled: true, senderAccessPolicy: "allowlist" });
+    const headers = daemonHeaders(tokens.rt_a!);
+    const key = "oc_review:thread:om_root";
+    const scope = { revision: config.revision, external_session_key: key, sender_open_id: "ou_external" };
+    const post = (route: string, body: unknown) => app.request(`/api/daemon/runtimes/rt_a/feishu-bot/${route}`, {
+      method: "POST", headers, body: JSON.stringify(body),
+    });
+    expect(await (await post("authorize-sender", scope)).json()).toEqual({ allowed: false });
+    const sender = store.listFeishuBotSenders("local")[0]!;
+    store.setFeishuBotSenderAllowed("local", sender.id, true);
+    expect(await (await post("authorize-sender", scope)).json()).toEqual({ allowed: true });
+    const submit = await post("messages", { ...scope, external_message_id: "om_work", text: "work", chat_type: "group", chat_id: "oc_review" });
+    expect(submit.status).toBe(202);
+    const task = await submit.json();
+    expect((await (await post("session/inspect", scope)).json()).task.task_id).toBe(task.taskId);
+    store.setFeishuBotSenderAllowed("local", sender.id, false);
+    expect(store.getFeishuBotConfig("local")?.revision).toBe(scope.revision);
+    for (const [route, extra] of [["session/inspect", {}], ["session/cancel", { chat_id: "oc_review" }],
+      ["session/reset", {}], ["session/reset", { cancel_current: true }]] as const) {
+      for (const identity of [scope.sender_open_id, undefined]) {
+        const denied = await post(route, { ...scope, ...extra, sender_open_id: identity });
+        expect(denied.status).toBe(403);
+        expect(await denied.json()).toMatchObject({ code: "sender_not_allowed" });
+      }
+    }
+    expect(store.getTask(task.taskId)?.status).toBe("queued");
+    store.setFeishuBotSenderAllowed("local", sender.id, true);
+    expect((await (await post("session/inspect", scope)).json()).task.task_id).toBe(task.taskId);
+    expect((await post("session/reset", { ...scope, revision: scope.revision - 1, cancel_current: true })).status).toBe(409);
+    const reset = await post("session/reset", { ...scope, cancel_current: true });
+    expect(await reset.json()).toEqual({ reset: true });
+    expect(store.getTask(task.taskId)?.status).toBe("cancelled");
+    expect((await (await post("session/inspect", scope)).json()).chat_session_id).toBeNull();
+  });
+
   it("bridges messages and session inspection only for the selected Runtime", async () => {
     const test = await scaffold();
     const submitted = await test.app.request("/api/daemon/runtimes/rt_a/feishu-bot/messages", {
@@ -910,7 +948,7 @@ describe("Feishu bot control-plane delivery", () => {
     const inspected = await test.app.request("/api/daemon/runtimes/rt_a/feishu-bot/session/inspect", {
       method: "POST",
       headers: daemonHeaders(test.tokens.rt_a!),
-      body: JSON.stringify({ revision: 1, external_session_key: "oc_chat_1" }),
+      body: JSON.stringify({ revision: 1, external_session_key: "oc_chat_1", sender_open_id: "ou_member" }),
     });
     expect(inspected.status).toBe(200);
     expect(await inspected.json()).toMatchObject({
@@ -921,7 +959,7 @@ describe("Feishu bot control-plane delivery", () => {
     const crossRuntime = await test.app.request("/api/daemon/runtimes/rt_a/feishu-bot/session/inspect", {
       method: "POST",
       headers: daemonHeaders(test.tokens.rt_b!),
-      body: JSON.stringify({ revision: 1, external_session_key: "oc_chat_1" }),
+      body: JSON.stringify({ revision: 1, external_session_key: "oc_chat_1", sender_open_id: "ou_member" }),
     });
     expect(crossRuntime.status).toBe(403);
   });

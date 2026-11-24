@@ -3958,9 +3958,34 @@ export class FeishuBotRepo {
     return { id: account?.id ?? null, allowed: accessPolicy === "agent" || (account?.allowed ?? false), displayName, actorId, profileDescription };
   }
 
-  resetSession(workspaceId: string, runtimeId: string, revision: number, externalSessionKey: string): boolean {
-    const config = this.getConfig(workspaceId);
-    if (!config || config.runtimeId !== runtimeId || config.revision !== revision) return false;
+  private withCommandSender<Result>(workspaceId: string, runtimeId: string, revision: number,
+    senderOpenId: string | null | undefined, execute: (appId: string) => Result): Result {
+    return this.ctx.db.transaction(() => {
+      this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
+      const openId = optionalBoundedString(senderOpenId, "sender_open_id", 512);
+      if (!openId) throw new FeishuBotConfigError("Feishu sender identity required", 403, "sender_not_allowed");
+      const row = this.ctx.db.query(`SELECT bot.app_id, bot.sender_access_policy, sender.allowed
+        FROM multiremi_feishu_bot_configs bot LEFT JOIN multiremi_feishu_bot_senders sender
+        ON sender.workspace_id = bot.workspace_id AND sender.bot_id = bot.bot_id AND sender.app_id = bot.app_id AND sender.open_id = ?
+        WHERE bot.workspace_id = ? AND bot.bot_id = ? AND bot.runtime_id = ? AND bot.revision = ? AND bot.enabled = 1`)
+        .get(openId, workspaceId, this.botId, runtimeId, revision);
+      if (!row) throw new FeishuBotConfigError("feishu bot assignment is stale", 409, "stale_revision");
+      if (row.sender_access_policy !== "agent" && Number(row.allowed) !== 1) {
+        throw new FeishuBotConfigError("Feishu sender is not allowed", 403, "sender_not_allowed");
+      }
+      return execute(String(row.app_id));
+    })();
+  }
+
+  resetSession(workspaceId: string, runtimeId: string, revision: number, externalSessionKey: string,
+    senderOpenId: string | null, cancelCurrent = false): boolean {
+    return this.withCommandSender(workspaceId, runtimeId, revision, senderOpenId, appId => {
+      if (cancelCurrent) this.cancelAuthorizedSession(workspaceId, appId, externalSessionKey, { senderOpenId });
+      return this.resetAuthorizedSession(workspaceId, appId, externalSessionKey);
+    });
+  }
+
+  private resetAuthorizedSession(workspaceId: string, appId: string, externalSessionKey: string): boolean {
     const key = requiredBoundedString(externalSessionKey, "external_session_key", 1_024);
     const result = this.ctx.db.run(
       `UPDATE multiremi_feishu_bot_chat_bindings
@@ -3970,7 +3995,7 @@ export class FeishuBotRepo {
       nowIso(),
       workspaceId,
       this.botId,
-      config.appId,
+      appId,
       key,
     );
     return result.changes > 0;
@@ -4009,10 +4034,12 @@ export class FeishuBotRepo {
     externalSessionKey: string,
     options: { chatId?: string | null; senderOpenId?: string | null; target?: string | null } = {},
   ): FeishuBotCancelResult {
-    const config = this.getConfig(workspaceId);
-    if (!config || config.runtimeId !== runtimeId || config.revision !== revision) {
-      return rejectedCancel("stale_assignment");
-    }
+    return this.withCommandSender(workspaceId, runtimeId, revision, options.senderOpenId,
+      appId => this.cancelAuthorizedSession(workspaceId, appId, externalSessionKey, options));
+  }
+
+  private cancelAuthorizedSession(workspaceId: string, appId: string, externalSessionKey: string,
+    options: { chatId?: string | null; senderOpenId?: string | null; target?: string | null }): FeishuBotCancelResult {
     const key = requiredBoundedString(externalSessionKey, "external_session_key", 1_024);
     const target = cleanOptionalString(options.target ?? null);
     const senderOpenId = cleanOptionalString(options.senderOpenId ?? null);
@@ -4022,7 +4049,7 @@ export class FeishuBotRepo {
       `SELECT chat_session_id FROM multiremi_feishu_bot_chat_bindings
         WHERE workspace_id = ? AND bot_id = ? AND app_id = ? AND external_session_key = ?
         ORDER BY updated_at DESC, id DESC`,
-    ).all(workspaceId, this.botId, config.appId, key) as Row[];
+    ).all(workspaceId, this.botId, appId, key) as Row[];
     const sessionTargets: ResolvedCancelTarget[] = [];
     const seenSessions = new Set<string>();
     for (const binding of bindings) {
@@ -4034,7 +4061,7 @@ export class FeishuBotRepo {
     }
 
     const candidates = chatId && senderOpenId
-      ? this.listCancelCandidates(workspaceId, config.appId, chatId, senderOpenId, seenSessions)
+      ? this.listCancelCandidates(workspaceId, appId, chatId, senderOpenId, seenSessions)
       : [];
 
     if (target) {
@@ -4144,11 +4171,13 @@ export class FeishuBotRepo {
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
   ): FeishuBotSessionSnapshot {
-    const config = this.getConfig(workspaceId);
-    if (!config || config.runtimeId !== runtimeId || config.revision !== revision) {
-      return { chatSessionId: null, agentId: null, agentName: null, task: null };
-    }
+    return this.withCommandSender(workspaceId, runtimeId, revision, senderOpenId,
+      appId => this.inspectAuthorizedSession(workspaceId, appId, externalSessionKey));
+  }
+
+  private inspectAuthorizedSession(workspaceId: string, appId: string, externalSessionKey: string): FeishuBotSessionSnapshot {
     const key = requiredBoundedString(externalSessionKey, "external_session_key", 1_024);
     const binding = this.ctx.db.query(
       `SELECT b.chat_session_id, b.agent_id, a.name AS agent_name
@@ -4156,7 +4185,7 @@ export class FeishuBotRepo {
        LEFT JOIN multiremi_agents a ON a.id = b.agent_id
        WHERE b.workspace_id = ? AND b.bot_id = ? AND b.app_id = ? AND b.external_session_key = ?
        ORDER BY b.updated_at DESC, b.id DESC LIMIT 1`,
-    ).get(workspaceId, this.botId, config.appId, key) as Row | null;
+    ).get(workspaceId, this.botId, appId, key) as Row | null;
     if (!binding) return { chatSessionId: null, agentId: null, agentName: null, task: null };
 
     const chatSessionId = String(binding.chat_session_id);

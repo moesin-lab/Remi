@@ -2587,8 +2587,10 @@ runMigrations(this.db);
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
+    cancelCurrent = false,
   ): boolean {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).resetSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).resetSession(workspaceId, runtimeId, revision, externalSessionKey, senderOpenId, cancelCurrent);
   }
 
   cancelFeishuBotSessionTask(
@@ -2606,8 +2608,9 @@ runMigrations(this.db);
     runtimeId: string,
     revision: number,
     externalSessionKey: string,
+    senderOpenId: string | null,
   ): ReturnType<FeishuBotRepo["inspectSession"]> {
-    return this.feishuBot.forRuntime(workspaceId, runtimeId).inspectSession(workspaceId, runtimeId, revision, externalSessionKey);
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).inspectSession(workspaceId, runtimeId, revision, externalSessionKey, senderOpenId);
   }
 
   feishuBotDirectiveForRuntime(workspaceId: string, runtimeId: string): MultiremiFeishuBotDirective | null {

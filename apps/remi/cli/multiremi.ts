@@ -715,9 +715,6 @@ export function controlPlaneConciergeHost(deps: {
           taskHandler: createFeishuTaskHandler(daemon, config.revision, agent.name),
           wakeWords: [...(config.wake_words ?? [])],
           groupPolicy: { getByChatId: chatId => noMentionChatIds.has(chatId) ? { monitor: true, replyMode: "thread" } : null },
-          abortTask: async (sessionKey) => {
-            await daemon.cancelFeishuBotSessionTask(config.revision, sessionKey);
-          },
         },
       );
       deps.attach(handle);
@@ -1267,6 +1264,14 @@ export function createFeishuTaskHandler(
       taskId,
       displayName: name,
     });
+    const senderOpenId = stringMetadata(message, "senderOpenId");
+    const handleDenied = async (error: unknown) => {
+      if (!(error instanceof MultiremiDaemonHttpError) || error.code !== "sender_not_allowed") return false;
+      if (!message.metadata?.monitored && !message.metadata?.fromHistory) {
+        await replyCard(FEISHU_SENDER_NOT_ALLOWED_MESSAGE, "feishu-sender-not-allowed", displayName);
+      }
+      return true;
+    };
     if (command && command.name === "stop") {
       // A stop that could not be requested must say so. Letting the error escape
       // would surface the connector's generic `**Error:** <http text>` card,
@@ -1275,10 +1280,11 @@ export function createFeishuTaskHandler(
       try {
         result = await daemon.cancelFeishuBotSessionTask(revision, sessionKey, {
           chatId: message.chatId,
-          senderOpenId: stringMetadata(message, "senderOpenId"),
+          senderOpenId,
           target: command.args || null,
         });
       } catch (error) {
+        if (await handleDenied(error)) return;
         await replyCard(
           renderFeishuStopFailure(error),
           "feishu-command-stop",
@@ -1293,24 +1299,18 @@ export function createFeishuTaskHandler(
       );
       return;
     }
-    if (command && command.name === "new") {
-      const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey);
-      await daemon.cancelFeishuBotSessionTask(revision, sessionKey);
-      const reset = await daemon.resetFeishuBotSession(revision, sessionKey);
-      await replyCard(
-        reset ? "已开启新对话。" : "当前已是新对话。",
-        "feishu-command-new",
-        snapshot.agentName ?? displayName,
-      );
-      return;
-    }
-    if (command && command.name === "status") {
-      const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey);
-      await replyCard(
-        renderFeishuStatus(snapshot),
-        "feishu-command-status",
-        snapshot.agentName ?? displayName,
-      );
+    if (command?.name === "new" || command?.name === "status") {
+      try {
+        const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey, senderOpenId);
+        if (command.name === "new") {
+          const reset = await daemon.resetFeishuBotSession(revision, sessionKey, senderOpenId);
+          await replyCard(reset ? "已开启新对话。" : "当前已是新对话。", "feishu-command-new", snapshot.agentName ?? displayName);
+        } else {
+          await replyCard(renderFeishuStatus(snapshot), "feishu-command-status", snapshot.agentName ?? displayName);
+        }
+      } catch (error) {
+        if (!await handleDenied(error)) throw error;
+      }
       return;
     }
     // An unrecognised bare slash message is answered instead of being filed as
@@ -1351,12 +1351,7 @@ export function createFeishuTaskHandler(
         deliveryMode: "native_cot_v1",
       });
     } catch (error) {
-      if (error instanceof MultiremiDaemonHttpError && error.code === "sender_not_allowed") {
-        if (!message.metadata?.monitored && !message.metadata?.fromHistory) {
-          await replyCard(FEISHU_SENDER_NOT_ALLOWED_MESSAGE, "feishu-sender-not-allowed", displayName);
-        }
-        return;
-      }
+      if (await handleDenied(error)) return;
       throw error;
     }
     // A live Task already has the card created by its first event. The steer is

@@ -24,6 +24,7 @@ import type { MultiremiDaemonOptions } from "@multiremi/daemon.js";
 import type { TraceAgentMessageItem, TraceEvent, TraceTurn } from "@multiremi/contracts/trace.js";
 import { completeTurn } from "@shared/turn-trace.js";
 import type {
+  FeishuBotCommandRequest,
   FeishuBotCancelCandidate,
   FeishuBotCancelResult,
   FeishuBotSessionSnapshot,
@@ -77,6 +78,8 @@ import {
   type WorkspaceSupervisorLease,
 } from "@daemon/agent-runtime/workspace/process-owner.js";
 import { type CliOptions, numberOpt, parseArgs, stringOpt } from "./multiremi/options.js";
+import type { FeishuCommandRuntime, FeishuSenderAuthorizer } from "@connectors/feishu/config.js";
+import { describeFeishuCommand, feishuCommandDigest } from "@shared/feishu-command-semantic.js";
 import { isUnknownFeishuCommand, resolveFeishuCommand, unknownCommandMessage } from "./feishu-commands.js";
 import {
   SUPPORTED_DAEMON_PROVIDERS,
@@ -693,15 +696,17 @@ export function controlPlaneConciergeHost(deps: {
         answer: (messageId, answer, credential) => daemon.answerFeishuIssueDecision(messageId, { answer, ...credential }),
       });
       displayName = agent.name;
-      const handle = await boot(
-        (openId, context) => daemon.authorizeFeishuBotSender({
+      const commands = createFeishuCommandRuntime(daemon, config.revision, config.bot_id ?? "default", agent.name);
+      const authorize: FeishuSenderAuthorizer = (openId, context) => daemon.authorizeFeishuBotSender({
           revision: config.revision,
           external_session_key: feishuSessionKey(context),
           sender_open_id: openId || null,
           sender_user_id: context.senderUserId || null,
           sender_union_id: context.senderUnionId || null,
           sender_tenant_key: context.senderTenantKey || null,
-        }),
+        });
+      authorize.commands = commands;
+      const handle = await boot(authorize,
         {
           daemonPort: daemon.localPort(),
           workspacesRoot,
@@ -712,7 +717,7 @@ export function controlPlaneConciergeHost(deps: {
             appSecret: config.app_secret,
             domain: config.domain,
           },
-          taskHandler: createFeishuTaskHandler(daemon, config.revision, agent.name),
+          taskHandler: createFeishuTaskHandler(daemon, config.revision, agent.name, { appId: config.app_id, domain: config.domain, botId: commands.botId }),
           wakeWords: [...(config.wake_words ?? [])],
           groupPolicy: { getByChatId: chatId => noMentionChatIds.has(chatId) ? { monitor: true, replyMode: "thread" } : null },
         },
@@ -1249,10 +1254,38 @@ function withDecisionRecipient(card: Record<string, unknown>, openId: string | n
   return card;
 }
 
+export function createFeishuCommandRuntime(daemon: MultiremiDaemon, revision: number, botId: string, displayName: string): FeishuCommandRuntime {
+  return {
+    revision, botId,
+    async execute(request) {
+      const { semantic } = request;
+      if (semantic.kind === "unknown") return { name: "unknown" };
+      if (semantic.name === "status") {
+        const snapshot = await daemon.inspectFeishuBotSession(request.revision, semantic.external_session_key, semantic.sender_open_id);
+        return { name: "status", snapshot };
+      }
+      if (semantic.name !== "new" && semantic.name !== "stop") throw new Error("Invalid Feishu command");
+      const response = await daemon.executeFeishuBotCommand(request);
+      if (response.state === "missing") return null;
+      if (response.result.name !== semantic.name) throw new Error("Unexpected Feishu command result");
+      return response.result;
+    },
+    render(result, semantic) {
+      switch (result.name) {
+        case "unknown": return { text: unknownCommandMessage(semantic.raw_content), displayName };
+        case "status": return { text: renderFeishuStatus(result.snapshot), displayName: result.snapshot.agentName ?? displayName };
+        case "new": return { text: result.reset ? "已开启新对话。" : "当前已是新对话。", displayName: result.agentName ?? displayName };
+        case "stop": return { text: renderFeishuStopResult(result.cancel, semantic.target, displayName), displayName: result.cancel.agentName ?? displayName };
+      }
+    },
+  };
+}
+
 export function createFeishuTaskHandler(
   daemon: MultiremiDaemon,
   revision: number,
   displayName: string,
+  scope?: { appId: string; domain: FeishuBotCommandRequest["semantic"]["domain"]; botId: string },
 ): TaskStreamingHandler {
   return async (message, sessionKey, consumer) => {
     // Commands are matched on the raw body. `message.text` carries the group
@@ -1272,51 +1305,21 @@ export function createFeishuTaskHandler(
       }
       return true;
     };
-    if (command && command.name === "stop") {
-      // A stop that could not be requested must say so. Letting the error escape
-      // would surface the connector's generic `**Error:** <http text>` card,
-      // which tells the user nothing about whether their Task is still running.
-      let result: FeishuBotCancelResult;
+    if (command || isUnknownFeishuCommand(rawContent)) {
+      if (message.metadata?.fromHistory) return;
+      if (!scope) throw new Error("Feishu command assignment missing");
+      const id = stringMetadata(message, "messageId");
+      if (!id || !senderOpenId) throw new Error("Feishu command identity missing");
+      const semantic = describeFeishuCommand({ domain: scope.domain, app_id: scope.appId, external_message_id: id,
+        sender_open_id: senderOpenId, chat_id: message.chatId, external_session_key: sessionKey, raw_content: rawContent });
       try {
-        result = await daemon.cancelFeishuBotSessionTask(revision, sessionKey, {
-          chatId: message.chatId,
-          senderOpenId,
-          target: command.args || null,
-        });
-      } catch (error) {
-        if (await handleDenied(error)) return;
-        await replyCard(
-          renderFeishuStopFailure(error),
-          "feishu-command-stop",
-          displayName,
-        );
-        return;
-      }
-      await replyCard(
-        renderFeishuStopResult(result, command.args || null, displayName),
-        "feishu-command-stop",
-        result.agentName ?? displayName,
-      );
-      return;
-    }
-    if (command?.name === "new" || command?.name === "status") {
-      try {
-        const snapshot = await daemon.inspectFeishuBotSession(revision, sessionKey, senderOpenId);
-        if (command.name === "new") {
-          const reset = await daemon.resetFeishuBotSession(revision, sessionKey, senderOpenId);
-          await replyCard(reset ? "已开启新对话。" : "当前已是新对话。", "feishu-command-new", snapshot.agentName ?? displayName);
-        } else {
-          await replyCard(renderFeishuStatus(snapshot), "feishu-command-status", snapshot.agentName ?? displayName);
+        const runtime = createFeishuCommandRuntime(daemon, revision, scope.botId, displayName);
+        const result = await runtime.execute({ revision, bot_id: scope.botId, mode: "execute", semantic, digest: feishuCommandDigest(semantic) });
+        if (result) {
+          const reply = runtime.render(result, semantic);
+          await replyCard(reply.text, `feishu-command-${command?.name ?? "unknown"}`, reply.displayName);
         }
-      } catch (error) {
-        if (!await handleDenied(error)) throw error;
-      }
-      return;
-    }
-    // An unrecognised bare slash message is answered instead of being filed as
-    // new work. `/data00/x …` and other slash-prefixed requests keep working.
-    if (isUnknownFeishuCommand(rawContent)) {
-      await replyCard(unknownCommandMessage(rawContent), "feishu-command-unknown", displayName);
+      } catch (error) { if (!await handleDenied(error)) throw error; }
       return;
     }
 
@@ -1351,7 +1354,7 @@ export function createFeishuTaskHandler(
         deliveryMode: "native_cot_v1",
       });
     } catch (error) {
-      if (await handleDenied(error)) return;
+      if (!scope && await handleDenied(error)) return;
       throw error;
     }
     // A live Task already has the card created by its first event. The steer is
@@ -1387,14 +1390,7 @@ function stringMetadata(message: IncomingMessage, key: string): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-/**
- * Reply card for a stop request.
- *
- * Only the server's answer is reported: a request that was accepted says so
- * ("已请求停止"), and the CoT card is what turns an accepted request into the
- * visible interrupted state. Nothing here claims a Task has already stopped.
- */
-function renderFeishuStopResult(
+export function renderFeishuStopResult(
   result: FeishuBotCancelResult,
   target?: string | null,
   fallbackAgentName?: string | null,
@@ -1432,31 +1428,6 @@ function renderFeishuStopResult(
     return `没有停止任何任务：${reason}。`;
   }
   return "当前没有正在运行的任务。";
-}
-
-/**
- * Reply card for a stop request that never reached the server.
- *
- * The Task was not confirmed stopped, so the card must not imply either
- * outcome: it reports the failure and points at the workbench, where the real
- * state is visible.
- */
-function renderFeishuStopFailure(error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  const reason = formatStopFailureReason(detail);
-  return `停止请求失败：${reason}。任务可能仍在运行，请到工作台确认。`;
-}
-
-/**
- * Keep the operator-useful part of a transport error without pasting a raw
- * English HTTP dump into the card.
- */
-function formatStopFailureReason(detail: string): string {
-  const status = /\breturned (\d{3})\b/.exec(detail) ?? /\b(\d{3})\b/.exec(detail);
-  if (status) return `服务端返回 ${status[1]}`;
-  if (/timed? ?out/i.test(detail)) return "请求超时";
-  if (/fetch failed|ECONNREFUSED|ENOTFOUND|network/i.test(detail)) return "无法连接服务端";
-  return "服务端未确认";
 }
 
 function renderFeishuCancelCandidate(candidate: FeishuBotCancelCandidate): string {

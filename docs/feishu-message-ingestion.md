@@ -103,9 +103,13 @@ daemon 以服务端既有 `multiremi_feishu_bot_chat_bindings.chat_id`（含话�
 启用此配置的连接器将实时事件先原子写入本地 app/domain 隔离的 pending 日志，
 业务 callback 成功后确认；失败保留 pending，启动及每 30 秒重放并分页读取历史。
 确认时原子清除已处理的 pending，并在同一 journal 保留 30 分钟的 message_id 确认记录。确认记录不保存正文。静默消息也会确认，因此重叠回扫或更换响应词不会重新唤醒同一条消息，同文新 ID 仍按当前配置处理。旧版 journal 保留原 pending 与扫描水位；升级前已经删除的 ID 无法追溯。
-实时与历史同时到达时优先处理实时副本。如果历史已处理，仅显式拒绝的实时提示和历史跳过的命令保留各自的实时处理机会。授权、身份或传输失败的 pending 不会被确认为成功。
+首次可识别的解析在鉴权前保存摘要，包含域名、应用、消息、发送者、会话、话题、命令、参数、目标和清洗后的原文。实时事件先到时，历史副本不能替换它。历史先到时，仅历史跳过的命令或显式拒绝保留对应的实时机会。后到的实时副本须通过当前准入并匹配原摘要。临时缺少身份、鉴权失败、服务不可用时保留 pending，不受 30 分钟终态清理影响。
+
+`/status` 保存查询结果后单独发送结果卡。`/new` 和 `/stop` 需要支持 `commands/v1` 的服务端，重试沿用原事件键。执行响应丢失后遇到配置或语义变化，只查原执行结果。旧服务端缺少该入口时记录 `command_endpoint_unsupported`，升级 server 后请发一条新命令。旧 v1 journal 保留扫描水位、pending 和终态。无摘要的历史命令机会静默关闭；旧实时 pending 可能已执行写命令时记录 `upgrade_write_outcome_unknown_resend_new_message`，请先核对业务状态，确有需要时用一条新消息重试。
+
+命令与拒绝卡以版本、域名、应用、消息 ID 和用途生成 UUID，发送前持久化正文、目的地和首次尝试时间。结果卡再次发送前复核当前权限。飞书官方 SDK 的 `CreateMessageReqBodyBuilder.Uuid` 和 `ReplyMessageReqBodyBuilder.Uuid` 均注明相同 UUID 的有效去重窗口为一小时。送达不明时，daemon 在首次尝试后 55 分钟内沿用原 UUID 重试，超过此窗口记录 `command_reply_delivery_unknown`。表情回执失败不会重新执行业务。[飞书官方 SDK 字段说明](https://github.com/larksuite/oapi-sdk-go/blob/v3_main/service/im/v1/model.go)
 历史 sender/mention 转为同一接收事件，沿用发送者授权、群准入及附件链路。
-历史准入拒绝不发送用户卡片，避免重叠回扫重复通知；实时拒绝提示按 message_id 本地去重一次。
+历史准入拒绝不发送用户卡片，避免重叠回扫重复通知；实时拒绝提示按域名、应用与 message_id 去重。
 Task 去重仍只由服务端 `multiremi_feishu_bot_deliveries.external_message_id` 负责；
 提交成功而本地未确认的事件可再次提交，解析到原 Task。
 

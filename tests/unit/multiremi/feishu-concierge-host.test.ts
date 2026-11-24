@@ -9,7 +9,8 @@
 import { describe, expect, it } from "bun:test";
 import { attachControlPlaneConciergeHosts, controlPlaneConciergeHost } from "../../../apps/remi/cli/multiremi.js";
 import { FeishuConciergeSupervisor, type FeishuConciergeHost } from "@multiremi/worker/feishu-concierge.js";
-import { processFeishuMessageEvent } from "@connectors/feishu/receive.js";
+import { createFeishuInboundDelivery, processFeishuMessageEvent } from "@connectors/feishu/receive.js";
+import { feishuHistoryEvent } from "@connectors/feishu/inbound-recovery.js";
 import type { bootFeishuChannel, FeishuChannelHandle } from "../../../apps/remi/cli/agent.js";
 import type { MultiremiDaemon } from "@multiremi/worker/daemon.js";
 import type {
@@ -156,6 +157,31 @@ function host(input: {
 }
 
 describe("control-plane Feishu concierge host", () => {
+  it("wires the assignment into command intake and retries an unavailable inspect before sending one card", async () => {
+    const { daemon } = fakeDaemon();
+    const inspects: unknown[] = [], cards: unknown[] = [];
+    daemon.authorizeFeishuBotSender = async () => true;
+    daemon.inspectFeishuBotSession = async (...args) => {
+      inspects.push(args);
+      if (inspects.length === 1) throw new Error("503");
+      return { chatSessionId: "current", task: null };
+    };
+    const test = host({ daemon });
+    await test.conciergeHost.start(assignment());
+    const event = feishuHistoryEvent({ message_id: "om_status", msg_type: "text", body: { content: '{"text":"/status"}' },
+      sender: { sender_type: "user", id_type: "open_id", id: "ou_sender" } }, "oc_chat", "p2p")!;
+    delete event.recovery_source;
+    const delivery = createFeishuInboundDelivery({ appId: assignment().config.app_id, recovery: null, authorizeSender: test.calls[0].authorize,
+      botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() }, onMessage: async () => { throw new Error("unexpected task"); },
+      client: { im: { message: { create: async (input: unknown) => { cards.push(input); return { code: 0, data: { message_id: "om_status_card" } }; } } },
+        request: async () => ({ code: 0, data: { items: [] } }) } as any });
+    await expect(delivery(event)).rejects.toThrow("503");
+    await delivery(event); await delivery(event);
+    expect(inspects).toEqual([[4, "oc_chat", "ou_sender"], [4, "oc_chat", "ou_sender"]]);
+    expect(cards).toHaveLength(1);
+    expect(JSON.stringify(cards[0])).toContain("current");
+  });
+
   it("refetches on reconnect and replaces wake words with the assignment snapshot", async () => {
     const fake = fakeDaemon();
     fake.daemon.authorizeFeishuBotSender = async () => true;

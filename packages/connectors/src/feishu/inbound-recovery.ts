@@ -3,18 +3,40 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { multiremiStateDir } from "@shared/home-paths.js";
 import type { FeishuMessageEvent } from "./types.js";
+import type { FeishuCommandSemantic } from "@multiremi/contracts/types.js";
 
 type ChatType = "p2p" | "group";
 type LiveFollowup = "denial" | "command";
-export type FeishuInboundDelivery = (event: FeishuMessageEvent, liveOnly?: LiveFollowup) => Promise<void | LiveFollowup>;
+export interface CommandReply {
+  botId?: string;
+  card: Record<string, unknown>;
+  denied: boolean;
+  uuid: string;
+  chatId: string;
+  replyTo?: string;
+  firstSendAt?: number;
+  uncertain?: boolean;
+  messageId?: string;
+}
+
+export interface CommandProgress {
+  digest?: string;
+  botId?: string;
+  legacyPending?: boolean;
+  write?: { semantic: FeishuCommandSemantic; revision: number; botId: string; lookupOnly?: boolean };
+  reply?: CommandReply;
+}
+export type FeishuInboundDelivery = (event: FeishuMessageEvent, liveOnly?: LiveFollowup, journal?: FeishuInboundRecovery) => Promise<void | LiveFollowup>;
 const HISTORY_WINDOW_MS = 10 * 60_000;
 const ACK_RETENTION_MS = 30 * 60_000;
 interface InboundState {
-  version: 1;
+  version: 2;
   initializedAt: number;
   chats: Record<string, { type: ChatType; through: number; scannedThrough: number }>;
   pending: Record<string, FeishuMessageEvent>;
-  acknowledged: Record<string, { at: number; liveOnly?: LiveFollowup }>;
+  acknowledged: Record<string, { at: number; liveOnly?: LiveFollowup; digest?: string; botId?: string; replyId?: string }>;
+  progress: Record<string, CommandProgress>;
+  liveCopies: Record<string, FeishuMessageEvent>;
   skipped: Array<{ chatId: string; reason: string; at: number; status: "skipped"; messageId?: string; command?: string }>;
 }
 
@@ -33,22 +55,28 @@ export class FeishuInboundRecovery {
   private nextPruneAt = 0;
   private closed = false;
 
-  constructor(private readonly path: string, private readonly now = Date.now) {
-    if (existsSync(path)) {
+  constructor(private readonly path: string | null, readonly now = Date.now) {
+    if (path && existsSync(path)) {
       // Fail closed on an unreadable journal. Silently resetting it would lose pending input.
-      const state = JSON.parse(readFileSync(path, "utf8")) as InboundState;
-      if (state.version !== 1 || !Number.isFinite(state.initializedAt)
+      const state = JSON.parse(readFileSync(path, "utf8")) as Omit<InboundState, "version"> & {version: number};
+      if (![1, 2].includes(state.version) || !Number.isFinite(state.initializedAt)
           || !state.chats || !state.pending || !Array.isArray(state.skipped)) throw new Error("Invalid Feishu inbound journal");
-      this.state = state;
-      this.state.acknowledged ??= {};
+      if (state.version === 2 && (!state.progress || !state.acknowledged || !state.liveCopies)) throw new Error("Incomplete Feishu inbound journal");
+      this.state = { ...state, version: 2, progress: state.progress ?? {}, liveCopies: state.liveCopies ?? {}, acknowledged: state.acknowledged ?? {} };
+      if (state.version === 1) {
+        for (const id of Object.keys(state.pending)) this.state.progress[id] = { legacyPending: true };
+        for (const receipt of Object.values(this.state.acknowledged)) if (receipt.liveOnly === "command") delete receipt.liveOnly;
+        this.save();
+      }
     } else {
-      this.state = { version: 1, initializedAt: now() - HISTORY_WINDOW_MS, chats: {}, pending: {}, acknowledged: {}, skipped: [] };
+      this.state = { version: 2, initializedAt: now() - HISTORY_WINDOW_MS, chats: {}, pending: {}, acknowledged: {}, progress: {}, liveCopies: {}, skipped: [] };
       this.save();
     }
   }
 
   private save(): void {
     if (this.closed) throw new Error("Feishu inbound journal closed");
+    if (!this.path) return;
     mkdirSync(dirname(this.path), { recursive: true });
     const temporary = `${this.path}.tmp`;
     writeFileSync(temporary, JSON.stringify(this.state), { mode: 0o600 });
@@ -57,6 +85,18 @@ export class FeishuInboundRecovery {
 
   close(): void {
     this.closed = true;
+  }
+
+  progress(id: string): Readonly<CommandProgress> {
+    if (this.closed) throw new Error("Feishu inbound journal closed");
+    const receipt = this.state.acknowledged[id];
+    return this.state.progress[id] ?? { digest: receipt?.digest, botId: receipt?.botId };
+  }
+
+  checkpoint(id: string, change: Partial<CommandProgress>): void {
+    if (this.closed || !this.state.pending[id]) throw new Error("Feishu input no longer pending");
+    this.state.progress[id] = { ...this.progress(id), ...change };
+    this.save();
   }
 
   private serialized(action: () => Promise<void>): Promise<void> {
@@ -96,10 +136,11 @@ export class FeishuInboundRecovery {
     this.rememberChat(event.message.chat_id, event.message.chat_type);
     // This synchronous write happens before any await, even behind another callback.
     const pending = this.state.pending[id];
-    // A history overlap must not erase a live notification obligation already
-    // journaled for this ID. A later live copy can replace a history copy.
-    this.state.pending[id] = pending && pending.recovery_source !== "history" && event.recovery_source === "history"
-      ? pending : event;
+    if (!pending) this.state.pending[id] = event;
+    else if (event.recovery_source !== "history") {
+      if (pending.recovery_source === "history") this.state.liveCopies[id] ??= event;
+      else if (this.progress(id).digest) this.state.pending[id] = event;
+    }
     this.save();
     return this.serialized(() => this.deliver(id, deliver));
   }
@@ -109,19 +150,22 @@ export class FeishuInboundRecovery {
     if (!event) return;
     const receipt = this.state.acknowledged[id];
     if (!receipt || (receipt.liveOnly && event.recovery_source !== "history")) {
-      const liveOnly = await callback(event, receipt?.liveOnly);
-      this.state.acknowledged[id] = { at: this.now(), ...(liveOnly ? { liveOnly } : {}) };
+      const liveOnly = await callback(event, receipt?.liveOnly, this);
+      const progress = this.progress(id);
+      this.state.acknowledged[id] = { at: this.now(), ...(liveOnly ? { liveOnly, digest: progress.digest, botId: progress.botId } : {}), replyId: progress.reply?.messageId };
     }
     const timestamp = Number(event.message.create_time);
     if (Number.isFinite(timestamp) && timestamp > 0 && timestamp <= this.now()) {
       const chat = this.state.chats[event.message.chat_id]!;
       chat.through = Math.max(chat.through, timestamp);
     }
-    const pending = this.state.pending[id];
-    if (pending === event || pending?.recovery_source === "history" || !this.state.acknowledged[id].liveOnly) {
-      delete this.state.pending[id];
-    }
+    const next = this.state.acknowledged[id].liveOnly && this.state.liveCopies[id];
+    delete this.state.progress[id];
+    delete this.state.liveCopies[id];
+    delete this.state.pending[id];
+    if (next) this.state.pending[id] = next;
     this.save();
+    if (next) await this.deliver(id, callback);
   }
 
   replay(callback: FeishuInboundDelivery): Promise<void> {

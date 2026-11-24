@@ -19,6 +19,32 @@ type Actor = ReturnType<AuthorityKernel['authorizeWrite']>;
 type Response = RevokeRootGrantResponse | RevokeCredentialFamilyResponse;
 interface PasswordEvidence { userId: string; verifier: string; version: number; node: string; deadline: number }
 
+interface HumanBootstrapInput {
+  deploymentId: string;
+  authorization: string;
+  userId: string;
+  reason: string;
+  expectedRevision: number;
+  dashboardSigningDomain?: Readonly<{ domainId: string; keyEpoch: string; keyDigest: string }>;
+}
+
+export function bootstrapAuthorizationDigest(input: HumanBootstrapInput): string {
+  const signing = input.dashboardSigningDomain;
+  if (!signing) return digest(input.authorization);
+  if (![signing.domainId, signing.keyEpoch].every(value => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value))
+    || typeof signing.keyDigest !== 'string' || !/^[0-9a-f]{64}$/.test(signing.keyDigest)) {
+    throw new RootManagementRequestError(400, 'Invalid signing domain commitment');
+  }
+  return 'dashboard-v1:' + digest(JSON.stringify([input.deploymentId,input.userId,input.reason,input.expectedRevision,
+    signing.domainId,signing.keyEpoch,signing.keyDigest,input.authorization]));
+}
+
+export interface IndependentDashboardIssuance {
+  readonly subjectType: 'user'; readonly subjectId: string; readonly purpose: 'dashboard';
+  readonly credentialId: string; readonly materialVersion: 1; readonly expectedVersion: 0;
+  readonly familyId: string; readonly nodeId: string; readonly generation: 1;
+}
+
 export class RootManagementRequestError extends Error {
   constructor(readonly status: 400 | 404, message: string) { super(message); }
 }
@@ -33,6 +59,7 @@ function onPrimary<T>(readOrWrite: () => T): T {
 export class RootManagement {
   private readonly proofs = new WeakMap<CredentialProof, PasswordEvidence>();
   private readonly actors = new WeakMap<Actor, { tx: SecurityTx; proof: CredentialProof; action: string; target: string }>();
+  private readonly dashboardCandidates = new WeakMap<CredentialProof, IndependentDashboardIssuance>();
 
   constructor(private readonly db: SqlDatabase) {}
 
@@ -156,7 +183,7 @@ export class RootManagement {
     return onPrimary(() => this.revoke(tx, actor, targetId, grantAction, input)) as RevokeRootGrantResponse;
   }
 
-  bootstrapHuman(proof: CredentialProof, input: { deploymentId: string; authorization: string; userId: string; reason: string; expectedRevision: number }): CreateRootGrantResponse {
+  bootstrapHuman(proof: CredentialProof, input: HumanBootstrapInput): CreateRootGrantResponse {
     const { deploymentId, authorization, userId, reason, expectedRevision } = input;
     const evidence = this.evidence(proof);
     if (userId !== evidence.userId || !reason.trim() || !deploymentId || !authorization) throw new SecurityAbort('root_required');
@@ -164,7 +191,7 @@ export class RootManagement {
     return onPrimary(() => withSecurityWrite(this.db, undefined, { ...this.plan(proof, use), expectedRevision }, tx => {
       this.checkPassword(tx, this.evidence(proof));
       const now = Date.now();
-      const ticket = digest(authorization);
+      const ticket = bootstrapAuthorizationDigest(input);
       if (!this.db.query(`UPDATE multiremi_root_bootstrap_authorizations SET consumed_at_ms=? WHERE authorization_digest=?
         AND deployment_id=? AND user_id=? AND reason=? AND expires_at_ms>? AND consumed_at_ms IS NULL RETURNING deployment_id`)
         .get(now, ticket, deploymentId, userId, reason, now)) throw new SecurityAbort('root_required');
@@ -172,17 +199,29 @@ export class RootManagement {
         AND feature_activation=0 AND NOT EXISTS (SELECT 1 FROM multiremi_root_grants) RETURNING singleton`).get()) throw new SecurityAbort('authority_revision_conflict');
       const origin = this.newNode('deployment_origin', 'deployment', deploymentId, 1, expectedRevision+1, null, []);
       const result = this.insertHumanGrant(tx, userId, reason, null, expectedRevision, { type: 'deployment', id: deploymentId }, [origin]);
+      const signing = input.dashboardSigningDomain;
+      if (signing) {
+        if (!this.db.query(`INSERT INTO multiremi_jwt_signing_domains(domain_id,key_epoch,key_digest) VALUES(?,?,?)
+          ON CONFLICT(domain_id) DO NOTHING RETURNING domain_id`).get(signing.domainId,signing.keyEpoch,signing.keyDigest)) {
+          throw new SecurityAbort('credential_version_conflict');
+        }
+        this.db.query(`INSERT INTO multiremi_root_management_events(actor_user_id,proof_node_id,actor_grant_id,actor_generation,
+          action,target_id,idempotency_key,payload_digest,reason,revision_before,revision_after,created_at_ms,result_json)
+          VALUES(?,?,?,?,'bootstrap.jwt-domain.register',?,?,?,?,?,?,?,?)`).run(userId,evidence.node,result.grant.id,result.grant.generation,
+          signing.domainId,signing.keyEpoch,digest(JSON.stringify([signing.domainId,signing.keyEpoch,signing.keyDigest])),reason,
+          expectedRevision,result.security_revision,now,JSON.stringify({domainId:signing.domainId,keyEpoch:signing.keyEpoch}));
+      }
       this.db.query(`UPDATE multiremi_root_bootstrap_authorizations SET grant_id=?,proof_node_id=?,revision_before=?,revision_after=?
         WHERE authorization_digest=?`).run(result.grant.id, evidence.node, expectedRevision, result.security_revision, ticket);
       return { ...result, grant: { ...result.grant, effective: false, effective_reason_code: 'feature_disabled' } };
     }));
   }
 
-  private newNode(kind: string, subjectType: string, subjectId: string, generation: number, revision: number, expiry: number | null, parents: string[]) {
-    const id = randomUUID();
+  private newNode(kind: string, subjectType: string, subjectId: string, generation: number, revision: number, expiry: number | null,
+    parents: string[], id: string = randomUUID(), scope = 'system') {
     this.db.query(`INSERT INTO multiremi_authority_nodes(node_id,issued_seq,generation,kind,subject_type,subject_id,scope,revision,expires_at_ms,continuous_parent_count)
-      SELECT ?,COALESCE(MAX(issued_seq),0)+1,?,?,?,?,'system',?,?,? FROM multiremi_authority_nodes`)
-      .run(id, generation, kind, subjectType, subjectId, revision, expiry ?? Number.MAX_SAFE_INTEGER, parents.length);
+      SELECT ?,COALESCE(MAX(issued_seq),0)+1,?,?,?,?,?,?,?,? FROM multiremi_authority_nodes`)
+      .run(id, generation, kind, subjectType, subjectId, scope, revision, expiry ?? Number.MAX_SAFE_INTEGER, parents.length);
     for (const parent of parents) {
       if (!this.db.query(`INSERT INTO multiremi_authority_edges SELECT c.node_id,c.generation,c.issued_seq,p.node_id,p.generation,p.issued_seq,'continuous'
         FROM multiremi_authority_nodes c CROSS JOIN multiremi_authority_nodes p WHERE c.node_id=? AND p.node_id=? RETURNING child_id`).get(id, parent)) {
@@ -190,6 +229,57 @@ export class RootManagement {
       }
     }
     return id;
+  }
+
+  issueIndependentDashboardSession(proof: CredentialProof, expiresAtMs: number,
+    signAndRegister: (tx: SecurityTx, source: IndependentDashboardIssuance, claims: { exp: number }) => string): string {
+    const evidence = this.evidence(proof);
+    let candidate = this.dashboardCandidates.get(proof);
+    if (!candidate) {
+      candidate = Object.freeze({ subjectType: 'user', subjectId: evidence.userId, purpose: 'dashboard', credentialId: randomUUID(),
+        materialVersion: 1, expectedVersion: 0, familyId: randomUUID(), nodeId: randomUUID(), generation: 1 });
+      this.dashboardCandidates.set(proof,candidate);
+    }
+    const source = candidate;
+    const state = onPrimary(() => this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get());
+    if (!state) throw new SecurityAbort('security_state_unavailable');
+    const before = Number(state.security_revision);
+    const targets = [`authority:${evidence.node}`,`authority:${source.nodeId}`,`jwt:${source.credentialId}`,`family:${source.familyId}`].sort();
+    return onPrimary(() => withSecurityWrite(this.db,undefined,{ expectedRevision:before,workspaceIds:[],numberKeys:[],domainTargets:targets },tx => {
+      this.checkPassword(tx,this.evidence(proof));
+      const active = this.db.query('SELECT feature_activation FROM multiremi_security_state WHERE singleton=1').get();
+      if (Number(active?.feature_activation)!==1) throw new SecurityAbort('root_required');
+      const now = Date.now();
+      const ceiling = this.db.query(`SELECT MIN(n.expires_at_ms) AS ceiling FROM multiremi_authority_nodes n JOIN multiremi_password_authority_versions p
+        ON n.node_id IN (p.identity_node_id,p.password_node_id) WHERE p.user_id=? AND p.version=?`).get(evidence.userId,evidence.version);
+      if (!Number.isSafeInteger(expiresAtMs/1000) || expiresAtMs<=now || expiresAtMs>Math.min(Number(ceiling?.ceiling),now+30*24*60*60_000)) {
+        throw new RootManagementRequestError(400,'Invalid dashboard session lifetime');
+      }
+      if (this.db.query('SELECT credential_id FROM multiremi_jwt_current WHERE credential_id=?').get(source.credentialId)) throw new SecurityAbort('credential_version_conflict');
+      const revision = before+1;
+      const familyNode = this.newNode('credential_family','user',source.subjectId,1,revision,expiresAtMs,[evidence.node],randomUUID(),'dashboard');
+      this.db.query(`INSERT INTO multiremi_credential_families(family_id,authority_node_id,max_expires_at_ms,revision) VALUES(?,?,?,?)`)
+        .run(source.familyId,familyNode,expiresAtMs,revision);
+      this.newNode('jwt_material','user',source.subjectId,1,revision,expiresAtMs,[familyNode],source.nodeId,'dashboard');
+      const compact = signAndRegister(tx,source,{exp:expiresAtMs/1000});
+      const registered = this.db.query(`SELECT m.claims_json,m.key_epoch,m.domain_id FROM multiremi_jwt_materials m JOIN multiremi_jwt_current c
+        ON c.credential_id=m.credential_id AND c.current_material_version=m.material_version WHERE m.compact_digest=? AND m.credential_id=?
+        AND m.material_version=1 AND m.revoked_at_ms IS NULL AND m.subject_type='user' AND m.subject_id=? AND m.purpose='dashboard'
+        AND m.authority_node_id=? AND m.authority_generation=1 AND m.family_id=? AND m.expires_at_ms=?`)
+        .get(digest(compact),source.credentialId,source.subjectId,source.nodeId,source.familyId,expiresAtMs);
+      if (!registered) throw new SecurityAbort('credential_version_conflict');
+      const claims = JSON.parse(registered.claims_json);
+      const allowedClaims = ['sub','jti','exp','purpose','material_version','key_epoch','signing_domain'];
+      if (Object.keys(claims).some(key => !allowedClaims.includes(key)) || claims.jti!==source.credentialId || claims.sub!==source.subjectId
+        || claims.exp!==expiresAtMs/1000 || claims.purpose!=='dashboard' || claims.material_version!==source.materialVersion
+        || claims.key_epoch!==registered.key_epoch || claims.signing_domain!==registered.domain_id) {
+        throw new SecurityAbort('credential_version_conflict');
+      }
+      this.checkPassword(tx,this.evidence(proof));
+      if (!this.db.query('UPDATE multiremi_security_state SET security_revision=? WHERE singleton=1 AND security_revision=? RETURNING singleton')
+        .get(revision,before)) throw new SecurityAbort('authority_revision_conflict');
+      return compact;
+    }));
   }
 
   private insertHumanGrant(tx: SecurityTx, userId: string, reason: string, expiry: number | null, before: number,

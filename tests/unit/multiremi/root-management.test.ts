@@ -6,10 +6,13 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
 import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
+import { invalidatingDatabase } from '@multiremi/store/request-read-cache.js';
+import { liveTermDatabase } from '@multiremi/store/live-term-fence.js';
 import { runMigrations } from '@multiremi/store/migrations.js';
 import type { AuthorityUse, CredentialProof } from '@multiremi/store/root-authority-contract.js';
 import type { RevokeCredentialFamilyRequest } from '@multiremi/contracts/root-authority.js';
-import { RootManagement } from '@multiremi/store/root-management.js';
+import { bootstrapAuthorizationDigest, RootManagement } from '@multiremi/store/root-management.js';
+import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
 import { withSecurityWrite } from '@multiremi/store/security-write.js';
 
 let sqlite: ReturnType<typeof openSqliteDatabase>;
@@ -24,7 +27,7 @@ const checksum = (value: string) => createHash('sha256').update(value).digest('h
 
 beforeEach(async () => {
   sqlite = openSqliteDatabase();
-  db = sqlite as unknown as SqlDatabase;
+  db = liveTermDatabase(invalidatingDatabase(sqlite as unknown as SqlDatabase));
   runMigrations(db);
   const passwordHash = await Bun.password.hash(passphrase, { algorithm: 'argon2id', memoryCost: 19456, timeCost: 2 });
   db.query(`INSERT INTO multiremi_users(id,name,email,created_at,updated_at) VALUES('usr_test','fixture','fixture@example.invalid','now','now')`).run();
@@ -53,6 +56,46 @@ beforeEach(async () => {
 afterEach(() => sqlite.close());
 
 function enable() { db.run("UPDATE multiremi_security_state SET feature_activation=1,bootstrap_completed=1,minimum_enforcement_version='fixture'"); }
+
+test('fresh independent password login issues just one registered self dashboard session with a revocable family', () => {
+  const signing = {domainId:'fixture-dashboard',keyEpoch:'1',secret:'synthetic-session-signing-key'};
+  const dashboardSigningDomain = {domainId:signing.domainId,keyEpoch:signing.keyEpoch,keyDigest:checksum(signing.secret)};
+  const input = {deploymentId:'fixture-deployment',authorization:'one-use-fixture-bootstrap',userId:'usr_test',reason:'fixture',expectedRevision:0,dashboardSigningDomain};
+  db.run('DELETE FROM multiremi_root_subject_state');
+  db.run('DELETE FROM multiremi_root_grants');
+  db.query(`INSERT INTO multiremi_root_bootstrap_authorizations(authorization_digest,deployment_id,user_id,reason,expires_at_ms)
+    VALUES(?,?,?,?,?)`).run(bootstrapAuthorizationDigest(input),input.deploymentId,input.userId,input.reason,Date.now()+60_000);
+  expect(()=>service.bootstrapHuman(proof,{...input,dashboardSigningDomain:{...dashboardSigningDomain,keyEpoch:'2'}})).toThrow('root_required');
+  expect(()=>service.bootstrapHuman(proof,{...input,dashboardSigningDomain:undefined})).toThrow('root_required');
+  db.exec("CREATE TRIGGER reject_domain_audit BEFORE INSERT ON multiremi_root_management_events BEGIN SELECT RAISE(ABORT,'audit rejected'); END");
+  expect(()=>service.bootstrapHuman(proof,input)).toThrow();
+  expect(db.query('SELECT domain_id FROM multiremi_jwt_signing_domains').all()).toEqual([]);
+  expect(db.query('SELECT grant_id FROM multiremi_root_grants').all()).toEqual([]);
+  db.exec('DROP TRIGGER reject_domain_audit');
+  service.bootstrapHuman(proof,input);
+  expect(db.query('SELECT domain_id,key_epoch FROM multiremi_jwt_signing_domains').get()).toEqual({domain_id:signing.domainId,key_epoch:'1'});
+  expect(db.query('SELECT feature_activation FROM multiremi_security_state').get().feature_activation).toBe(0);
+  enable();
+  db.run("UPDATE multiremi_root_subject_state SET active_grant_id=NULL WHERE subject_id='usr_test'");
+  const materials = new JwtMaterials(db);
+  const expiry = (Math.floor(Date.now()/1000)+300)*1000;
+  expect(()=>service.issueIndependentDashboardSession(proof,expiry,()=>'unregistered')).toThrow('credential_version_conflict');
+  expect(()=>service.issueIndependentDashboardSession(proof,expiry,(tx,source,claims)=>
+    materials.issue(tx,source,{...claims,root:true},signing))).toThrow('credential_version_conflict');
+  expect(db.query("SELECT node_id FROM multiremi_authority_nodes WHERE kind='jwt_material'").all()).toEqual([]);
+  const issue = () => service.issueIndependentDashboardSession(proof,expiry,(tx,source,claims)=>materials.issue(tx,source,claims,signing));
+  const compact = issue();
+  const row = db.query(`SELECT m.subject_id,m.family_id,m.material_version,m.purpose,m.authority_node_id,f.authority_node_id AS family_node
+    FROM multiremi_jwt_materials m JOIN multiremi_credential_families f ON f.family_id=m.family_id WHERE m.compact_digest=?`).get(checksum(compact));
+  expect(row).toMatchObject({subject_id:'usr_test',material_version:1,purpose:'dashboard'});
+  expect(db.query('SELECT parent_id FROM multiremi_authority_edges WHERE child_id=?').get(row.authority_node_id).parent_id).toBe(row.family_node);
+  expect(db.query('SELECT parent_id FROM multiremi_authority_edges WHERE child_id=?').get(row.family_node).parent_id).toBe('password');
+  expect(issue).toThrow('credential_version_conflict');
+  expect(db.query('SELECT COUNT(*) AS total FROM multiremi_jwt_materials').get().total).toBe(1);
+  expect(materials.validate(compact,signing)?.userId).toBe('usr_test');
+  db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='password'");
+  expect(materials.validate(compact,signing)).toBeNull();
+});
 
 test('trust grant binds live daemon credential, enrollment, two key proofs and single-use nonce, then revokes atomically', () => {
   enable();

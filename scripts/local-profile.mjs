@@ -1374,6 +1374,21 @@ async function runAction(profile, action, flags, root) {
     }
   }
   else if (action === 'token') {
+    // Only the running primary-backed API can report activation. A local env
+    // value or an unreachable/older server cannot establish a disabled domain.
+    let registrationRequired;
+    try {
+      const status = await fetch(`http://127.0.0.1:${settings[profile].apiPort}/api/config`, {
+        redirect: 'error', signal: AbortSignal.timeout(5_000),
+      });
+      if (!status.ok) throw new Error('API unavailable');
+      registrationRequired = (await status.json()).jwt_registration_required;
+    } catch {
+      throw new Error('Cannot verify JWT registration state; start the selected profile API and authenticate online');
+    }
+    if (registrationRequired !== false) {
+      throw new Error('Offline JWT mint is disabled when registration is required or unknown; use online authentication with a trusted source adapter');
+    }
     const { JWT_SECRET: signingSecret } = parseEnv(readFileSync(join(root, 'api.env'), 'utf8'));
     if (!signingSecret) throw new Error('No local profile JWT_SECRET is configured');
     // Existing JWT authentication recognizes the local administrator identity;

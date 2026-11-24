@@ -6,6 +6,9 @@ import { runMigrations } from '@multiremi/store/migrations.js';
 import { expandJwtMaterials } from '@multiremi/store/jwt-material-schema.js';
 import { compactJwtDigest, JwtMaterials, JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
 import { withSecurityWrite } from '@multiremi/store/security-write.js';
+import { MultiremiStore } from '@multiremi/store.js';
+import { createJwtBrowserClientGuard } from '@multiremi/api/realtime.js';
+import type { MultiremiWebSocketClient } from '@multiremi/api/helpers/realtime-types.js';
 
 let sqlite: ReturnType<typeof openSqliteDatabase>;
 let db: SqlDatabase;
@@ -118,6 +121,43 @@ test('expiry, future times and non-dashboard issuance cannot become dashboard au
       domainTargets: ['authority:material', 'jwt:jwt-fixture'] }, tx => materials.issue(tx, input, claims, signing))).toThrow();
   }
   expect(materials.validate(issue({ purpose: 'cli' }), signing)).toBeNull();
+});
+
+test('final socket send checks current ancestry after an asynchronous projection completes', async () => {
+  const token = issue();
+  const store = new MultiremiStore(db);
+  db.run("UPDATE multiremi_security_state SET feature_activation=1,bootstrap_completed=1,minimum_enforcement_version='fixture'");
+  const env = { JWT_SECRET: process.env.JWT_SECRET, MULTIREMI_JWT_SIGNING_DOMAIN: process.env.MULTIREMI_JWT_SIGNING_DOMAIN,
+    MULTIREMI_JWT_KEY_EPOCH: process.env.MULTIREMI_JWT_KEY_EPOCH };
+  Object.assign(process.env, { JWT_SECRET: signing.secret, MULTIREMI_JWT_SIGNING_DOMAIN: signing.domainId, MULTIREMI_JWT_KEY_EPOCH: signing.keyEpoch });
+  const sent: string[] = [];
+  const closes: Array<number | undefined> = [];
+  const client: MultiremiWebSocketClient = { data: { kind: 'browser', connectedAt: 'fixture', workspaceId: 'local',
+    authenticated: true, userId: 'local', accessToken: null, jwtDigest: compactJwtDigest(token) },
+    sendText: message => { sent.push(message); }, close: code => { closes.push(code); } };
+  try {
+    const wrap = createJwtBrowserClientGuard(store);
+    const guarded = wrap(client);
+    expect(wrap(client)).toBe(guarded);
+    guarded.sendText('before');
+    expect(sent).toEqual(['before']);
+    let resume!: () => void;
+    const projection = new Promise<void>(resolve => { resume = resolve; });
+    const delivery = (async () => { await projection; guarded.sendText('after'); })();
+    db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='identity'");
+    resume();
+    await delivery;
+    expect(sent).toEqual(['before']);
+    expect(closes).toEqual([1008]);
+    db.run('DELETE FROM multiremi_security_state');
+    guarded.sendText('unavailable');
+    expect(sent).toEqual(['before']);
+    expect(closes).toEqual([1008, 1011]);
+  } finally {
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
 });
 
 test('primary state unavailability raises an explicit unavailable failure', () => {

@@ -25,6 +25,8 @@ import {
   stripRootReadonlyFields,
 } from "../../../packages/contracts/src/root-authority.js";
 import {
+  assertFrozenBusinessPayloadHasNoTransportSecrets,
+  assertRootWirePayloadHasNoPlaintextSecrets,
   assertStatusResponseHasNoSecrets,
   buildDaemonRootRestartResumeReply,
   buildDaemonRootTaskOfferPayload,
@@ -32,8 +34,10 @@ import {
   classifyDaemonRestartResumeRequest,
   classifyDaemonTaskOfferPayload,
   evaluateRootDeliveryNegotiation,
+  findForbiddenBusinessPayloadField,
   isMonotonicReceiverTransition,
   ROOT_DELIVERY_CAPABILITY,
+  ROOT_DELIVERY_FORBIDDEN_BUSINESS_PAYLOAD_FIELDS,
   ROOT_DELIVERY_JWE_ALG,
   ROOT_DELIVERY_JWE_ENC,
   ROOT_DELIVERY_MIN_RSA_BITS,
@@ -597,5 +601,162 @@ describe("MUL-1 §10.1 public contracts and fixtures", () => {
       generation: 1,
       root_delivery: fixtureResumeRootDeliveryEnvelopePayload,
     })).toThrow(/handoff_id/);
+  });
+
+  it("rejects nested structured transport secrets across objects/arrays while preserving plain user prose (F5)", () => {
+    const syntheticMarker = "synthetic_non_secret_marker_f5";
+    expect(ROOT_DELIVERY_FORBIDDEN_BUSINESS_PAYLOAD_FIELDS).toContain("auth_token");
+    expect(ROOT_DELIVERY_FORBIDDEN_BUSINESS_PAYLOAD_FIELDS).toContain("raw");
+    expect(ROOT_DELIVERY_FORBIDDEN_BUSINESS_PAYLOAD_FIELDS).toContain("envelope");
+    expect(ROOT_DELIVERY_FORBIDDEN_BUSINESS_PAYLOAD_FIELDS).toContain("machine_proof");
+
+    // 1. Nested object & array-of-objects structured transport secret keys inside frozen_business_payload MUST fail closed.
+    const nestedObjectCases: ReadonlyArray<{ label: string; payload: Record<string, unknown>; expectedPath: string }> = [
+      {
+        label: "nested object auth_token",
+        payload: { turn_id: "trn_root_fixture_1", meta: { auth_token: syntheticMarker } },
+        expectedPath: "meta.auth_token",
+      },
+      {
+        label: "array item nested raw",
+        payload: { turn_id: "trn_root_fixture_1", items: [{ ok: true }, { nested: [{ raw: syntheticMarker }] }] },
+        expectedPath: "items[1].nested[0].raw",
+      },
+      {
+        label: "nested envelope",
+        payload: { turn_id: "trn_root_fixture_1", transport: { envelope: syntheticMarker } },
+        expectedPath: "transport.envelope",
+      },
+      {
+        label: "nested machine_proof",
+        payload: { turn_id: "trn_root_fixture_1", transport: { machine_proof: { signature: syntheticMarker } } },
+        expectedPath: "transport.machine_proof",
+      },
+    ];
+
+    for (const tc of nestedObjectCases) {
+      expect(findForbiddenBusinessPayloadField(tc.payload), tc.label).toBe(tc.expectedPath);
+      expect(() => assertFrozenBusinessPayloadHasNoTransportSecrets(tc.payload), tc.label).toThrow(tc.expectedPath);
+
+      const offerClassified = classifyDaemonTaskOfferPayload({
+        ...fixtureRootTaskOfferPayload,
+        root_delivery: {
+          ...fixtureInitialRootDeliveryEnvelopePayload,
+          frozen_business_payload: tc.payload,
+        },
+      });
+      expect(offerClassified, tc.label).toMatchObject({
+        kind: "invalid_root",
+        code: "root_delivery_invalid",
+      });
+      if (offerClassified.kind === "invalid_root") {
+        expect(offerClassified.reason).toContain(tc.expectedPath);
+        expect(offerClassified.reason).not.toContain(syntheticMarker);
+      }
+
+      const resumeClassified = classifyDaemonRestartResumeReply({
+        ...fixtureRootRestartResumeReply,
+        root_delivery: {
+          ...fixtureResumeRootDeliveryEnvelopePayload,
+          frozen_business_payload: tc.payload,
+        },
+      });
+      expect(resumeClassified, tc.label).toMatchObject({
+        kind: "invalid_root",
+        code: "root_delivery_invalid",
+      });
+      if (resumeClassified.kind === "invalid_root") {
+        expect(resumeClassified.reason).toContain(tc.expectedPath);
+        expect(resumeClassified.reason).not.toContain(syntheticMarker);
+      }
+    }
+
+    // 2. Nested structured transport secrets inside resume recovered_questions MUST fail closed.
+    const poisonedQuestionReply = classifyDaemonRestartResumeReply({
+      ...fixtureRootRestartResumeReply,
+      recovered_questions: [
+        {
+          id: "msg_q_1",
+          body_md: "Please confirm deployment target.",
+          metadata: { context: [{ auth_token: syntheticMarker }] },
+        },
+      ],
+    });
+    expect(poisonedQuestionReply).toMatchObject({
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+    });
+    if (poisonedQuestionReply.kind === "invalid_root") {
+      expect(poisonedQuestionReply.reason).toContain("[0].metadata.context[0].auth_token");
+      expect(poisonedQuestionReply.reason).not.toContain(syntheticMarker);
+    }
+
+    // 3. Status/journal and wire secret assertions reject nested structured keys as well.
+    expect(() => assertStatusResponseHasNoSecrets({
+      ...fixtureDeliveryStatusResponse,
+      extra: { nested: [{ raw: syntheticMarker }] },
+    })).toThrow(/extra\.nested\[0\]\.raw/);
+    expect(() => assertStatusResponseHasNoSecrets({
+      ...fixtureDeliveryStatusResponse,
+      tuple: { ...fixtureDeliveryStatusResponse.tuple, auth_token: syntheticMarker },
+    })).toThrow(/tuple\.auth_token/);
+    expect(() => assertRootWirePayloadHasNoPlaintextSecrets({
+      nested: { bearer: syntheticMarker },
+    })).toThrow(/nested\.bearer/);
+
+    // 4. Circular references and excessive nesting depth fail closed cleanly.
+    const circular: Record<string, unknown> = { turn_id: "trn_root_fixture_1" };
+    circular.self = circular;
+    expect(() => assertFrozenBusinessPayloadHasNoTransportSecrets(circular)).toThrow(/circular/);
+    expect(classifyDaemonTaskOfferPayload({
+      ...fixtureRootTaskOfferPayload,
+      root_delivery: {
+        ...fixtureInitialRootDeliveryEnvelopePayload,
+        frozen_business_payload: circular,
+      },
+    })).toMatchObject({ kind: "invalid_root", code: "root_delivery_invalid" });
+
+    let deep: Record<string, unknown> = { ok: true };
+    for (let i = 0; i < 40; i += 1) deep = { child: deep };
+    const overDeep = { turn_id: "trn_root_fixture_1", deep };
+    expect(() => assertFrozenBusinessPayloadHasNoTransportSecrets(overDeep)).toThrow(/maximum nesting depth/);
+
+    // 5. Positive preservation: legitimate user prose strings mentioning secret terms MUST be accepted untouched.
+    const proseBody = "Operator note: rotate auth_token, raw_token, bearer, envelope, and machine_proof after incident.";
+    const prosePayload = {
+      turn_id: "trn_root_fixture_1",
+      attempt_id: fixtureInitialRootDeliveryEnvelopePayload.tuple.attempt_id,
+      summary: proseBody,
+      messages: [
+        { id: "msg_1", body_md: proseBody },
+      ],
+    };
+    expect(findForbiddenBusinessPayloadField(prosePayload)).toBeNull();
+    expect(() => assertFrozenBusinessPayloadHasNoTransportSecrets(prosePayload)).not.toThrow();
+
+    const proseOffer = buildDaemonRootTaskOfferPayload({
+      turn_id: "trn_root_fixture_1",
+      attempt_id: fixtureInitialRootDeliveryEnvelopePayload.tuple.attempt_id,
+      root_delivery: {
+        ...fixtureInitialRootDeliveryEnvelopePayload,
+        frozen_business_payload: prosePayload,
+      },
+    });
+    expect(proseOffer.root_delivery.frozen_business_payload).toEqual(prosePayload);
+
+    const proseResumeReply = buildDaemonRootRestartResumeReply({
+      turn_id: "trn_root_fixture_1",
+      attempt_id: fixtureResumeRootDeliveryEnvelopePayload.tuple.attempt_id,
+      handoff_id: fixtureResumeRootDeliveryEnvelopePayload.tuple.handoff_id!,
+      generation: fixtureResumeRootDeliveryEnvelopePayload.tuple.handoff_generation,
+      root_delivery: {
+        ...fixtureResumeRootDeliveryEnvelopePayload,
+        frozen_business_payload: prosePayload,
+      },
+      recovered_questions: [
+        { id: "msg_q_2", body_md: proseBody },
+      ],
+    });
+    expect(proseResumeReply.recovered_questions).toEqual([{ id: "msg_q_2", body_md: proseBody }]);
   });
 });

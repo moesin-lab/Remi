@@ -50,13 +50,16 @@ import type {
 import type { MultiremiChatSessionStatus, MultiremiDaemonHeartbeatAck, MultiremiDaemonSshMeshStatus } from "./types.js";
 import type { RootCarrierMode } from "./root-delivery.js";
 export {
+  assertFrozenBusinessPayloadHasNoTransportSecrets,
   buildDaemonRootRestartResumeReply,
   buildDaemonRootTaskOfferPayload,
   classifyDaemonRestartResumeReply,
   classifyDaemonRestartResumeRequest,
   classifyDaemonTaskOfferPayload,
   evaluateRootDeliveryNegotiation,
+  findForbiddenBusinessPayloadField,
   ROOT_DELIVERY_CAPABILITY,
+  ROOT_DELIVERY_FORBIDDEN_BUSINESS_PAYLOAD_FIELDS,
   ROOT_DELIVERY_MODE,
   ROOT_DELIVERY_PROTOCOL_VERSION,
   STANDARD_DELIVERY_MODE,

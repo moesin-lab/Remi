@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import { paths } from "@multiremi/core/paths";
 import { api } from "@multiremi/core/api";
+import { repositoryListOptions } from "@multiremi/core/repositories";
 import { NavigationProvider } from "../navigation";
 import { traceTurn, turnPage } from "../test/trace-fixtures";
 import { renderWithI18n } from "../test/i18n";
@@ -29,8 +30,12 @@ const row = {
 };
 const page = { items: [row], has_more: true, next_cursor: "next", as_of: "2026-11-24T12:00:00Z" };
 
-function mount(search = "view=history") {
+function mount(search = "view=history", cachedName?: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  if (cachedName) client.setQueryData(repositoryListOptions("ws").queryKey, {
+    repositories: [{ id: "r", name: cachedName, url: "https://example.invalid/r.git", source: "github",
+      description: null, default_branch: null, imported_at: null, updated_at: null }], total: 1,
+  });
   const push = vi.fn();
   function App() {
     const [url, setUrl] = useState(`/test/repos/r/activity?${search}`);
@@ -50,6 +55,13 @@ beforeEach(() => {
   vi.mocked(api.listAgents).mockResolvedValue([]);
   vi.mocked(api.getTaskTrace).mockResolvedValue(turnPage(traceTurn({ id: "turn-1" }), []));
   vi.mocked(api.listWorkspaceRepositories).mockResolvedValue({ repositories: [], total: 0 });
+});
+
+it.each([undefined, "Cached repository"])("opens the activity URL without fetching repositories (cached name %s)", async (name) => {
+  mount("view=history", name);
+  await screen.findByText("build failed");
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(`${name ?? "r"} ·`);
+  expect(api.listWorkspaceRepositories).not.toHaveBeenCalled();
 });
 
 it("keeps filters in navigation, resets the cursor on changes and paginates in both directions", async () => {

@@ -83,7 +83,7 @@ export function RepositoryActivityPage({ repositoryId }: { repositoryId: string 
   const { t: agentText } = useT("agents");
   const filters = activityFilters(navigation.searchParams);
   const query = useQuery(repositoryActivityOptions(workspace, repositoryId, filters));
-  const repositories = useQuery(repositoryListOptions(workspace));
+  const repositories = useQuery({ ...repositoryListOptions(workspace), enabled: false });
   const agents = useQuery(agentListOptions(workspace));
   const previous = useRef(new Map<string, string>());
   const cursor = filters.cursor;

@@ -12833,6 +12833,9 @@
     "GET /api/workspaces/:id/repos": {
       "command": "repo.list"
     },
+    "GET /api/workspaces/:id/repos/:repositoryId/activity": {
+      "command": "repo.activity"
+    },
     "GET /api/workspaces/:id/repos/:repositoryId/wiki": {
       "command": "wiki.repository.list"
     },

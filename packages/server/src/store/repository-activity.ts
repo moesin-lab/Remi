@@ -120,7 +120,6 @@ export function readRepositoryActivity(db: SqlDatabase, scope: ActivityScope, pa
   }
   const rows = db.query(`WITH candidates AS (
     SELECT t.id, t.turn_id, t.status, t.created_at, t.started_at, t.attempt, t.progress_summary, t.wait_reason, t.failure_reason,
-      CASE WHEN t.status='failed' THEN substr(t.error,1,1024) END AS error_excerpt,
       CASE t.status WHEN 'completed' THEN t.completed_at WHEN 'cancelled' THEN t.cancelled_at WHEN 'failed' THEN t.failed_at END AS ended_at,
       a.id AS agent_id, a.name AS agent_name, i.id AS issue_id, ${issueKey} AS issue_key, i.title, s.id AS session_id, s.title AS session_title,
       ${directRepositorySql(db)} AS direct_id,
@@ -162,7 +161,8 @@ export function readRepositoryActivity(db: SqlDatabase, scope: ActivityScope, pa
     issue: row.issue_id ? { id: row.issue_id, key: row.issue_key || row.issue_id, title: row.title } : null,
     issue_session: row.session_id ? { id: row.session_id, title: row.session_title } : null,
     attempt: Math.max(1, row.attempt ?? 1), created_at: row.created_at, started_at: row.started_at, ended_at: row.ended_at,
-    progress_summary: summary(row.progress_summary), wait_reason: summary(row.wait_reason), failure_reason: summary(row.failure_reason), error_summary: summary(row.error_excerpt),
+    progress_summary: summary(row.progress_summary), wait_reason: summary(row.wait_reason), failure_reason: summary(row.failure_reason),
+    error_summary: row.status === "failed" ? summary(row.failure_reason) : null,
     worktree: trees.get(row.issue_id) ?? null, change_requests: changes.get(row.issue_id) ?? [], change_request_count: counts.get(row.issue_id) ?? 0,
   }));
   const last = items.at(-1);
@@ -172,6 +172,9 @@ export function readRepositoryActivity(db: SqlDatabase, scope: ActivityScope, pa
 
 function summary(value: string | null): string | null {
   if (!value) return null;
-  return redactRuntimeCommandText(value).split(/[\r\n]/, 1)[0]!.replace(/(?:\/[\w.@{}+-]+){2,}/g, "[path]")
-    .replace(/\b(?:Bearer\s+|(?:api[_-]?key|secret|token|password)\s*[:=]\s*)[^\s,;]+/gi, "[redacted]").slice(0, 180) || null;
+  const line = value.split(/[\r\n\u2028\u2029]/, 1)[0]!;
+  const safeLine = line.replace(/\b(?:Bearer\s+|[\w-]*(?:api[_-]?key|secret|token|password)["']?\s*[:=]).*$/i, "[redacted]");
+  const separator = safeLine.search(/[\\/]/);
+  const safePrefix = separator < 0 ? safeLine : safeLine.slice(0, separator).replace(/\S*$/, "[path]");
+  return redactRuntimeCommandText(safePrefix).slice(0, 180) || null;
 }

@@ -19,6 +19,35 @@ function setup() {
 }
 
 describe("repository activity", () => {
+  it("returns public summaries over HTTP without inspecting either repository's missing default branch", async () => {
+    const { store, issue, agent } = setup();
+    const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "Test summaries" });
+    const inspections: string[] = [];
+    const app = createMultiremiApp({ store, inspectGitRemoteRepository: async (url) => {
+      inspections.push(url);
+      return { default_branch: "main", branches: ["main"] };
+    } });
+    const update = db!.prepare(`UPDATE multiremi_turn_attempts SET status='failed',error=?,progress_summary=?,wait_reason=?,failure_reason=? WHERE id=?`);
+    for (const [detail, marker] of [
+      [String.raw`C:\Example\Team checkout\fixture.txt`, "[path]"],
+      [String.raw`\\fileserver\private share\fixture.txt`, "[path]"],
+      ["/private/team checkout/fixture.txt", "[path]"],
+      ["access_token=\"fixture credential\"", "[redacted]"],
+    ] as const) {
+      update.run(String.raw`ENOENT C:\Example\Team\checkout\fixture.txt`, `Checking ${detail}`, `Waiting ${detail}`, `Failed ${detail}`, task.id);
+      const response = await app.request("/api/workspaces/local/repos/r1/activity?view=history");
+      expect(response.status).toBe(200);
+      expect((await response.json()).items[0]).toMatchObject({ task_id: task.id, progress_summary: `Checking ${marker}`,
+        wait_reason: `Waiting ${marker}`, failure_reason: `Failed ${marker}`, error_summary: `Failed ${marker}` });
+    }
+    update.run("private raw diagnostic", "Checking files", null, null, task.id);
+    const response = await app.request("/api/workspaces/local/repos/r1/activity?view=history");
+    expect((await response.json()).items[0]).toMatchObject({ progress_summary: "Checking files", error_summary: null });
+    expect(inspections).toEqual([]);
+    expect((await app.request("/api/workspaces/local/repos")).status).toBe(200);
+    expect(inspections.sort()).toEqual([repository.url, other.url].sort());
+  });
+
   it("binds filters, scopes and stable tie breaks before limiting rows", async () => {
     const { store, issue, agent } = setup();
     const task = store.createTask({ agentId: agent.id, issueId: issue.id, prompt: "sensitive prompt" });

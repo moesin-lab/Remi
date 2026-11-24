@@ -1,14 +1,14 @@
 {
   "meta": {
     "harness": "scripts/snapshot-api-routes.ts",
-    "routeCount": 842,
+    "routeCount": 843,
     "routeCountByPrefix": {
       "native": 226,
-      "compat": 596,
+      "compat": 597,
       "root": 20
     },
-    "getRoutes": 366,
-    "getRoutesWithBody": 362,
+    "getRoutes": 367,
+    "getRoutesWithBody": 363,
     "statusOnlyRoutes": [
       "GET /api/daemon/ws",
       "GET /api/realtime/ws",
@@ -469,6 +469,7 @@
     "GET /api/workspaces/:id/relay-config",
     "GET /api/workspaces/:id/relay-config/:engine/reasoning-levels",
     "GET /api/workspaces/:id/repos",
+    "GET /api/workspaces/:id/repos/:repositoryId/activity",
     "GET /api/workspaces/:id/repos/:repositoryId/wiki",
     "GET /api/workspaces/:id/repos/:repositoryId/wiki/:ref",
     "GET /api/workspaces/:id/repos/:repositoryId/wiki/:ref/backlinks",
@@ -1291,6 +1292,7 @@
     "GET /api/workspaces/:id/relay-config",
     "GET /api/workspaces/:id/relay-config/:engine/reasoning-levels",
     "GET /api/workspaces/:id/repos",
+    "GET /api/workspaces/:id/repos/:repositoryId/activity",
     "GET /api/workspaces/:id/repos/:repositoryId/wiki",
     "GET /api/workspaces/:id/repos/:repositoryId/wiki/:ref",
     "GET /api/workspaces/:id/repos/:repositoryId/wiki/:ref/backlinks",
@@ -10044,6 +10046,17 @@
             "id": "project.update",
             "command": "remi project update",
             "capability": "project.update",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "repo.activity",
+            "command": "remi repo activity",
+            "capability": "repo.activity",
             "outputs": [
               "table",
               "json",
@@ -23722,6 +23735,109 @@
           }
         ],
         "total": 3
+      }
+    },
+    {
+      "key": "get-sweep GET /api/workspaces/:id/repos/:repositoryId/activity",
+      "route": "GET /api/workspaces/:id/repos/:repositoryId/activity",
+      "path": "/api/workspaces/local/repos/repo_snapshot/activity",
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "task_id": "tsk_m21cp1q6gys4",
+            "turn_id": "tsk_m21cp1q6gys4",
+            "status": "queued",
+            "relation": "project_context",
+            "agent": {
+              "id": "agt_snapshot",
+              "name": "Snapshot Agent"
+            },
+            "issue": {
+              "id": "iss_bbo9f1dxazyr",
+              "key": "MUL-5",
+              "title": "Snapshot {{title}}"
+            },
+            "issue_session": {
+              "id": "ises_yy6thkeq1n3e",
+              "title": "Main"
+            },
+            "attempt": 1,
+            "created_at": "<timestamp>",
+            "started_at": null,
+            "ended_at": null,
+            "progress_summary": null,
+            "wait_reason": null,
+            "failure_reason": null,
+            "error_summary": null,
+            "worktree": null,
+            "change_requests": [],
+            "change_request_count": 0
+          },
+          {
+            "task_id": "tsk_9i3epsr6j5hf",
+            "turn_id": "tsk_9i3epsr6j5hf",
+            "status": "queued",
+            "relation": "project_context",
+            "agent": {
+              "id": "agt_snapshot",
+              "name": "Snapshot Agent"
+            },
+            "issue": {
+              "id": "iss_8rcx9z88woyu",
+              "key": "MUL-4",
+              "title": "snapshot run"
+            },
+            "issue_session": {
+              "id": "ises_r4ic9doizq3q",
+              "title": "Main"
+            },
+            "attempt": 1,
+            "created_at": "<timestamp>",
+            "started_at": null,
+            "ended_at": null,
+            "progress_summary": null,
+            "wait_reason": null,
+            "failure_reason": null,
+            "error_summary": null,
+            "worktree": null,
+            "change_requests": [],
+            "change_request_count": 0
+          },
+          {
+            "task_id": "tsk_kn3jgt7c45iv",
+            "turn_id": "tsk_kn3jgt7c45iv",
+            "status": "awaiting_human",
+            "relation": "project_context",
+            "agent": {
+              "id": "agt_snapshot",
+              "name": "Snapshot Agent"
+            },
+            "issue": {
+              "id": "iss_snapshot",
+              "key": "MUL-1",
+              "title": "Snapshot issue"
+            },
+            "issue_session": {
+              "id": "ises_0w4ud0f59v1p",
+              "title": "Main"
+            },
+            "attempt": 1,
+            "created_at": "<timestamp>",
+            "started_at": null,
+            "ended_at": null,
+            "progress_summary": null,
+            "wait_reason": null,
+            "failure_reason": null,
+            "error_summary": null,
+            "worktree": null,
+            "change_requests": [],
+            "change_request_count": 0
+          }
+        ],
+        "has_more": false,
+        "next_cursor": null,
+        "as_of": "<timestamp>"
       }
     },
     {

@@ -29,7 +29,7 @@ export function redactDiagnostic(value: string): string {
   return safe;
 }
 
-async function freePort(): Promise<number> {
+export async function freePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -56,8 +56,8 @@ export class ApiChild {
   private failure: string | null = null;
   private diagnostics = "";
 
-  constructor(readonly port: number, env: Record<string, string | undefined>) {
-    this.process = Bun.spawn([process.execPath, "--no-env-file", CHILD_ENTRY], {
+  constructor(readonly port: number, env: Record<string, string | undefined>, entry = CHILD_ENTRY) {
+    this.process = Bun.spawn([process.execPath, "--no-env-file", entry], {
       cwd: REPO_ROOT,
       env,
       stdout: "pipe",

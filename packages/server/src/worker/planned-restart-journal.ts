@@ -3,6 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { openSqliteDatabase } from "../store/db/sqlite.js";
+import { ROOT_DELIVERY_RECEIVER_STATES, type RootDeliveryTuple, type RootDeliveryReceiverState, type RootExecutionLocator } from '@multiremi/contracts/root-delivery.js';
+import { serializeRootDeliveryTuple } from './root-delivery-envelope.js';
 import type { PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import { parseTraceTranslatorCheckpoint, TRACE_TRANSLATOR_CHECKPOINT_MAX_BYTES, type TraceTranslatorCheckpoint } from "./trace-translator.js";
 
@@ -83,7 +85,52 @@ export class PlannedRestartJournal {
       );
       CREATE TABLE IF NOT EXISTS planned_restart_trace_identities (
         handoff_id TEXT PRIMARY KEY, payload TEXT NOT NULL, sha256 TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS root_execution_receivers (
+        receipt_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, generation INTEGER NOT NULL,
+        binding TEXT NOT NULL, envelope_digest TEXT NOT NULL, launch_identity TEXT NOT NULL UNIQUE,
+        locator TEXT, started_at TEXT, state TEXT NOT NULL CHECK(state IN ('received','installed','confirmed','started')),
+        UNIQUE(attempt_id,generation)
       );`);
+  }
+
+  receiveRootExecution(tuple: RootDeliveryTuple, envelopeDigest: string): {
+    launchIdentity: string; state: RootDeliveryReceiverState; locator: RootExecutionLocator | null;
+  } {
+    const binding = serializeRootDeliveryTuple(tuple);
+    if (!/^sha256:[0-9a-f]{64}$/.test(envelopeDigest)) throw new Error('Invalid envelope digest');
+    return this.db.transaction(() => {
+      this.db.run(`INSERT INTO root_execution_receivers(receipt_id,attempt_id,generation,binding,envelope_digest,launch_identity,state)
+        VALUES(?,?,?,?,?,?,'received') ON CONFLICT DO NOTHING`,
+        [tuple.receipt_id, tuple.attempt_id, tuple.run_generation, binding, envelopeDigest, randomUUID()]);
+      const stored = this.db.query<{ launchIdentity: string; state: RootDeliveryReceiverState; locator: string | null; startedAt: string | null }, [string, string, string]>(
+        'SELECT launch_identity AS launchIdentity,state,locator,started_at AS startedAt FROM root_execution_receivers WHERE receipt_id=? AND binding=? AND envelope_digest=?',
+      ).get(tuple.receipt_id, binding, envelopeDigest);
+      if (!stored) throw new Error('receipt_conflict');
+      const identity = stored.locator && JSON.parse(stored.locator);
+      return { launchIdentity: stored.launchIdentity, state: stored.state, locator: identity && {
+        execution_id: identity[0], birth_token_id: identity[1], launch_identity: stored.launchIdentity, carrier_mode: 'immutable_run_env',
+        runtime_id: tuple.runtime_id, daemon_id: tuple.daemon_id, incarnation: tuple.incarnation, started_at: stored.startedAt,
+      } };
+    })();
+  }
+
+  advanceRootExecution(tuple: RootDeliveryTuple, envelopeDigest: string, locator: RootExecutionLocator,
+    next: Exclude<RootDeliveryReceiverState, 'received'>): void {
+    const binding = serializeRootDeliveryTuple(tuple);
+    if (locator.runtime_id !== tuple.runtime_id || locator.daemon_id !== tuple.daemon_id || locator.incarnation !== tuple.incarnation ||
+        locator.carrier_mode !== 'immutable_run_env' || !locator.execution_id || !locator.birth_token_id ||
+        [locator.execution_id, locator.birth_token_id, locator.launch_identity].some(value => typeof value !== 'string' || value.length > 512)) {
+      throw new Error('stale_execution');
+    }
+    const identity = JSON.stringify([locator.execution_id, locator.birth_token_id, locator.launch_identity]);
+    const previous = ROOT_DELIVERY_RECEIVER_STATES[ROOT_DELIVERY_RECEIVER_STATES.indexOf(next) - 1];
+    if (!previous || (next === 'started' ? !Number.isFinite(Date.parse(locator.started_at ?? '')) : locator.started_at !== null)) throw new Error('Invalid receiver transition');
+    const result = this.db.run(`UPDATE root_execution_receivers SET locator=?,state=?,started_at=?
+      WHERE receipt_id=? AND binding=? AND envelope_digest=? AND launch_identity=? AND state IN (?,?)
+        AND (locator IS NULL OR locator=?) AND (started_at IS NULL OR started_at=?)`,
+      [identity, next, locator.started_at, tuple.receipt_id, binding, envelopeDigest, locator.launch_identity, previous, next, identity, locator.started_at]);
+    if (result.changes !== 1) throw new Error('receipt_conflict');
   }
 
   /** Optional local optimization, never part of server continuation authority. */

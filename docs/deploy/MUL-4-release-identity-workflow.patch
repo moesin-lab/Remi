@@ -27,7 +27,7 @@ index 777068777..0e2cd4b06 100644
        - name: Restore previous release Bun package downloads
          uses: actions/cache/restore@v4
          with:
-@@ -129,12 +140,24 @@ jobs:
+@@ -129,10 +140,22 @@ jobs:
          working-directory: ci-schema/previous
          run: bun install --registry https://registry.npmjs.org --frozen-lockfile --ignore-scripts
        - name: Previous release core tests on candidate expanded schema
@@ -52,5 +52,3 @@ index 777068777..0e2cd4b06 100644
 +            ci-schema/*.log
 +            ci-schema/rollback-logs/
            if-no-files-found: error
- 
-   im-platform-smoke:

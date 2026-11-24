@@ -144,9 +144,26 @@ MULTIREMI_TEST_POSTGRES_URL=postgres://… bun scripts/check-schema-rollback.ts 
 PLATFORM_SCHEMA_ROLLBACK_EVIDENCE=ci-schema/rollback-evidence.json node scripts/package-platform-application.mjs platform-release.json
 ```
 
-发布负责人只能使用同一目标 SHA 成功可信 main CI 的证据。打包核对 SHA、schema、前版身份、探针完整性
-和版本先后；没有证据时沿用人工审核或空声明。当前 platform-release workflow 不自动下载此 artifact，
-须显式提供 `PLATFORM_SCHEMA_ROLLBACK_EVIDENCE`；发布侧自动取证接线仍需 owner 配合。
+发布负责人只能使用同一目标 SHA 成功可信 main CI 的证据。[打包消费端](../../scripts/platform-rollback-policy.mjs)
+强制验证完整 `format: 1` 契约，旧版缺字段的 artifact 会被拒绝，不能靠传入人工审核绕过错误的自动证据：
+
+- `previousManifest` 保留下载 manifest 的原始 UTF-8 文本；重算 SHA256 必须等于
+  `previousIdentity.manifestSha256`，解析内容必须等于 `previousRelease`。发布 URL、镜像和版本必须属于
+  固定仓库；`publishedRef = actualPreviousRef = previousRelease.ref`，归档摘要必须等于其 `sourceSha256`。
+  源码 tree、观察到的 tag、资产 ID、来源摘要及各必填字段均验证格式。
+- `tag` 模式必须严格 tag/ref 相等且 `tagDrift: false`；`published-archive` 模式必须显式记录不同的
+  `observedTagRef` 和 `tagDrift: true`，执行的仍是发布源码。组合来源模型、`sourceArchiveAttestation: false`、
+  镜像身份、run/attempt/job 的 URL 绑定和日志/签名验证摘要必须完整，不能用 digest-only 模型替代。
+- 四阶段必须依序为 `previous-before-expand`、`candidate-expand`、`previous-after-expand`、
+  `verify-schema-levels`，全部 `passed`、exit 0、无 signal/error，并保留对应 stdout/stderr 日志路径；
+  前后两次核心探针必须报告成功及创建/取消的 task ID。`schemaVerification` 必须等于 expand 结果，
+  level 重新计算的指纹必须等于目标 `dataSchema`，contract 仍为 0。
+- 探针、测试库、管理连接和临时 HOME 四项 cleanup 必须完整、依序且全部 `passed`、无 error；
+  缺失、重复、跳过或失败均拒绝自动回退声明。版本先后、候选 SHA、完整 checks 和前版回退指纹也必须匹配。
+
+这些消费端校验约束可信 CI 产物的一致性，不能为任意手写 JSON 建立签名或执行来源；签名验证、归档完整 tree
+和实际源码复核仍由生产证据的门禁实际执行。没有自动证据时沿用人工审核或空声明。当前 platform-release
+workflow 不自动下载此 artifact，须显式提供 `PLATFORM_SCHEMA_ROLLBACK_EVIDENCE`；发布侧自动取证接线仍需 owner 配合。
 
 [release-build-check](../../.github/workflows/release-build-check.yml) 的 `schema-compatibility` job
 执行 PostgreSQL 守卫、历史回归和上一发布版混跑，并作为总 build 的依赖。
@@ -156,7 +173,9 @@ PLATFORM_SCHEMA_ROLLBACK_EVIDENCE=ci-schema/rollback-evidence.json node scripts/
 可用 `git apply --check docs/deploy/MUL-4-release-identity-workflow.patch` 检查补丁。
 归档校验回归使用 `python3 -I scripts/verify-release-source.test.py`；身份来源回归使用
 `bun test tests/unit/scripts/schema-rollback-identity.test.ts`，失败编排回归使用
-`node --experimental-strip-types --test scripts/check-schema-rollback.test.ts`。这些回归不替代真实发布前版的 PostgreSQL 混跑。
+`node --experimental-strip-types --test scripts/check-schema-rollback.test.ts`；消费契约回归使用
+`node --test scripts/platform-rollback-policy.test.mjs`，包含合法 tag 漂移和缺失/篡改/失败 artifact 的负向用例。
+这些回归不替代真实发布前版的 PostgreSQL 混跑。
 
 ## SQL 允许清单与检测边界
 

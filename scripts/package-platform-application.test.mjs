@@ -42,7 +42,7 @@ else if (command === 'cp') {
     const manifest = { version: '1.2.0', ref: 'a'.repeat(40), apiImage: 'api@sha256:' + 'a'.repeat(64), webImage: 'web@sha256:' + 'b'.repeat(64), manifestUrl: 'https://example.org/platform-release.json', dataSchema: 'stale input must be replaced' };
     if (reviewed) manifest.rollbackReview = { targetRef: manifest.ref, previousVersion: '1.1.0', previousDataSchema: 'c'.repeat(64), reason: 'Reviewed unchanged storage format', reviewedBy: 'human reviewer', previousRelease: { version: '1.1.0', dataSchema: 'c'.repeat(64) } };
     await writeFile(manifestPath, JSON.stringify(manifest));
-    const run = mismatch => spawnSync(process.execPath, ['scripts/package-platform-application.mjs', manifestPath, temporary], { cwd: root, encoding: 'utf8', env: { ...process.env, PATH: bin + delimiter + process.env.PATH, PACKAGE_SOURCE: root, PACKAGE_MISMATCH: mismatch ? '1' : '' } });
+    const run = (mismatch, evidencePath = '') => spawnSync(process.execPath, ['scripts/package-platform-application.mjs', manifestPath, temporary], { cwd: root, encoding: 'utf8', env: { ...process.env, PATH: bin + delimiter + process.env.PATH, PACKAGE_SOURCE: root, PACKAGE_MISMATCH: mismatch ? '1' : '', PLATFORM_SCHEMA_ROLLBACK_EVIDENCE: evidencePath } });
     const result = run(false);
     assert.equal(result.status, 0, result.stderr);
     const published = JSON.parse(await readFile(manifestPath));
@@ -56,6 +56,17 @@ else if (command === 'cp') {
       assert.equal(await schemaFingerprint(join(extracted, 'api')), published.dataSchema);
       assert.deepEqual(archived.application.rollbackSafeFrom, published.application.rollbackSafeFrom);
     }
+    const incompletePath = join(temporary, 'old-rollback-evidence.json');
+    await writeFile(incompletePath, JSON.stringify({ format: 1, targetRef: manifest.ref, dataSchema: published.dataSchema,
+      previousRelease: { version: '1.1.0', ref: 'e'.repeat(40), dataSchema: 'c'.repeat(64) },
+      schema: { expandLevel: 3, contractLevel: 0 },
+      checks: ['previous-startup', 'previous-create-start-complete-cancel', 'candidate-expand-startup', 'previous-startup-after-expand', 'previous-create-start-complete-cancel-after-expand'],
+      rollbackSafeFrom: ['c'.repeat(64)] }));
+    const beforeInvalidEvidence = await readFile(manifestPath, 'utf8');
+    const invalidEvidence = run(false, incompletePath);
+    assert.notEqual(invalidEvidence.status, 0);
+    assert.match(invalidEvidence.stderr, /Invalid mixed-version rollback evidence/);
+    assert.equal(await readFile(manifestPath, 'utf8'), beforeInvalidEvidence);
     const mismatch = run(true);
     assert.notEqual(mismatch.status, 0);
     assert.match(mismatch.stderr, /Published API source differs/);

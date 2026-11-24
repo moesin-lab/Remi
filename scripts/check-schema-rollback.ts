@@ -51,7 +51,11 @@ export async function checkSchemaRollback(args: string[]) {
   const saveDiagnostics = () => writeFile(diagnosticsPath,
     JSON.stringify(diagnostics, (key, value) => key === 'rollbackSafeFrom' ? undefined : value, 2) + '\n');
   try {
-    // This precedes arguments, source identity, module loading and Git checks.
+    // Inspect the original checkout before our diagnostics create untracked files
+    // or output/log cleanup could hide tracked or untracked candidate changes.
+    assertCleanCandidate(candidateRoot);
+    // Identity verification never sees stale success, even on an invalid candidate
+    // (the failure path below also removes it before saving diagnostics).
     await rm(output, { force: true });
     await mkdir(artifactRoot, { recursive: true });
     await rm(logs, { recursive: true, force: true });
@@ -60,12 +64,12 @@ export async function checkSchemaRollback(args: string[]) {
     assert(previousRootArg && manifestPathArg && process.env.MULTIREMI_TEST_POSTGRES_URL, 'Previous source, published manifest and isolated PostgreSQL URL are required');
     const previousRoot = resolve(previousRootArg), manifestPath = resolve(manifestPathArg);
     assert.notEqual(previousRoot, candidateRoot, 'Previous source must be isolated from the candidate');
-    assertCleanCandidate(candidateRoot);
     diagnostics.targetRef = git(candidateRoot, 'rev-parse', 'HEAD'); // CI checks out the merge SHA.
     const { verifyPreparedRelease } = await import('./schema-rollback-identity.ts');
     const identity = await verifyPreparedRelease(previousRoot, manifestPath);
     diagnostics.previousIdentity = identity;
-    const previous = JSON.parse(await readFile(manifestPath, 'utf8'));
+    const previousManifest = await readFile(manifestPath, 'utf8');
+    const previous = JSON.parse(previousManifest);
     const { schemaLevelFingerprint } = await import('../packages/platform-updater/src/schema-fingerprint.mjs');
     const dataSchema = await schemaLevelFingerprint(candidateRoot);
     const url = new URL(process.env.MULTIREMI_TEST_POSTGRES_URL!);
@@ -118,7 +122,7 @@ export async function checkSchemaRollback(args: string[]) {
     const verified = await runPhase('verify-schema-levels', [process.execPath, script, '--read-schema'], candidateRoot);
     diagnostics.schemaVerification = verified.schema;
     assert.deepEqual(verified.schema, expanded.schema, 'Old startup must retain schema levels');
-    evidence = { format: 1, targetRef: diagnostics.targetRef, dataSchema, previousRelease: previous,
+    evidence = { format: 1, targetRef: diagnostics.targetRef, dataSchema, previousManifest, previousRelease: previous,
       previousIdentity: identity, schema: expanded.schema, schemaVerification: verified.schema,
       probes: { before: seeded, after }, phases,
       checks: ['previous-startup', 'previous-create-start-complete-cancel', 'candidate-expand-startup', 'previous-startup-after-expand', 'previous-create-start-complete-cancel-after-expand'],

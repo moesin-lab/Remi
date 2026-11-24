@@ -151,6 +151,37 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     expect(store.getExecutionEndpointCatalog(endpoint.id, "other")).toEqual([]);
   });
 
+  it("refreshes and reads one saved protocol catalog with workspace-scoped human credentials", async () => {
+    const { store } = fixture();
+    const endpoint = store.saveExecutionEndpoint("local", { name: "System catalog", connection: { ...connection,
+      options: { fetch_models: false, manual_models: [{ id: "summary" }] } }, api_key: key });
+    const app = createMultiremiApp({ store, authToken: "master" });
+    const owner = await store.createAccessToken({ workspaceId: "local", type: "pat", name: "Owner", userId: "local" });
+    const daemon = await store.createAccessToken({ workspaceId: "local", type: "daemon", name: "Daemon" });
+    const inspect = (token: string, protocol: string) => app.request("/api/execution-endpoints/inspect", {
+      method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ workspace_id: "local", endpoint_id: endpoint.id, operation: "models", protocol }),
+    });
+    const catalog = (token: string, workspace: string) => app.request(`/api/execution-endpoints/${endpoint.id}/catalog?workspace_id=${workspace}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect((await inspect(daemon.token, "anthropic-messages")).status).toBe(403);
+    expect((await catalog(daemon.token, "local")).status).toBe(403);
+    expect((await inspect(owner.token, "openai-chat-completions")).status).toBe(400);
+    const refresh = await inspect(owner.token, "anthropic-messages");
+    expect(refresh.status).toBe(200);
+    const inspection = await refresh.json();
+    expect(inspection.persisted).toBe(true);
+    expect(inspection.inspection.results).toMatchObject([{ protocol: "anthropic-messages", state: "manual" }]);
+    expect(JSON.stringify(inspection)).not.toContain(key);
+    const snapshot = await catalog(owner.token, "local");
+    expect(snapshot.status).toBe(200);
+    expect((await snapshot.json()).catalogs).toMatchObject([{ protocol: "anthropic-messages", models: [{ id: "summary" }] }]);
+    const other = store.createWorkspace({ name: "Other" });
+    const otherOwner = await store.createAccessToken({ workspaceId: other.id, type: "pat", name: "Other owner", userId: "local" });
+    expect((await catalog(otherOwner.token, other.id)).status).toBe(404);
+  });
+
   it("requires endpoint options support before reporting a binding ready", () => {
     const { store } = fixture();
     const endpoint = store.saveExecutionEndpoint("local", { name: "Manual catalog", connection: { ...connection,

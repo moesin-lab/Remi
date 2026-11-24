@@ -63,6 +63,14 @@ offer 输入与会话投影的范围记录都为 complete 时什么也不加；�
 会话里不变的内容（Agent 定义、Remi 规则、工作区、项目、Issue 等）由 daemon 写进 provider home 的 `AGENTS.md`，不进每轮输入。
 旧 daemon 仍按范围记录拼接自己的提示词。
 
+工作区系统默认行为通过 `system_prompt_policy` 下发，格式及字段见
+[共享契约](../packages/contracts/src/system-prompt-policy.ts)。服务端在 claim 同一事务冻结版本、默认 revision、
+完整五槽快照与内容哈希；offer 准备阶段不重读最新配置。未 accept 的 rescind/requeue/stale reclaim 可以重绑，
+running 尝试保持原快照。新 daemon 声明 `prompt.policy.v1`，校验格式及哈希后写入 provider home；实际输入记录关联该 binding。
+当 mode 为 custom，或当前服务端默认不等于首版 `LEGACY_BASELINE_DEFAULT_REVISION` 时，claim 前必须具备此能力，
+否则等待并提供升级诊断。仅 default 且默认仍等价于基线时允许旧 daemon 兼容执行；reset 不绕过未来默认升级的能力门禁。
+整个 `system_prompt_policy` 属于执行绑定，预算降级不得删除或截短其字符串。
+
 长正文带完整展开指针；范围命令为 `remi message list <session> --from X --to Y`，语义为 `X < seq ≤ Y`，
 调用 `GET /api/sessions/:id/messages`。旧 CLI log 命令只返回退役提示；浏览器 `/log` 窗口继续只读展示。
 服务端范围分页保留长正文条内偏移，CLI 自动跟随全部游标并拼回完整正文，不切开代理对。

@@ -87,7 +87,7 @@ CLI 支持 `remi runtime group create|update --file group.json --blocked-model e
 | 失败与旧目录 | 刷新失败保留上次成功列表并标识旧版本；修改草稿后显示旧目录提示。失败、空列表、无效 JSON 不标为成功 |
 | 未保存草稿 | 可以检查草稿；不会因此保存配置。已保存端点可在服务器复用密钥，浏览器不取回明文 |
 
-`POST /api/execution-endpoints/inspect` 接收 `operation: models | detect | test`；`test` 必须指定一个 `protocol` 和 `model`。`GET /api/execution-endpoints/:id/catalog` 读取目录缓存及最近检查结果。只有未修改的已保存配置才更新缓存；旧 revision 的迟到结果被忽略。缓存不参与 Runtime ready 判定，实际可执行目录仍由执行组成员确认。使用 Runtime 环境变量认证的端点不能在服务器检查，手动目录读取除外。
+`POST /api/execution-endpoints/inspect` 接收 `operation: models | detect | test`；`test` 必须指定一个 `protocol` 和 `model`。`GET /api/execution-endpoints/:id/catalog` 读取目录缓存及最近检查结果。按 `endpoint_id` 检查模型时，省略 `connection` 或传 `null` 表示使用已保存连接。使用已保存凭据时可更新目录缓存，旧 revision 的迟到结果被忽略。显式提供连接对象（即使与已保存连接等价）或临时 `api_key` 时，检查结果只用于本次预览。缓存不参与 Runtime ready 判定，实际可执行目录仍由执行组成员确认。使用 Runtime 环境变量认证的端点不能在服务器检查，手动目录读取除外。
 
 ```bash
 remi runtime endpoint inspect --file inspection.json --json

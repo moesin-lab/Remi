@@ -151,6 +151,60 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
     expect(store.getExecutionEndpointCatalog(endpoint.id, "other")).toEqual([]);
   });
 
+  it("caches ID-only catalog reads for a migrated relay and isolates previews and stale revisions", async () => {
+    const { store, db } = fixture();
+    let model = "saved-model";
+    let beforeResponse: (() => void) | undefined;
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+      if (new URL(request.url).pathname !== "/proxy/v1/models") return new Response(null, { status: 404 });
+      beforeResponse?.();
+      return Response.json({ data: [{ id: model }] });
+    } });
+    try {
+      const baseUrl = `${upstream.url.origin}/proxy/v1/`;
+      db.run(`INSERT INTO multiremi_relay_config(workspace_id,engine,fragment,auth_token,revision,updated_at)
+        VALUES('local','claude',?,?,1,?)`, [JSON.stringify({ env: { ANTHROPIC_BASE_URL: baseUrl } }), key, new Date().toISOString()]);
+      db.run("DELETE FROM multiremi_schema_migrations WHERE id='execution_endpoints_v1'");
+      runMigrations(db, { historicalMaintenance: true });
+      const endpoint = store.getExecutionEndpoint(store.getSystemModelEndpoints("local")["anthropic-messages"]!, "local")!;
+      expect(endpoint.connection.base_url).toBe(baseUrl);
+      const app = createMultiremiApp({ store });
+      const inspect = async (overrides: Record<string, unknown> = {}) => {
+        const response = await app.request("/api/execution-endpoints/inspect", { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspace_id: "local", endpoint_id: endpoint.id, operation: "models", protocol: "anthropic-messages", ...overrides }) });
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body.inspection.results).toMatchObject([{ state: "ok", models: [{ id: model }] }]);
+        return body.persisted;
+      };
+      const catalogs = async () => {
+        const response = await app.request(`/api/execution-endpoints/${endpoint.id}/catalog?workspace_id=local`);
+        expect(response.status).toBe(200);
+        return (await response.json()).catalogs;
+      };
+      expect(await inspect()).toBe(true);
+      expect(await catalogs()).toMatchObject([{ revision: endpoint.revision, models: [{ id: model }] }]);
+      model = "saved-null";
+      expect(await inspect({ connection: null })).toBe(true);
+      const saved = await catalogs();
+      expect(saved).toMatchObject([{ models: [{ id: model }] }]);
+      model = "preview";
+      expect(await inspect({ connection: endpoint.connection })).toBe(false);
+      expect(await inspect({ api_key: "preview-key" })).toBe(false);
+      expect(await catalogs()).toEqual(saved);
+      beforeResponse = () => { store.saveExecutionEndpoint("local", { name: "Updated", connection: endpoint.connection }, endpoint.id); };
+      await inspect();
+      const updated = store.getExecutionEndpoint(endpoint.id, "local")!;
+      expect(updated.revision).toBeGreaterThan(endpoint.revision);
+      expect(await catalogs()).toEqual(saved);
+      beforeResponse = undefined;
+      expect(await inspect({ connection: updated.connection })).toBe(false);
+      expect(await catalogs()).toEqual(saved);
+    } finally {
+      upstream.stop(true);
+    }
+  });
+
   it("refreshes and reads one saved protocol catalog with workspace-scoped human credentials", async () => {
     const { store } = fixture();
     const endpoint = store.saveExecutionEndpoint("local", { name: "System catalog", connection: { ...connection,

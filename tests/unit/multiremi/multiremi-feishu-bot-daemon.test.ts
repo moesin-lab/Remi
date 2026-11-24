@@ -954,6 +954,8 @@ describe("Feishu bot control-plane delivery", () => {
   for (const scenario of ['new', 'stop', 'target', 'none'] as const) {
     it(`commits ${scenario} once and safely recovers its original result over HTTP`, async () => {
       const { app, store, tokens } = await scaffold();
+      const cancelled: string[] = [];
+      store.onTaskEvent(event => { if (event.type === 'task:cancelled') cancelled.push(event.task.id); });
       let loseResponse = false;
       const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
         const response = await app.fetch(request);
@@ -986,6 +988,7 @@ describe("Feishu bot control-plane delivery", () => {
           else db!.exec(`CREATE TRIGGER fail_receipt BEFORE INSERT ON multiremi_feishu_command_results BEGIN SELECT RAISE(ABORT,'fail receipt'); END`);
           await expect(execute(input)).rejects.toMatchObject({ status: 500 });
           expect(store.getTask(before!)?.status).toBe('queued');
+          expect(cancelled).toEqual([]);
           expect(store.inspectFeishuBotSession('local','rt_a',1,base.external_session_key,base.sender_open_id).task?.taskId).toBe(before!);
           expect(await execute({ ...input, mode: 'lookup_only' })).toEqual({ state: 'missing' });
           db!.exec(db!.dialect === 'postgres' ? 'ALTER TABLE multiremi_feishu_command_results DROP CONSTRAINT fail_receipt' : 'DROP TRIGGER fail_receipt');
@@ -1025,6 +1028,10 @@ describe("Feishu bot control-plane delivery", () => {
         db!.run("UPDATE multiremi_feishu_bot_configs SET runtime_id='rt_a' WHERE bot_id='default'");
         db!.run("UPDATE multiremi_feishu_bot_configs SET sender_access_policy='allowlist' WHERE bot_id='default'");
         for (const mode of ['execute','lookup_only'] as const) await expect(execute({ ...input, mode })).rejects.toMatchObject({ code: 'sender_not_allowed' });
+        db!.run("UPDATE multiremi_feishu_bot_configs SET revision=2, sender_access_policy='agent' WHERE bot_id='default'");
+        await expect(execute(input)).rejects.toMatchObject({ code: 'stale_revision' });
+        for (const mode of ['execute','lookup_only'] as const) expect(await execute({ ...input, mode, revision: 2 })).toEqual(original.value);
+        expect(cancelled).toEqual(before ? [before] : []);
         expect(store.getTask(after)?.status).toBe('queued');
       } finally { server.stop(true); }
     }, 30000);

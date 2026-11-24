@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ROOT_SECURITY_REVOKE_REASONS, type RevokeCredentialFamilyRequest, type RevokeCredentialFamilyResponse,
-  type RevokeRootGrantRequest, type RevokeRootGrantResponse } from '@multiremi/contracts/root-authority.js';
+  type RevokeRootGrantRequest, type RevokeRootGrantResponse, type CreateRootGrantRequest, type CreateRootGrantResponse } from '@multiremi/contracts/root-authority.js';
 import type { SqlDatabase } from './db/postgres.js';
-import { assertUnrevokedAncestry } from './authority-provenance.js';
+import { assertUnrevokedAncestry, grantAncestryIsCurrent } from './authority-provenance.js';
 import type { AuthorityKernel, AuthorityUse, CredentialProof, CurrentAuthority } from './root-authority-contract.js';
 import { readRecordedGrant } from './root-grants.js';
 import { SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
@@ -10,6 +10,7 @@ import { SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx }
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 const grantAction = 'root.grant.revoke';
 const familyAction = 'root.credential-family.revoke';
+const createAction = 'root.grant.create';
 type Actor = ReturnType<AuthorityKernel['authorizeWrite']>;
 type Response = RevokeRootGrantResponse | RevokeCredentialFamilyResponse;
 interface PasswordEvidence { userId: string; verifier: string; version: number; node: string; deadline: number }
@@ -103,6 +104,7 @@ export class RootManagement {
     const evidence = this.evidence(proof);
     const target = request.actualTarget;
     if (!target.id || request.use !== 'management' || !(request.action === grantAction && target.type === 'grant'
+      || request.action === createAction && target.type === 'user'
       || request.action === familyAction && target.type === 'credential_family')) throw new SecurityAbort('root_required');
     this.checkPassword(tx, evidence);
     const state = this.db.query('SELECT feature_activation,security_revision FROM multiremi_security_state WHERE singleton=1').get();
@@ -115,7 +117,7 @@ export class RootManagement {
         AND scope='system' AND subject_type='user' AND subject_id=?`).get(grant.authorityNodeId, grant.generation, subject.id);
       if (!node) throw new SecurityAbort('root_authority_revoked');
       assertUnrevokedAncestry(this.db, tx, { nodeId: grant.authorityNodeId, generation: grant.generation });
-      const exists = request.action === grantAction
+      const exists = request.action === createAction ? this.db.query('SELECT id FROM multiremi_users WHERE id=?').get(target.id) : request.action === grantAction
         ? this.db.query('SELECT grant_id FROM multiremi_root_grants WHERE grant_id=?').get(target.id)
         : this.db.query('SELECT family_id FROM multiremi_credential_families WHERE family_id=?').get(target.id);
       if (!exists) throw new RootManagementRequestError(404, 'Management target not found');
@@ -141,6 +143,114 @@ export class RootManagement {
 
   revokeGrant(tx: SecurityTx, actor: Parameters<AuthorityKernel['revokeGrant']>[1], targetId: string, input: RevokeRootGrantRequest): RevokeRootGrantResponse {
     return onPrimary(() => this.revoke(tx, actor, targetId, grantAction, input)) as RevokeRootGrantResponse;
+  }
+
+  bootstrapHuman(proof: CredentialProof, input: { deploymentId: string; authorization: string; userId: string; reason: string; expectedRevision: number }): CreateRootGrantResponse {
+    const { deploymentId, authorization, userId, reason, expectedRevision } = input;
+    const evidence = this.evidence(proof);
+    if (userId !== evidence.userId || !reason.trim() || !deploymentId || !authorization) throw new SecurityAbort('root_required');
+    const use = { action: createAction, actualTarget: { type: 'user', id: userId }, use: 'management' };
+    return onPrimary(() => withSecurityWrite(this.db, undefined, { ...this.plan(proof, use), expectedRevision }, tx => {
+      this.checkPassword(tx, this.evidence(proof));
+      const now = Date.now();
+      const ticket = digest(authorization);
+      if (!this.db.query(`UPDATE multiremi_root_bootstrap_authorizations SET consumed_at_ms=? WHERE authorization_digest=?
+        AND deployment_id=? AND user_id=? AND reason=? AND expires_at_ms>? AND consumed_at_ms IS NULL RETURNING deployment_id`)
+        .get(now, ticket, deploymentId, userId, reason, now)) throw new SecurityAbort('root_required');
+      if (!this.db.query(`UPDATE multiremi_security_state SET bootstrap_completed=1 WHERE singleton=1 AND bootstrap_completed=0
+        AND feature_activation=0 AND NOT EXISTS (SELECT 1 FROM multiremi_root_grants) RETURNING singleton`).get()) throw new SecurityAbort('authority_revision_conflict');
+      const origin = this.newNode('deployment_origin', 'deployment', deploymentId, 1, expectedRevision+1, null, []);
+      const result = this.insertHumanGrant(tx, userId, reason, null, expectedRevision, { type: 'deployment', id: deploymentId }, [origin]);
+      this.db.query(`UPDATE multiremi_root_bootstrap_authorizations SET grant_id=?,proof_node_id=?,revision_before=?,revision_after=?
+        WHERE authorization_digest=?`).run(result.grant.id, evidence.node, expectedRevision, result.security_revision, ticket);
+      return { ...result, grant: { ...result.grant, effective: false, effective_reason_code: 'feature_disabled' } };
+    }));
+  }
+
+  private newNode(kind: string, subjectType: string, subjectId: string, generation: number, revision: number, expiry: number | null, parents: string[]) {
+    const id = randomUUID();
+    this.db.query(`INSERT INTO multiremi_authority_nodes(node_id,issued_seq,generation,kind,subject_type,subject_id,scope,revision,expires_at_ms,continuous_parent_count)
+      SELECT ?,COALESCE(MAX(issued_seq),0)+1,?,?,?,?,'system',?,?,? FROM multiremi_authority_nodes`)
+      .run(id, generation, kind, subjectType, subjectId, revision, expiry ?? Number.MAX_SAFE_INTEGER, parents.length);
+    for (const parent of parents) {
+      if (!this.db.query(`INSERT INTO multiremi_authority_edges SELECT c.node_id,c.generation,c.issued_seq,p.node_id,p.generation,p.issued_seq,'continuous'
+        FROM multiremi_authority_nodes c CROSS JOIN multiremi_authority_nodes p WHERE c.node_id=? AND p.node_id=? RETURNING child_id`).get(id, parent)) {
+        throw new SecurityAbort('root_authority_revoked');
+      }
+    }
+    return id;
+  }
+
+  private insertHumanGrant(tx: SecurityTx, userId: string, reason: string, expiry: number | null, before: number,
+    issuer: { type: 'deployment' | 'user'; id: string }, parents: string[]): CreateRootGrantResponse {
+    const state = this.db.query("SELECT generation_counter,active_grant_id FROM multiremi_root_subject_state WHERE subject_type='user' AND subject_id=?").get(userId);
+    if (state?.active_grant_id) throw new SecurityAbort('authority_revision_conflict');
+    const generation = Number(state?.generation_counter ?? 0)+1;
+    const revision = before+1;
+    const now = Date.now();
+    if (!Number.isSafeInteger(generation) || !Number.isSafeInteger(revision)) throw new SecurityAbort('authority_revision_conflict');
+    const node = this.newNode('grant', 'user', userId, generation, revision, expiry, parents);
+    if (!grantAncestryIsCurrent(this.db, tx, userId, { nodeId: node, generation })) throw new SecurityAbort('root_authority_revoked');
+    const id = randomUUID();
+    this.db.query(`INSERT INTO multiremi_root_grants(grant_id,subject_type,subject_id,generation,scope,authority_node_id,issuer_type,issuer_id,revision,reason,created_at_ms,expires_at_ms)
+      VALUES(?,'user',?,?,'system',?,?,?,?,?,?,?)`).run(id,userId,generation,node,issuer.type,issuer.id,revision,reason,now,expiry);
+    if (!this.db.query(`INSERT INTO multiremi_root_subject_state(subject_type,subject_id,generation_counter,active_grant_id) VALUES('user',?,?,?)
+      ON CONFLICT(subject_type,subject_id) DO UPDATE SET generation_counter=excluded.generation_counter,active_grant_id=excluded.active_grant_id
+      WHERE multiremi_root_subject_state.active_grant_id IS NULL AND multiremi_root_subject_state.generation_counter=? RETURNING generation_counter`)
+      .get(userId,generation,id,generation-1)) throw new SecurityAbort('authority_revision_conflict');
+    if (!this.db.query('UPDATE multiremi_security_state SET security_revision=? WHERE singleton=1 AND security_revision=? RETURNING singleton')
+      .get(revision,before)) throw new SecurityAbort('authority_revision_conflict');
+    return { security_revision: revision, grant: { id, subject: { type: 'user', id: userId }, scope: 'system', generation, status: 'active', effective: true,
+      effective_reason_code: 'active', authority_node_id: node, issuer, origin_attempt_id: null, origin_family_id: null, reason, revocation_reason: null,
+      created_at: new Date(now).toISOString(), expires_at: expiry === null ? null : new Date(expiry).toISOString(), revoked_at: null, revision } };
+  }
+
+  grant(tx: SecurityTx, actor: Parameters<AuthorityKernel['grant']>[1], input: CreateRootGrantRequest): CreateRootGrantResponse {
+    const target = input.subject;
+    if (target.type !== 'user' || !target.id.startsWith('usr_')) throw new SecurityAbort('root_required');
+    return withSecurityTarget(this.db, tx, `management:user:${target.id}`, () => onPrimary(() => {
+      const bound = this.actors.get(actor as Actor);
+      if (!bound || bound.tx !== tx || bound.target !== target.id || bound.action !== createAction) throw new SecurityAbort('root_required');
+      const current = this.check(tx, bound.proof, { action: createAction, actualTarget: target, use: 'management' });
+      if (!current.effectiveRoot || !current.recordedGrant || !current.subject) throw new SecurityAbort('root_required');
+      const previous = actor as Actor;
+      if (previous.checkedRevision !== current.checkedRevision || previous.recordedGrant?.grantId !== current.recordedGrant.grantId) throw new SecurityAbort('authority_revision_conflict');
+      if (!input.reason?.trim() || !input.idempotency_key?.trim() || !Number.isSafeInteger(input.expected_revision) || input.expected_revision < 0
+        || input.runtime_trust_ids?.length || input.accepted_dependency_digest != null) throw new RootManagementRequestError(400, 'Invalid human grant request');
+      const expiry = input.expires_at == null ? null : Date.parse(input.expires_at);
+      if (expiry !== null && !Number.isSafeInteger(expiry)) throw new RootManagementRequestError(400, 'Invalid expiry');
+      const key = [current.subject.id,createAction,target.id,input.idempotency_key];
+      const payload = digest(JSON.stringify([input.expected_revision,input.reason,expiry]));
+      const prior = this.db.query(`SELECT result_json,payload_digest FROM multiremi_root_management_events
+        WHERE actor_user_id=? AND action=? AND target_id=? AND idempotency_key=?`).get(...key);
+      if (prior) {
+        if (prior.payload_digest !== payload) throw new SecurityAbort('authority_revision_conflict');
+        const result: CreateRootGrantResponse = JSON.parse(prior.result_json);
+        const record = this.db.query(`SELECT g.revoked_at_ms,g.revoke_reason,g.revision,s.active_grant_id FROM multiremi_root_grants g
+          JOIN multiremi_root_subject_state s ON s.subject_type=g.subject_type AND s.subject_id=g.subject_id WHERE g.grant_id=?`).get(result.grant.id);
+        if (!record) throw new SecurityAbort('security_state_unavailable');
+        const revoked = record.revoked_at_ms !== null;
+        const expired = expiry !== null && expiry <= Date.now();
+        const effective = !revoked && !expired && record.active_grant_id === result.grant.id && grantAncestryIsCurrent(this.db,tx,target.id,
+          { nodeId: result.grant.authority_node_id, generation: result.grant.generation });
+        return { security_revision: current.checkedRevision, replayed: true, grant: { ...result.grant, effective, revision: Number(record.revision),
+          revoked_at: revoked ? new Date(Number(record.revoked_at_ms)).toISOString() : null, revocation_reason: record.revoke_reason,
+          status: revoked ? 'revoked' : expired ? 'expired' : 'active', effective_reason_code: revoked ? 'grant_revoked' : expired ? 'grant_expired' : effective ? 'active' : 'ancestor_revoked' } };
+      }
+      if (current.checkedRevision !== input.expected_revision) throw new SecurityAbort('authority_revision_conflict');
+      if (expiry !== null && expiry <= Date.now()) throw new RootManagementRequestError(400, 'Invalid expiry');
+      const targetPassword = this.passwordRow(target.id, true);
+      const targetProof = targetPassword && this.versionRow(target.id, digest(targetPassword.password_hash));
+      if (!targetProof || !grantAncestryIsCurrent(this.db, tx, target.id, { nodeId: targetProof.password_node_id,
+        generation: Number(targetProof.version) })) throw new SecurityAbort('root_required');
+      const evidence = this.evidence(bound.proof);
+      const result = this.insertHumanGrant(tx,target.id,input.reason,expiry,current.checkedRevision,{ type: 'user', id: current.subject.id },
+        [current.recordedGrant.authorityNodeId,evidence.node]);
+      this.db.query(`INSERT INTO multiremi_root_management_events(actor_user_id,action,target_id,idempotency_key,payload_digest,proof_node_id,actor_grant_id,
+        actor_generation,reason,revision_before,revision_after,created_at_ms,result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(...key,payload,evidence.node,current.recordedGrant.grantId,current.recordedGrant.generation,input.reason,current.checkedRevision,result.security_revision,Date.now(),JSON.stringify(result));
+      return result;
+    }));
   }
 
   revokeFamily(tx: SecurityTx, actor: Parameters<AuthorityKernel['revokeFamily']>[1], targetId: string, input: RevokeCredentialFamilyRequest): RevokeCredentialFamilyResponse {

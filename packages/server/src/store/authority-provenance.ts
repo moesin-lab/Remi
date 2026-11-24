@@ -16,7 +16,19 @@ const maxDepth = 32;
 const maxNodes = 1024;
 
 export function assertUnrevokedAncestry(db: SqlDatabase, tx: SecurityTx, ref: AuthorityNodeRef): void {
-  withSecurityTarget(db, tx, `authority:${ref.nodeId}`, () => {
+  withSecurityTarget(db, tx, `authority:${ref.nodeId}`, () => checkAncestry(db, ref));
+}
+
+export function grantAncestryIsCurrent(db: SqlDatabase, tx: SecurityTx, userId: string, ref: AuthorityNodeRef): boolean {
+  return withSecurityTarget(db, tx, `management:user:${userId}`, () => {
+    try { checkAncestry(db, ref); return true; } catch (error) {
+      if (error instanceof SecurityAbort && error.code === 'root_authority_revoked') return false;
+      throw error;
+    }
+  });
+}
+
+function checkAncestry(db: SqlDatabase, ref: AuthorityNodeRef): void {
     const completed = new Map<string, Ancestor>();
     let remaining = maxNodes;
     let earliestExpiry = Infinity;
@@ -63,5 +75,4 @@ export function assertUnrevokedAncestry(db: SqlDatabase, tx: SecurityTx, ref: Au
       throw new SecurityAbort('security_state_unavailable');
     }
     if (earliestExpiry <= Date.now()) throw new SecurityAbort('root_authority_revoked');
-  });
 }

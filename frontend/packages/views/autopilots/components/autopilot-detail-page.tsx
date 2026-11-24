@@ -25,7 +25,7 @@ import {
   getCompatibleConfigurableTriggerKinds,
   type ConfigurableAutopilotTriggerKind,
 } from "@multiremi/core/autopilots";
-import { api } from "@multiremi/core/api";
+import { api, ApiError } from "@multiremi/core/api";
 import { useWorkspaceId } from "@multiremi/core/hooks";
 import { useWorkspacePaths } from "@multiremi/core/paths";
 import { useActorName } from "@multiremi/core/workspace/hooks";
@@ -642,7 +642,7 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
   const router = useNavigation();
   const { getActorName } = useActorName();
 
-  const { data, isLoading } = useQuery(autopilotDetailOptions(wsId, autopilotId));
+  const { data, isLoading, error, refetch } = useQuery(autopilotDetailOptions(wsId, autopilotId));
   const [runOffset, setRunOffset] = useState(0);
   const { data: runs = [], isLoading: runsLoading } = useQuery(autopilotRunsOptions(wsId, autopilotId, runOffset));
   const { data: projects = [] } = useQuery(projectListOptions(wsId));
@@ -701,8 +701,9 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
 
   if (!data) {
     return (
-      <div className="flex items-center justify-center h-full text-muted-foreground">
-        {t(($) => $.detail.not_found)}
+      <div role="alert" className="flex items-center justify-center h-full gap-2 text-muted-foreground">
+        {error instanceof ApiError && error.status === 404 ? t(($) => $.detail.not_found) : t(($) => $.delivery.configuration_error)}
+        <Button variant="outline" onClick={() => void refetch()}>{t(($) => $.delivery.retry)}</Button>
       </div>
     );
   }

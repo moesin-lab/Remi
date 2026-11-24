@@ -18,14 +18,15 @@ export function DeliveryTarget({ value, onChange }: {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
   const descriptionId = useId();
-  const query = useQuery({ ...deliveryTargetsOptions(wsId), enabled: Boolean(value || onChange) });
+  const query = useQuery({ ...deliveryTargetsOptions(wsId), enabled: Boolean(wsId && (value || onChange)) });
   const targets = query.isSuccess && !query.isFetching ? query.data.targets : [];
   const selected = targets.find(target => target.id === value);
   const readError = query.error instanceof ApiError && query.error.status === 403
     ? t(($) => $.delivery.denied) : t(($) => $.delivery.read_error);
   const label = (target: AutopilotDeliveryTarget) => {
-    const channel = target.channel === "web_chat" || target.channel === "feishu"
-      ? t(($) => $.delivery[target.channel as "web_chat" | "feishu"])
+    const key = target.channel;
+    const channel = key === "web_chat" || key === "feishu"
+      ? t(($) => $.delivery[key])
       : t(($) => $.delivery.unknown_channel);
     return [target.title, channel, target.id].filter(Boolean).join(" · ");
   };
@@ -47,7 +48,10 @@ export function DeliveryTarget({ value, onChange }: {
   };
   return <div className="space-y-1 text-sm">
     <p id={descriptionId} aria-live="polite">{status}</p>
-    <PropertyPicker open={open} onOpenChange={setOpen} searchable align="start" width="w-72"
+    <PropertyPicker open={open} onOpenChange={nextOpen => {
+      setOpen(nextOpen);
+      if (nextOpen) void query.refetch();
+    }} searchable align="start" width="w-72"
       onSearchChange={setFilter} searchPlaceholder={t(($) => $.delivery.choose)}
       triggerRender={<button type="button" aria-describedby={descriptionId} className="underline" />}
       trigger={t(($) => $.delivery.choose)}>

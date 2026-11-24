@@ -33,7 +33,7 @@ describe("report delivery", () => {
   });
 
   it("filters duplicate names by channel, selects by keyboard and clears explicitly", () => {
-    result.mockReturnValue({ isSuccess: true, data: { targets } });
+    result.mockReturnValue({ isSuccess: true, data: { targets }, refetch: vi.fn() });
     renderWithI18n(<Editor />);
     expect(screen.getByText("Daily · Web Chat · first")).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Choose delivery Chat" }));

@@ -1,5 +1,6 @@
 {
   "delivery": {
+    "configuration_error": "자동 작업 설정을 불러올 수 없습니다.",
     "denied": "전송 대상에 접근할 권한이 없습니다.",
     "heading": "보고서 전송",
     "unbound": "내부 세션에만 저장되며 사용자 채팅으로 전송되지 않습니다.",

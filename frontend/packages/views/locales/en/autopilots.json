@@ -1,5 +1,6 @@
 {
   "delivery": {
+    "configuration_error": "Could not load Autopilot configuration.",
     "denied": "You do not have permission to access delivery targets.",
     "heading": "Report delivery",
     "unbound": "Reports are saved only in the internal session. No report is sent to a user Chat.",

@@ -21,6 +21,8 @@ export function deliveryTargetsOptions(wsId: string) {
   return queryOptions({
     queryKey: [...autopilotKeys.all(wsId), "delivery-targets"],
     queryFn: () => api.listAutopilotDeliveryTargets(wsId),
+    staleTime: 0,
+    refetchOnWindowFocus: true,
     retry: false,
   });
 }

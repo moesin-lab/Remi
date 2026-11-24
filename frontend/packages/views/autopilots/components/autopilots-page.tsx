@@ -192,6 +192,7 @@ export function AutopilotsPage() {
   const wsId = useWorkspaceId();
   const {
     data: autopilots = [],
+    refetch,
     isLoading,
     status: autopilotsStatus,
     isPlaceholderData: autopilotsIsPlaceholderData,
@@ -245,6 +246,11 @@ export function AutopilotsPage() {
               ))}
             </div>
           </>
+        ) : autopilotsStatus === "error" && autopilots.length === 0 ? (
+          <div role="alert" className="flex items-center gap-2 px-5 py-4 text-sm">
+            {t(($) => $.delivery.configuration_error)}
+            <Button size="sm" variant="outline" onClick={() => void refetch()}>{t(($) => $.delivery.retry)}</Button>
+          </div>
         ) : autopilots.length === 0 ? (
           <div className="flex flex-col items-center py-16 px-5">
             <Zap className="h-10 w-10 mb-3 text-muted-foreground opacity-30" />

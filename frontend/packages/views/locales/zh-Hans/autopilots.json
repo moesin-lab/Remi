@@ -1,5 +1,6 @@
 {
   "delivery": {
+    "configuration_error": "无法读取定时任务配置。",
     "denied": "没有访问投递目标的权限。",
     "heading": "汇报投递",
     "unbound": "仅写入内部会话，不向用户 Chat 投递",

@@ -94,7 +94,25 @@ try {
   await page.reload();
   await page.getByText(unbound, { exact: true }).waitFor();
   assert.equal(store.getAutopilot(autopilot.id)?.deliveryChatSessionId, null);
-  console.log("PASS list, bind, change, reload, rejected archived target, retained draft and explicit clear");
+  await page.goto(`${frontend}/${workspace.slug}/autopilots`);
+  await page.getByRole("button", { name: "New autopilot" }).click();
+  await dialog.getByLabel("Autopilot name").fill("Created in browser");
+  await dialog.getByRole("button", { name: /Select agent or squad/ }).click();
+  await page.getByRole("button", { name: "Reporter" }).click();
+  await dialog.getByRole("button", { name: /^Run only/ }).click();
+  await choose(second.id);
+  await dialog.getByRole("button", { name: /^Create issue/ }).click();
+  await dialog.getByText(`${second.title} · Web Chat · ${second.id}`, { exact: true }).waitFor();
+  const creation = page.waitForResponse(item => item.request().method() === "POST" && item.url().endsWith("/api/autopilots"));
+  await dialog.getByRole("button", { name: "Create autopilot", exact: true }).click();
+  const created = await creation;
+  assert(created.ok());
+  const createdId = (await created.json()).id;
+  assert.equal(store.getAutopilot(createdId)?.deliveryChatSessionId, second.id);
+  await dialog.waitFor({ state: "hidden" });
+  await page.reload();
+  await page.getByRole("link", { name: /Created in browser/ }).getByText(`${second.title} · Web Chat · ${second.id}`).waitFor();
+  console.log("PASS list, create, bind, change, reload, rejected archived target, retained draft, mode guard and explicit clear");
 } finally {
   await browser?.close();
   next.kill();

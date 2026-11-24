@@ -178,7 +178,7 @@ export function formatEventTime(iso: string): string {
 // Fold the server-side per-provider usage rollup (camelCase on the wire) into a
 // single header snapshot. Terminal tasks carry this; live fallback (last usage
 // message) is a Batch 3 concern.
-export function usageSnapshotFromTask(task: AgentTask): UsageSnapshot | null {
+export function usageSnapshotFromTask(task: Pick<AgentTask, "usage">): UsageSnapshot | null {
   const entries = task.usage;
   if (!entries || entries.length === 0) return null;
   const acc: UsageSnapshot = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };

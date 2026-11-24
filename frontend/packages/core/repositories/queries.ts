@@ -1,5 +1,18 @@
 import { queryOptions } from "@tanstack/react-query";
 import { api } from "../api";
+import type { ActivityFilters } from "./activity-filters";
+
+export function repositoryActivityOptions(workspace: string, repository: string, filters: ActivityFilters) {
+  return queryOptions({
+    queryKey: ["repository-activity", workspace, repository, filters] as const,
+    queryFn: ({ signal }) => api.listRepositoryActivity(workspace, repository, filters, signal),
+    enabled: Boolean(workspace && repository),
+    staleTime: 0,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+  });
+}
 import type { RepositoryWikiSummary } from "../types";
 
 // Poll cadence while a wiki build is queued/building. Kept in one place so

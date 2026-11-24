@@ -34,6 +34,8 @@ API 代理目标由 [resolveRemoteApiUrl](../../frontend/apps/web/config/runtime
 
 ## 一次任务读取与更新
 
+仓库列表的任务入口打开工作区内 `/repos/[id]/activity`。进行中、历史、状态、执行者、Issue 搜索和分页游标取自 URL。活动查询以 `repository-activity`、工作区、仓库和规范化筛选为 key；精确 WS 提示合并 250ms，可见页每 30 秒校准一次。行耗时共用响应的 `as_of` 时间，日志点击后才订阅。历史使用当前项目/PR 关系，工作树只显示 Issue 在本仓的当前状态。
+
 ```text
 页面 / 组件
   → core/<领域>/queries.ts、mutations.ts

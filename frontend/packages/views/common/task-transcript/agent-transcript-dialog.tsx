@@ -61,7 +61,7 @@ import { ExecutionModelInfo } from "./execution-model-info";
 interface AgentTranscriptDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  task: AgentTask;
+  task: TranscriptTask;
   items: TimelineItem[];
   agentName: string;
   isLive?: boolean;
@@ -72,12 +72,14 @@ interface AgentTranscriptDialogProps {
    * The dialog stays generic — slot content is the caller's concern.
    */
   headerSlot?: React.ReactNode;
+  emptyContent?: React.ReactNode;
 }
 
 // ─── Color mapping for timeline segments ────────────────────────────────────
 
 /** Task states after which no step can still be running. */
 const TERMINAL_TASK_STATUS = new Set<string>(["completed", "failed", "cancelled"]);
+export type TranscriptTask = Omit<Partial<AgentTask>, "status"> & { id: string; status: string };
 
 // ─── Main dialog ────────────────────────────────────────────────────────────
 
@@ -89,6 +91,7 @@ export function AgentTranscriptDialog({
   agentName,
   isLive = false,
   headerSlot,
+  emptyContent,
 }: AgentTranscriptDialogProps) {
   const { t } = useT("agents");
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
@@ -716,7 +719,7 @@ export function AgentTranscriptDialog({
         >
           {entries.length === 0 ? (
             <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
-              {emptyStateLabel ? (
+              {emptyContent || (emptyStateLabel ? (
                 <div className="flex items-center gap-2">
                   {emptyStateSpins
                     ? <Loader2 className="h-4 w-4 animate-spin" />
@@ -725,7 +728,7 @@ export function AgentTranscriptDialog({
                 </div>
               ) : (
                 t(($) => $.transcript.no_data)
-              )}
+              ))}
             </div>
           ) : (
             <div className="divide-y">

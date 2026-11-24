@@ -4,6 +4,7 @@ import type { RootDeliveryEnvelopePayload, RootDeliveryTuple, RootDeliveryStatus
 import { sealRootDelivery, serializeRootDeliveryTuple } from '../worker/root-delivery-envelope.js';
 import type { IssuedCredential, ReceiptService } from './root-authority-contract.js';
 import type { SqlDatabase } from './db/postgres.js';
+import { persistIssuedMaterialBinding } from './credential-version-bindings.js';
 import { withSecurityTarget, type SecurityTx } from './security-write.js';
 
 type Lease = { start_deadline: string; lease_id: string; fence_term: string };
@@ -127,6 +128,8 @@ export class RootReceiptStore {
         JOIN multiremi_turns t ON t.current_attempt_id=a.id AND t.id=a.turn_id
         WHERE s.task_id=? AND s.active_run_id=? AND s.runtime_id=? AND a.runtime_id=? AND t.agent_id=? AND r.complete=0`)
         .get(tuple.attempt_id, tuple.consumer_id, tuple.runtime_id, tuple.runtime_id, issued.subject.id)) throw new Error('stale_execution');
+      persistIssuedMaterialBinding(this.db, tx, issued, { credentialId: issued.credential.id, materialVersion: tuple.material_version,
+        materialDigest: candidate.tokenHash, credentialType: 'task', purpose: 'task', subject: issued.subject });
       const material = this.db.query(`INSERT INTO multiremi_credential_materials
         (credential_id,material_version,family_id,authority_node_id,authority_generation,authority_seq,expires_at_ms)
         SELECT t.id,?,f.family_id,n.node_id,n.generation,n.issued_seq,? FROM multiremi_access_tokens t

@@ -20,6 +20,7 @@ import type {
 } from "@multiremi/contracts/types.js";
 
 export interface ScmChangeRequestBindingTarget {
+  workspaceId: string;
   connection: MultiremiScmConnection;
   binding: MultiremiScmRepositoryBinding;
   /** Opaque revision of persisted configuration, including encrypted credentials. */

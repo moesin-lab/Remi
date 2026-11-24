@@ -29,4 +29,15 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
       cursor_id TEXT NOT NULL, complete INTEGER NOT NULL CHECK (complete IN (0, 1))
     )`);
   },
+}, {
+  id: '20261124_scm_rollback_review', phase: 'expand', level: 5,
+  expandRelease: '0.2.95', release: '0.2.95',
+  run: db => {
+    db.exec(`CREATE TABLE IF NOT EXISTS multiremi_scm_rollback_review (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
+    )`);
+    db.run(`INSERT INTO multiremi_scm_rollback_review (singleton)
+      SELECT singleton FROM multiremi_scm_ownership_cutover WHERE complete = 1
+      ON CONFLICT(singleton) DO NOTHING`);
+  },
 }];

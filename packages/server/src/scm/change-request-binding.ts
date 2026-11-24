@@ -49,15 +49,17 @@ export function parseChangeRequestUrl(value: string): { repository: string; numb
 export async function bindScmChangeRequestReference(input: {
   store: MultiremiStore;
   issueId: string;
+  workspaceId: string;
   reference: ChangeRequestReference;
   signal?: AbortSignal;
 }) {
-  const { store, issueId, reference } = input;
+  const { store, issueId, workspaceId, reference } = input;
   const issue = store.getIssue(issueId);
   if (!issue) throw new ScmBindingError("scm_issue_not_found", "Issue not found", 404);
+  if (issue.workspaceId !== workspaceId) throw new ScmOperationError("scm_binding_conflict", "Issue workspace changed; retry the reference");
   const parsed = "url" in reference ? parseChangeRequestUrl(reference.url) : reference;
   const matches = matchScmRepositoryBindings(
-    store.listScmRepositoryBindings({ workspaceId: issue.workspaceId, enabled: true }), parsed.repository,
+    store.listScmRepositoryBindings({ workspaceId, enabled: true }), parsed.repository,
   );
   if (matches.length !== 1) throw new ScmBindingError(
     matches.length ? "scm_reference_ambiguous" : "scm_binding_not_found",
@@ -65,7 +67,7 @@ export async function bindScmChangeRequestReference(input: {
     matches.length ? 409 : 404,
   );
   const binding = matches[0]!;
-  const prepared = store.prepareScmChangeRequestBinding(issueId, binding.connectionId, binding.repositoryId, parsed.number);
+  const prepared = store.prepareScmChangeRequestBinding(workspaceId, issueId, binding.connectionId, binding.repositoryId, parsed.number);
   const { connection } = prepared.target;
   if ("provider" in parsed && connection.provider !== parsed.provider) throw invalidReference();
   let observation: ScmEntityObservation | undefined;

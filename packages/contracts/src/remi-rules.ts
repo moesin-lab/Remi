@@ -9,7 +9,7 @@ import { LEGACY_WORKSPACE_DEFAULTS, WORKSPACE_DEFAULT_V3 } from "./legacy-worksp
 export const CODE_DELIVERY_CONTRACT = `When a task changes code:
 - Push the working branch and create a GitHub pull request or Codebase merge request before reporting completion.
 - Give the PR/MR a title describing the change without an Issue Key prefix.
-- After creating or reusing the PR/MR, run remi scm change-request bind <issue> --url <url> (or --repository <repo> --number <n>). Report delivery only after binding succeeds and remi scm change-request list <issue> shows that same PR/MR.
+- Use the internal iss_... Issue ID from the task context. After creating or reusing the PR/MR, run remi scm change-request bind <issue-id> --url <url> (or --repository <repo> --number <n>). Report delivery only after binding succeeds and remi scm change-request list <issue-id> shows that same PR/MR.
 - If binding fails, report the URL and error and retry binding the same reference.
 - Reuse an existing open PR/MR for the same source branch. Create at most one PR/MR per changed repository.
 - Creating a PR/MR does not require approval. Merging it or pushing directly to the default branch requires explicit user authorization.

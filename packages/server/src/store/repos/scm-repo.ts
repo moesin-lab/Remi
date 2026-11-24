@@ -1,4 +1,4 @@
-import { assertScmOwnershipReady, deleteScmIssueLinks, persistedOwnership } from "../scm-ownership.js";
+import { assertScmOwnershipReady, scmOwnershipReady, deleteScmIssueLinks, persistedOwnership } from "../scm-ownership.js";
 import { createHash } from "node:crypto";
 import { ScmOperationError } from "@multiremi/scm/operations.js";
 import { observationCanonicalEvents, observationSnapshotInput } from "@multiremi/scm/reconcile.js";
@@ -1000,17 +1000,19 @@ export class ScmRepo {
     ).all(issueId, issue.workspaceId) as Row[]).map(toChangeRequest);
   }
 
-  prepareChangeRequestBinding(issueId: string, connectionId: string, repositoryId: string, number: number) {
+  prepareChangeRequestBinding(workspaceId: string, issueId: string, connectionId: string, repositoryId: string, number: number) {
     assertScmOwnershipReady(this.ctx.db);
     return this.ctx.db.transaction(() => {
-      const issue = this.ctx.issues().getIssue(issueId);
-      if (!issue) throw new Error(`Issue not found: ${issueId}`);
-      this.lockWorkspace(issue.workspaceId);
+      this.lockWorkspace(workspaceId);
       const { connection, binding } = this.lockConnectionAndBinding(connectionId, repositoryId);
-      this.assertBindingAvailable(issue.workspaceId, connection, binding);
+      this.assertBindingAvailable(workspaceId, connection, binding);
+      lockIssueRowWithinTransaction(this.ctx.db, issueId);
+      if (this.ctx.issues().getIssue(issueId)?.workspaceId !== workspaceId) {
+        throw new ScmOperationError("scm_binding_conflict", "Issue workspace changed; retry the reference");
+      }
       const changeRequest = this.changeRequestByNumber(connectionId, repositoryId, number);
       return {
-        target: { connection, binding, revision: this.bindingRevision(connectionId, repositoryId) },
+        target: { workspaceId, connection, binding, revision: this.bindingRevision(connectionId, repositoryId) },
         changeRequest,
         credential: changeRequest ? null : this.getConnectionCredential(connectionId),
       };
@@ -1026,7 +1028,7 @@ export class ScmRepo {
     assertScmOwnershipReady(this.ctx.db);
     return this.ctx.db.transaction(() => {
       const { target, number, issueId } = input;
-      this.lockWorkspace(target.connection.workspaceId);
+      this.lockWorkspace(target.workspaceId);
       // Configuration writers use the same workspace -> connection -> binding order.
       const currentConnection = this.getConnection(target.connection.id);
       const currentBinding = this.getRepositoryBinding(target.connection.id, target.binding.repositoryId);
@@ -1036,11 +1038,11 @@ export class ScmRepo {
       const { connection, binding } = this.lockConnectionAndBinding(currentConnection.id, currentBinding.repositoryId);
       lockIssueRowWithinTransaction(this.ctx.db, issueId);
       const issue = this.ctx.issues().getIssue(issueId);
-      if (!issue || issue.workspaceId !== target.connection.workspaceId
+      if (!issue || issue.workspaceId !== target.workspaceId
         || this.bindingRevision(connection.id, binding.repositoryId) !== target.revision) {
         throw new ScmOperationError("scm_binding_conflict", "SCM binding changed while resolving; retry the reference");
       }
-      this.assertBindingAvailable(issue.workspaceId, connection, binding);
+      this.assertBindingAvailable(target.workspaceId, connection, binding);
       let projectionChanged = false;
       let eventInputs: RecordScmCanonicalEventInput[] = [];
       if (input.observation) {
@@ -1348,6 +1350,7 @@ export class ScmRepo {
   }
 
   dispatchPendingEvents(now: Date = new Date(), limit = 25): MultiremiAutopilotRun[] {
+    if (!scmOwnershipReady(this.ctx.db)) return [];
     const runs: MultiremiAutopilotRun[] = [];
     for (const event of this.claimPendingEvents(now, limit)) {
       this.processPendingMergeEffects(event);

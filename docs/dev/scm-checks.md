@@ -8,12 +8,12 @@ summary: 通过外部 PR/MR 引用持久化绑定 Issue，并使用任务凭据�
 
 ## 按外部引用绑定 PR/MR
 
-外部工具创建 PR/MR 后，可立即绑定到 Issue，无需等待首次轮询或在标题、正文、分支中写入 Issue Key：
+`<issue-id>` 使用任务上下文中的内部 `iss_...` ID。外部工具创建 PR/MR 后，可立即绑定到 Issue，无需等待首次轮询或在标题、正文、分支中写入 Issue Key：
 
 ```bash
-remi scm change-request bind <issue> --url https://github.com/owner/repo/pull/42 --json
-remi scm change-request bind <issue> --repository owner/repo --number 42 --json
-remi scm change-request list <issue> --json
+remi scm change-request bind <issue-id> --url https://github.com/owner/repo/pull/42 --json
+remi scm change-request bind <issue-id> --repository owner/repo --number 42 --json
+remi scm change-request list <issue-id> --json
 ```
 
 命令调用 `PUT /api/issues/:issueId/change-requests/by-reference`，请求为
@@ -89,8 +89,33 @@ kind 为 workflow_run，保留 status、conclusion 和 runAttempt。同一 run I
 
 ## SCM 归属切换
 
-先对共享库执行 level 4 的加法 expand，再停止所有 API slot、后台 SCM writer 及旧交付轮次，排尽在途事务和数据库连接。在整个维护窗口禁用旧实例自动重启并阻断重新连接，包括对 Issue key 的写入。使用新版本的本机 `remi db classify-scm-links`（显式 PostgreSQL `MULTIREMI_DATABASE_URL`）。advisory lock 串行维护命令，离线检查只能观察当时的连接。新安装的空库同样执行此命令以登记完成。候选启动和 `db prepare` 均不执行分类。
+完成 expand 5 后，停止所有 API slot、后台 writer 和旧交付轮次，排空连接和在途事务，禁用自动重启并隔离旧进程的数据库访问，包括投影及 Issue key 写入。操作员须在整个窗口维持隔离。PG 的 advisory lock 串行维护命令，客户端检查只反映检查时刻。SQLite 入口持有启动迁移锁及目标库排他锁，覆盖所有分页事务；操作员仍须关闭空闲句柄并阻止重连。
 
-每批以 link ID 排序，证据与游标同事务提交。中断后保持隔离，以相同命令续跑；完成后可重复执行。仅完成后恢复新 Server 的 SCM 写入，再启用具备 bind 命令的 CLI 和新 daemon。旧 daemon 创建的 PR/MR 用原 URL 显式 bind 并 list 核对。旧 Server 回滚期间必须继续隔离 SCM 写入；若旧 writer 已再次写入，保持隔离并审计受影响的关联、投影及 Issue key，重新核对后才可切换。重复运行已完成的命令不会重新分类，不能用旧标记证明回退后的数据有效。
+- PostgreSQL 使用目标库的 `MULTIREMI_DATABASE_URL`，执行 `remi db classify-scm-links`。
+- SQLite 取消设置 `MULTIREMI_DATABASE_URL`，执行 `remi db classify-scm-links --sqlite-file /absolute/path/to/server.sqlite`，指定 Server 实际使用的既有文件。
+- 冷启动空库也须执行分类。每批以 link ID 排序，证据（包括已核对的弱证据 `[]`）与游标同事务提交。中断或锁冲突时维持隔离，断开其他客户端，重试同一命令。成功后恢复兼容 writer；候选启动、standby、`db prepare` 均不做历史分类。
+
+### 回滚与重新接管
+
+1. 在已停止所有 writer 的库上，给同一分类命令追加 `--hold-for-rollback`，确认输出 `writersHeld`。回滚前、重新停掉旧 writer 后分别离线导出以下查询结果到受控审计目录。保存排序后的前后文件并用 `diff -u before.tsv after.tsv` 核对 identity、active/source、Issue key 及投影变化。回滚期间保留旧 writer 操作记录和绑定时刻的原始投影。
+
+   ```sql
+   SELECT l.id, l.workspace_id, l.change_request_id, l.issue_id, l.source, l.active,
+          i.issue_key, i.issue_number, p.connection_id, p.repository_id, p.external_id,
+          p.source_branch, p.title, p.body, e.attribution
+   FROM multiremi_scm_issue_links l
+   JOIN multiremi_issues i ON i.id=l.issue_id
+   JOIN multiremi_scm_change_requests p ON p.id=l.change_request_id
+   LEFT JOIN multiremi_scm_link_ownership e ON e.link_id=l.id ORDER BY l.id;
+   ```
+
+2. 再切换前重新排空旧实例并阻止重连。原有强弱证据继续冻结。遇到删除、身份重用、来源变化等无法和审计记录核实的差异，维持 hold 并交人工处理。确认差异范围后运行相同分类命令。它会列出至多 25 条缺证据的 auto/legacy link 并保持门禁。旧 level 4 已完成的库升级时也会进入 hold，缺行可能是历史弱提及。
+3. 对每条缺行核对绑定时刻的可信记录，按 branch、title、声明式 body 顺序记录命中项，确认仅普通提及时记 `[]`。保留原始证据和审核清单。复制命令输出中的完整六个身份与状态字段，追加 `proof` 与 `attribution`，形成 JSON 数组。例如：
+
+   ```json
+   [{"id":"link_1","workspace_id":"local","issue_id":"iss_example","change_request_id":"cr_1","source":"auto","active":1,"proof":"archived-bind-record:42","attribution":["title"]}]
+   ```
+
+4. 给同一命令追加 `--restore-reviewed /absolute/path/review.json` 导入。身份、来源、active 或既有归属冲突时整批拒绝。重复处理后续候选，直到返回 `complete`。不以当前已改写的文本推测历史；缺可信依据时保持隔离。复查上述清单、inactive/tombstone 和 Issue 活动，确认仅审核缺行获得证据、没有历史 merge 活动新增，再恢复新 writer。需建立新的明确归属时，使用任务上下文内部 Issue ID 对原 URL 显式 bind 并 list 核对。
 
 poll、webhook、baseline 和 bind 都不会依据标题、分支或正文新增关联，旧 `scm_auto_link_enabled` 设置仅保留序列化兼容。显式 manual 关联具有归属；已存在的 auto/legacy 关联按切换时可证实的分支、标题、声明式正文保存归属。普通提及保持可见，解绑记录继续隐藏。后续文本更新不改变归属，合并只记录活动。切换前已丢失证据的关联可按原 URL 显式绑定，不补录历史活动。

@@ -31,7 +31,7 @@ export function verifyPlannedRestartSchemaUpgrade(db: SqlDatabase): void {
     if (historicalMaintenance) restoreLevel2();
     if (historicalMaintenance) runMigrations(db, { historicalMaintenance: true });
     else runStartupMigrations(db);
-    expect(readSchemaLevels(db)).toEqual({ expandLevel: 4, contractLevel: 0 });
+    expect(readSchemaLevels(db)).toEqual({ expandLevel: 5, contractLevel: 0 });
     expect(() => assertSchemaCompatible(readSchemaLevels(db), { minLevel: 2, maxLevel: 2 })).not.toThrow();
     expect(db.query('SELECT * FROM multiremi_planned_restarts').all()).toEqual([]);
     const indexes = db.dialect === 'postgres'

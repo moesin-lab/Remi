@@ -73,7 +73,7 @@ export function registerScmRoutes(app: Hono, deps: RouterDeps): void {
     if (isJsonApiError(body)) return c.json({ error: body.apiError }, body.statusCode);
     try {
       const reference = parseChangeRequestReference(body);
-      return c.json(await bindScmChangeRequestReference({ store, issueId: issue.id, reference, signal: c.req.raw.signal }));
+      return c.json(await bindScmChangeRequestReference({ store, workspaceId: issue.workspaceId, issueId: issue.id, reference, signal: c.req.raw.signal }));
     } catch (error) { return scmErrorResponse(c, error); }
   });
 

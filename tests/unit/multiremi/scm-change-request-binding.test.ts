@@ -1,6 +1,7 @@
+import { ScmRepo } from "@multiremi/store/repos/scm-repo.js";
 import { runStartupMigrations } from "@multiremi/store/migrations.js";
 import { assertScmOwnershipReady, classifyScmLinkBatch, classifyScmLinks } from "@multiremi/store/scm-ownership.js";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { parseChangeRequestReference, parseChangeRequestUrl, readChangeRequest } from "@multiremi/scm/change-request-binding.js";
 import { GitHubScmProviderAdapter, githubPullObservation } from "@multiremi/scm/github.js";
@@ -67,7 +68,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const observed = { ...pull, title: legacyTitle, body: `Fixes: ${issue.key}\nAlso mentions ${weak.key}`,
         head: { ...pull.head, ref: `branch/${issue.key.toLowerCase()}` } };
       store.advanceScmEntitySnapshot(snapshot(observed));
-      const projection = store.prepareScmChangeRequestBinding(issue.id, connection.id, "repo_widgets", 42).changeRequest!;
+      const projection = store.prepareScmChangeRequestBinding(issue.workspaceId, issue.id, connection.id, "repo_widgets", 42).changeRequest!;
       for (const [id, issueId, source, active] of [
         ["a", issue.id, "legacy", 1], ["b", inactive.id, "auto", 0], ["c", weak.id, "auto", 1], ["d", manual.id, "manual", 1],
       ]) {
@@ -79,7 +80,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const before = links();
       db.exec("DROP TABLE multiremi_scm_link_ownership");
       db.exec("DROP TABLE multiremi_scm_ownership_cutover");
-      db.run("DELETE FROM multiremi_schema_steps WHERE level = 4");
+      db.run("DELETE FROM multiremi_schema_steps WHERE level >= 4");
       db.run("UPDATE multiremi_schema_meta SET expand_level = 3");
       runStartupMigrations(db);
       runStartupMigrations(db);
@@ -88,7 +89,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       expect(classifyScmLinkBatch(db, 1)).toBe(false);
       expect(() => store.unlinkScmChangeRequestFromIssue(issue.id, projection.id)).toThrow("cutover incomplete");
       expect(() => store.advanceScmEntitySnapshot(snapshot())).toThrow("cutover incomplete");
-      expect(() => store.dispatchPendingScmEvents()).toThrow("cutover incomplete");
+      expect(store.dispatchPendingScmEvents()).toEqual([]);
       expect(db.query("SELECT cursor_id, complete FROM multiremi_scm_ownership_cutover").get()).toEqual({cursor_id: "a", complete: 0});
       db.run("INSERT INTO multiremi_scm_link_ownership(link_id, attribution) VALUES ('b', '[]')");
       expect(() => classifyScmLinkBatch(db, 1)).toThrow();
@@ -97,7 +98,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       classifyScmLinks(db);
       classifyScmLinks(db);
       expect(links()).toEqual(before);
-      expect(count("link_ownership")).toBe(2);
+      expect(count("link_ownership")).toBe(3);
       expect(store.listScmChangeRequestsForIssue(inactive.id)).toEqual([]);
       const merged = { ...pull, title: weak.key, merged: true, state: "closed", merged_at: "2026-11-18T00:00:00Z", updated_at: "2026-11-18T00:00:00Z" };
       const observation = githubPullObservation(merged, new Date());
@@ -247,7 +248,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       store.updateWorkspace("local", { settings: { scm_complete_issue_on_merge_enabled: true } });
       mockFetch(() => {
         store.advanceScmEntitySnapshot(snapshot());
-        const projection = store.prepareScmChangeRequestBinding(other.id, connection.id, "repo_widgets", 42).changeRequest!;
+        const projection = store.prepareScmChangeRequestBinding(other.workspaceId, other.id, connection.id, "repo_widgets", 42).changeRequest!;
         store.linkScmChangeRequestToIssue(other.id, projection.id);
         return Response.json({ ...pull, state: "closed", merged: true, merged_at: "2026-11-17T00:00:00Z", updated_at: "2026-11-17T00:00:00Z" });
       });
@@ -349,6 +350,40 @@ for (const backend of ["sqlite", "postgres"] as const) {
       expect(events).toHaveLength(0);
       db.exec("DROP TRIGGER reject_bind_link" + (backend === "postgres" ? " ON multiremi_scm_issue_links" : ""));
       expect((await bind({ url: pull.html_url })).status).toBe(200);
+    });
+
+    it.each(["body", "provider"])("rejects an Issue moved during %s processing", async phase => {
+      const { store, app, bind, issue, connection, count } = await setup();
+      const destination = store.createWorkspace({ name: "Destination", slug: "destination" });
+      const member = store.createWorkspaceMember({ name: "Destination owner", workspaceId: destination.id });
+      const move = () => store.updateIssue(issue.id, {
+        workspaceId: destination.id, responsibleMemberId: member.id, actorType: "member", actorId: member.id,
+      });
+      const credentials = spyOn(ScmRepo.prototype, "getConnectionCredential");
+      const updates: unknown[] = [];
+      store.onWorkspaceEvent(event => { if (event.type === "change_request:updated") updates.push(event); });
+      let reads = 0;
+      mockFetch(() => { reads++; if (phase === "provider") move(); return Response.json(pull); });
+      try {
+        let response: Response;
+        if (phase === "body") {
+          const request = new Request(`http://localhost/api/issues/${issue.id}/change-requests/by-reference`, {
+            method: "PUT", headers, body: JSON.stringify({ url: pull.html_url }),
+          });
+          const text = request.text.bind(request);
+          request.text = async () => { move(); return text(); };
+          response = await app.request(request);
+        } else {
+          response = await bind({ url: pull.html_url });
+        }
+        expect(store.getIssue(issue.id)?.workspaceId).toBe(destination.id);
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ code: "scm_binding_conflict" });
+        expect(credentials.mock.calls).toEqual(phase === "body" ? [] : [[connection.id]]);
+        expect(reads).toBe(phase === "body" ? 0 : 1);
+        for (const table of ["change_requests", "issue_links", "events", "effects"]) expect(count(table)).toBe(0);
+        expect(updates).toEqual([]);
+      } finally { credentials.mockRestore(); }
     });
 
     it("allows same-workspace Task binding but denies cross-workspace and daemon access before fetching", async () => {

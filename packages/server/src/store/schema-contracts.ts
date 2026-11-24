@@ -20,10 +20,14 @@ export function contractSchema(db: SqlDatabase, targetLevel: number): ReturnType
 }
 
 /** Caller holds MIGRATION_ADVISORY_LOCK_KEY throughout the contract run. */
-export function assertSchemaContractClientsOffline(db: SqlDatabase): void {
+export function assertSchemaContractClientsOffline(db: SqlDatabase, operation: "contract" | "classify-scm-links" = "contract"): void {
   // Conservatively require every other client disconnected, including standby
   // slots. A connecting startup waits on our lock and rechecks the floor.
   const row = db.query(`SELECT COUNT(*) AS count FROM pg_stat_activity
     WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend'`).get();
-  if (!row || Number(row.count) !== 0) throw new Error('Schema contract refused: other database clients are online. Stop ALL API slots and database workers, run remi db contract, then restart compatible releases.');
+  if (row && Number(row.count) === 0) return;
+  if (operation === "classify-scm-links") {
+    throw new Error("Other database clients are online. Disconnect all clients and keep old writers isolated. Retry remi db classify-scm-links with the same arguments; resume compatible writers only after success.");
+  }
+  throw new Error('Schema contract refused: other database clients are online. Stop ALL API slots and database workers, run remi db contract, then restart compatible releases.');
 }

@@ -59,7 +59,7 @@ export function createStore(): MultiremiStore {
 }
 
 export function linkProjectedTestChangeRequest(store: MultiremiStore, issueId: string, connectionId: string, repositoryId: string, number: number) {
-  const projection = store.prepareScmChangeRequestBinding(issueId, connectionId, repositoryId, number).changeRequest;
+  const projection = store.prepareScmChangeRequestBinding(store.getIssue(issueId)!.workspaceId, issueId, connectionId, repositoryId, number).changeRequest;
   if (!projection) throw new Error(`Missing projected change request #${number}`);
   store.linkScmChangeRequestToIssue(issueId, projection.id);
 }

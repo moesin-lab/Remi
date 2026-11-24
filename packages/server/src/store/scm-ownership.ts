@@ -14,8 +14,12 @@ export function persistedOwnership(row: Record<string, unknown>): ScmIssueOwners
   return row.attribution ? JSON.parse(String(row.attribution)) : [];
 }
 
+export function scmOwnershipReady(db: SqlDatabase): boolean {
+  return Boolean(db.query("SELECT singleton FROM multiremi_scm_ownership_cutover WHERE singleton = 1 AND complete = 1 AND NOT EXISTS (SELECT 1 FROM multiremi_scm_rollback_review)").get());
+}
+
 export function assertScmOwnershipReady(db: SqlDatabase): void {
-  if (!db.query("SELECT singleton FROM multiremi_scm_ownership_cutover WHERE singleton = 1 AND complete = 1").get()) {
+  if (!scmOwnershipReady(db)) {
     throw new Error("SCM ownership cutover incomplete. Stop writers and run remi db classify-scm-links offline.");
   }
 }
@@ -41,9 +45,7 @@ export function classifyScmLinkBatch(db: SqlDatabase, limit = 250): boolean {
         issueKey: String(row.issue_key || (Number(row.issue_number) > 0 ? `MUL-${row.issue_number}` : row.issue_id)),
         title: String(row.title), body: String(row.body ?? ""), sourceBranch: String(row.source_branch ?? ""),
       });
-      if (attribution.length) {
-        db.run("INSERT INTO multiremi_scm_link_ownership (link_id, attribution) VALUES (?, ?)", [row.id, JSON.stringify(attribution)]);
-      }
+      db.run("INSERT INTO multiremi_scm_link_ownership (link_id, attribution) VALUES (?, ?)", [row.id, JSON.stringify(attribution)]);
     }
     const complete = rows.length < limit;
     db.run("UPDATE multiremi_scm_ownership_cutover SET cursor_id = ?, complete = ? WHERE singleton = 1",
@@ -52,8 +54,46 @@ export function classifyScmLinkBatch(db: SqlDatabase, limit = 250): boolean {
   })();
 }
 
-export function classifyScmLinks(db: SqlDatabase): void {
+export function holdScmWritersForReview(db: SqlDatabase): void {
+  db.run("INSERT INTO multiremi_scm_rollback_review (singleton) VALUES (1) ON CONFLICT(singleton) DO NOTHING");
+}
+
+export function classifyScmLinks(db: SqlDatabase, reviewed?: unknown): void {
+  holdScmWritersForReview(db);
+  if (reviewed !== undefined) restoreReviewedScmOwnership(db, reviewed);
   while (!classifyScmLinkBatch(db)) continue;
+  const outstanding = db.query(`SELECT l.id, l.workspace_id, l.issue_id, l.change_request_id, l.source, l.active
+    FROM multiremi_scm_issue_links l LEFT JOIN multiremi_scm_link_ownership e ON e.link_id = l.id
+    WHERE l.source IN ('auto','legacy') AND e.link_id IS NULL ORDER BY l.id LIMIT 25`).all();
+  if (outstanding.length) {
+    throw new Error(`Unreviewed SCM links after cutover. Keep writers isolated. Review these links against trusted records and retry with --restore-reviewed: ${JSON.stringify(outstanding)}`);
+  }
+  db.run("DELETE FROM multiremi_scm_rollback_review WHERE singleton = 1");
+}
+
+function restoreReviewedScmOwnership(db: SqlDatabase, records: unknown): void {
+  if (!db.query("SELECT singleton FROM multiremi_scm_ownership_cutover WHERE complete = 1").get()) throw new Error("Complete initial classification before restoring reviewed links");
+  if (!Array.isArray(records) || !records.length) throw new Error("Expected a nonempty array of reviewed links");
+  db.transaction(() => {
+    for (const record of records) {
+      if (!record || typeof record.id !== "string" || typeof record.proof !== "string" || !record.proof.trim()
+        || !Array.isArray(record.attribution)) throw new Error("Each reviewed link requires its identity, proof reference and attribution");
+      const attribution = ["branch", "title", "body"].filter(kind => record.attribution.includes(kind));
+      if (JSON.stringify(attribution) !== JSON.stringify(record.attribution)) throw new Error("Invalid or unordered ownership evidence");
+      const link = db.query(`SELECT l.workspace_id, l.issue_id, l.change_request_id, l.source, l.active, e.attribution
+        FROM multiremi_scm_issue_links l LEFT JOIN multiremi_scm_link_ownership e ON e.link_id = l.id WHERE l.id = ?`).get(record.id);
+      if (!link || !["auto", "legacy"].includes(link.source) || link.source !== record.source || link.active !== record.active
+        || link.workspace_id !== record.workspace_id || link.issue_id !== record.issue_id || link.change_request_id !== record.change_request_id) {
+        throw new Error(`Reviewed link identity or state changed: ${record.id}`);
+      }
+      const encoded = JSON.stringify(attribution);
+      if (link.attribution != null) {
+        if (link.attribution !== encoded) throw new Error(`Existing frozen ownership differs: ${record.id}`);
+      } else {
+        db.run("INSERT INTO multiremi_scm_link_ownership (link_id, attribution) VALUES (?, ?)", [record.id, encoded]);
+      }
+    }
+  })();
 }
 
 function escapeRegExp(value: string): string {

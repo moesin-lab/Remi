@@ -1,3 +1,4 @@
+import { scmOwnershipReady } from "./scm-ownership.js";
 import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
@@ -2708,6 +2709,10 @@ runMigrations(this.db);
 
   deleteScmRepositoryBinding(connectionId: string, repositoryId: string): boolean {
     return this.scm.deleteRepositoryBinding(connectionId, repositoryId);
+  }
+
+  scmOwnershipReady(): boolean {
+    return scmOwnershipReady(this.db);
   }
 
   reconcileScmRepositoryBindings(workspaceId: string): MultiremiScmRepositoryBinding[] {

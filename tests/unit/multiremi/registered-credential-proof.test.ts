@@ -1,5 +1,7 @@
 import { expect,test } from 'bun:test';
 import { createHash } from 'node:crypto';
+import { fixtureDeliveryTuple } from '../../fixtures/root-authority.js';
+import { serializeRootDeliveryTuple } from '@multiremi/worker/root-delivery-envelope.js';
 import { runMigrations } from '@multiremi/store/migrations.js';
 import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
 import type { SqlDatabase } from '@multiremi/store/db/postgres.js';
@@ -83,15 +85,45 @@ pendingTurnBackendTests('registered supervisor task management',fixture=>{
       VALUES('nominal','agent',?,1,'system','grant','deployment','fixture',0,'fixture',1)`).run(agent.id);
     db.query("INSERT INTO multiremi_root_subject_state VALUES('agent',?,1,'nominal')").run(agent.id);
     const service = new RootManagement(db);
+    expect(service.registeredCredentials.verify(token.token).kind).toBe('invalid');
+    const tuple = {...fixtureDeliveryTuple,attempt_id:task.id,material_expires_at:token.expiresAt!};
+    db.query("UPDATE multiremi_turn_attempts SET status='accepted',runtime_id=? WHERE id=?").run(tuple.runtime_id,task.id);
+    db.query(`INSERT INTO multiremi_usage_task_scopes(task_id,workspace_id,agent_id,runtime_id,active_run_id) VALUES(?,'local',?,?,?)
+      ON CONFLICT(task_id) DO UPDATE SET runtime_id=excluded.runtime_id,active_run_id=excluded.active_run_id`).run(task.id,agent.id,tuple.runtime_id,tuple.consumer_id);
+    db.query('INSERT INTO multiremi_usage_runs VALUES(?,?,0,0)').run(task.id,tuple.consumer_id);
+    db.query("INSERT INTO multiremi_credential_materials VALUES(?,1,'family','credential',1,2,?)").run(token.id,expiry);
+    db.query(`INSERT INTO multiremi_delivery_receipts(receipt_id,attempt_id,handoff_id,run_generation,consumer_id,receipt_version,delivery_version,material_version,
+      credential_id,binding_json,envelope,envelope_digest,business_payload_json,start_deadline,lease_id,fence_term,ack_state,run_state)
+      VALUES(?,?,?,1,?,1,1,1,?,?,'fixture','fixture','{}',?,'test-lease','test-fence','pending','pending_start')`)
+      .run(tuple.receipt_id,task.id,tuple.handoff_id,tuple.consumer_id,token.id,serializeRootDeliveryTuple(tuple),token.expiresAt);
     const proof = service.registeredCredentials.verify(token.token);
     const request = {action:'root.grant.revoke',use:'management',actualTarget:{type:'grant',id:'nominal'}};
     expect(service.resolveCurrent(proof,request)).toMatchObject({transport:'task',subject:{type:'agent',id:agent.id},attemptId:task.id,
       recordedGrant:{grantId:'nominal'},effectiveRoot:false,reason:'attempt_not_eligible'});
     expect(()=>withSecurityWrite(db,undefined,service.plan(proof,request),tx=>service.authorizeWrite(tx,proof,request))).toThrow('root_required');
-    db.query("UPDATE multiremi_turn_attempts SET status='accepted' WHERE id=?").run(task.id);
+    const current = () => service.resolveCurrent(proof,request);
+    db.run("UPDATE multiremi_delivery_receipts SET lease_id='different-lease'");
+    expect(current).toThrow('root_authority_revoked');
+    db.run("UPDATE multiremi_delivery_receipts SET lease_id='test-lease',fence_term='different-fence'");
+    expect(current).toThrow('root_authority_revoked');
+    db.run("UPDATE multiremi_delivery_receipts SET lease_id='',fence_term='test-fence'");
+    expect(current).toThrow('root_authority_revoked');
+    db.run("UPDATE multiremi_delivery_receipts SET lease_id='test-lease',run_generation=2");
+    expect(current).toThrow('root_authority_revoked');
+    db.run("UPDATE multiremi_delivery_receipts SET run_generation=1,start_deadline='2000-01-01T00:00:00Z'");
+    expect(current).toThrow('root_authority_revoked');
+    db.query('UPDATE multiremi_delivery_receipts SET start_deadline=?').run(token.expiresAt);
+    db.run('UPDATE multiremi_usage_runs SET complete=1');
+    expect(current).toThrow('root_authority_revoked');
+    db.run('UPDATE multiremi_usage_runs SET complete=0');
+    db.query("UPDATE multiremi_turn_attempts SET status='running' WHERE id=?").run(task.id);
+    expect(current).toThrow('root_authority_revoked');
+    db.run("UPDATE multiremi_delivery_receipts SET run_state='running',ack_state='confirmed',execution_locator_json='{}'");
     expect(service.resolveCurrent(proof,request).effectiveRoot).toBe(false);
-    db.query("UPDATE multiremi_turn_attempts SET status='offered' WHERE id=?").run(task.id);
-    expect(()=>service.resolveCurrent(proof,request)).toThrow('root_authority_revoked');
+    for (const phase of ['offered','waiting_local_directory','completed','failed','cancelled','lost']) {
+      db.query('UPDATE multiremi_turn_attempts SET status=? WHERE id=?').run(phase,task.id);
+      expect(current).toThrow('root_authority_revoked');
+    }
     db.query("UPDATE multiremi_turn_attempts SET status='running' WHERE id=?").run(task.id);
     db.query('UPDATE multiremi_turns SET current_attempt_id=NULL WHERE current_attempt_id=?').run(task.id);
     expect(()=>service.resolveCurrent(proof,request)).toThrow('root_authority_revoked');

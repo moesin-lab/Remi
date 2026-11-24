@@ -276,8 +276,10 @@ export interface RootDeliveryJournalEntry {
   readonly updated_at: string;
 }
 
-/** Fields forbidden on `RootDeliveryStatusResponse` and `RootDeliveryJournalEntry`. */
+/** Fields forbidden anywhere (top-level or nested) on `RootDeliveryStatusResponse` and `RootDeliveryJournalEntry`. */
 export const ROOT_DELIVERY_FORBIDDEN_STATUS_FIELDS = [
+  "auth_token",
+  "authToken",
   "raw",
   "raw_token",
   "rawToken",
@@ -289,6 +291,8 @@ export const ROOT_DELIVERY_FORBIDDEN_STATUS_FIELDS = [
   "frozen_business_payload",
   "material_digest",
   "materialDigest",
+  "machine_proof",
+  "machineProof",
 ] as const;
 
 /** Plaintext credential / digest fields forbidden on wire root offers, resumes, and frozen business payloads. */
@@ -303,6 +307,25 @@ export const ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS = [
   "plaintext",
   "material_digest",
   "materialDigest",
+] as const;
+
+/**
+ * Structured object property names forbidden anywhere inside
+ * `frozen_business_payload` (and resume `recovered_questions`), whether at
+ * top-level or nested inside child objects/arrays.
+ *
+ * Plain user text strings mentioning these terms (for example inside message
+ * bodies or summaries) are NOT scanned or mutated; only structured object keys
+ * are rejected so transport secrets cannot be smuggled inside business JSON.
+ */
+export const ROOT_DELIVERY_FORBIDDEN_BUSINESS_PAYLOAD_FIELDS = [
+  ...ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS,
+  "envelope",
+  "envelope_digest",
+  "envelopeDigest",
+  "jwe",
+  "machine_proof",
+  "machineProof",
 ] as const;
 
 /** Top-level ordinary offer/resume fields forbidden on typed root delivery frames to prevent downgrade to `handleTask`. */
@@ -562,6 +585,14 @@ function isPositiveInt(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
 }
 
+const MAX_STRUCTURED_SCAN_DEPTH = 32;
+
+const FORBIDDEN_STATUS_FIELD_SET: ReadonlySet<string> = new Set(ROOT_DELIVERY_FORBIDDEN_STATUS_FIELDS);
+const FORBIDDEN_WIRE_SECRET_FIELD_SET: ReadonlySet<string> = new Set(ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
+const FORBIDDEN_BUSINESS_PAYLOAD_FIELD_SET: ReadonlySet<string> = new Set(
+  ROOT_DELIVERY_FORBIDDEN_BUSINESS_PAYLOAD_FIELDS,
+);
+
 function findForbiddenField(
   record: Readonly<Record<string, unknown>>,
   forbidden: readonly string[],
@@ -570,6 +601,148 @@ function findForbiddenField(
     if (field in record && record[field] !== undefined) return field;
   }
   return null;
+}
+
+type StructuredScanResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly kind: "forbidden_field"; readonly path: string; readonly field: string }
+  | { readonly ok: false; readonly kind: "invalid_structure"; readonly reason: string };
+
+/**
+ * Recursively scans structured objects and arrays for forbidden own property
+ * names without inspecting or mutating primitive string values (preserving
+ * legitimate user prose). Fails closed on circular references, excessive
+ * nesting depth, or (when `requireJsonSafe` is set) non-JSON-safe values.
+ */
+function scanStructuredValue(
+  value: unknown,
+  forbiddenSet: ReadonlySet<string>,
+  requireJsonSafe: boolean,
+  path = "",
+  depth = 0,
+  ancestors = new WeakSet<object>(),
+): StructuredScanResult {
+  if (depth > MAX_STRUCTURED_SCAN_DEPTH) {
+    return {
+      ok: false,
+      kind: "invalid_structure",
+      reason: `exceeds maximum nesting depth (${MAX_STRUCTURED_SCAN_DEPTH})`,
+    };
+  }
+  if (value === null || value === undefined) {
+    return { ok: true };
+  }
+  const valueType = typeof value;
+  if (valueType === "string" || valueType === "boolean") {
+    return { ok: true };
+  }
+  if (valueType === "number") {
+    if (requireJsonSafe && !Number.isFinite(value)) {
+      return {
+        ok: false,
+        kind: "invalid_structure",
+        reason: `contains non-finite number${path ? ` at "${path}"` : ""}`,
+      };
+    }
+    return { ok: true };
+  }
+  if (valueType !== "object") {
+    if (requireJsonSafe) {
+      return {
+        ok: false,
+        kind: "invalid_structure",
+        reason: `contains unsupported ${valueType} value${path ? ` at "${path}"` : ""}`,
+      };
+    }
+    return { ok: true };
+  }
+
+  const obj = value as object;
+  if (ancestors.has(obj)) {
+    return {
+      ok: false,
+      kind: "invalid_structure",
+      reason: `contains circular reference${path ? ` at "${path}"` : ""}`,
+    };
+  }
+  ancestors.add(obj);
+  try {
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i += 1) {
+        const entryPath = `${path}[${i}]`;
+        const childResult = scanStructuredValue(
+          value[i],
+          forbiddenSet,
+          requireJsonSafe,
+          entryPath,
+          depth + 1,
+          ancestors,
+        );
+        if (!childResult.ok) return childResult;
+      }
+      return { ok: true };
+    }
+    if (!isPlainRecord(value)) {
+      if (requireJsonSafe) {
+        return {
+          ok: false,
+          kind: "invalid_structure",
+          reason: `contains non-plain object${path ? ` at "${path}"` : ""}`,
+        };
+      }
+      return { ok: true };
+    }
+    for (const [key, member] of Object.entries(value)) {
+      if (member === undefined) continue;
+      const keyPath = path ? `${path}.${key}` : key;
+      if (forbiddenSet.has(key)) {
+        return { ok: false, kind: "forbidden_field", path: keyPath, field: key };
+      }
+      const childResult = scanStructuredValue(
+        member,
+        forbiddenSet,
+        requireJsonSafe,
+        keyPath,
+        depth + 1,
+        ancestors,
+      );
+      if (!childResult.ok) return childResult;
+    }
+    return { ok: true };
+  } finally {
+    ancestors.delete(obj);
+  }
+}
+
+/**
+ * Returns the first dotted/indexed path of a forbidden structured transport
+ * secret key found anywhere inside `payload`, or `null` when clean.
+ * Plain string values are never inspected or modified.
+ */
+export function findForbiddenBusinessPayloadField(payload: unknown): string | null {
+  const result = scanStructuredValue(payload, FORBIDDEN_BUSINESS_PAYLOAD_FIELD_SET, false);
+  return !result.ok && result.kind === "forbidden_field" ? result.path : null;
+}
+
+/**
+ * Validates that a `frozen_business_payload` (or nested business projection)
+ * is a JSON-safe plain object containing no top-level or nested structured
+ * transport secret keys (`auth_token`, `raw`, `envelope`, `machine_proof`, ...).
+ */
+export function assertFrozenBusinessPayloadHasNoTransportSecrets(
+  payload: unknown,
+  label = "frozen_business_payload",
+): void {
+  if (!isPlainRecord(payload)) {
+    throw new Error(`${label} must be an object`);
+  }
+  const scan = scanStructuredValue(payload, FORBIDDEN_BUSINESS_PAYLOAD_FIELD_SET, true);
+  if (!scan.ok) {
+    if (scan.kind === "forbidden_field") {
+      throw new Error(`${label} must not contain transport secret field "${scan.path}"`);
+    }
+    throw new Error(`${label} ${scan.reason}`);
+  }
 }
 
 const ROOT_DELIVERY_TUPLE_KEYS: ReadonlySet<string> = new Set([
@@ -661,9 +834,15 @@ function validateRootDeliveryEnvelopePayloadShape(value: unknown): string | null
   if (!isPlainRecord(value.frozen_business_payload)) {
     return "root_delivery.frozen_business_payload must be an object";
   }
-  const payloadSecret = findForbiddenField(value.frozen_business_payload, ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
-  if (payloadSecret) {
-    return `root_delivery.frozen_business_payload must not contain plaintext secret field "${payloadSecret}"`;
+  const payloadScan = scanStructuredValue(
+    value.frozen_business_payload,
+    FORBIDDEN_BUSINESS_PAYLOAD_FIELD_SET,
+    true,
+  );
+  if (!payloadScan.ok) {
+    return payloadScan.kind === "forbidden_field"
+      ? `root_delivery.frozen_business_payload must not contain transport secret field "${payloadScan.path}"`
+      : `root_delivery.frozen_business_payload ${payloadScan.reason}`;
   }
   if (value.start_deadline !== null && !isNonEmptyString(value.start_deadline)) {
     return "root_delivery.start_deadline must be null or a non-empty ISO string";
@@ -715,9 +894,12 @@ export function assertRootWirePayloadHasNoPlaintextSecrets(
   value: Readonly<Record<string, unknown>>,
   label = "root wire payload",
 ): void {
-  const field = findForbiddenField(value, ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
-  if (field) {
-    throw new Error(`${label} must not expose plaintext secret field "${field}"`);
+  const scan = scanStructuredValue(value, FORBIDDEN_WIRE_SECRET_FIELD_SET, false);
+  if (!scan.ok) {
+    if (scan.kind === "forbidden_field") {
+      throw new Error(`${label} must not expose plaintext secret field "${scan.path}"`);
+    }
+    throw new Error(`${label} ${scan.reason}`);
   }
 }
 
@@ -952,6 +1134,20 @@ export function classifyDaemonRestartResumeReply(payload: unknown): DaemonRestar
       reason: "Root turn.restart.resume reply requires turn_id, attempt_id, handoff_id, generation >= 1, and recovered_questions array.",
     };
   }
+  const questionsScan = scanStructuredValue(
+    payload.recovered_questions,
+    FORBIDDEN_BUSINESS_PAYLOAD_FIELD_SET,
+    true,
+  );
+  if (!questionsScan.ok) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: questionsScan.kind === "forbidden_field"
+        ? `Root turn.restart.resume reply recovered_questions must not contain transport secret field "${questionsScan.path}".`
+        : `Root turn.restart.resume reply recovered_questions ${questionsScan.reason}.`,
+    };
+  }
   const envelopeErr = validateRootDeliveryEnvelopePayloadShape(payload.root_delivery);
   if (envelopeErr) {
     return { kind: "invalid_root", code: "root_delivery_invalid", reason: envelopeErr };
@@ -1043,10 +1239,12 @@ export function buildDaemonRootRestartResumeReply(input: {
 }
 
 export function assertStatusResponseHasNoSecrets(value: Readonly<Record<string, unknown>>): void {
-  for (const field of ROOT_DELIVERY_FORBIDDEN_STATUS_FIELDS) {
-    if (field in value && value[field] !== undefined) {
-      throw new Error(`RootDeliveryStatusResponse must not expose secret/envelope field "${field}"`);
+  const scan = scanStructuredValue(value, FORBIDDEN_STATUS_FIELD_SET, false);
+  if (!scan.ok) {
+    if (scan.kind === "forbidden_field") {
+      throw new Error(`RootDeliveryStatusResponse must not expose secret/envelope field "${scan.path}"`);
     }
+    throw new Error(`RootDeliveryStatusResponse ${scan.reason}`);
   }
 }
 

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { serializeRootDeliveryTuple } from '../worker/root-delivery-envelope.js';
 import { assertUnrevokedAncestry } from './authority-provenance.js';
 import { readCurrentMaterialBinding, type MaterialIdentity } from './credential-version-bindings.js';
 import type { SqlDatabase } from './db/postgres.js';
@@ -9,6 +10,7 @@ interface Evidence {
   identity: MaterialIdentity;
   nodeId: string;
   attemptId: string | null;
+  receipt?: { binding: string; lease: string; fence: string };
 }
 
 export interface CurrentMaterial extends CredentialOrigin {
@@ -70,12 +72,37 @@ export class RegisteredCredentialProofs {
       if (binding.node.nodeId!==evidence.nodeId) throw new SecurityAbort('credential_version_conflict');
       assertUnrevokedAncestry(this.db,tx,binding.node);
       if (identity.credentialType==='task' && identity.subject.type==='agent' && identity.purpose==='task') {
-        const active = this.db.query(`SELECT a.id FROM multiremi_turn_attempts a JOIN multiremi_turns t ON t.id=a.turn_id AND t.current_attempt_id=a.id
+        const active = this.db.query(`SELECT receipt.binding_json,receipt.lease_id,receipt.fence_term,receipt.receipt_id,receipt.receipt_version,
+          receipt.handoff_id,receipt.consumer_id,receipt.delivery_version,receipt.run_generation,receipt.run_state,receipt.start_deadline,a.runtime_id
+          FROM multiremi_turn_attempts a JOIN multiremi_turns t ON t.id=a.turn_id AND t.current_attempt_id=a.id
           JOIN multiremi_access_tokens c ON c.task_id=a.id AND c.agent_id=t.agent_id AND c.workspace_id=t.workspace_id
           JOIN multiremi_turn_execution_records execution ON execution.id=a.id
-          WHERE a.id=? AND c.id=? AND t.agent_id=? AND a.status IN ('accepted','running')
-          AND execution.status IN ('dispatched','running','awaiting_human')`).get(evidence.attemptId,identity.credentialId,identity.subject.id);
+          JOIN multiremi_credential_version_bindings version ON version.credential_id=c.id AND version.material_version=?
+          JOIN multiremi_credential_materials material ON material.credential_id=c.id AND material.material_version=version.material_version
+            AND material.authority_node_id=version.authority_node_id AND material.authority_generation=version.authority_generation
+            AND material.authority_seq=version.authority_seq AND material.family_id=version.family_id AND material.expires_at_ms=version.expires_at_ms
+          JOIN multiremi_delivery_receipts receipt ON receipt.attempt_id=a.id AND receipt.credential_id=c.id AND receipt.material_version=material.material_version
+          JOIN multiremi_usage_task_scopes scope ON scope.task_id=a.id AND scope.workspace_id=t.workspace_id AND scope.agent_id=t.agent_id
+            AND scope.runtime_id=a.runtime_id AND scope.active_run_id=receipt.consumer_id
+          JOIN multiremi_usage_runs run ON run.task_id=a.id AND run.run_id=scope.active_run_id AND run.complete=0
+          WHERE a.id=? AND c.id=? AND t.agent_id=? AND receipt.lease_id<>'' AND receipt.fence_term<>''
+            AND ((a.status='accepted' AND execution.status='dispatched' AND receipt.run_state='pending_start')
+              OR (a.status='running' AND execution.status='running' AND receipt.run_state='running' AND receipt.ack_state='confirmed'))
+            AND NOT EXISTS(SELECT 1 FROM multiremi_delivery_receipts newer WHERE newer.attempt_id=a.id AND newer.run_generation>receipt.run_generation)`)
+          .get(identity.materialVersion,evidence.attemptId,identity.credentialId,identity.subject.id);
         if (!active) throw new SecurityAbort('root_authority_revoked');
+        try {
+          const tuple = JSON.parse(active.binding_json);
+          if (serializeRootDeliveryTuple(tuple)!==active.binding_json || tuple.attempt_id!==evidence.attemptId || tuple.runtime_id!==active.runtime_id ||
+              tuple.handoff_id!==active.handoff_id || tuple.receipt_id!==active.receipt_id || tuple.consumer_id!==active.consumer_id ||
+              tuple.run_generation!==Number(active.run_generation) || tuple.delivery_version!==Number(active.delivery_version) ||
+              tuple.receipt_version!==Number(active.receipt_version) || tuple.material_version!==identity.materialVersion ||
+              Date.parse(tuple.material_expires_at)!==binding.expiresAtMs ||
+              (active.run_state==='pending_start' && !(Date.parse(active.start_deadline)>Date.now()))) throw new Error();
+        } catch { throw new SecurityAbort('root_authority_revoked'); }
+        if (evidence.receipt && (evidence.receipt.binding!==active.binding_json || evidence.receipt.lease!==active.lease_id ||
+            evidence.receipt.fence!==active.fence_term)) throw new SecurityAbort('root_authority_revoked');
+        evidence.receipt ??= {binding:active.binding_json,lease:active.lease_id,fence:active.fence_term};
       } else if (identity.credentialType==='pat' && identity.subject.type==='user' && identity.subject.id.startsWith('usr_') && evidence.attemptId===null) {
         const human = this.db.query(`SELECT u.id FROM multiremi_users u JOIN multiremi_access_tokens t ON t.user_id=u.id
           WHERE u.id=? AND t.id=? AND t.type='pat' AND t.purpose IN ('personal','session','cli')

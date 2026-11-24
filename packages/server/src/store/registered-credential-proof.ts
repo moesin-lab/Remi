@@ -3,7 +3,7 @@ import { assertUnrevokedAncestry } from './authority-provenance.js';
 import { readCurrentMaterialBinding, type MaterialIdentity } from './credential-version-bindings.js';
 import type { SqlDatabase } from './db/postgres.js';
 import type { CredentialOrigin, CredentialProof } from './root-authority-contract.js';
-import { SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
+import { abortSecurityWrite, SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
 
 interface Evidence {
   identity: MaterialIdentity;
@@ -58,7 +58,7 @@ export class RegisteredCredentialProofs {
 
   requireCurrent(tx: SecurityTx, proof: CredentialProof): CurrentMaterial {
     const evidence = this.proofs.get(proof);
-    if (!evidence) throw new SecurityAbort('root_authority_revoked');
+    if (!evidence) return abortSecurityWrite(this.db,tx,'root_authority_revoked');
     const identity = evidence.identity;
     return withSecurityTarget(this.db,tx,`credential:${identity.credentialId}`,()=>{
       let binding: ReturnType<typeof readCurrentMaterialBinding>;

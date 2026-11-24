@@ -344,8 +344,12 @@ function classifyStatementNodes(nodes: SqlNode[]): LockOrderClass[] {
   if (keyword(nodes[0], "select") || keyword(nodes[0], "with")) {
     return [...new Set(selectLocks(nodes).classes)];
   }
-  if (keyword(nodes[0], "update")) {
-    let target = keyword(nodes[1], "only") ? 2 : 1;
+  const createTable = keyword(nodes[0], "create") && keyword(nodes[1], "table");
+  if (createTable || keyword(nodes[0], "update") || keyword(nodes[0], "insert") && keyword(nodes[1], "into")
+    || keyword(nodes[0], "delete") && keyword(nodes[1], "from")) {
+    let target = keyword(nodes[0], "update") ? 1 : 2;
+    if (createTable && keyword(nodes[2], "if") && keyword(nodes[3], "not") && keyword(nodes[4], "exists")) target = 5;
+    if (keyword(nodes[target], "only")) target++;
     while (identifier(nodes[target]) && symbol(nodes[target + 1], ".")) target += 2;
     if (identifier(nodes[target]) === "multiremi_security_state") return ["S"];
   }

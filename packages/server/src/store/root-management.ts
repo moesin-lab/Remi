@@ -8,7 +8,7 @@ import { assertUnrevokedAncestry, grantAncestryIsCurrent } from './authority-pro
 import type { AuthorityKernel, AuthorityUse, CredentialProof, CurrentAuthority } from './root-authority-contract.js';
 import { readRecordedGrant } from './root-grants.js';
 import { RegisteredCredentialProofs } from './registered-credential-proof.js';
-import { SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
+import { abortSecurityWrite, SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
 
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 const grantAction = 'root.grant.revoke';
@@ -302,11 +302,24 @@ export class RootManagement {
   private insertHumanGrant(tx: SecurityTx, userId: string, reason: string, expiry: number | null, before: number,
     issuer: { type: 'deployment' | 'user'; id: string }, parents: string[]): CreateRootGrantResponse {
     const state = this.db.query("SELECT generation_counter,active_grant_id FROM multiremi_root_subject_state WHERE subject_type='user' AND subject_id=?").get(userId);
-    if (state?.active_grant_id) throw new SecurityAbort('authority_revision_conflict');
     const generation = Number(state?.generation_counter ?? 0)+1;
     const revision = before+1;
     const now = Date.now();
     if (!Number.isSafeInteger(generation) || !Number.isSafeInteger(revision)) throw new SecurityAbort('authority_revision_conflict');
+    const previousId = state?.active_grant_id ?? null;
+    if (previousId !== null) {
+      const prior = this.db.query(`SELECT g.authority_node_id,g.revoked_at_ms,g.expires_at_ms FROM multiremi_root_grants g
+        JOIN multiremi_authority_nodes n ON n.node_id=g.authority_node_id AND n.generation=g.generation AND n.kind='grant'
+          AND n.subject_type=g.subject_type AND n.subject_id=g.subject_id AND n.scope=g.scope
+        WHERE g.grant_id=? AND g.subject_type='user' AND g.subject_id=? AND g.generation=?`).get(previousId,userId,generation-1);
+      if (!prior) throw new SecurityAbort('security_state_unavailable');
+      if (prior.revoked_at_ms===null && (prior.expires_at_ms===null || Number(prior.expires_at_ms)>now)
+        && grantAncestryIsCurrent(this.db,tx,userId,{nodeId:prior.authority_node_id,generation:generation-1})) {
+        throw new SecurityAbort('authority_revision_conflict');
+      }
+      this.db.query(`UPDATE multiremi_authority_nodes SET revoked_at_ms=?,revision=? WHERE node_id=? AND generation=? AND revoked_at_ms IS NULL`)
+        .run(now,revision,prior.authority_node_id,generation-1);
+    }
     const node = this.newNode('grant', 'user', userId, generation, revision, expiry, parents);
     if (!grantAncestryIsCurrent(this.db, tx, userId, { nodeId: node, generation })) throw new SecurityAbort('root_authority_revoked');
     const id = randomUUID();
@@ -314,8 +327,8 @@ export class RootManagement {
       VALUES(?,'user',?,?,'system',?,?,?,?,?,?,?)`).run(id,userId,generation,node,issuer.type,issuer.id,revision,reason,now,expiry);
     if (!this.db.query(`INSERT INTO multiremi_root_subject_state(subject_type,subject_id,generation_counter,active_grant_id) VALUES('user',?,?,?)
       ON CONFLICT(subject_type,subject_id) DO UPDATE SET generation_counter=excluded.generation_counter,active_grant_id=excluded.active_grant_id
-      WHERE multiremi_root_subject_state.active_grant_id IS NULL AND multiremi_root_subject_state.generation_counter=? RETURNING generation_counter`)
-      .get(userId,generation,id,generation-1)) throw new SecurityAbort('authority_revision_conflict');
+      WHERE multiremi_root_subject_state.active_grant_id IS NOT DISTINCT FROM ? AND multiremi_root_subject_state.generation_counter=? RETURNING generation_counter`)
+      .get(userId,generation,id,previousId,generation-1)) throw new SecurityAbort('authority_revision_conflict');
     if (!this.db.query('UPDATE multiremi_security_state SET security_revision=? WHERE singleton=1 AND security_revision=? RETURNING singleton')
       .get(revision,before)) throw new SecurityAbort('authority_revision_conflict');
     return { security_revision: revision, grant: { id, subject: { type: 'user', id: userId }, scope: 'system', generation, status: 'active', effective: true,
@@ -325,7 +338,7 @@ export class RootManagement {
 
   grant(tx: SecurityTx, actor: Parameters<AuthorityKernel['grant']>[1], input: CreateRootGrantRequest): CreateRootGrantResponse {
     const target = input.subject;
-    if (target.type !== 'user' || !target.id.startsWith('usr_')) throw new SecurityAbort('root_required');
+    if (target.type !== 'user' || !target.id.startsWith('usr_')) return abortSecurityWrite(this.db,tx,'root_required');
     return withSecurityTarget(this.db, tx, `management:user:${target.id}`, () => onPrimary(() => {
       const bound = this.actors.get(actor as Actor);
       if (!bound || bound.tx !== tx || bound.target !== target.id || bound.action !== createAction) throw new SecurityAbort('root_required');

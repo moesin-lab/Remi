@@ -6,6 +6,10 @@ import {
 
 const cases: Array<[string, string, LockOrderClass[]]> = [
   ["security state read", "SELECT * FROM multiremi_security_state", []],
+  ["security singleton insert", 'INSERT INTO "public"."multiremi_security_state"(singleton) VALUES(1)', ["S"]],
+  ["security singleton delete", 'DELETE FROM ONLY public.multiremi_security_state WHERE singleton=1', ["S"]],
+  ["security singleton migration", 'CREATE TABLE IF NOT EXISTS multiremi_security_state(singleton INTEGER)', ["S"]],
+  ["security singleton modifying CTE", 'WITH removed AS (DELETE FROM multiremi_security_state RETURNING singleton) SELECT * FROM removed', ["S"]],
   ["security singleton update", 'UPDATE "public"."multiremi_security_state" AS s SET revision = s.revision WHERE singleton = 1', ["S"]],
   ["security singleton through CTE", 'WITH gate AS (SELECT * FROM "multiremi_security_state" s FOR UPDATE OF s) SELECT * FROM gate', ["S"]],
   ["domain alias named after singleton", "SELECT * FROM multiremi_issues AS multiremi_security_state FOR UPDATE OF multiremi_security_state", ["D"]],

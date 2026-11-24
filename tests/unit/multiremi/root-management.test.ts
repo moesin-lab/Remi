@@ -13,7 +13,7 @@ import type { AuthorityUse, CredentialProof } from '@multiremi/store/root-author
 import type { RevokeCredentialFamilyRequest } from '@multiremi/contracts/root-authority.js';
 import { bootstrapAuthorizationDigest, RootManagement } from '@multiremi/store/root-management.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
-import { withSecurityWrite } from '@multiremi/store/security-write.js';
+import { afterSecurityCommit, withSecurityWrite } from '@multiremi/store/security-write.js';
 
 let sqlite: ReturnType<typeof openSqliteDatabase>;
 let db: SqlDatabase;
@@ -56,6 +56,19 @@ beforeEach(async () => {
 afterEach(() => sqlite.close());
 
 function enable() { db.run("UPDATE multiremi_security_state SET feature_activation=1,bootstrap_completed=1,minimum_enforcement_version='fixture'"); }
+
+test('catching a rejected management target still rolls back the outer write', () => {
+  enable();
+  let notified = false;
+  expect(()=>withSecurityWrite(db,undefined,service.plan(proof,grant),tx=>{
+    const actor = service.authorizeWrite(tx,proof,grant);
+    afterSecurityCommit(db,tx,()=>{ notified = true; });
+    db.run('UPDATE multiremi_security_state SET security_revision=99 WHERE singleton=1');
+    expect(()=>service.grant(tx,actor,{subject:{type:'agent',id:'agt_fixture'},expected_revision:0,idempotency_key:'fixture',reason:'fixture'})).toThrow('root_required');
+  })).toThrow('root_required');
+  expect(db.query('SELECT security_revision FROM multiremi_security_state').get().security_revision).toBe(0);
+  expect(notified).toBe(false);
+});
 
 test('fresh independent password login issues just one registered self dashboard session with a revocable family', () => {
   const signing = {domainId:'fixture-dashboard',keyEpoch:'1',secret:'synthetic-session-signing-key'};
@@ -194,7 +207,17 @@ test('explicit grant checks the target and actor and preserves generation and cu
   withSecurityWrite(db,undefined,service.plan(proof,revokeUse),tx => service.revokeGrant(tx,service.authorizeWrite(tx,proof,revokeUse),created.grant.id,
     { reason: 'fixture revoke',idempotency_key: 'revoke',expected_revision: 1 }));
   expect(create(0,'grant-request')).toMatchObject({ replayed: true,grant: { effective: false,status: 'revoked' } });
-  expect(create(2,'second-grant').grant).toMatchObject({ generation: 2,effective: true });
+  const second = create(2,'second-grant').grant;
+  expect(second).toMatchObject({generation:2,effective:true});
+  expect(()=>create(3,'still-active')).toThrow('authority_revision_conflict');
+  db.query(`INSERT INTO multiremi_authority_edges SELECT node_id,generation,issued_seq,'family-node',1,5,'continuous'
+    FROM multiremi_authority_nodes WHERE node_id=?`).run(second.authority_node_id);
+  db.query('UPDATE multiremi_authority_nodes SET continuous_parent_count=continuous_parent_count+1 WHERE node_id=?').run(second.authority_node_id);
+  db.run("UPDATE multiremi_authority_nodes SET revoked_at_ms=1 WHERE node_id='family-node'");
+  const third = create(3,'independent-reauthorization').grant;
+  expect(third).toMatchObject({generation:3,effective:true});
+  expect(third.authority_node_id).not.toBe(second.authority_node_id);
+  expect(create(2,'second-grant')).toMatchObject({replayed:true,grant:{id:second.id,effective:false}});
   expect(create(0,'grant-request').grant.id).toBe(created.grant.id);
 });
 function revoke(use: AuthorityUse, input: RevokeCredentialFamilyRequest = request) {

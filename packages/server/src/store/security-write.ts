@@ -75,6 +75,10 @@ export function withSecurityTarget<T>(db: SqlDatabase, tx: SecurityTx, target: s
   return synchronous(frame, callback);
 }
 
+export function abortSecurityWrite(db: SqlDatabase, tx: SecurityTx, code: Failure): never {
+  return reject(requireActive(db, tx), code);
+}
+
 export function withSecurityWrite<T>(db: SqlDatabase, fenceTerm: string | undefined, plan: SecurityLockPlan,
   callback: (tx: SecurityTx) => T): T {
   if (db.inTransaction !== false || active.has(db)) return reject(active.get(db), 'security_tx_invalid');

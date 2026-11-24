@@ -2,7 +2,7 @@ import { constants, createHash, createPublicKey, publicEncrypt, randomBytes, ran
 import { ROOT_DELIVERY_MIN_RSA_BITS, type RootDeliveryMachineProof } from '@multiremi/contracts/root-delivery.js';
 import type { SqlDatabase } from './db/postgres.js';
 import { assertUnrevokedAncestry } from './authority-provenance.js';
-import { SecurityAbort, withSecurityTarget, type SecurityTx } from './security-write.js';
+import { abortSecurityWrite, SecurityAbort, withSecurityTarget, type SecurityTx } from './security-write.js';
 import type { ReceiptService } from './root-authority-contract.js';
 
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
@@ -125,7 +125,7 @@ export function verifyMachineChallenge(db: SqlDatabase, tx: SecurityTx, connecti
 
 export function requireCurrentMachine(db: SqlDatabase, tx: SecurityTx, proof: MachineBrand, purpose: string, targetId: string): VerifiedMachine {
   const evidence = verifiedMachines.get(proof);
-  if (!evidence || evidence.db!==db || evidence.purpose!==purpose || evidence.targetId!==targetId) return reject();
+  if (!evidence || evidence.db!==db || evidence.purpose!==purpose || evidence.targetId!==targetId) return abortSecurityWrite(db,tx,'root_authority_revoked');
   const handle = evidence.handle;
   return withSecurityTarget(db,tx,`machine:${handle.runtimeId}`,() => {
     if (evidence.connection) currentConnectionDigest(db,evidence.connection);
@@ -139,16 +139,18 @@ export function requireCurrentMachine(db: SqlDatabase, tx: SecurityTx, proof: Ma
 }
 
 export function readVerifiedTrustChallenge(db: SqlDatabase, tx: SecurityTx, runtimeId: string, challengeId: string, response: string) {
-  const receipt = db.query(`SELECT c.binding_digest,e.credential_digest FROM multiremi_machine_challenges c JOIN multiremi_machine_enrollments e
-    ON e.incarnation=c.incarnation WHERE c.challenge_id=? AND c.target_id=? AND e.runtime_id=? AND c.purpose='root.runtime-trust.grant'
-    AND c.consumed_at_ms IS NOT NULL AND c.expires_at_ms>? AND c.proof_digest=?`).get(challengeId,runtimeId,runtimeId,Date.now(),response);
-  if (!receipt) return reject();
-  const verified = enrollment(db,runtimeId,receipt.credential_digest);
-  assertUnrevokedAncestry(db,tx,{ nodeId: verified.row.authority_node_id,generation: Number(verified.row.generation) });
-  if (verified.binding !== receipt.binding_digest) return reject();
-  return { runtimeId,workspaceId: String(verified.row.workspace_id),daemonId: String(verified.row.daemon_id),incarnation: String(verified.row.incarnation),
-    keyId: String(verified.row.recipient_key_id), fingerprint: verified.fingerprint, expires: Number(verified.row.key_expires_at_ms),
-    attestationExpiry: Number(verified.row.attestation_expires_at_ms),authorityNodeId: String(verified.row.authority_node_id) };
+  return withSecurityTarget(db,tx,`management:runtime:${runtimeId}`,()=>{
+    const receipt = db.query(`SELECT c.binding_digest,e.credential_digest FROM multiremi_machine_challenges c JOIN multiremi_machine_enrollments e
+      ON e.incarnation=c.incarnation WHERE c.challenge_id=? AND c.target_id=? AND e.runtime_id=? AND c.purpose='root.runtime-trust.grant'
+      AND c.consumed_at_ms IS NOT NULL AND c.expires_at_ms>? AND c.proof_digest=?`).get(challengeId,runtimeId,runtimeId,Date.now(),response);
+    if (!receipt) return reject();
+    const verified = enrollment(db,runtimeId,receipt.credential_digest);
+    assertUnrevokedAncestry(db,tx,{ nodeId: verified.row.authority_node_id,generation: Number(verified.row.generation) });
+    if (verified.binding !== receipt.binding_digest) return reject();
+    return { runtimeId,workspaceId: String(verified.row.workspace_id),daemonId: String(verified.row.daemon_id),incarnation: String(verified.row.incarnation),
+      keyId: String(verified.row.recipient_key_id), fingerprint: verified.fingerprint, expires: Number(verified.row.key_expires_at_ms),
+      attestationExpiry: Number(verified.row.attestation_expires_at_ms),authorityNodeId: String(verified.row.authority_node_id) };
+  });
 }
 
 export function recordedMachineBindingIsCurrent(db: SqlDatabase, tx: SecurityTx, runtimeId: string, challengeId: string): boolean {

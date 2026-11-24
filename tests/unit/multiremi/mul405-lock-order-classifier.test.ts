@@ -131,6 +131,23 @@ describe("MUL-405 shared lock-order SQL classifier", () => {
   it("accepts the singleton after the fence and before workspace locks", () => {
     expect(() => takeLocks(["F", "S", "W", "N", "D"])).not.toThrow();
   });
+  for (const sql of [
+    'INSERT INTO "public"."multiremi_security_state"(singleton) VALUES(1)',
+    'WITH removed AS (DELETE FROM "public"."multiremi_security_state" RETURNING singleton) SELECT * FROM removed',
+  ]) {
+    it(`enforces singleton lock order for ${sql}`, () => {
+      lockOrderSentinelTransactionBegin();
+      try {
+        lockOrderSentinelNoteStatement('DELETE FROM public.multiremi_issues WHERE id=?');
+        expect(()=>lockOrderSentinelNoteStatement(sql)).toThrow('lock order violated');
+      } finally { lockOrderSentinelTransactionEnd(); }
+      lockOrderSentinelTransactionBegin();
+      try {
+        lockOrderSentinelNoteStatement(sql);
+        expect(acquire.W).not.toThrow();
+      } finally { lockOrderSentinelTransactionEnd(); }
+    });
+  }
   for (const order of [["S", "F"], ["W", "S"], ["N", "S"], ["D", "S"]] as const) {
     it(`rejects ${order.join(" then ")}`, () => {
       expect(() => takeLocks(order)).toThrow("lock order violated");

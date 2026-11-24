@@ -13,7 +13,7 @@ import type { AuthorityUse, CredentialProof } from '@multiremi/store/root-author
 import type { RevokeCredentialFamilyRequest } from '@multiremi/contracts/root-authority.js';
 import { bootstrapAuthorizationDigest, RootManagement } from '@multiremi/store/root-management.js';
 import { JwtMaterials } from '@multiremi/store/jwt-materials.js';
-import { afterSecurityCommit, withSecurityWrite } from '@multiremi/store/security-write.js';
+import { afterSecurityCommit, withSecurityWrite, type SecurityLockPlan, type SecurityTx } from '@multiremi/store/security-write.js';
 
 let sqlite: ReturnType<typeof openSqliteDatabase>;
 let db: SqlDatabase;
@@ -86,17 +86,31 @@ test('direct retry invocation binds the fresh actor and primary turn to one prop
   expect(()=>withSecurityWrite(db,undefined,plan,tx=>service.verifyDirectRetryInvocation(tx,proof,target))).toThrow('root_authority_revoked');
 });
 
+function expectRollbackAfterCaughtRejection(plan: SecurityLockPlan, code: string, operation: (tx: SecurityTx) => void) {
+  let notified = false;
+  db.exec('CREATE TABLE IF NOT EXISTS isolation_marker(value INTEGER)');
+  expect(()=>withSecurityWrite(db,undefined,plan,tx=>{
+    afterSecurityCommit(db,tx,()=>{ notified = true; });
+    db.run('INSERT INTO isolation_marker(value) VALUES(1)');
+    expect(()=>operation(tx)).toThrow(code);
+  })).toThrow(code);
+  expect(db.query('SELECT value FROM isolation_marker').all()).toEqual([]);
+  expect(notified).toBe(false);
+}
+
 test('catching a rejected management target still rolls back the outer write', () => {
   enable();
-  let notified = false;
-  expect(()=>withSecurityWrite(db,undefined,service.plan(proof,grant),tx=>{
+  expectRollbackAfterCaughtRejection(service.plan(proof,grant),'root_required',tx=>{
     const actor = service.authorizeWrite(tx,proof,grant);
-    afterSecurityCommit(db,tx,()=>{ notified = true; });
-    db.run('UPDATE multiremi_security_state SET security_revision=99 WHERE singleton=1');
-    expect(()=>service.grant(tx,actor,{subject:{type:'agent',id:'agt_fixture'},expected_revision:0,idempotency_key:'fixture',reason:'fixture'})).toThrow('root_required');
-  })).toThrow('root_required');
-  expect(db.query('SELECT security_revision FROM multiremi_security_state').get().security_revision).toBe(0);
-  expect(notified).toBe(false);
+    service.grant(tx,actor,{subject:{type:'agent',id:'agt_fixture'},expected_revision:0,idempotency_key:'fixture',reason:'fixture'});
+  });
+});
+
+test('unknown registered evidence rolls back a prior business write even when caught', () => {
+  enable();
+  expectRollbackAfterCaughtRejection(service.plan(proof,grant),'root_authority_revoked',tx=>{
+    service.registeredCredentials.requireCurrent(tx,{kind:'invalid'});
+  });
 });
 
 test('fresh independent password login issues just one registered self dashboard session with a revocable family', () => {
@@ -172,7 +186,8 @@ test('trust grant binds live daemon credential, enrollment, two key proofs and s
   expect(()=>verify({...machine,incarnation:'another'})).toThrow('root_authority_revoked');
   const verified = verify(machine);
   expect(withSecurityWrite(db,undefined,plan,tx=>requireCurrentMachine(db,tx,verified,action,'rt_test'))).toBe(verified);
-  expect(()=>withSecurityWrite(db,undefined,plan,tx=>requireCurrentMachine(db,tx,verified,'receipt.replay','rt_test'))).toThrow('root_authority_revoked');
+  expectRollbackAfterCaughtRejection(plan,'root_authority_revoked',tx=>requireCurrentMachine(db,tx,verified,'receipt.replay','rt_test'));
+  expectRollbackAfterCaughtRejection(plan,'root_authority_revoked',tx=>requireCurrentMachine(db,tx,verified,action,'wrong-runtime'));
   expect(()=>verify(machine)).toThrow('root_authority_revoked');
   releaseMachineConnection(owner);
   expect(()=>withSecurityWrite(db,undefined,plan,tx=>requireCurrentMachine(db,tx,verified,action,'rt_test'))).toThrow('root_authority_revoked');
@@ -248,6 +263,16 @@ test('explicit grant checks the target and actor and preserves generation and cu
   expect(third.authority_node_id).not.toBe(second.authority_node_id);
   expect(create(2,'second-grant')).toMatchObject({replayed:true,grant:{id:second.id,effective:false}});
   expect(create(0,'grant-request').grant.id).toBe(created.grant.id);
+  db.query('UPDATE multiremi_root_grants SET created_at_ms=1,expires_at_ms=2 WHERE grant_id=?').run(third.id);
+  db.exec("CREATE TRIGGER reject_replacement BEFORE INSERT ON multiremi_root_management_events BEGIN SELECT RAISE(ABORT,'audit rejected'); END");
+  expect(()=>create(4,'expiry-replacement')).toThrow();
+  expect(db.query('SELECT generation_counter,active_grant_id FROM multiremi_root_subject_state WHERE subject_id=?').get(subject.id))
+    .toEqual({generation_counter:3,active_grant_id:third.id});
+  expect(db.query('SELECT revoked_at_ms FROM multiremi_authority_nodes WHERE node_id=?').get(third.authority_node_id).revoked_at_ms).toBeNull();
+  db.exec('DROP TRIGGER reject_replacement');
+  const fourth = create(4,'expiry-replacement').grant;
+  expect(fourth).toMatchObject({generation:4,effective:true});
+  expect(create(3,'independent-reauthorization')).toMatchObject({replayed:true,grant:{id:third.id,effective:false}});
 });
 function revoke(use: AuthorityUse, input: RevokeCredentialFamilyRequest = request) {
   return withSecurityWrite(db, undefined, service.plan(proof, use), tx => {

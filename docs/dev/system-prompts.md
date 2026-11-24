@@ -59,7 +59,7 @@ POST `/preview` 预览当前或未保存正文。写入须携带 `expectedRevisi
 |---|---|
 | 文本边界、规范哈希与受保护句子 | [共享契约](../../tests/unit/contracts/system-prompt-policy.test.ts) |
 | 版本、默认升级、CAS/幂等、权限、审计、实际输入与清理 | [SQLite/API](../../tests/unit/multiremi/system-prompt-policy.test.ts) |
-| 两进程首次保存竞争、幂等重放竞争与 level-4 迁移回滚 | [PostgreSQL](../../tests/unit/multiremi/system-prompt-policy-postgres.test.ts)；须设置本机 `MULTIREMI_TEST_POSTGRES_URL`，否则明确跳过；CI schema job 提供 PostgreSQL 16 |
+| 两进程首次保存竞争、幂等重放竞争与 level-4 迁移回滚 | [PostgreSQL](../../tests/unit/multiremi/schema-levels-postgres.test.ts)；须设置本机 `MULTIREMI_TEST_POSTGRES_URL`，否则明确跳过；CI schema job 提供 PostgreSQL 16 |
 | capability、claim 重绑、offer 完整性 | [daemon offers](../../tests/unit/multiremi/daemon-task-offers.test.ts) |
 | 指令文件采用与驻留进程配置替换 | [后台集成](../../tests/integration/multiremi-daemon-background-tasks.test.ts)；脚本化 ACP，不证明外部模型服从性 |
 | 八个 CLI 命令的 HTTP/输出与 task deny | [CLI](../../tests/unit/remi/cli-workspace-system-prompt.test.ts)；回环 HTTP fixture，不替代领域 API 测试 |

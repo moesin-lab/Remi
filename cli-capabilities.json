@@ -12985,6 +12985,15 @@
     "GET /api/workspaces/:id/storage/daemons": {
       "command": "runtime.storage"
     },
+    "GET /api/workspaces/:id/system-prompt": {
+      "command": "workspace.system-prompt.get"
+    },
+    "GET /api/workspaces/:id/system-prompt/versions": {
+      "command": "workspace.system-prompt.history"
+    },
+    "GET /api/workspaces/:id/system-prompt/versions/:versionId": {
+      "command": "workspace.system-prompt.version"
+    },
     "GET /api/workspaces/:workspaceId/feishu/chats": {
       "command": "feishu.chats.list"
     },
@@ -14225,6 +14234,15 @@
     "POST /api/workspaces/:id/ssh-mesh/test": {
       "command": "workspace.ssh-mesh.test"
     },
+    "POST /api/workspaces/:id/system-prompt/preview": {
+      "command": "workspace.system-prompt.preview"
+    },
+    "POST /api/workspaces/:id/system-prompt/reset": {
+      "command": "workspace.system-prompt.reset"
+    },
+    "POST /api/workspaces/:id/system-prompt/restore": {
+      "command": "workspace.system-prompt.restore"
+    },
     "POST /api/workspaces/:workspaceId/feishu/endpoints/:name/check": {
       "command": "feishu.endpoint.check"
     },
@@ -14498,6 +14516,9 @@
     },
     "PUT /api/workspaces/:id/storage": {
       "command": "workspace.storage.set"
+    },
+    "PUT /api/workspaces/:id/system-prompt": {
+      "command": "workspace.system-prompt.set"
     },
     "PUT /api/workspaces/:workspaceId/scm/connections/:connectionId/repositories/:repositoryId": {
       "command": "scm.repository.bind"

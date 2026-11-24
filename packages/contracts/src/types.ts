@@ -4962,6 +4962,33 @@ export interface FeishuBotSessionSnapshot {
 
 /** One Task that a Feishu `/stop` could target, with the context a human
  *  needs to tell several concurrent runs apart. */
+export interface FeishuCommandSemantic {
+  domain: FeishuBotDomain;
+  app_id: string;
+  external_message_id: string;
+  sender_open_id: string;
+  chat_id: string;
+  external_session_key: string;
+  kind: 'command' | 'unknown' | 'message';
+  name: string;
+  args: string;
+  target: string | null;
+  raw_content: string;
+}
+
+export interface FeishuBotCommandRequest {
+  revision: number;
+  bot_id: string;
+  mode: 'execute' | 'lookup_only';
+  semantic: FeishuCommandSemantic;
+  digest: string;
+}
+
+export type FeishuBotCommandResult = { name: 'new'; reset: boolean; agentName: string | null }
+  | { name: 'stop'; cancel: FeishuBotCancelResult };
+
+export type FeishuBotCommandResponse = { state: 'missing' } | { state: 'committed'; result: FeishuBotCommandResult };
+
 export interface FeishuBotCancelCandidate {
   taskId: string;
   status: MultiremiTaskStatus;

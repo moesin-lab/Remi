@@ -117,7 +117,9 @@ export class RuntimesEndpoints {
     return parseStrictResponse<{ endpoints: ExecutionEndpoint[] }>(raw, ExecutionEndpointListSchema, { endpoint: "GET /api/execution-endpoints" });
   }
   async inspectExecutionEndpoint(wsId: string, input: { endpoint_id?: string; connection: ExecutionEndpointInput["connection"]; api_key?: string;
-    operation: "models" | "detect" | "test"; protocol?: string; model?: string }, signal?: AbortSignal) {
+    operation: "models" | "detect" | "test"; protocol?: string; model?: string } | {
+    endpoint_id: string; operation: "models"; protocol: ExecutionEndpoint["connection"]["protocols"][number]; connection?: never; api_key?: never;
+  }, signal?: AbortSignal) {
     const raw = await this.http.fetch<unknown>("/api/execution-endpoints/inspect",
       { method: "POST", body: JSON.stringify({ ...input, workspace_id: wsId }), signal });
     return parseStrictResponse<EndpointInspectionResponse>(raw, EndpointInspectionSchema, { endpoint: "POST /api/execution-endpoints/inspect" });

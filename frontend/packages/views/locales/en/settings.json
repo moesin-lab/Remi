@@ -737,7 +737,15 @@
     "system_title": "System AI",
     "system_description": "Choose existing endpoints for automatic titles and progress summaries. Agent connections are selected only by execution groups.",
     "manage_endpoints": "Manage endpoints in execution groups",
-    "no_endpoint": "Not configured"
+    "no_endpoint": "Not configured",
+    "catalog_loading": "Loading models…",
+    "catalog_unbound": "No confirmed gateway catalog. Enter a model ID manually.",
+    "catalog_disabled": "Discovery is off. Only manually listed models are shown.",
+    "catalog_error": "Model discovery failed. You can still enter a model ID.",
+    "catalog_empty": "The gateway returned no models. Enter a model ID manually.",
+    "catalog_stale": "Cached models · Last successful check",
+    "catalog_refresh": "Refresh models",
+    "catalog_cli": "Claude CLI uses the local runtime configuration. Local model overrides take precedence."
   },
   "storage": {
     "description": "Ended Issues and chats release their code directories and runtime environments after a retention period. Unsaved work is snapshotted first and restored when the Issue or chat reopens; execution records always stay on the machine.",

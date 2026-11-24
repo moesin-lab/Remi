@@ -735,7 +735,15 @@
     "system_title": "システム AI",
     "system_description": "自動タイトルや進捗要約には既存のエンドポイントを選択します。Agent の接続は実行グループで設定します。",
     "manage_endpoints": "実行グループでエンドポイントを管理",
-    "no_endpoint": "未設定"
+    "no_endpoint": "未設定",
+    "catalog_loading": "モデルを読み込み中…",
+    "catalog_unbound": "ゲートウェイの一覧を確認できません。モデル ID を入力してください。",
+    "catalog_disabled": "自動取得はオフです。手動登録したモデルのみ表示します。",
+    "catalog_error": "モデルの取得に失敗しました。モデル ID を入力できます。",
+    "catalog_empty": "モデル一覧は空です。モデル ID を入力してください。",
+    "catalog_stale": "キャッシュされた一覧 · 前回の取得成功日時",
+    "catalog_refresh": "モデルを更新",
+    "catalog_cli": "Claude CLI はローカル設定を使用し、ローカルのモデル指定を優先します。"
   },
   "storage": {
     "description": "終了した Issue とチャットは、保持期間を過ぎるとコードディレクトリと実行環境を解放します。未保存の作業は先にスナップショットとして保存され、Issue やチャットを再開すると復元されます。実行記録は常にマシン上に残ります。",

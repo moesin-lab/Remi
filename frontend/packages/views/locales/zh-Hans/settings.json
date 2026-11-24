@@ -736,7 +736,15 @@
     "system_title": "系统 AI",
     "system_description": "选择已有端点供自动标题、进度摘要等系统功能使用。Agent 的连接只由执行能力组决定。",
     "manage_endpoints": "前往执行能力组管理端点",
-    "no_endpoint": "未配置"
+    "no_endpoint": "未配置",
+    "catalog_loading": "正在加载模型…",
+    "catalog_unbound": "未确认可用的网关目录，可手动输入模型 ID。",
+    "catalog_disabled": "已关闭模型发现，仅显示手动添加的模型。",
+    "catalog_error": "模型发现失败，仍可手动输入模型 ID。",
+    "catalog_empty": "网关返回的模型列表为空，可手动输入模型 ID。",
+    "catalog_stale": "正在显示旧目录 · 上次成功时间",
+    "catalog_refresh": "刷新模型",
+    "catalog_cli": "Claude CLI 使用本机运行配置，本机模型覆盖设置优先。"
   },
   "storage": {
     "description": "已结束的 Issue 和对话在保留期过后会释放代码目录和运行环境。未保存的工作会先保存为快照，Issue 或对话重新打开时恢复；执行记录始终保留在机器上。",

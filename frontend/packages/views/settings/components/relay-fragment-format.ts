@@ -1,5 +1,23 @@
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
-import type { RelayEngine } from "@multiremi/core/api";
+import type { RelayConfigResponse, RelayEngine } from "@multiremi/core/api";
+
+function hasGatewayBase(engine: "codex" | "claude", fragment: string) {
+  try {
+    if (engine === "claude") return !!JSON.parse(fragment)?.env?.ANTHROPIC_BASE_URL;
+    const config = parseToml(fragment) as { model_provider?: string; model_providers?: Record<string, { base_url?: string }> };
+    const providers = config.model_providers ?? {};
+    const provider = config.model_provider ?? Object.keys(providers)[0];
+    return !!(provider && providers[provider]?.base_url);
+  } catch {
+    return false;
+  }
+}
+
+export function titleGatewayProtocol(config: RelayConfigResponse | undefined) {
+  if (config?.codex?.hasToken && hasGatewayBase("codex", config.codex.fragment)) return "openai-chat-completions";
+  if (config?.claude?.hasToken && hasGatewayBase("claude", config.claude.fragment)) return "anthropic-messages";
+  return undefined;
+}
 
 /**
  * Re-indent a stored gateway fragment for the editor.

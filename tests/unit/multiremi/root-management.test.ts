@@ -47,6 +47,11 @@ beforeEach(async () => {
     db.query("INSERT INTO multiremi_root_subject_state VALUES('user',?,1,?)").run(user, id);
   }
   node('family-node', 'credential_family', 'usr_test', 0);
+  db.run("INSERT INTO multiremi_authority_nodes VALUES('deployment',100,1,'deployment_origin','deployment','fixture','system',0,9999999999999,NULL,0)");
+  db.run("UPDATE multiremi_authority_nodes SET issued_seq=101,continuous_parent_count=1 WHERE node_id='actor-grant'");
+  db.run("INSERT INTO multiremi_authority_edges VALUES('actor-grant',1,101,'deployment',1,100,'continuous')");
+  db.run(`INSERT INTO multiremi_root_bootstrap_authorizations(authorization_digest,deployment_id,user_id,reason,expires_at_ms,consumed_at_ms,grant_id,proof_node_id,revision_before,revision_after)
+    VALUES('synthetic-seed','fixture','usr_test','seed',9999999999999,1,'actor-grant','password',0,0)`);
   node('child', 'credential', 'usr_test', 1);
   db.run("INSERT INTO multiremi_authority_edges VALUES('child',1,6,'family-node',1,5,'continuous')");
   db.run("INSERT INTO multiremi_credential_families VALUES('family','family-node',9999999999999,NULL,0)");
@@ -56,6 +61,16 @@ beforeEach(async () => {
 afterEach(() => sqlite.close());
 
 function enable() { db.run("UPDATE multiremi_security_state SET feature_activation=1,bootstrap_completed=1,minimum_enforcement_version='fixture'"); }
+
+test('a nominal grant and an unrevoked deployment node cannot replace the consumed bootstrap authorization', () => {
+  enable();
+  db.run("UPDATE multiremi_root_bootstrap_authorizations SET consumed_at_ms=NULL");
+  expect(()=>service.resolveCurrent(proof,grant)).toThrow('root_authority_revoked');
+  db.run("UPDATE multiremi_root_bootstrap_authorizations SET consumed_at_ms=1");
+  db.run("DELETE FROM multiremi_authority_edges WHERE child_id='actor-grant'");
+  db.run("UPDATE multiremi_authority_nodes SET continuous_parent_count=0 WHERE node_id='actor-grant'");
+  expect(()=>revoke(grant)).toThrow('root_authority_revoked');
+});
 
 test('direct retry invocation binds the fresh actor and primary turn to one proposed replacement in its transaction',()=>{
   enable();
@@ -118,6 +133,7 @@ test('fresh independent password login issues just one registered self dashboard
   const dashboardSigningDomain = {domainId:signing.domainId,keyEpoch:signing.keyEpoch,keyDigest:checksum(signing.secret)};
   const input = {deploymentId:'fixture-deployment',authorization:'one-use-fixture-bootstrap',userId:'usr_test',reason:'fixture',expectedRevision:0,dashboardSigningDomain};
   db.run('DELETE FROM multiremi_root_subject_state');
+  db.run('DELETE FROM multiremi_root_bootstrap_authorizations');
   db.run('DELETE FROM multiremi_root_grants');
   db.query(`INSERT INTO multiremi_root_bootstrap_authorizations(authorization_digest,deployment_id,user_id,reason,expires_at_ms)
     VALUES(?,?,?,?,?)`).run(bootstrapAuthorizationDigest(input),input.deploymentId,input.userId,input.reason,Date.now()+60_000);
@@ -213,6 +229,7 @@ test('trust grant binds live daemon credential, enrollment, two key proofs and s
 
 test('offline bootstrap binds the verified human, deployment and one-use authorization without activating root', () => {
   db.run('DELETE FROM multiremi_root_subject_state');
+  db.run('DELETE FROM multiremi_root_bootstrap_authorizations');
   db.run('DELETE FROM multiremi_root_grants');
   const input = { deploymentId: 'synthetic-deployment', authorization: 'synthetic-offline-ticket', userId: 'usr_test', reason: 'fixture enrollment', expectedRevision: 0 };
   db.query(`INSERT INTO multiremi_root_bootstrap_authorizations(authorization_digest,deployment_id,user_id,reason,expires_at_ms)
@@ -227,7 +244,7 @@ test('offline bootstrap binds the verified human, deployment and one-use authori
     .toEqual({ grant_id: created.grant.id,proof_node_id: 'password',revision_before: 0,revision_after: 1 });
 });
 
-test('explicit grant checks the target and actor and preserves generation and current effectiveness on replay', () => {
+test('explicit grant checks the target and actor and preserves generation and current effectiveness on replay', async () => {
   enable();
   const subject = { type: 'user',id: 'usr_second' } as const;
   const use = { action: 'root.grant.create',use: 'management',actualTarget: subject };
@@ -244,6 +261,12 @@ test('explicit grant checks the target and actor and preserves generation and cu
   db.run("INSERT INTO multiremi_password_authority_versions SELECT 'usr_second',1,verifier_digest,'password2','identity2' FROM multiremi_password_authority_versions WHERE user_id='usr_test'");
   const created = create(0,'grant-request');
   expect(created.grant).toMatchObject({ generation: 1,effective: true,subject });
+  const recipientProof = await service.verifyIndependentPassword(subject.id,passphrase);
+  expect(service.resolveCurrent(recipientProof,grant).effectiveRoot).toBe(true);
+  db.run("UPDATE multiremi_root_management_events SET proof_node_id='identity' WHERE idempotency_key='grant-request'");
+  expect(()=>service.resolveCurrent(recipientProof,grant)).toThrow('root_authority_revoked');
+  expect(create(0,'grant-request').grant.effective).toBe(false);
+  db.run("UPDATE multiremi_root_management_events SET proof_node_id='password' WHERE idempotency_key='grant-request'");
   expect(db.query('SELECT parent_id FROM multiremi_authority_edges WHERE child_id=? ORDER BY parent_id').all(created.grant.authority_node_id))
     .toEqual([{ parent_id: 'actor-grant' },{ parent_id: 'password' }]);
   expect(create(0,'grant-request')).toMatchObject({ replayed: true,grant: { id: created.grant.id,effective: true } });

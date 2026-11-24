@@ -179,6 +179,7 @@ export class RootManagement {
         AND scope='system' AND subject_type='user' AND subject_id=?`).get(grant.authorityNodeId, grant.generation, subject.id);
       if (!node) throw new SecurityAbort('root_authority_revoked');
       assertUnrevokedAncestry(this.db, tx, { nodeId: grant.authorityNodeId, generation: grant.generation });
+      if (!this.hasHumanGrantOrigins(grant.authorityNodeId)) throw new SecurityAbort('root_authority_revoked');
       const exists = retry ? this.db.query('SELECT id FROM multiremi_turns WHERE id=?').get(target.id)
         : request.action === trustAction ? this.db.query('SELECT id FROM multiremi_runtimes WHERE id=?').get(target.id)
         : request.action === untrustAction ? this.db.query('SELECT trust_id FROM multiremi_runtime_trusts WHERE trust_id=?').get(target.id)
@@ -194,6 +195,33 @@ export class RootManagement {
 
   resolveCurrent(proof: CredentialProof, request: AuthorityUse): CurrentAuthority {
     return onPrimary(() => withSecurityWrite(this.db, undefined, this.plan(proof, request), tx => this.check(tx, proof, request)));
+  }
+
+  private hasHumanGrantOrigins(nodeId: string): boolean {
+    const invalid = this.db.query(`WITH RECURSIVE origins(id) AS (
+      SELECT node_id FROM multiremi_authority_nodes WHERE node_id=?
+      UNION SELECT e.parent_id FROM multiremi_authority_edges e JOIN origins o ON o.id=e.child_id WHERE e.dependency='continuous'
+    ) SELECT n.node_id FROM origins o JOIN multiremi_authority_nodes n ON n.node_id=o.id
+      LEFT JOIN multiremi_root_grants g ON g.authority_node_id=n.node_id AND g.subject_id=n.subject_id
+        AND g.subject_type=n.subject_type AND g.generation=n.generation AND g.scope=n.scope
+      WHERE n.kind='grant' AND (g.grant_id IS NULL OR NOT (
+        (g.issuer_type='deployment' AND EXISTS (SELECT 1 FROM multiremi_root_bootstrap_authorizations b
+          JOIN multiremi_authority_nodes credential ON credential.node_id=b.proof_node_id AND credential.kind='password'
+            AND credential.subject_type='user' AND credential.subject_id=b.user_id
+          JOIN multiremi_authority_edges e ON e.child_id=n.node_id AND e.dependency='continuous'
+          JOIN multiremi_authority_nodes p ON p.node_id=e.parent_id AND p.kind='deployment_origin' AND p.subject_type='deployment'
+          WHERE b.grant_id=g.grant_id AND b.user_id=g.subject_id AND b.deployment_id=g.issuer_id AND p.subject_id=b.deployment_id
+            AND b.consumed_at_ms IS NOT NULL AND b.consumed_at_ms<b.expires_at_ms AND b.revision_after=n.revision))
+        OR (g.issuer_type='user' AND EXISTS (SELECT 1 FROM multiremi_root_management_events audit
+          JOIN multiremi_root_grants issuer ON issuer.grant_id=audit.actor_grant_id AND issuer.generation=audit.actor_generation
+            AND issuer.subject_type='user' AND issuer.subject_id=g.issuer_id
+          JOIN multiremi_authority_edges parent ON parent.child_id=n.node_id AND parent.parent_id=issuer.authority_node_id AND parent.dependency='continuous'
+          JOIN multiremi_authority_edges proof ON proof.child_id=n.node_id AND proof.parent_id=audit.proof_node_id AND proof.dependency='continuous'
+          JOIN multiremi_authority_nodes password ON password.node_id=proof.parent_id AND password.kind='password' AND password.subject_type='user'
+            AND password.subject_id=g.issuer_id
+          WHERE audit.action='root.grant.create' AND audit.target_id=g.subject_id AND audit.actor_user_id=g.issuer_id AND audit.revision_after=n.revision))
+      )) LIMIT 1`).get(nodeId);
+    return !invalid;
   }
 
   authorizeWrite(tx: SecurityTx, proof: CredentialProof, request: AuthorityUse): Actor {
@@ -374,7 +402,7 @@ export class RootManagement {
         WHERE g.grant_id=? AND g.subject_type='user' AND g.subject_id=? AND g.generation=?`).get(previousId,userId,generation-1);
       if (!prior) throw new SecurityAbort('security_state_unavailable');
       if (prior.revoked_at_ms===null && (prior.expires_at_ms===null || Number(prior.expires_at_ms)>now)
-        && grantAncestryIsCurrent(this.db,tx,userId,{nodeId:prior.authority_node_id,generation:generation-1})) {
+        && grantAncestryIsCurrent(this.db,tx,userId,{nodeId:prior.authority_node_id,generation:generation-1}) && this.hasHumanGrantOrigins(prior.authority_node_id)) {
         throw new SecurityAbort('authority_revision_conflict');
       }
       this.db.query(`UPDATE multiremi_authority_nodes SET revoked_at_ms=?,revision=? WHERE node_id=? AND generation=? AND revoked_at_ms IS NULL`)
@@ -423,7 +451,7 @@ export class RootManagement {
         const revoked = record.revoked_at_ms !== null;
         const expired = expiry !== null && expiry <= Date.now();
         const effective = !revoked && !expired && record.active_grant_id === result.grant.id && grantAncestryIsCurrent(this.db,tx,target.id,
-          { nodeId: result.grant.authority_node_id, generation: result.grant.generation });
+          { nodeId: result.grant.authority_node_id, generation: result.grant.generation }) && this.hasHumanGrantOrigins(result.grant.authority_node_id);
         return { security_revision: current.checkedRevision, replayed: true, grant: { ...result.grant, effective, revision: Number(record.revision),
           revoked_at: revoked ? new Date(Number(record.revoked_at_ms)).toISOString() : null, revocation_reason: record.revoke_reason,
           status: revoked ? 'revoked' : expired ? 'expired' : 'active', effective_reason_code: revoked ? 'grant_revoked' : expired ? 'grant_expired' : effective ? 'active' : 'ancestor_revoked' } };

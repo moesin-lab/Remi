@@ -332,14 +332,14 @@ export interface RootDeliveryRuntimeCapabilities {
 /**
  * Inputs required to negotiate root delivery eligibility for a daemon connection
  * and target Runtime. Capability advertisement is a prerequisite, NEVER a substitute
- * for active server-side Runtime/consumer trust.
+ * for active server-side Runtime and consumer trust.
  */
 export interface RootDeliveryNegotiationInput {
   readonly hello_caps: readonly string[];
   readonly welcome_caps: readonly string[];
   readonly runtime_capabilities?: RootDeliveryRuntimeCapabilities | null;
   readonly runtime_trusted: boolean;
-  readonly consumer_trusted?: boolean;
+  readonly consumer_trusted: boolean;
 }
 
 export type RootDeliveryNegotiationResult =
@@ -358,14 +358,23 @@ export type RootDeliveryNegotiationResult =
 
 /**
  * Evaluates whether a connection + Runtime may send/receive typed root delivery.
- * Fails closed on any missing capability, version mismatch, unsupported carrier,
- * or untrusted Runtime/consumer. Never authorizes downgrading a root attempt to
- * an ordinary plaintext `task.offer` or `turn.restart.resume` reply.
+ * Fails closed on any missing/malformed input, missing capability, version mismatch,
+ * unsupported carrier, or non-explicit Runtime/consumer trust. Never authorizes
+ * downgrading a root attempt to an ordinary plaintext `task.offer` or
+ * `turn.restart.resume` reply.
  */
 export function evaluateRootDeliveryNegotiation(
   input: RootDeliveryNegotiationInput,
 ): RootDeliveryNegotiationResult {
-  if (!hasDaemonCapability(input.hello_caps, ROOT_DELIVERY_CAPABILITY)) {
+  if (!isPlainRecord(input)) {
+    return {
+      eligible: false,
+      code: "root_delivery_unsupported",
+      reason: "Root delivery negotiation input must be an object.",
+      downgrade_allowed: false,
+    };
+  }
+  if (!Array.isArray(input.hello_caps) || !hasDaemonCapability(input.hello_caps, ROOT_DELIVERY_CAPABILITY)) {
     return {
       eligible: false,
       code: "root_delivery_unsupported",
@@ -373,7 +382,7 @@ export function evaluateRootDeliveryNegotiation(
       downgrade_allowed: false,
     };
   }
-  if (!hasDaemonCapability(input.welcome_caps, ROOT_DELIVERY_CAPABILITY)) {
+  if (!Array.isArray(input.welcome_caps) || !hasDaemonCapability(input.welcome_caps, ROOT_DELIVERY_CAPABILITY)) {
     return {
       eligible: false,
       code: "root_delivery_unsupported",
@@ -382,7 +391,7 @@ export function evaluateRootDeliveryNegotiation(
     };
   }
   const runtimeCaps = input.runtime_capabilities;
-  if (!runtimeCaps || runtimeCaps.root_delivery_protocol !== ROOT_DELIVERY_PROTOCOL_VERSION) {
+  if (!isPlainRecord(runtimeCaps) || runtimeCaps.root_delivery_protocol !== ROOT_DELIVERY_PROTOCOL_VERSION) {
     return {
       eligible: false,
       code: "root_delivery_unsupported",
@@ -401,11 +410,11 @@ export function evaluateRootDeliveryNegotiation(
       downgrade_allowed: false,
     };
   }
-  if (!input.runtime_trusted || input.consumer_trusted === false) {
+  if (input.runtime_trusted !== true || input.consumer_trusted !== true) {
     return {
       eligible: false,
       code: "root_runtime_untrusted",
-      reason: "Target Runtime or consumer is not actively trusted for root delivery.",
+      reason: "Target Runtime and consumer must both be explicitly trusted for root delivery.",
       downgrade_allowed: false,
     };
   }

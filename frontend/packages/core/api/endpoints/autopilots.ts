@@ -33,6 +33,12 @@ import {
   WebhookDeliveryResponseSchema,
 } from "../schemas/autopilots";
 
+export class UnconfirmedAutopilotCreateError extends ApiContractError {
+  constructor(readonly autopilotId: string | null) {
+    super("POST /api/autopilots");
+  }
+}
+
 function parseSavedAutopilot(raw: unknown, target: string | null | undefined, endpoint: string): Autopilot {
   const saved = parseStrictResponse<Autopilot>(raw, AutopilotSchema, { endpoint });
   if (target !== undefined && saved.delivery_chat_session_id !== target) throw new ApiContractError(endpoint);
@@ -64,11 +70,20 @@ export class AutopilotsEndpoints {
   }
 
   async createAutopilot(data: CreateAutopilotRequest): Promise<Autopilot> {
-    const raw = await this.http.fetch<unknown>("/api/autopilots", {
+    const response = await this.http.fetchRaw("/api/autopilots", {
+      extraHeaders: { "Content-Type": "application/json" },
       method: "POST",
       body: JSON.stringify(data),
     });
-    return parseSavedAutopilot(raw, data.delivery_chat_session_id, "POST /api/autopilots");
+    const raw: unknown = await response.json().catch(() => null);
+    const id = raw && typeof raw === "object" && "id" in raw && typeof raw.id === "string" && /^[\w-]+$/.test(raw.id) ? raw.id : null;
+    if (!id) throw new UnconfirmedAutopilotCreateError(null);
+    try {
+      return parseSavedAutopilot(raw, data.delivery_chat_session_id, "POST /api/autopilots");
+    } catch (error) {
+      if (error instanceof ApiContractError) throw new UnconfirmedAutopilotCreateError(id);
+      throw error;
+    }
   }
 
   async updateAutopilot(id: string, data: UpdateAutopilotRequest): Promise<Autopilot> {

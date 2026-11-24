@@ -1,5 +1,8 @@
 {
   "delivery": {
+    "committed": "Autopilot created. Verify delivery and continue configuring this autopilot.",
+    "resume": "Verify and continue",
+    "inspect": "Creation was accepted. Check the autopilot list before making further changes.",
     "configuration_error": "Could not load Autopilot configuration.",
     "denied": "You do not have permission to access delivery targets.",
     "heading": "Report delivery",

@@ -61,7 +61,7 @@ import {
   reconcileTriggerKindForExecutionMode,
   type ConfigurableAutopilotTriggerKind,
 } from "@multiremi/core/autopilots";
-import { api, ApiError } from "@multiremi/core/api";
+import { api, ApiError, UnconfirmedAutopilotCreateError } from "@multiremi/core/api";
 import type {
   AutopilotAssigneeType,
   AutopilotExecutionMode,
@@ -461,6 +461,8 @@ export function AutopilotDialog(props: AutopilotDialogProps) {
   const createTrigger = useCreateAutopilotTrigger();
   const updateAutopilot = useUpdateAutopilot();
   const updateTrigger = useUpdateAutopilotTrigger();
+  const [committed, setCommitted] = useState<{ id: string | null; workspaceId: string } | null>(null);
+  const submitLock = useRef(false);
   const [submitting, setSubmitting] = useState(false);
 
   // After a successful webhook-kind create, we don't close the dialog —
@@ -478,25 +480,44 @@ export function AutopilotDialog(props: AutopilotDialogProps) {
     assigneeId.length > 0 &&
     modeAndTriggerAreCompatible &&
     (triggerKind !== "scm_event" || scmEventConfig.events.length > 0) &&
-    !submitting;
+    (!committed || Boolean(committed.id && committed.workspaceId === wsId)) && !submitting;
 
   const handleSubmit = async () => {
-    if (!canSubmit) return;
+    if (!canSubmit || submitLock.current) return;
+    submitLock.current = true;
     setDeliveryError("");
     setSubmitting(true);
     try {
       if (isCreate) {
-        const autopilot = await createAutopilot.mutateAsync({
-          ...(deliveryTarget ? { delivery_chat_session_id: deliveryTarget } : {}),
-          title: title.trim(),
-          description: description.trim() || undefined,
-          project_id: executionMode === "create_issue" ? projectId : null,
-          assignee_type: assigneeType,
-          assignee_id: assigneeId,
-          execution_mode: executionMode,
-          session_policy: sessionPolicy,
-          workspace_policy: workspacePolicy,
-        });
+        let autopilot;
+        if (committed) {
+          if (!committed.id || committed.workspaceId !== wsId) return;
+          const detail = await api.getAutopilot(committed.id);
+          if (detail.autopilot.id !== committed.id || detail.autopilot.workspace_id !== wsId || detail.triggers.length) {
+            setDeliveryError(t(($) => $.delivery.inspect));
+            return;
+          }
+          autopilot = detail.autopilot;
+          if (deliveryTarget && autopilot.delivery_chat_session_id !== deliveryTarget) {
+            const saved = await updateAutopilot.mutateAsync({ id: committed.id, delivery_chat_session_id: deliveryTarget });
+            if (saved.id !== committed.id || saved.workspace_id !== wsId) {
+              setDeliveryError(t(($) => $.delivery.inspect));
+              return;
+            }
+          }
+        } else {
+          autopilot = await createAutopilot.mutateAsync({
+            ...(deliveryTarget ? { delivery_chat_session_id: deliveryTarget } : {}),
+            title: title.trim(),
+            description: description.trim() || undefined,
+            project_id: executionMode === "create_issue" ? projectId : null,
+            assignee_type: assigneeType,
+            assignee_id: assigneeId,
+            execution_mode: executionMode,
+            session_policy: sessionPolicy,
+            workspace_policy: workspacePolicy,
+          });
+        }
         let triggerOk = true;
         let triggerErrMessage: string | null = null;
         let webhookTrigger: AutopilotTrigger | null = null;
@@ -656,13 +677,18 @@ export function AutopilotDialog(props: AutopilotDialogProps) {
         }
       }
     } catch (err) {
+      if (isCreate && err instanceof UnconfirmedAutopilotCreateError) {
+        setCommitted({ id: err.autopilotId, workspaceId: wsId });
+        return;
+      }
       const message = err instanceof Error && err.message ? err.message
         : isCreate ? t(($) => $.dialog.toast_create_failed) : t(($) => $.dialog.toast_update_failed);
-      if (deliveryTarget !== originalTarget) {
+      if (committed || deliveryTarget !== originalTarget) {
         void queryClient.invalidateQueries(deliveryTargetsOptions(wsId));
         setDeliveryError(err instanceof ApiError && err.status === 403 ? t(($) => $.delivery.denied) : message);
       } else toast.error(message);
     } finally {
+      submitLock.current = false;
       setSubmitting(false);
     }
   };
@@ -755,6 +781,7 @@ export function AutopilotDialog(props: AutopilotDialogProps) {
         {/* Body: two columns (stacks on narrow screens via flex-wrap at container level) */}
         <div
           key={contentKey}
+          inert={Boolean(committed) || submitting}
           className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden"
         >
           {/* Left: Runbook */}
@@ -812,7 +839,7 @@ export function AutopilotDialog(props: AutopilotDialogProps) {
               <h3 className="text-sm font-medium">{t(($) => $.delivery.heading)}</h3>
               <DeliveryTarget value={deliveryTarget} onChange={id => { setDeliveryTarget(id); setDeliveryError(""); }} />
             </section>}
-            {deliveryError && <p role="alert" className="text-sm text-destructive">{deliveryError}</p>}
+            {!committed && deliveryError && <p role="alert" className="text-sm text-destructive">{deliveryError}</p>}
             {executionMode === "create_issue" && (
               <ProjectSection
                 projectId={projectId}
@@ -863,6 +890,10 @@ export function AutopilotDialog(props: AutopilotDialogProps) {
           </aside>
         </div>
 
+        {committed && <div role="alert" className="px-5 py-2 text-sm">
+          {committed.id ? `${t(($) => $.delivery.committed)} · ${committed.id}` : t(($) => $.delivery.inspect)}
+          {deliveryError && <p>{deliveryError}</p>}
+        </div>}
         {/* Footer */}
         <div className="flex items-center justify-between gap-3 px-5 py-3 border-t shrink-0 bg-background">
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground min-w-0">
@@ -878,6 +909,7 @@ export function AutopilotDialog(props: AutopilotDialogProps) {
                 ? isCreate
                   ? t(($) => $.dialog.creating)
                   : t(($) => $.dialog.saving)
+                : committed ? t(($) => $.delivery.resume)
                 : isCreate
                 ? t(($) => $.dialog.create)
                 : t(($) => $.dialog.save)}

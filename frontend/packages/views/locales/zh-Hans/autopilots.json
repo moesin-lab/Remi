@@ -1,5 +1,8 @@
 {
   "delivery": {
+    "committed": "任务已创建，投递配置待核实。可继续配置此任务。",
+    "resume": "核实并继续配置",
+    "inspect": "创建已提交，请先在任务列表核对后再修改。",
     "configuration_error": "无法读取定时任务配置。",
     "denied": "没有访问投递目标的权限。",
     "heading": "汇报投递",

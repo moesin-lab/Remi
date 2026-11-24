@@ -120,6 +120,52 @@ try {
   await dialog.waitFor({ state: "hidden" });
   await page.reload();
   await page.getByRole("link", { name: /Created in browser/ }).getByText(`${second.title} · Feishu · ${second.id}`).waitFor();
+  for (const scenario of ["missing target", "different target", "missing ID"]) {
+    let posts = 0;
+    let committedId = "";
+    const path = "**/api/autopilots";
+    await page.route(path, async route => {
+      if (route.request().method() !== "POST") return route.continue();
+      posts++;
+      assert.equal(route.request().postDataJSON().delivery_chat_session_id, second.id);
+      const response = await route.fetch();
+      assert.equal(response.status(), 201);
+      const body = await response.json();
+      committedId = body.id;
+      if (scenario === "missing ID") delete body.id;
+      if (scenario === "missing target") delete body.delivery_chat_session_id;
+      if (scenario === "different target") {
+        body.delivery_chat_session_id = null;
+        store.updateAutopilot(committedId, { deliveryChatSessionId: null });
+      }
+      await route.fulfill({ response, json: body });
+    });
+    await page.getByRole("button", { name: "New autopilot" }).click();
+    await dialog.getByLabel("Autopilot name").fill(scenario);
+    await dialog.getByRole("button", { name: /Select agent or squad/ }).click();
+    await page.getByRole("button", { name: "Reporter" }).click();
+    await dialog.getByRole("button", { name: /^Run only/ }).click();
+    await choose(second.id);
+    await dialog.getByRole("button", { name: "Create autopilot", exact: true }).click();
+    const resume = dialog.getByRole("button", { name: "Verify and continue" });
+    await resume.waitFor();
+    assert.equal(store.listAutopilotTriggers(committedId).length, 0);
+    if (scenario === "missing ID") {
+      assert(await resume.isDisabled());
+      await dialog.getByText(/Check the autopilot list/).waitFor();
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+    } else {
+      await dialog.getByText(new RegExp(committedId)).waitFor();
+      await resume.click();
+      await dialog.waitFor({ state: "hidden" });
+      assert.equal(store.getAutopilot(committedId)?.deliveryChatSessionId, second.id);
+      assert.equal(store.listAutopilotTriggers(committedId).length, 1);
+    }
+    assert.equal(posts, 1);
+    assert.deepEqual(store.listAutopilots(workspace.id).filter(item => item.title === scenario).map(item => item.id), [committedId]);
+    await page.unroute(path);
+  }
+  console.log("PASS accepted create recovery, original ID and single trigger, missing ID blocks resubmission");
   console.log("PASS list, create, bind, change, reload, rejected archived target, retained draft, mode guard and explicit clear");
 } finally {
   await browser?.close();

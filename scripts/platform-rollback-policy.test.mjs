@@ -44,7 +44,15 @@ function mixedVersionEvidence(drift = false) {
     manifestUrl: `${origin}/releases/download/v1.1.9/platform-release.json`,
     sourceUrl: `${origin}/releases/download/v1.1.9/platform-systemd-v1.1.9.tar.gz`,
     apiImage: `ghcr.io/moesin-lab/remi-api@sha256:${'a'.repeat(64)}` };
-  const evidence = { format: 1, targetRef: target.ref, dataSchema: target.dataSchema,
+  const runId = '4cac804b-47c8-4b32-8e78-91a425bc1b8b', tree = '9'.repeat(40);
+  const executionIdentity = { runId, ref: target.ref, tree };
+  const evidence = { format: 2, targetRef: target.ref, dataSchema: target.dataSchema,
+    candidateExecution: { format: 1, mode: 'private-fixed-commit', runId,
+      expectedRef: target.ref, actualRef: target.ref, expectedTree: tree, finalTree: tree,
+      lockfileSha256: '8'.repeat(64), runtime: { node: 'v22.23.2', bun: '1.3.14' },
+      cleanup: ['previous-input', 'candidate-checkout', 'staged-result', 'run-root']
+        .map(name => ({ name, status: 'passed' })) },
+    candidatePhases: { expand: { ...executionIdentity }, verify: { ...executionIdentity } },
     previousRelease: previous,
     previousIdentity: { format: 1, mode: drift ? 'published-archive' : 'tag',
       publishedRef: previous.ref, actualPreviousRef: previous.ref,
@@ -70,6 +78,67 @@ function mixedVersionEvidence(drift = false) {
   sealManifest(evidence);
   return evidence;
 }
+const candidateExecutionMutations = [
+  ['old format1 with otherwise complete evidence', evidence => { evidence.format = 1; }],
+  ...['candidateExecution', 'candidatePhases'].flatMap(key => [
+    [`missing ${key}`, evidence => { delete evidence[key]; }],
+    [`null ${key}`, evidence => { evidence[key] = null; }],
+  ]),
+  ...Object.keys(mixedVersionEvidence().candidateExecution).map(key =>
+    [`missing execution ${key}`, evidence => { delete evidence.candidateExecution[key]; }]),
+  ...Object.entries({ format: 2, mode: 'shared-checkout', expectedRef: '1'.repeat(40),
+    actualRef: '2'.repeat(40), expectedTree: '3'.repeat(40), finalTree: '4'.repeat(40),
+    lockfileSha256: 'invalid', runtime: null }).map(([key, value]) =>
+    [`wrong execution ${key}`, evidence => { evidence.candidateExecution[key] = value; }]),
+  ...[undefined, null, 123, '', 'not-a-uuid', '00000000-0000-0000-0000-000000000000',
+    '4cac804b-47c8-0b32-8e78-91a425bc1b8b', '4cac804b-47c8-4b32-7e78-91a425bc1b8b',
+    ' 4cac804b-47c8-4b32-8e78-91a425bc1b8b'].map(runId =>
+    [`invalid UUID ${JSON.stringify(runId)}`, evidence => {
+      evidence.candidateExecution.runId = evidence.candidatePhases.expand.runId = evidence.candidatePhases.verify.runId = runId;
+    }]),
+  ...['expand', 'verify'].flatMap(name => [
+    [`missing candidate phase ${name}`, evidence => { delete evidence.candidatePhases[name]; }],
+    [`null candidate phase ${name}`, evidence => { evidence.candidatePhases[name] = null; }],
+    ...['runId', 'ref', 'tree'].flatMap(key => [
+      [`missing ${name} ${key}`, evidence => { delete evidence.candidatePhases[name][key]; }],
+      [`wrong ${name} ${key}`, evidence => {
+        evidence.candidatePhases[name][key] = key === 'runId'
+          ? 'b2d4c074-19f5-4bc0-a3ab-f1ad20ad189f' : '5'.repeat(40);
+      }],
+    ]),
+  ]),
+  ['same wrong ref in execution and phases', evidence => {
+    evidence.candidateExecution.expectedRef = evidence.candidateExecution.actualRef =
+      evidence.candidatePhases.expand.ref = evidence.candidatePhases.verify.ref = '6'.repeat(40);
+  }],
+  ...['invalid', '7'.repeat(39), 'G'.repeat(40), null].map(tree =>
+    [`invalid coherent tree ${JSON.stringify(tree)}`, evidence => {
+      evidence.candidateExecution.expectedTree = evidence.candidateExecution.finalTree =
+        evidence.candidatePhases.expand.tree = evidence.candidatePhases.verify.tree = tree;
+    }]),
+  ...['', '8'.repeat(63), '8'.repeat(65), 'G'.repeat(64), null, 123].map(digest =>
+    [`invalid lock digest ${JSON.stringify(digest)}`, evidence => { evidence.candidateExecution.lockfileSha256 = digest; }]),
+  ...['node', 'bun'].flatMap(key => [
+    [`missing runtime ${key}`, evidence => { delete evidence.candidateExecution.runtime[key]; }],
+    ...['', ' ', null, 123].map(value =>
+      [`invalid runtime ${key} ${JSON.stringify(value)}`, evidence => { evidence.candidateExecution.runtime[key] = value; }]),
+  ]),
+  ['wrong Bun version', evidence => { evidence.candidateExecution.runtime.bun = '1.3.13'; }],
+  ['Bun version with prefix', evidence => { evidence.candidateExecution.runtime.bun = 'v1.3.14'; }],
+  ['empty outer cleanup', evidence => { evidence.candidateExecution.cleanup = []; }],
+  ['missing outer cleanup entry', evidence => { evidence.candidateExecution.cleanup.pop(); }],
+  ['duplicate outer cleanup entry', evidence => { evidence.candidateExecution.cleanup.push(evidence.candidateExecution.cleanup[0]); }],
+  ['reordered outer cleanup', evidence => { evidence.candidateExecution.cleanup.reverse(); }],
+  ...[0, 1, 2, 3].flatMap(index => [
+    [`missing outer cleanup ${index}`, evidence => { evidence.candidateExecution.cleanup.splice(index, 1); }],
+    [`wrong outer cleanup name ${index}`, evidence => { evidence.candidateExecution.cleanup[index].name = 'temporary-home'; }],
+    ...['failed', 'running', 'skipped', undefined].map(status =>
+      [`outer cleanup ${index} status ${status}`, evidence => { evidence.candidateExecution.cleanup[index].status = status; }]),
+    ...['cleanup failed', '', null].map(error =>
+      [`outer cleanup ${index} error ${JSON.stringify(error)}`, evidence => { evidence.candidateExecution.cleanup[index].error = error; }]),
+  ]),
+];
+
 function rejectMutations(mutations, drift = false) {
   for (const mutate of mutations) {
     const evidence = mixedVersionEvidence(drift);
@@ -85,6 +154,13 @@ test('accepts complete tag evidence and actual published source with explicitly 
     assert.deepEqual(rollbackPolicy(target, undefined, evidence), [review.previousDataSchema]);
     delete evidence.phases[0].signalCode; // Bun may omit an undefined signal on success.
     assert.deepEqual(rollbackPolicy(target, undefined, evidence), [review.previousDataSchema]);
+  }
+});
+test('requires complete fixed-commit execution, matching candidate phases and successful outer cleanup', async t => {
+  for (const [name, mutate] of candidateExecutionMutations) {
+    await t.test(name, () => {
+      for (const drift of [false, true]) rejectMutations([mutate], drift);
+    });
   }
 });
 test('rejects old incomplete evidence, missing mandatory fields and stale candidate bindings', () => {
@@ -191,14 +267,15 @@ const replayedProbeMutations = [
 test('rejects replayed reports and every within-phase or cross-phase task ID reuse', () => {
   for (const drift of [false, true]) rejectMutations(replayedProbeMutations, drift);
 });
-test('packaging rejects replayed or contradictory reports before invoking Docker', { skip: process.platform !== 'linux' }, async () => {
+test('packaging rejects invalid fixed-commit evidence and replayed reports before invoking Docker', { skip: process.platform !== 'linux' }, async t => {
   const temporary = await mkdtemp(join(tmpdir(), 'remi-rollback-policy-package-'));
   try {
     const bin = join(temporary, 'bin'), dockerMarker = join(temporary, 'docker-called');
     const manifestPath = join(temporary, 'platform-release.json'), evidencePath = join(temporary, 'rollback-evidence.json');
     await mkdir(bin);
     await writeFile(join(bin, 'docker'), `#!${process.execPath}\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(${JSON.stringify(dockerMarker)}, 'called');\nprocess.exit(99);\n`, { mode: 0o755 });
-    const release = { ...target, apiImage: `ghcr.io/moesin-lab/remi-api@sha256:${'a'.repeat(64)}`,
+    const release = { ...target, rollbackReview: review,
+      apiImage: `ghcr.io/moesin-lab/remi-api@sha256:${'a'.repeat(64)}`,
       webImage: `ghcr.io/moesin-lab/remi-web@sha256:${'b'.repeat(64)}` };
     const run = async evidence => {
       await rm(dockerMarker, { force: true });
@@ -210,17 +287,24 @@ test('packaging rejects replayed or contradictory reports before invoking Docker
       });
     };
     // A valid fixture reaches the deliberate Docker cutoff; no real Docker runs.
-    const control = await run(mixedVersionEvidence(true));
-    assert.notEqual(control.status, 0);
-    assert.match(control.stderr, /docker pull failed/);
-    assert.equal(await readFile(dockerMarker, 'utf8'), 'called');
-    for (const mutate of replayedProbeMutations) {
-      const evidence = mixedVersionEvidence(true);
-      mutate(evidence);
-      const result = await run(evidence);
-      assert.notEqual(result.status, 0);
-      assert.match(result.stderr, /Invalid mixed-version rollback evidence/);
-      await assert.rejects(readFile(dockerMarker), { code: 'ENOENT' });
+    for (const drift of [false, true]) {
+      const control = await run(mixedVersionEvidence(drift));
+      assert.notEqual(control.status, 0);
+      assert.match(control.stderr, /docker pull failed/);
+      assert.equal(await readFile(dockerMarker, 'utf8'), 'called');
+    }
+    const mutations = [...candidateExecutionMutations,
+      ...replayedProbeMutations.map((mutate, index) => [`replayed core report ${index}`, mutate])];
+    for (const [name, mutate] of mutations) {
+      await t.test(name, async () => {
+        const evidence = mixedVersionEvidence(true);
+        mutate(evidence);
+        const result = await run(evidence);
+        assert.notEqual(result.status, 0);
+        assert.match(result.stderr, /Invalid mixed-version rollback evidence/);
+        await assert.rejects(readFile(dockerMarker), { code: 'ENOENT' });
+        assert.equal(await readFile(manifestPath, 'utf8'), JSON.stringify(release));
+      });
     }
   } finally { await rm(temporary, { recursive: true, force: true }); }
 });

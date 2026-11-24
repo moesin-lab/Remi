@@ -131,34 +131,51 @@ API 不可用、签名失败、来源缺失或源码不符均阻断，不回退�
 成功证据包含候选实际 checkout SHA（PR CI 中为 merge SHA）、manifest/归档 digest、源码 tree、
 发布/实际运行 ref、observed tag、来源验证结果及每阶段 stdout/stderr 路径。
 
-准备流程清除其旧成功证据；checker 必须从自身所在的候选仓库根运行，候选 SHA、指纹与实际迁移执行根
-必须一致，内部 expand/read 子进程也检查该根。主进程冻结最初 SHA，并通过环境将该 SHA 和本轮已独占
-创建的诊断、日志路径传给候选子进程。身份异步验证后、各阶段前后、候选模块加载与迁移执行前后以及
-清理后的成功证据发布前后，均复核 HEAD 和源码状态；同目录内 dirty 源码、同 level 的新提交或额外
-untracked 源码都会阻断。根目录输出仅豁免本轮已独占拥有的产物，尚未创建的 evidence 不在豁免内；
-现有 `ci-schema/` 生成输入约定不变，tracked 变化始终拒绝。该复核检测各边界观察到的变化，不锁定
-其他 writer；运行期间应保持候选 checkout 专用于本次检查。任何写入或资源创建前，checker 验证候选干净且 evidence、
-`rollback-diagnostics.json`、`rollback-logs/` 三个目标均不存在、互不重叠，并处于候选目录内、`.git` 外。
-目标不能与跟踪文件（含父子目录）、前版源码或 manifest 重叠，路径组件不能经过符号链接。
-预检失败只向 stderr 报错，不写诊断、不删除预存 tracked/untracked 内容；包括旧成功 evidence 在内的
-已有产物均拒绝覆盖，重跑须由调用方保留原记录并选择全新的输出路径。成功 CI 是消费证据的前提，不能
-从失败运行遗留的文件推断成功。通过预检后，checker 独占创建诊断和日志；本轮失败不产生成功 evidence，
-只清理本轮已拥有的资源。`preparation-diagnostics.json`、`rollback-diagnostics.json` 与 `rollback-logs/`
-保存失败进度和每项清理结果，诊断中不产生 `rollbackSafeFrom`。探针文件、测试库、连接及临时 HOME
-独立清理，清理失败同样阻断；全部成功后才独占创建 `rollback-evidence.json`。
-应用下述 workflow 补丁后，CI 以 `always()` 上传明确列出的证据和日志，不上传归档、源码或依赖。有 contract 的 schema 不生成
-自动回退声明。核心探针不能替代所有产品行为的兼容验证。
+生产入口是 [run-schema-rollback.mjs](../../scripts/run-schema-rollback.mjs)。调用方明确提供完整候选 SHA，
+launcher 在唯一私有目录创建独立 Git clone；共享 checkout 仅提供该提交的 Git 对象，不读取其可变源码、
+依赖或 `ci-schema`，不修改共享分支、refs 或 index。launcher 自身也应从该 SHA 的 Git 对象导出到独立
+bootstrap 目录后执行；启动 Node 前清除 `NODE_OPTIONS`、`NODE_PATH` 和 Git root/index/object/config 覆盖。
+私有 clone 的 origin 指向官方 GitHub；候选完整 workspace 与实际发布前版各自
+用 Bun 1.3.14、公共 registry、各自 lockfile 和 `--frozen-lockfile --ignore-scripts` 独立安装，不复用
+共享 `node_modules` 或外链源码。运行 HOME、缓存、前版输入与控制文件属于本轮私有目录。
+
+[候选验证器](../../scripts/schema-rollback-candidate.mjs) 绑定固定 SHA 和 Git tree，逐个重验实际源码
+内容、文件类型、可执行位和符号链接，不依赖 index 或 stat cache。完整 inventory 包含 ignored/untracked
+输入，只排除固定 workspace manifests 推导出的明确安装目录，并检查依赖链接不逃回共享源码。
+安装前后、候选模块加载与执行边界及最终发布前均复核。主 checker 与 expand/read 子入口必须从同一
+真实私有根加载，接收相同 run-context 和原始控制文件摘要，报告同一 runId/ref/tree；没有上下文的直接
+调用拒绝，不回退到共享执行。该模型隔离正常并发开发，依赖私有目录独占及可信工具链/锁定依赖，
+不构成对同 UID/root 恶意瞬时写入的强制安全边界。
+
+持久产物目录必须在共享输入和临时运行目录之外，且是不存在的新目录。路径不得经过 symlink 或与源码、
+前版、控制文件重叠；预检失败仅 stderr，不删除或覆盖任何调用方内容。通过预检后只处理本轮独占创建的
+资源。checker 先写 `rollback-staged-result.json`，保留四阶段 stdout/stderr、失败诊断和旧探针/测试库/
+管理连接/临时 HOME 四项独立清理结果；该 staging 文件不是可发布证据，也不进入上传白名单。
+launcher 最终复核源码和 staged 身份，将必要元数据留存后，依序独立清理 `previous-input`、
+`candidate-checkout`、`staged-result`、`run-root`。全部内外清理通过后，才以 `wx` 独占创建
+`rollback-evidence.json`。任一阶段、复核、清理或文件竞争失败均不产生本轮成功证据；另一 writer 创建的
+内容保留。`launcher-diagnostics.json`、`preparation-diagnostics.json`、`rollback-diagnostics.json`
+和日志保存本轮失败及清理结果，诊断不产生 `rollbackSafeFrom`。重跑选择全新产物目录，不从失败 CI 或
+旧文件推断成功。应用下述 workflow 补丁后，CI 以 `always()` 上传明确列出的证据/元数据/日志，不上传
+staging、归档、源码、HOME 或依赖。有 contract 的 schema 不生成自动回退声明。核心探针不能替代所有产品行为的兼容验证。
+
+固定 bootstrap 的可运行导出步骤见下述 workflow 补丁；导出后从仓库外调用（候选 SHA 必须是实际 checkout
+SHA，PR CI 为 merge SHA），不能把共享源码中的 checker 当作兼容门禁入口：
 
 ```bash
-bun scripts/prepare-schema-rollback.ts ci-schema
-(cd ci-schema/previous && bun install --frozen-lockfile --ignore-scripts --registry https://registry.npmjs.org)
-MULTIREMI_TEST_POSTGRES_URL=postgres://… bun scripts/check-schema-rollback.ts ci-schema/previous ci-schema/previous-release.json ci-schema/rollback-evidence.json
-PLATFORM_SCHEMA_ROLLBACK_EVIDENCE=ci-schema/rollback-evidence.json node scripts/package-platform-application.mjs platform-release.json
+MULTIREMI_TEST_POSTGRES_URL=postgres://… node /path/to/exported/run-schema-rollback.mjs \
+  --source-repo "$PWD" --candidate-ref "$candidate_sha" --artifacts "$fresh_artifact_directory"
+PLATFORM_SCHEMA_ROLLBACK_EVIDENCE="$fresh_artifact_directory/rollback-evidence.json" \
+  node scripts/package-platform-application.mjs platform-release.json
 ```
 
 发布负责人只能使用同一目标 SHA 成功可信 main CI 的证据。[打包消费端](../../scripts/platform-rollback-policy.mjs)
-强制验证完整 `format: 1` 契约，旧版缺字段的 artifact 会被拒绝，不能靠传入人工审核绕过错误的自动证据：
+强制验证完整 `format: 2` 契约，旧 format1 或缺字段 artifact 均拒绝，不能靠人工审核挽救错误的自动证据：
 
+- `candidateExecution` 必须是 `private-fixed-commit`，携带同一 UUID runId、`expectedRef = actualRef = targetRef`、
+  一致的 expectedTree/finalTree、lockfile SHA256、Node 版本和固定 Bun 1.3.14。`candidatePhases` 中 expand/
+  verify 两报告的 runId/ref/tree 必须逐项相同；外层四项 cleanup 必须完整有序且全部通过，不接受 staging。
+  这与 checker 原四项资源清理分列，两组都不能缺失或失败。
 - `previousManifest` 保留下载 manifest 的原始 UTF-8 文本；重算 SHA256 必须等于
   `previousIdentity.manifestSha256`，解析内容必须等于 `previousRelease`。发布 URL、镜像和版本必须属于
   固定仓库；`publishedRef = actualPreviousRef = previousRelease.ref`，归档摘要必须等于其 `sourceSha256`。
@@ -181,13 +198,15 @@ workflow 不自动下载此 artifact，须显式提供 `PLATFORM_SCHEMA_ROLLBACK
 
 [release-build-check](../../.github/workflows/release-build-check.yml) 的 `schema-compatibility` job
 执行 PostgreSQL 守卫、历史回归和上一发布版混跑，并作为总 build 的依赖。
-[MUL-4 workflow 补丁](../deploy/MUL-4-release-identity-workflow.patch) 增加身份回归、checker 的 `GH_TOKEN`
-及 `always()` 失败证据上传。当前凭据缺少 `workflow` scope，源码 PR 无法提交 workflow 本体；
+[MUL-4 workflow 补丁](../deploy/MUL-4-release-identity-workflow.patch) 增加身份/私有执行回归，从明确 SHA 的 Git
+对象导出固定 launcher，调用其私有安装/prepare/check 全链，传入 `GH_TOKEN` 并以 `always()` 上传外部产物
+白名单。旧共享 `ci-schema` prepare/安装/cache 接线移除，候选与前版安装由 launcher 管理；upload 路径明确
+使用本轮 runner.temp 产物目录。当前凭据缺少 `workflow` scope，源码 PR 无法提交 workflow 本体；
 须由具备权限的 owner 在独立 PR 应用补丁并核对最终候选的实际 CI，未应用不能宣称门禁已恢复。
 可用 `git apply --check docs/deploy/MUL-4-release-identity-workflow.patch` 检查补丁。
 归档校验回归使用 `python3 -I scripts/verify-release-source.test.py`；身份来源回归使用
-`bun test tests/unit/scripts/schema-rollback-identity.test.ts`，失败编排回归使用
-`node --experimental-strip-types --test scripts/check-schema-rollback.test.ts`；消费契约回归使用
+`bun test tests/unit/scripts/schema-rollback-identity.test.ts`，私有 clone/源码 inventory 与失败编排回归使用
+`node --experimental-strip-types --test scripts/run-schema-rollback.test.mjs scripts/schema-rollback-candidate.test.mjs scripts/check-schema-rollback.test.ts`；消费契约回归使用
 `node --test scripts/platform-rollback-policy.test.mjs`，包含合法 tag 漂移和缺失/篡改/失败 artifact 的负向用例。
 这些回归不替代真实发布前版的 PostgreSQL 混跑。
 

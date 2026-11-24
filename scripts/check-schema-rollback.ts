@@ -1,34 +1,16 @@
-/** Real previous release x candidate schema. Evidence is published only after
- * old startup/writes, candidate expand, old startup/writes and cleanup succeed.
- * Usage: bun scripts/check-schema-rollback.ts <previous source> <manifest> <output> */
+/** Real previous release x private candidate schema. The launcher publishes
+ * final evidence after this staged result and all outer cleanup succeed.
+ * Internal: SCHEMA_ROLLBACK_RUN_CONTEXT=... bun scripts/check-schema-rollback.ts <previous source> <manifest> <staging> */
 import assert from 'node:assert/strict';
 import { constants } from 'node:fs';
 import { resolve, join, dirname, relative, sep } from 'node:path';
 import { copyFile, readFile, writeFile, rm, mkdir, mkdtemp, lstat, realpath, open } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { validateCoreProbeReports } from './platform-rollback-policy.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
-
-/** Only generated ci-schema inputs and this run's exclusively owned artifacts
- * are exempt. Tracked changes and other untracked source still fail. */
-export function assertCleanCandidate(root: string, ownedPaths: string[] = []) {
-  execFileSync('git', ['diff', '--quiet', 'HEAD'], { cwd: root });
-  const untracked = execFileSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8' })
-    .split('\0').filter(path => path && !path.startsWith('ci-schema/') &&
-      !ownedPaths.some(owned => contains(owned, resolve(root, path))));
-  assert.deepEqual(untracked, [], `Candidate has untracked files: ${untracked.join(', ')}`);
-}
-
-function assertCandidateIdentity(root: string, expectedRef: string, ownedPaths: string[]) {
-  assert.match(expectedRef, /^[a-f0-9]{40}$/, 'Expected candidate SHA is required');
-  assert.equal(git(root, 'rev-parse', 'HEAD'), expectedRef, 'Candidate HEAD changed during rollback verification');
-  assertCleanCandidate(root, ownedPaths);
-  assert.equal(git(root, 'rev-parse', 'HEAD'), expectedRef, 'Candidate HEAD changed during source verification');
-}
 
 async function assertExecutionRoot() {
   const root = await realpath(process.cwd());
@@ -45,12 +27,10 @@ const overlaps = (a: string, b: string) => contains(a, b) || contains(b, a);
 /** Preflight is read-only. Existing files, including stale artifacts, belong to
  * the caller; a run only owns outputs that it creates exclusively afterward. */
 async function assertArtifactPaths(root: string, paths: string[], inputs: string[]) {
-  const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' })
-    .split('\0').filter(Boolean).map(path => resolve(root, path));
+  assert.equal(root, await realpath(root), 'Artifact root must be its real path');
   for (const path of paths) {
-    assert(contains(root, path) && path !== root && !contains(join(root, '.git'), path),
-      `Artifact must be inside the candidate, outside .git: ${path}`);
-    assert(!tracked.some(file => overlaps(path, file)), `Artifact overlaps tracked candidate content: ${path}`);
+    assert(contains(root, path) && path !== root,
+      `Artifact must be inside the owned artifact root: ${path}`);
     assert(!inputs.some(input => overlaps(path, input)), `Artifact overlaps previous source or manifest: ${path}`);
     for (const other of paths) {
       assert(path === other || !overlaps(path, other), `Artifact paths overlap: ${path}`);
@@ -85,19 +65,24 @@ type Phase = {
 
 export async function checkSchemaRollback(args: string[]) {
   const [previousRootArg, manifestPathArg, outputArg] = args;
-  if (!outputArg) throw new Error('Usage: MULTIREMI_TEST_POSTGRES_URL=... bun scripts/check-schema-rollback.ts <previous source> <manifest> <evidence.json>');
+  if (!outputArg) throw new Error('Internal usage: SCHEMA_ROLLBACK_RUN_CONTEXT=... SCHEMA_ROLLBACK_CONTEXT_SHA256=... MULTIREMI_TEST_POSTGRES_URL=... bun scripts/check-schema-rollback.ts <previous source> <manifest> <rollback-staged-result.json>');
   // Reject checkout/path mismatches before any output or resource mutation.
   const candidateRoot = await assertExecutionRoot(), output = resolve(outputArg);
+  const contextPath = process.env.SCHEMA_ROLLBACK_RUN_CONTEXT;
+  assert(contextPath, 'SCHEMA_ROLLBACK_RUN_CONTEXT is required; use the private candidate launcher');
+  const { loadCandidateContext, verifyCandidate } = await import('./schema-rollback-candidate.mjs');
+  const context = await loadCandidateContext(contextPath, candidateRoot);
+  const checkCandidate = () => verifyCandidate(context);
+  await checkCandidate();
   assert(previousRootArg && manifestPathArg && process.env.MULTIREMI_TEST_POSTGRES_URL, 'Previous source, published manifest and isolated PostgreSQL URL are required');
   const previousRoot = await realpath(resolve(previousRootArg)), manifestPath = await realpath(resolve(manifestPathArg));
-  assert.notEqual(previousRoot, candidateRoot, 'Previous source must be isolated from the candidate');
-  const artifactRoot = dirname(output), diagnosticsPath = join(artifactRoot, 'rollback-diagnostics.json');
+  assert.equal(previousRoot, join(context.runRoot, 'previous-input', 'previous'), 'Previous source must belong to this private run');
+  assert.equal(manifestPath, join(context.runRoot, 'previous-input', 'previous-release.json'), 'Previous manifest must belong to this private run');
+  const artifactRoot = context.artifactRoot, diagnosticsPath = join(artifactRoot, 'rollback-diagnostics.json');
   const logs = join(artifactRoot, 'rollback-logs');
-  await assertArtifactPaths(candidateRoot, [output, diagnosticsPath, logs], [previousRoot, manifestPath]);
-  const candidateRef = git(candidateRoot, 'rev-parse', 'HEAD');
-  const ownedPaths: string[] = [];
-  const checkCandidate = () => assertCandidateIdentity(candidateRoot, candidateRef, ownedPaths);
-  checkCandidate();
+  assert.equal(output, join(artifactRoot, 'rollback-staged-result.json'), 'Only the private launcher staged output is allowed');
+  await assertArtifactPaths(artifactRoot, [output, diagnosticsPath, logs], [candidateRoot, previousRoot, manifestPath, contextPath]);
+  const candidateRef = context.expectedRef;
   const phases: Phase[] = [];
   const cleanups: Cleanup[] = [];
   const diagnostics: Record<string, unknown> = { format: 1, targetRef: candidateRef, status: 'running', phases };
@@ -107,7 +92,6 @@ export async function checkSchemaRollback(args: string[]) {
   await mkdir(artifactRoot, { recursive: true });
   // Exclusive creation establishes ownership; never truncate a pre-existing file.
   const diagnosticFile = await open(diagnosticsPath, 'wx');
-  ownedPaths.push(diagnosticsPath);
   const saveDiagnostics = async () => {
     await diagnosticFile.truncate(0);
     await diagnosticFile.write(JSON.stringify(diagnostics,
@@ -115,24 +99,23 @@ export async function checkSchemaRollback(args: string[]) {
   };
   try {
     await mkdir(logs);
-    ownedPaths.push(logs);
     await saveDiagnostics();
-    checkCandidate();
+    await checkCandidate();
     const { verifyPreparedRelease } = await import('./schema-rollback-identity.ts');
-    checkCandidate();
+    await checkCandidate();
     const identity = await verifyPreparedRelease(previousRoot, manifestPath);
-    checkCandidate();
+    await checkCandidate();
     diagnostics.previousIdentity = identity;
     const previousManifest = await readFile(manifestPath, 'utf8');
     const previous = JSON.parse(previousManifest);
-    checkCandidate();
+    await checkCandidate();
     const { schemaLevelFingerprint } = await import('../packages/platform-updater/src/schema-fingerprint.mjs');
-    checkCandidate();
+    await checkCandidate();
     const dataSchema = await schemaLevelFingerprint(candidateRoot);
-    checkCandidate();
+    await checkCandidate();
     const url = new URL(process.env.MULTIREMI_TEST_POSTGRES_URL!);
     assert(['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname), 'Requires an isolated local test PostgreSQL service');
-    const temporary = await mkdtemp(join(tmpdir(), 'remi-schema-rollback-'));
+    const temporary = await mkdtemp(join(context.runRoot, 'probe-home-'));
     cleanups.push({ name: 'temporary-home', run: () => rm(temporary, { recursive: true, force: true }) });
     const admin = new Bun.SQL(url.toString(), { max: 1 });
     cleanups.unshift({ name: 'admin-connection', run: () => admin.close() });
@@ -152,12 +135,13 @@ export async function checkSchemaRollback(args: string[]) {
       await saveDiagnostics();
       let stdout = '', stderr = '';
       try {
-        checkCandidate();
+        await checkCandidate();
         const result = Bun.spawnSync(command, { cwd, env: { ...env, MUL173_EXPECT_TASK: expectedTask,
-          SCHEMA_ROLLBACK_EXPECTED_REF: candidateRef, SCHEMA_ROLLBACK_OWNED_ARTIFACTS: JSON.stringify(ownedPaths) }, stdout: 'pipe', stderr: 'pipe' });
+          SCHEMA_ROLLBACK_RUN_CONTEXT: contextPath,
+          SCHEMA_ROLLBACK_CONTEXT_SHA256: process.env.SCHEMA_ROLLBACK_CONTEXT_SHA256 }, stdout: 'pipe', stderr: 'pipe' });
         stdout = result.stdout.toString(); stderr = result.stderr.toString();
         phase.exitCode = result.exitCode; phase.signalCode = result.signalCode;
-        checkCandidate();
+        await checkCandidate();
         assert.equal(result.exitCode, 0, `${name} failed (${result.exitCode}); see ${phase.stderr}`);
         assert(!result.signalCode, `${name} terminated by signal ${result.signalCode}`);
         const report = JSON.parse(stdout.trim().split('\n').at(-1)!);
@@ -176,14 +160,22 @@ export async function checkSchemaRollback(args: string[]) {
     const seeded = await runPhase('previous-before-expand', [process.execPath, probe], previousRoot);
     validateCoreProbeReports([seeded]);
     const expanded = await runPhase('candidate-expand', [process.execPath, script, '--candidate-expand'], candidateRoot);
+    const expectedExecution = { runId: context.runId, ref: candidateRef, tree: context.expectedTree };
+    assert.deepEqual(expanded.candidateExecution, expectedExecution, 'Expand candidate execution context differs');
     diagnostics.schema = expanded.schema;
     assert.equal(expanded.schema.contractLevel, 0, 'Automatic rollback attestation cannot cross contract');
     const after = await runPhase('previous-after-expand', [process.execPath, probe], previousRoot, seeded.task);
     validateCoreProbeReports([seeded, after]);
     const verified = await runPhase('verify-schema-levels', [process.execPath, script, '--read-schema'], candidateRoot);
+    assert.deepEqual(verified.candidateExecution, expectedExecution, 'Schema verification candidate execution context differs');
     diagnostics.schemaVerification = verified.schema;
     assert.deepEqual(verified.schema, expanded.schema, 'Old startup must retain schema levels');
-    evidence = { format: 1, targetRef: diagnostics.targetRef, dataSchema, previousManifest, previousRelease: previous,
+    await checkCandidate();
+    evidence = { format: 2, targetRef: candidateRef, dataSchema, previousManifest, previousRelease: previous,
+      candidateExecution: { format: 1, mode: 'private-fixed-commit', runId: context.runId,
+        expectedRef: candidateRef, actualRef: candidateRef, expectedTree: context.expectedTree, finalTree: context.expectedTree,
+        lockfileSha256: context.lockfileSha256, runtime: context.runtime },
+      candidatePhases: { expand: expanded.candidateExecution, verify: verified.candidateExecution },
       previousIdentity: identity, schema: expanded.schema, schemaVerification: verified.schema,
       probes: { before: seeded, after }, phases,
       checks: ['previous-startup', 'previous-create-start-complete-cancel', 'candidate-expand-startup', 'previous-startup-after-expand', 'previous-create-start-complete-cancel-after-expand'],
@@ -205,12 +197,11 @@ export async function checkSchemaRollback(args: string[]) {
   let outputFile: Awaited<ReturnType<typeof open>> | undefined;
   try {
     assert(evidence, 'Missing complete rollback evidence');
-    checkCandidate();
+    await checkCandidate();
     outputFile = await open(output, 'wx');
-    ownedPaths.push(output);
-    checkCandidate();
+    await checkCandidate();
     await outputFile.writeFile(JSON.stringify({ ...evidence, cleanup: cleanupResults }, null, 2) + '\n');
-    checkCandidate();
+    await checkCandidate();
     console.log(JSON.stringify({ pass: true, targetRef: evidence.targetRef, previousIdentity: evidence.previousIdentity, schema: evidence.schema }));
   } catch (error) {
     if (outputFile) await rm(output, { force: true });
@@ -225,35 +216,31 @@ export async function checkSchemaRollback(args: string[]) {
 
 async function candidatePhase(expand: boolean) {
   const root = await assertExecutionRoot();
-  const expectedRef = process.env.SCHEMA_ROLLBACK_EXPECTED_REF ?? '';
-  assert.match(expectedRef, /^[a-f0-9]{40}$/, 'Expected candidate SHA is required');
-  const ownedPaths = JSON.parse(process.env.SCHEMA_ROLLBACK_OWNED_ARTIFACTS ?? '[]');
-  assert(Array.isArray(ownedPaths) && ownedPaths.length === 2 &&
-    ownedPaths.every(path => typeof path === 'string' && resolve(path) === path &&
-      contains(root, path) && path !== root && !contains(join(root, '.git'), path)) &&
-    ownedPaths[0] === join(dirname(ownedPaths[1]), 'rollback-diagnostics.json') &&
-    ownedPaths[1] === join(dirname(ownedPaths[0]), 'rollback-logs'), 'Expected owned rollback artifacts');
-  const checkCandidate = () => assertCandidateIdentity(root, expectedRef, ownedPaths);
-  checkCandidate();
+  const contextPath = process.env.SCHEMA_ROLLBACK_RUN_CONTEXT;
+  assert(contextPath, 'SCHEMA_ROLLBACK_RUN_CONTEXT is required; use the private candidate launcher');
+  const { loadCandidateContext, verifyCandidate } = await import('./schema-rollback-candidate.mjs');
+  const context = await loadCandidateContext(contextPath, root);
+  const checkCandidate = () => verifyCandidate(context);
+  await checkCandidate();
   const { PostgresSyncDatabase } = await import('../packages/server/src/store/db/postgres.ts');
-  checkCandidate();
+  await checkCandidate();
   const { readSchemaLevels } = await import('../packages/server/src/store/schema-levels.ts');
-  checkCandidate();
+  await checkCandidate();
   const db = new PostgresSyncDatabase(process.env.MULTIREMI_DATABASE_URL!);
   try {
-    checkCandidate();
+    await checkCandidate();
     if (expand) {
       const { runMigrations, runStartupMigrations } = await import('../packages/server/src/store/migrations.ts');
-      checkCandidate();
+      await checkCandidate();
       runMigrations(db, { historicalMaintenance: true }); // Offline initial protocol boundary.
-      checkCandidate();
+      await checkCandidate();
       runStartupMigrations(db); // Candidate's real startup path.
-      checkCandidate();
+      await checkCandidate();
     }
     const schema = readSchemaLevels(db);
-    checkCandidate();
+    await checkCandidate();
     assert.equal(schema.contractLevel, 0, 'Automatic rollback attestation cannot cross contract');
-    console.log(JSON.stringify({ pass: true, schema }));
+    console.log(JSON.stringify({ pass: true, schema, candidateExecution: await checkCandidate() }));
   } finally { db.close(); }
 }
 

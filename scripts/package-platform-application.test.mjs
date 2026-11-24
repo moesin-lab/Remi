@@ -14,12 +14,13 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 for (const reviewed of [false, true]) test(`packages computed schema in feed and both archives (review=${reviewed})`, { skip: process.platform !== 'linux' }, async () => {
   const temporary = await mkdtemp(join(tmpdir(), 'remi-package-test-'));
   try {
-    const bin = join(temporary, 'bin');
+    const bin = join(temporary, 'bin'), dockerMarker = join(temporary, 'docker-called');
     await mkdir(bin);
     const docker = `#!${process.execPath}
 import { mkdirSync, copyFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 const args = process.argv.slice(2), command = args[0];
+writeFileSync(${JSON.stringify(dockerMarker)}, 'called');
 if (command === 'create') console.log(args.includes('api@sha256:' + 'a'.repeat(64)) ? 'api' : 'web');
 else if (command === 'run') console.log(args.includes('GNU_LIBC_VERSION') ? 'glibc 2.36' : args.includes('/usr/local/bin/bun') ? '1.3.14' : 'v22.23.2');
 else if (command === 'cp') {
@@ -63,9 +64,12 @@ else if (command === 'cp') {
       checks: ['previous-startup', 'previous-create-start-complete-cancel', 'candidate-expand-startup', 'previous-startup-after-expand', 'previous-create-start-complete-cancel-after-expand'],
       rollbackSafeFrom: ['c'.repeat(64)] }));
     const beforeInvalidEvidence = await readFile(manifestPath, 'utf8');
+    assert.equal(await readFile(dockerMarker, 'utf8'), 'called');
+    await rm(dockerMarker);
     const invalidEvidence = run(false, incompletePath);
     assert.notEqual(invalidEvidence.status, 0);
     assert.match(invalidEvidence.stderr, /Invalid mixed-version rollback evidence/);
+    await assert.rejects(readFile(dockerMarker), { code: 'ENOENT' });
     assert.equal(await readFile(manifestPath, 'utf8'), beforeInvalidEvidence);
     const mismatch = run(true);
     assert.notEqual(mismatch.status, 0);

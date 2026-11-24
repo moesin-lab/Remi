@@ -56,12 +56,40 @@ export function validateCoreProbeReports(reports) {
   assert.equal(new Set(ids).size, ids.length, 'Each completed/cancelled task must have a distinct ID across core probes');
 }
 
+function validateCandidateExecution(evidence) {
+  const execution = evidence.candidateExecution;
+  assert.equal(execution.format, 1);
+  assert.equal(execution.mode, 'private-fixed-commit');
+  assert(typeof execution.runId === 'string'
+    && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(execution.runId));
+  assert.equal(execution.expectedRef, evidence.targetRef);
+  assert.equal(execution.actualRef, execution.expectedRef);
+  assert(commit(execution.expectedTree));
+  assert.equal(execution.finalTree, execution.expectedTree);
+  assert(hash(execution.lockfileSha256));
+  assert(text(execution.runtime.node));
+  assert.equal(execution.runtime.bun, '1.3.14');
+  for (const name of ['expand', 'verify']) {
+    const phase = evidence.candidatePhases[name];
+    assert.equal(phase.runId, execution.runId);
+    assert.equal(phase.ref, execution.expectedRef);
+    assert.equal(phase.tree, execution.expectedTree);
+  }
+  assert.deepEqual(execution.cleanup.map(result => result.name),
+    ['previous-input', 'candidate-checkout', 'staged-result', 'run-root']);
+  for (const result of execution.cleanup) {
+    assert.equal(result.status, 'passed');
+    assert.equal(result.error, undefined);
+  }
+}
+
 function validateMixedVersionEvidence(manifest, evidence) {
   try {
-    assert.equal(evidence.format, 1);
+    assert.equal(evidence.format, 2);
     assert(commit(manifest.ref) && hash(manifest.dataSchema));
     assert.equal(evidence.targetRef, manifest.ref);
     assert.equal(evidence.dataSchema, manifest.dataSchema);
+    validateCandidateExecution(evidence);
     validateIdentity(evidence.previousRelease, evidence.previousIdentity, evidence.previousManifest);
     const schema = evidence.schema;
     assert.equal(schema.contractLevel, 0);

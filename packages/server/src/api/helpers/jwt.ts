@@ -2,6 +2,8 @@
 // constant-time comparison the signature check relies on.
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { cleanString, isObjectRecord } from "../wire/index.js";
+import type { MultiremiStore } from '@multiremi/store/store.js';
+import { compactJwtDigest, type JwtSigningDomain } from '@multiremi/store/jwt-materials.js';
 
 export const DEFAULT_JWT_SECRET = "multiremi-dev-secret-change-in-production";
 
@@ -11,7 +13,12 @@ export const JWT_HMAC_ALGORITHMS: Record<string, string> = {
   HS512: "sha512",
 };
 
-export function verifyJwtToken(token: string): { userId: string } | null {
+export function verifyJwtToken(token: string, store: MultiremiStore): { userId: string; jwtDigest: string } | null {
+  if (store.jwtMaterials.isActive()) {
+    const signing = currentJwtSigningDomain();
+    const material = signing ? store.jwtMaterials.validate(token, signing) : null;
+    return material ? { userId: material.userId, jwtDigest: material.digest } : null;
+  }
   // No real secret configured (outside development) => reject every JWT rather
   // than validating against a publicly-known hardcoded default.
   const secret = jwtSecret();
@@ -28,7 +35,22 @@ export function verifyJwtToken(token: string): { userId: string } | null {
   if (!safeEqualText(signature, expected)) return null;
   const userId = cleanString(typeof claims.sub === "string" ? claims.sub : null);
   if (!userId || !jwtTimeClaimsAreValid(claims)) return null;
-  return { userId };
+  return { userId, jwtDigest: compactJwtDigest(token) };
+}
+
+export function currentJwtSigningDomain(): JwtSigningDomain | null {
+  const secret = jwtSecret();
+  return secret ? {
+    secret,
+    domainId: process.env.MULTIREMI_JWT_SIGNING_DOMAIN || 'dashboard',
+    keyEpoch: process.env.MULTIREMI_JWT_KEY_EPOCH || '1',
+  } : null;
+}
+
+export function jwtDigestIsCurrent(store: MultiremiStore, digest: string): boolean {
+  if (!store.jwtMaterials.isActive()) return true;
+  const signing = currentJwtSigningDomain();
+  return Boolean(signing && store.jwtMaterials.validateDigest(digest, signing));
 }
 
 // Returns the configured JWT signing secret, or null when none is set. The

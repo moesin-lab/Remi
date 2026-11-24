@@ -1,5 +1,6 @@
 import { querySchemaCompatibility } from './schema-levels.js';
 import { PlannedRestarts } from "./planned-restarts.js";
+import { JwtMaterials } from './jwt-materials.js';
 import { withAttemptAdmission, type AttemptWrite } from './attempt-admission.js';
 import type { SecurityLockPlan } from './security-write.js';
 import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
@@ -536,6 +537,7 @@ export class MultiremiStore {
   private ctx: StoreContext;
   private feedback: FeedbackRepo;
   private accessTokens: AccessTokensRepo;
+  readonly jwtMaterials: JwtMaterials;
   private passwordAccounts: PasswordAccountsRepo;
   private issueShares: IssueSharesRepo;
   private notificationChannels: NotificationChannelsRepo;
@@ -613,6 +615,7 @@ export class MultiremiStore {
     this.ctx = new StoreContext(this.db, () => this);
     this.feedback = new FeedbackRepo(this.db);
     this.accessTokens = new AccessTokensRepo(this.db);
+    this.jwtMaterials = new JwtMaterials(this.db);
     this.issueShares = new IssueSharesRepo(this.db);
     this.notificationChannels = new NotificationChannelsRepo(this.ctx);
     this.notificationDispatcher = new OutboundNotificationDispatcher({

@@ -16,6 +16,8 @@ import {
 } from "../helpers.js";
 import type { RouterDeps } from "./deps.js";
 import { PasswordLoginLimiter } from "../helpers/password-login.js";
+import { assertCredentialIssuerAvailable } from '../helpers/login.js';
+import { JwtMaterialUnavailable } from '@multiremi/store/jwt-materials.js';
 import { readRequestBodyLimited } from "../helpers/webhooks.js";
 import { authenticatedRequestUserId, currentAccessToken, currentRequestUserId, isObjectRecord } from "../wire/context.js";
 import { PasswordAccountError, normalizePasswordLoginEmail } from "@multiremi/store/repos/password-accounts-repo.js";
@@ -52,6 +54,7 @@ export function registerAuthRoutes(app: Hono, deps: RouterDeps): void {
 
   app.post("/auth/password", async (c) => {
     if (process.env.MULTIREMI_ALLOW_PASSWORD_LOGIN !== "1") return c.json({ error: "password login is disabled" }, 403);
+    assertCredentialIssuerAvailable(store);
     const limited = () => { c.header("Retry-After", "60"); return c.json({ error: "too many login attempts" }, 429); };
     if (!passwordLimiter.enter()) return limited();
     try {
@@ -74,6 +77,7 @@ export function registerAuthRoutes(app: Hono, deps: RouterDeps): void {
   });
 
   app.post("/api/cli-token", async (c) => {
+    assertCredentialIssuerAvailable(store);
     const userId = authenticatedRequestUserId(c) ?? "local";
     if (userId !== "local" && !store.getUser(userId)) return c.json({ error: "unauthorized" }, 401);
     const source = currentAccessToken(c);
@@ -152,6 +156,7 @@ export function registerAuthRoutes(app: Hono, deps: RouterDeps): void {
       setAuthCookie(c, payload.token);
       return c.json(payload);
     } catch (e) {
+      if (e instanceof JwtMaterialUnavailable) return c.json({ error: 'authentication state unavailable' }, 503);
       return c.json({ error: e instanceof Error ? e.message : "Feishu login failed" }, 401);
     }
   });

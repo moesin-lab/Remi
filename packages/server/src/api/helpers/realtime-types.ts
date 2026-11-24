@@ -30,6 +30,8 @@ export type BrowserWebSocketData = {
   workspaceId: string;
   authenticated: boolean;
   userId: string | null;
+  /** Compact digest only; current material and ancestry are re-read before sends. */
+  jwtDigest?: string;
   accessToken: MultiremiAccessToken | null;
   /**
    * Which v2 stream kind this socket serves (MUL-438): `/ws` carries `log:*`,

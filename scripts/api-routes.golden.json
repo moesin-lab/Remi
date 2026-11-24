@@ -12864,6 +12864,7 @@
       "path": "/api/config",
       "status": 200,
       "body": {
+        "jwt_registration_required": false,
         "cdn_domain": "",
         "allow_signup": true,
         "google_client_id": "snapshot-google-client",

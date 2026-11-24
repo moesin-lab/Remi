@@ -328,8 +328,6 @@
     "feature_co_author_label": "Co-authored-by 트레일러",
     "feature_co_author_description_prefix": "에이전트가 작성한 커밋에",
     "feature_co_author_description_suffix": "을(를) 추가합니다.",
-    "feature_auto_link_label": "Issue와 코드 변경 자동 연결",
-    "feature_auto_link_description": "브랜치 이름, 제목 및 설명의 Issue 번호를 대조해 자동으로 연결합니다.",
     "section_repositories": "저장소",
     "repositories_shortcut_label": "저장소 URL은 저장소 탭에 있습니다",
     "repositories_shortcut_link": "저장소 관리 →",

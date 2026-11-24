@@ -1,3 +1,4 @@
+import { assertScmOwnershipReady, classifyScmLinks } from "@multiremi/store/scm-ownership.js";
 import { verifyPlannedRestartSchemaUpgrade } from "../../fixtures/planned-restart-schema-upgrade.js";
 import { afterEach, describe, expect, it } from 'bun:test';
 import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
@@ -31,12 +32,17 @@ describe('schema compatibility protocol', () => {
     const database = db();
     expect(readSchemaLevels(database)).toEqual({ expandLevel: 0, contractLevel: 0 });
     runMigrations(database);
-    expect(readSchemaLevels(database)).toEqual({ expandLevel: 3, contractLevel: 0 });
+    expect(() => assertScmOwnershipReady(database)).toThrow('cutover incomplete');
+    classifyScmLinks(database);
+    classifyScmLinks(database);
+    expect(() => assertScmOwnershipReady(database)).not.toThrow();
+    expect(database.query('SELECT cursor_id, complete FROM multiremi_scm_ownership_cutover').all()).toEqual([{ cursor_id: '', complete: 1 }]);
+    expect(readSchemaLevels(database)).toEqual({ expandLevel: 4, contractLevel: 0 });
     runMigrations(database);
-    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(3);
-    database.exec('UPDATE multiremi_schema_meta SET expand_level=4, contract_level=4');
+    expect(database.query('SELECT id FROM multiremi_schema_steps').all()).toHaveLength(4);
+    database.exec('UPDATE multiremi_schema_meta SET expand_level=5, contract_level=5');
     const before = database.query('SELECT total_changes() AS count').get();
-    expect(() => runMigrations(database)).toThrow('contract_level=4 exceeds code maxLevel=3');
+    expect(() => runMigrations(database)).toThrow('contract_level=5 exceeds code maxLevel=4');
     expect(database.query('SELECT total_changes() AS count').get()).toEqual(before);
   });
   it('requires maintenance for populated pre-protocol databases and never replays enrolled history', () => {
@@ -63,7 +69,7 @@ describe('schema compatibility protocol', () => {
     database.exec("DELETE FROM multiremi_schema_steps WHERE level>=2");
     database.exec("UPDATE multiremi_schema_meta SET expand_level=1");
     runStartupMigrations(database);
-    expect(readSchemaLevels(database)).toEqual({ expandLevel: 3, contractLevel: 0 });
+    expect(readSchemaLevels(database)).toEqual({ expandLevel: 4, contractLevel: 0 });
     expect(database.query("SELECT name FROM sqlite_master WHERE name='multiremi_live_terms'").get()).not.toBeNull();
     expect(database.query("SELECT id FROM multiremi_schema_steps WHERE level=2").get().id).toBe('20261118_live_term_fence');
   });

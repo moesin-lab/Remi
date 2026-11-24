@@ -69,6 +69,18 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "db.classify-scm-links": {
+      "command": "remi db classify-scm-links",
+      "aliases": [],
+      "auth": [],
+      "capability": null,
+      "mutation": "destructive",
+      "output": [
+        "json"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "db.contract": {
       "command": "remi db contract",
       "aliases": [],

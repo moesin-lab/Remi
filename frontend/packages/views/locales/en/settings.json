@@ -328,8 +328,6 @@
     "feature_co_author_label": "Co-authored-by trailer",
     "feature_co_author_description_prefix": "Append",
     "feature_co_author_description_suffix": "to commits authored by agents.",
-    "feature_auto_link_label": "Auto-link issues and code changes",
-    "feature_auto_link_description": "Match issue identifiers in branch names, titles, and descriptions to create links automatically.",
     "section_repositories": "Repositories",
     "repositories_shortcut_label": "Repository URLs live in the Repositories tab",
     "repositories_shortcut_link": "Manage repositories →",

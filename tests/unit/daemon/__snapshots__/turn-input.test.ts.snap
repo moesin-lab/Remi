@@ -50,7 +50,9 @@ Use \`remi message list ises_1\` to read this Session's earlier messages (\`--fr
 ## Delivery
 When a task changes code:
 - Push the working branch and create a GitHub pull request or Codebase merge request before reporting completion.
-- Include the issue key in the PR/MR title or description so Multiremi can associate it automatically.
+- Give the PR/MR a title describing the change without an Issue Key prefix.
+- After creating or reusing the PR/MR, run remi scm change-request bind <issue> --url <url> (or --repository <repo> --number <n>). Report delivery only after binding succeeds and remi scm change-request list <issue> shows that same PR/MR.
+- If binding fails, report the URL and error and retry binding the same reference.
 - Reuse an existing open PR/MR for the same source branch. Create at most one PR/MR per changed repository.
 - Creating a PR/MR does not require approval. Merging it or pushing directly to the default branch requires explicit user authorization.
 - Return every PR/MR URL in the final result. If creation fails, report the exact failure and preserve the pushed branch for recovery.

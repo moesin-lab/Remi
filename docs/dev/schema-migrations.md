@@ -23,7 +23,8 @@ SQLite 历史升级仍须由离线工具调用 `runMigrations(db, { historicalMa
 `multiremi_schema_steps` 记录步骤 ID、phase、level、首次发布版本和完成时间。
 缺少元数据表示历史 level 0；空行、非法值或损坏元数据拒绝启动，不自动重置。
 [声明文件](../../packages/server/src/store/schema-compatibility.json) 同时供运行时代码、打包与 updater 读取。
-当前 `{minLevel: 3, maxLevel: 3}`、expand 3、contract 0。
+当前 `{minLevel: 4, maxLevel: 4}`、expand 4、contract 0。
+level 4 增加 SCM 关联归属证据与维护游标表，启动只建结构。切换流程见 [SCM 离线维护](./scm-checks.md#scm-归属切换)。
 level 1 是 schema 协议登记；level 2 为 A3 的 `multiremi_live_terms` 加法建表，
 同样在版本化 expand 事务内执行，已登记 level 1 的库启动也会补齐该表。
 level 3 为 planned restart 的表、索引及 daemon drain_id：先补 drain identity，再建 planned restart 表；

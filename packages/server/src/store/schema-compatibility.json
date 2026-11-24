@@ -1,7 +1,7 @@
 {
   "format": 1,
-  "expandLevel": 3,
+  "expandLevel": 4,
   "contractLevel": 0,
-  "minLevel": 3,
-  "maxLevel": 3
+  "minLevel": 4,
+  "maxLevel": 4
 }

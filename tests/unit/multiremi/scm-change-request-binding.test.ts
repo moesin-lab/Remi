@@ -1,3 +1,5 @@
+import { runStartupMigrations } from "@multiremi/store/migrations.js";
+import { assertScmOwnershipReady, classifyScmLinkBatch, classifyScmLinks } from "@multiremi/store/scm-ownership.js";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
 import { parseChangeRequestReference, parseChangeRequestUrl, readChangeRequest } from "@multiremi/scm/change-request-binding.js";
@@ -43,6 +45,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const fixture = await factory.open();
       opened.push(fixture);
       const { store, db } = fixture;
+      classifyScmLinks(db);
       store.updateWorkspace("local", { repos: [{ id: "repo_widgets", name: "widgets", url: "https://github.com/acme/widgets.git" }], settings: { scm_auto_link_enabled: false } });
       const connection = store.createScmConnection({ id: "scm_github", workspaceId: "local", name: "GitHub", provider: "github", accessToken: "connection-secret", repositoryIds: ["repo_widgets"] });
       const issue = createResponsibleTestIssue(store, { title: "Explicit binding", workspaceId: "local" });
@@ -52,6 +55,66 @@ for (const backend of ["sqlite", "postgres"] as const) {
       const count = (table: string) => Number((db.query(`SELECT COUNT(*) AS count FROM multiremi_scm_${table}`).get() as { count: number }).count);
       return { store, db, connection, issue, app, bind, snapshot, count };
     }
+
+    it("freezes only existing ownership, resumes by link ID and gates incomplete cutover", async () => {
+      const { store, db, connection, issue, snapshot, count, bind } = await setup();
+      const weak = createResponsibleTestIssue(store, { title: "Weak mention", workspaceId: "local" });
+      const inactive = createResponsibleTestIssue(store, { title: "Removed link", workspaceId: "local" });
+      const manual = createResponsibleTestIssue(store, { title: "Manual owner", workspaceId: "local" });
+      store.updateWorkspace("local", { settings: { scm_complete_issue_on_merge_enabled: true } });
+      db.run("UPDATE multiremi_issues SET issue_key = NULL WHERE id = ?", [issue.id]);
+      const legacyTitle = `${issue.key} ${inactive.key}`;
+      const observed = { ...pull, title: legacyTitle, body: `Fixes: ${issue.key}\nAlso mentions ${weak.key}`,
+        head: { ...pull.head, ref: `branch/${issue.key.toLowerCase()}` } };
+      store.advanceScmEntitySnapshot(snapshot(observed));
+      const projection = store.prepareScmChangeRequestBinding(issue.id, connection.id, "repo_widgets", 42).changeRequest!;
+      for (const [id, issueId, source, active] of [
+        ["a", issue.id, "legacy", 1], ["b", inactive.id, "auto", 0], ["c", weak.id, "auto", 1], ["d", manual.id, "manual", 1],
+      ]) {
+        db.run(`INSERT INTO multiremi_scm_issue_links
+          (id, workspace_id, change_request_id, issue_id, source, active, linked_at, created_at, updated_at)
+          VALUES (?, 'local', ?, ?, ?, ?, ?, ?, ?)`, [id, projection.id, issueId, source, active, pull.updated_at, pull.updated_at, pull.updated_at]);
+      }
+      const links = () => db.query("SELECT * FROM multiremi_scm_issue_links ORDER BY id").all();
+      const before = links();
+      db.exec("DROP TABLE multiremi_scm_link_ownership");
+      db.exec("DROP TABLE multiremi_scm_ownership_cutover");
+      db.run("DELETE FROM multiremi_schema_steps WHERE level = 4");
+      db.run("UPDATE multiremi_schema_meta SET expand_level = 3");
+      runStartupMigrations(db);
+      runStartupMigrations(db);
+      expect(count("ownership_cutover")).toBe(0);
+      expect(() => assertScmOwnershipReady(db)).toThrow("cutover incomplete");
+      expect(classifyScmLinkBatch(db, 1)).toBe(false);
+      expect(() => store.unlinkScmChangeRequestFromIssue(issue.id, projection.id)).toThrow("cutover incomplete");
+      expect(() => store.advanceScmEntitySnapshot(snapshot())).toThrow("cutover incomplete");
+      expect(() => store.dispatchPendingScmEvents()).toThrow("cutover incomplete");
+      expect(db.query("SELECT cursor_id, complete FROM multiremi_scm_ownership_cutover").get()).toEqual({cursor_id: "a", complete: 0});
+      db.run("INSERT INTO multiremi_scm_link_ownership(link_id, attribution) VALUES ('b', '[]')");
+      expect(() => classifyScmLinkBatch(db, 1)).toThrow();
+      expect(db.query("SELECT cursor_id FROM multiremi_scm_ownership_cutover").get()?.cursor_id).toBe("a");
+      db.run("DELETE FROM multiremi_scm_link_ownership WHERE link_id = 'b'");
+      classifyScmLinks(db);
+      classifyScmLinks(db);
+      expect(links()).toEqual(before);
+      expect(count("link_ownership")).toBe(2);
+      expect(store.listScmChangeRequestsForIssue(inactive.id)).toEqual([]);
+      const merged = { ...pull, title: weak.key, merged: true, state: "closed", merged_at: "2026-11-18T00:00:00Z", updated_at: "2026-11-18T00:00:00Z" };
+      const observation = githubPullObservation(merged, new Date());
+      const input = { store: scmIngestionStore(store), binding: store.getScmRepositoryBinding(connection.id, "repo_widgets")!, observation, baseline: false };
+      reconcileObservation(input);
+      reconcileObservation(input);
+      for (const [owner, evidence] of [[issue, ["branch", "title", "body"]], [manual, ["manual"]], [weak, []], [inactive, []]] as const) {
+        const events = store.listIssueActivity(owner.id).filter(event => event.type === "scm_merge_completed");
+        expect(events).toHaveLength(evidence.length ? 1 : 0);
+        if (evidence.length) expect(events[0]?.data).toMatchObject({ attribution: evidence });
+        expect(store.getIssue(owner.id)?.status).toBe("todo");
+      }
+      expect(store.listScmChangeRequestsForIssue(weak.id)).toHaveLength(1);
+      expect((await bind({ url: pull.html_url }, headers, inactive.id)).status).toBe(200);
+      expect(store.listScmChangeRequestsForIssue(inactive.id)).toHaveLength(1);
+      expect(count("issue_links")).toBe(4);
+    });
 
     it("imports before polling, persists an active manual link, and retries without timestamps or broadcasts", async () => {
       const { store, issue, bind, count } = await setup();
@@ -118,6 +181,20 @@ for (const backend of ["sqlite", "postgres"] as const) {
       expect(store.getIssue(issue.id)?.status).toBe("todo");
     });
 
+    it.each([true, false, undefined])("poll baseline and later updates preserve zero links with old setting %s", async setting => {
+      const { store, issue, count } = await setup();
+      store.updateWorkspace("local", { settings: { scm_auto_link_enabled: setting } });
+      const adapter = new GitHubScmProviderAdapter();
+      let observation = githubPullObservation({ ...pull, title: issue.key, body: `Fixes ${issue.key}`, head: { ...pull.head, ref: issue.key } }, new Date());
+      adapter.poll = async context => ({ observations: context.stream === "change_requests" ? [observation] : [], cursor: null, watermark: null, done: true });
+      const scheduler = new ScmPollingScheduler({ store: scmIngestionStore(store), adapters: [adapter] });
+      expect((await scheduler.runOnce()).failed).toBe(0);
+      expect(count("change_requests")).toBe(1);
+      observation = githubPullObservation({ ...pull, title: `Updated ${issue.key}`, updated_at: "2026-11-18T00:00:00Z" }, new Date());
+      expect((await scheduler.runOnce(new Date(Date.now() + 86400000))).failed).toBe(0);
+      expect(count("issue_links")).toBe(0);
+    });
+
     it("matches mixed-case GitHub repository coordinates", async () => {
       const { store, connection, bind } = await setup();
       const binding = store.getScmRepositoryBinding(connection.id, "repo_widgets")!;
@@ -144,6 +221,7 @@ for (const backend of ["sqlite", "postgres"] as const) {
     });
 
     it.each([
+      { setting: false, field: "title" }, { setting: false, field: "branch" }, { setting: false, field: "body" },
       { setting: true, field: "title" }, { setting: true, field: "branch" }, { setting: true, field: "body" },
       { setting: undefined, field: "title" }, { setting: undefined, field: "branch" }, { setting: undefined, field: "body" },
     ])("explicitly binds only the requested Issue with autoLink=$setting and Key in $field", async ({ setting, field }) => {

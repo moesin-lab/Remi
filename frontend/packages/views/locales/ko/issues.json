@@ -320,7 +320,7 @@
       "error": "준비 실패"
     },
     "change_requests_loading": "불러오는 중...",
-    "change_requests_empty": "아직 연결된 코드 변경이 없습니다. 브랜치 이름, 제목 또는 설명에 이 Issue 번호를 넣으면 자동으로 연결됩니다.",
+    "change_requests_empty": "아직 연결된 코드 변경이 없습니다.",
     "change_request_github_reference": "GitHub PR #{{number}}",
     "change_request_codebase_reference": "Codebase MR !{{number}}",
     "change_request_generic_reference": "변경 #{{number}}",

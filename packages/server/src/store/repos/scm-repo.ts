@@ -1,3 +1,4 @@
+import { assertScmOwnershipReady, deleteScmIssueLinks, persistedOwnership } from "../scm-ownership.js";
 import { createHash } from "node:crypto";
 import { ScmOperationError } from "@multiremi/scm/operations.js";
 import { observationCanonicalEvents, observationSnapshotInput } from "@multiremi/scm/reconcile.js";
@@ -71,16 +72,6 @@ interface LockedSnapshotAdvanceResult {
   workspaceId: string;
 }
 
-type ScmIssueOwnershipAttribution = "manual" | "branch" | "title" | "body";
-
-interface ScmIssueOwnershipCandidate {
-  issueKey: string;
-  linkSource: string;
-  title: string;
-  body: string | null;
-  sourceBranch: string | null;
-}
-
 export class ScmRepo {
   constructor(private readonly ctx: StoreContext) {}
 
@@ -132,6 +123,7 @@ export class ScmRepo {
   }
 
   createConnection(input: CreateScmConnectionInput): ScmConnectionWithRepositories {
+    assertScmOwnershipReady(this.ctx.db);
     const workspaceId = cleanOptionalString(input.workspaceId ?? input.workspace_id) ?? "local";
     const provider = normalizeProvider(input.provider);
     const mode = normalizeMode(input.mode ?? "poll");
@@ -212,6 +204,7 @@ export class ScmRepo {
   }
 
   updateConnection(id: string, input: UpdateScmConnectionInput): ScmConnectionWithRepositories {
+    assertScmOwnershipReady(this.ctx.db);
     const current = this.getConnection(id);
     if (!current) throw new Error(`SCM connection not found: ${id}`);
     const replaceRepositoryIds = input.repositoryIds !== undefined || input.repository_ids !== undefined;
@@ -375,6 +368,7 @@ export class ScmRepo {
   }
 
   deleteConnection(id: string): boolean {
+    assertScmOwnershipReady(this.ctx.db);
     return this.ctx.db.transaction(() => {
       const locked = this.ctx.db.query(
         "UPDATE multiremi_scm_connections SET updated_at = updated_at WHERE id = ? RETURNING id",
@@ -386,8 +380,8 @@ export class ScmRepo {
       if (Number(eventCount?.count ?? 0) > 0) {
         throw new Error("SCM connection has event history; disable it instead of deleting it");
       }
-      this.ctx.db.run(
-        `DELETE FROM multiremi_scm_issue_links WHERE change_request_id IN (
+      deleteScmIssueLinks(this.ctx.db,
+        `change_request_id IN (
           SELECT id FROM multiremi_scm_change_requests WHERE connection_id = ?
         )`,
         [id],
@@ -458,6 +452,7 @@ export class ScmRepo {
   }
 
   upsertRepositoryBinding(input: UpsertScmRepositoryBindingInput): MultiremiScmRepositoryBinding {
+    assertScmOwnershipReady(this.ctx.db);
     return this.ctx.db.transaction(() => {
       const workspace = this.lockWorkspace(input.workspaceId);
       const repository = findWorkspaceRepository(workspace.repos, input.repositoryId);
@@ -568,8 +563,11 @@ export class ScmRepo {
     workspaceId: string,
     repositories: unknown[],
   ): MultiremiScmRepositoryBinding[] {
+    const existingConnections = this.listConnections({ workspaceId });
+    if (!existingConnections.length) return [];
+    assertScmOwnershipReady(this.ctx.db);
     const connections = new Map(
-      this.listConnections({ workspaceId })
+      existingConnections
         .sort((left, right) => left.id.localeCompare(right.id))
         .map((connection) => {
           const locked = this.lockConnection(connection.id);
@@ -629,6 +627,7 @@ export class ScmRepo {
   }
 
   markConnectionVerificationStarted(id: string): { connection: MultiremiScmConnection; runId: string } {
+    assertScmOwnershipReady(this.ctx.db);
     const runId = createId("scv");
     const row = this.ctx.db.query(
       `UPDATE multiremi_scm_connections
@@ -648,6 +647,7 @@ export class ScmRepo {
     result: MultiremiScmVerificationResult,
     runId: string,
   ): MultiremiScmConnection {
+    assertScmOwnershipReady(this.ctx.db);
     const repositoryTotal = normalizeVerificationCount(result.repositoryTotal, "verification repository total");
     const repositoryCount = normalizeVerificationCount(result.repositoryCount, "verified repository count");
     if (repositoryCount > repositoryTotal) throw new Error("verified repository count cannot exceed repository total");
@@ -683,6 +683,7 @@ export class ScmRepo {
   }
 
   deleteRepositoryBinding(connectionId: string, repositoryId: string): boolean {
+    assertScmOwnershipReady(this.ctx.db);
     const current = this.getConnection(connectionId);
     if (!current) return false;
     return this.ctx.db.transaction(() => {
@@ -713,6 +714,7 @@ export class ScmRepo {
   }
 
   upsertSyncCursor(input: UpsertScmSyncCursorInput): MultiremiScmSyncCursor {
+    assertScmOwnershipReady(this.ctx.db);
     return this.ctx.db.transaction(() => {
       this.lockConnectionAndBinding(input.connectionId, input.repositoryId);
       const current = this.getSyncCursor(input.connectionId, input.repositoryId, input.stream);
@@ -753,6 +755,7 @@ export class ScmRepo {
   }
 
   claimSyncStream(input: ClaimScmSyncStreamInput): MultiremiScmSyncCursor | null {
+    assertScmOwnershipReady(this.ctx.db);
     const owner = requiredString(input.owner, "SCM sync lease owner");
     const claimedAt = normalizeIsoTimestamp(input.now ?? nowIso(), "SCM sync lease time");
     const leaseMs = normalizeLeaseMs(input.leaseMs);
@@ -789,6 +792,7 @@ export class ScmRepo {
   }
 
   updateClaimedSyncCursor(input: UpdateClaimedScmSyncCursorInput): MultiremiScmSyncCursor | null {
+    assertScmOwnershipReady(this.ctx.db);
     const leaseToken = requiredString(input.leaseToken, "SCM sync lease token");
     const now = nowIso();
     const leaseUntil = input.leaseUntil === undefined
@@ -837,6 +841,7 @@ export class ScmRepo {
   }
 
   releaseSyncStream(input: ReleaseScmSyncStreamInput): boolean {
+    assertScmOwnershipReady(this.ctx.db);
     const leaseToken = requiredString(input.leaseToken, "SCM sync lease token");
     return this.ctx.db.run(
       `UPDATE multiremi_scm_sync_cursors
@@ -883,7 +888,8 @@ export class ScmRepo {
     return { advance: written.snapshot.advance, events: written.events };
   }
 
-  private advanceEntitySnapshotLocked(input: UpsertScmEntitySnapshotInput, discoverIssueLinks = true): LockedSnapshotAdvanceResult {
+  private advanceEntitySnapshotLocked(input: UpsertScmEntitySnapshotInput): LockedSnapshotAdvanceResult {
+    assertScmOwnershipReady(this.ctx.db);
     const now = nowIso();
     const observedAt = normalizeIsoTimestamp(input.observedAt ?? now, "snapshot observation time");
     const revisionAt = normalizeIsoTimestamp(input.revisionAt ?? observedAt, "snapshot revision time");
@@ -915,7 +921,7 @@ export class ScmRepo {
     ).get(...values) as Row | null;
     if (inserted) {
       if (input.entityType === "change_request") {
-        projected = this.upsertChangeRequestProjectionLocked(connection, binding, input.externalId, input.payload, now, discoverIssueLinks);
+        projected = this.upsertChangeRequestProjectionLocked(connection, binding, input.externalId, input.payload, now);
       }
       return {
         advance: { applied: true, previous: null, snapshot: toEntitySnapshot(inserted) },
@@ -965,7 +971,7 @@ export class ScmRepo {
     ) as Row | null;
     if (!updated) throw new Error("SCM snapshot compare-and-set lost its locked row");
     if (input.entityType === "change_request") {
-      projected = this.upsertChangeRequestProjectionLocked(connection, binding, input.externalId, input.payload, now, discoverIssueLinks);
+      projected = this.upsertChangeRequestProjectionLocked(connection, binding, input.externalId, input.payload, now);
     }
     return {
       advance: { applied: true, previous, snapshot: toEntitySnapshot(updated) },
@@ -995,6 +1001,7 @@ export class ScmRepo {
   }
 
   prepareChangeRequestBinding(issueId: string, connectionId: string, repositoryId: string, number: number) {
+    assertScmOwnershipReady(this.ctx.db);
     return this.ctx.db.transaction(() => {
       const issue = this.ctx.issues().getIssue(issueId);
       if (!issue) throw new Error(`Issue not found: ${issueId}`);
@@ -1016,6 +1023,7 @@ export class ScmRepo {
     number: number;
     observation?: ScmEntityObservation;
   }): { changeRequest: MultiremiScmChangeRequest; link: MultiremiScmIssueLink } {
+    assertScmOwnershipReady(this.ctx.db);
     return this.ctx.db.transaction(() => {
       const { target, number, issueId } = input;
       this.lockWorkspace(target.connection.workspaceId);
@@ -1042,7 +1050,7 @@ export class ScmRepo {
           throw new ScmOperationError("scm_reference_invalid", "SCM observation does not match the reference");
         }
         // Explicit binding grants only the requested Issue a new association.
-        const written = this.advanceEntitySnapshotLocked(observationSnapshotInput(binding, observation), false);
+        const written = this.advanceEntitySnapshotLocked(observationSnapshotInput(binding, observation));
         projectionChanged = written.projection !== null;
         // First insertion is a baseline; an existing predecessor must retain real transitions.
         eventInputs = observationCanonicalEvents({ binding, observation, baseline: true }, written.advance);
@@ -1116,6 +1124,7 @@ export class ScmRepo {
     changeRequest: MultiremiScmChangeRequest;
     link: MultiremiScmIssueLink;
   } {
+    assertScmOwnershipReady(this.ctx.db);
     const result = this.ctx.db.transaction(() => {
       const issue = this.ctx.issues().getIssue(issueId);
       if (!issue) throw new Error(`Issue not found: ${issueId}`);
@@ -1146,6 +1155,7 @@ export class ScmRepo {
   }
 
   unlinkChangeRequestFromIssue(issueId: string, changeRequestId: string): boolean {
+    assertScmOwnershipReady(this.ctx.db);
     const changeRequest = this.getChangeRequest(changeRequestId);
     if (!changeRequest) return false;
     const issue = this.ctx.issues().getIssue(issueId);
@@ -1172,6 +1182,7 @@ export class ScmRepo {
   }
 
   private recordCanonicalEventLocked(input: RecordScmCanonicalEventInput): RecordScmCanonicalEventResult {
+    assertScmOwnershipReady(this.ctx.db);
     const logicalKey = requiredString(input.logicalKey, "SCM logical event key");
     const evidenceDedupeKey = requiredString(input.evidence.dedupeKey, "SCM evidence dedupe key");
     const observedAt = input.observedAt ?? nowIso();
@@ -1309,6 +1320,7 @@ export class ScmRepo {
   }
 
   claimPendingEvents(now: Date = new Date(), limit = 25): MultiremiScmCanonicalEvent[] {
+    assertScmOwnershipReady(this.ctx.db);
     const claimedAt = now.toISOString();
     const leaseUntil = new Date(now.getTime() + 60_000).toISOString();
     const rows = this.ctx.db.query(
@@ -1598,8 +1610,9 @@ export class ScmRepo {
   }
 
   private deleteRepositorySyncStateLocked(connectionId: string, repositoryId: string): void {
-    this.ctx.db.run(
-      `DELETE FROM multiremi_scm_issue_links WHERE change_request_id IN (
+    assertScmOwnershipReady(this.ctx.db);
+    deleteScmIssueLinks(this.ctx.db,
+      `change_request_id IN (
         SELECT id FROM multiremi_scm_change_requests WHERE connection_id = ? AND repository_id = ?
       )`,
       [connectionId, repositoryId],
@@ -1624,6 +1637,7 @@ export class ScmRepo {
     nextConnectionId: string,
     repositoryId: string,
   ): void {
+    assertScmOwnershipReady(this.ctx.db);
     this.ctx.db.run(
       "DELETE FROM multiremi_scm_sync_cursors WHERE connection_id = ? AND repository_id = ?",
       [previousConnectionId, repositoryId],
@@ -1661,7 +1675,6 @@ export class ScmRepo {
     externalId: string,
     payload: Record<string, unknown>,
     now: string,
-    discoverIssueLinks = true,
   ): { changeRequestId: string; issueIds: string[] } {
     const number = finiteInteger(payload.number);
     const draft = payload.draft === true;
@@ -1757,20 +1770,6 @@ export class ScmRepo {
     ).get(...lookupParams) as Row | null;
     if (!row) throw new Error("SCM change request projection could not be read after upsert");
     const changeRequest = toChangeRequest(row);
-    if (discoverIssueLinks && this.ctx.workspaces().getWorkspace(connection.workspaceId)?.settings.scm_auto_link_enabled !== false) {
-      const haystack = [changeRequest.title, changeRequest.sourceBranch ?? "", changeRequest.body ?? ""].join("\n");
-      for (const issue of this.ctx.issues().listIssues({ workspaceId: connection.workspaceId })) {
-        if (!issue.key || !new RegExp(`\\b${escapeRegExp(issue.key)}\\b`, "i").test(haystack)) continue;
-        this.ctx.db.run(
-          `INSERT INTO multiremi_scm_issue_links (
-            id, workspace_id, change_request_id, issue_id, source, active,
-            linked_at, unlinked_at, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, 'auto', 1, ?, NULL, ?, ?)
-          ON CONFLICT(change_request_id, issue_id) DO NOTHING`,
-          [createId("sil"), connection.workspaceId, changeRequest.id, issue.id, now, now, now],
-        );
-      }
-    }
     return { changeRequestId: changeRequest.id, issueIds: this.activeIssueIds(changeRequest.id) };
   }
 
@@ -1781,47 +1780,30 @@ export class ScmRepo {
     if (workspace?.settings.scm_complete_issue_on_merge_enabled !== true) return;
     const rows = this.ctx.db.query(
       `SELECT i.id AS issue_id, cr.id AS change_request_id, l.source AS link_source,
-              cr.title, cr.body, cr.source_branch
+              e.attribution
        FROM multiremi_scm_change_requests cr
        JOIN multiremi_scm_issue_links l ON l.change_request_id = cr.id AND l.active = 1
+       LEFT JOIN multiremi_scm_link_ownership e ON e.link_id = l.id
        JOIN multiremi_issues i ON i.id = l.issue_id
        WHERE cr.connection_id = ? AND cr.repository_id = ? AND cr.external_id = ?
          AND i.workspace_id = ? AND i.status <> 'done'`,
     ).all(event.connectionId, event.repositoryId, event.subjectId, event.workspaceId) as Row[];
     for (const row of rows) {
       const issueId = String(row.issue_id);
-      // Read the derived key rather than the raw column: `issue_key` is nullable and
-      // Issue.key falls back to the formatted issue number. Using the column directly
-      // would stringify NULL to "null" and match any change request that merely
-      // contains the word "null" — the very misattribution this guard exists to stop.
-      const issueKey = this.ctx.issues().getIssue(issueId)?.key;
-      if (!issueKey) continue;
-      const attribution = scmIssueOwnershipAttribution({
-        issueKey,
-        linkSource: String(row.link_source),
-        title: String(row.title ?? ""),
-        body: nullableString(row.body),
-        sourceBranch: nullableString(row.source_branch),
-      });
-      if (attribution.length === 0) continue;
+      if (!persistedOwnership(row).length) continue;
 
       // Exclude the merging change request by primary key. `external_id` is only
       // unique per connection+repository, so filtering on it would also drop an
       // unrelated open owner that happens to share the id in another repository.
       const competingRows = this.ctx.db.query(
-        `SELECT l.source AS link_source, cr.title, cr.body, cr.source_branch
+        `SELECT l.source AS link_source, e.attribution
          FROM multiremi_scm_issue_links l
          JOIN multiremi_scm_change_requests cr ON cr.id = l.change_request_id
+         LEFT JOIN multiremi_scm_link_ownership e ON e.link_id = l.id
          WHERE l.issue_id = ? AND l.active = 1 AND cr.workspace_id = ?
            AND cr.id != ? AND cr.state = 'open' AND cr.draft = 0`,
       ).all(issueId, event.workspaceId, String(row.change_request_id)) as Row[];
-      const hasCompetingOwner = competingRows.some((competing) => scmIssueOwnershipAttribution({
-        issueKey,
-        linkSource: String(competing.link_source),
-        title: String(competing.title ?? ""),
-        body: nullableString(competing.body),
-        sourceBranch: nullableString(competing.source_branch),
-      }).length > 0);
+      const hasCompetingOwner = competingRows.some(competing => persistedOwnership(competing).length > 0);
       if (hasCompetingOwner) continue;
 
       this.ctx.db.run(
@@ -1840,6 +1822,7 @@ export class ScmRepo {
    * stored `complete_issue_on_merge` name; it only records `scm_merge_completed`.
    */
   private processPendingMergeEffects(event: MultiremiScmCanonicalEvent): void {
+    assertScmOwnershipReady(this.ctx.db);
     // The pending row is committed with the canonical event. Retrying after a
     // crash is safe: the record and the `applied` mark commit together.
     const rows = this.ctx.db.query(
@@ -1851,15 +1834,6 @@ export class ScmRepo {
       const effectId = String(row.id);
       const issueId = String(row.issue_id);
       try {
-        const changeRequestRow = this.ctx.db.query(
-          `SELECT cr.id AS change_request_id, cr.number, cr.url, cr.source_branch,
-                  cr.title, cr.body, l.source AS link_source
-           FROM multiremi_scm_change_requests cr
-           LEFT JOIN multiremi_scm_issue_links l
-             ON l.change_request_id = cr.id AND l.issue_id = ?
-           WHERE cr.connection_id = ? AND cr.repository_id = ? AND cr.external_id = ?`,
-        ).get(issueId, event.connectionId, event.repositoryId, event.subjectId) as Row | null;
-        if (!changeRequestRow) throw new Error("SCM change request for merge completion could not be found");
         // `scm_merge_completed` and the effect's own `applied` mark are one
         // transaction, so a failure leaves the effect pending for the next dispatch.
         const deferredEvents = createCommitEventQueue();
@@ -1869,7 +1843,17 @@ export class ScmRepo {
           // Serialize with status writers so a just-closed Issue records no merge.
           lockIssueRowWithinTransaction(this.ctx.db, issueId);
           const current = this.ctx.issues().getIssue(issueId);
-          if (current && current.status !== "done") {
+          const changeRequestRow = this.ctx.db.query(
+            `SELECT cr.id AS change_request_id, cr.number, cr.url, cr.source_branch,
+                    e.attribution, l.source AS link_source
+             FROM multiremi_scm_change_requests cr
+             JOIN multiremi_scm_issue_links l
+               ON l.change_request_id = cr.id AND l.issue_id = ? AND l.active = 1
+             LEFT JOIN multiremi_scm_link_ownership e ON e.link_id = l.id
+             WHERE cr.connection_id = ? AND cr.repository_id = ? AND cr.external_id = ?`,
+          ).get(issueId, event.connectionId, event.repositoryId, event.subjectId) as Row | null;
+          const attribution = changeRequestRow ? persistedOwnership(changeRequestRow) : [];
+          if (current && current.status !== "done" && changeRequestRow && attribution.length) {
             this.ctx.appendIssueActivity(issueId, {
               actorType: "system",
               actorId: null,
@@ -1880,13 +1864,7 @@ export class ScmRepo {
                 url: nullableString(changeRequestRow.url),
                 source_branch: nullableString(changeRequestRow.source_branch),
                 event_id: event.id,
-                attribution: scmIssueOwnershipAttribution({
-                  issueKey: current.key,
-                  linkSource: String(changeRequestRow.link_source ?? ""),
-                  title: String(changeRequestRow.title ?? ""),
-                  body: nullableString(changeRequestRow.body),
-                  sourceBranch: nullableString(changeRequestRow.source_branch),
-                }),
+                attribution,
               },
             }, deferredEvents);
           }
@@ -2381,27 +2359,6 @@ function normalizeChangeRequestState(value: unknown, draft: boolean): MultiremiS
   if (value === "merged" || value === "closed") return value;
   if (draft || value === "draft") return "draft";
   return "open";
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-}
-
-function scmIssueOwnershipAttribution(
-  candidate: ScmIssueOwnershipCandidate,
-): ScmIssueOwnershipAttribution[] {
-  const issueKey = escapeRegExp(candidate.issueKey);
-  const keyPattern = new RegExp(`\\b${issueKey}\\b`, "i");
-  const bodyDeclarationPattern = new RegExp(
-    `^[\\s\\-*>]*(fix(e[sd])?|close[sd]?|resolve[sd]?|issues?)\\s*[:：-]?\\s*${issueKey}\\b`,
-    "im",
-  );
-  const attribution: ScmIssueOwnershipAttribution[] = [];
-  if (candidate.linkSource === "manual") attribution.push("manual");
-  if (keyPattern.test(candidate.sourceBranch ?? "")) attribution.push("branch");
-  if (keyPattern.test(candidate.title)) attribution.push("title");
-  if (bodyDeclarationPattern.test(candidate.body ?? "")) attribution.push("body");
-  return attribution;
 }
 
 function optionalSecret(value: unknown, label: string): string | null {

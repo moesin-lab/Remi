@@ -1,3 +1,4 @@
+import { classifyScmLinks } from "@multiremi/store/scm-ownership.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { taskOfferResponse } from "../../fixtures/task-offer.js";
@@ -80,6 +81,17 @@ function recordChange(
       providerEventId: input.source === "webhook" ? "delivery-42" : null,
     },
   });
+}
+
+function classifyHistoricalLinks(...links: Array<[number, string]>) {
+  db!.run("DELETE FROM multiremi_scm_ownership_cutover");
+  for (const [number, issueId] of links) {
+    db!.run(`INSERT INTO multiremi_scm_issue_links
+      (id, workspace_id, change_request_id, issue_id, source, active, linked_at, created_at, updated_at)
+      SELECT ?, workspace_id, id, ?, 'auto', 1, updated_at, created_at, updated_at
+      FROM multiremi_scm_change_requests WHERE number = ?`, [crypto.randomUUID(), issueId, number]);
+  }
+  classifyScmLinks(db!);
 }
 
 function projectChangeRequest(
@@ -282,6 +294,7 @@ describe("SCM connection and canonical event store", () => {
         target_branch: "main",
       },
     });
+    classifyHistoricalLinks([41, issue.id]);
     expect((db!.query(
       "SELECT COUNT(*) AS count FROM multiremi_scm_change_requests WHERE connection_id = ? AND repository_id = ?",
     ).get(connection.id, "repo_widgets") as { count: number }).count).toBe(1);
@@ -623,12 +636,14 @@ describe("SCM connection and canonical event store", () => {
       contentHash: "delete-projection",
       payload: { number: 1, title: `${issue.key} cleanup`, state: "open" },
     });
+    classifyHistoricalLinks([1, issue.id]);
     expect(store.listScmChangeRequestsForIssue(issue.id)).toHaveLength(1);
     expect(store.deleteScmConnection(connection.id)).toBe(true);
     expect(store.getScmSyncCursor(connection.id, "repo_widgets", "default_branch")).toBeNull();
     expect(store.getScmEntitySnapshot(connection.id, "repo_widgets", "ref", "main")).toBeNull();
     expect(store.listScmRepositoryBindings({ connectionId: connection.id })).toEqual([]);
     expect(store.listScmChangeRequestsForIssue(issue.id)).toEqual([]);
+    expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_scm_link_ownership").get()).toEqual({ count: 0 });
   });
 
   it("claims polling streams with fencing tokens and rejects stale owners", () => {
@@ -837,48 +852,17 @@ describe("SCM connection and canonical event store", () => {
     expect(db!.query("SELECT COUNT(*) AS count FROM multiremi_scm_event_evidence").get()).toEqual({ count: 1 });
   });
 
-  it("projects baseline change requests and auto-links issue keys from title, branch, or body", () => {
+  it.each([true, false, undefined])("never discovers links with old setting %s", setting => {
     const { store, connection } = seedConnection();
+    store.updateWorkspace("local", { settings: { scm_auto_link_enabled: setting } });
     const issue = createResponsibleTestIssue(store, { title: "Projection target", workspaceId: "local" });
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
-    store.onWorkspaceEvent((event) => events.push(event));
-
-    store.advanceScmEntitySnapshot({
-      connectionId: connection.id,
-      repositoryId: "repo_widgets",
-      entityType: "change_request",
-      externalId: "42",
-      version: "v1",
-      revisionAt: "2026-08-21T10:00:00.000Z",
-      revision: "v1",
-      contentHash: "open-v1",
-      payload: {
-        number: 42,
-        title: "Update projection",
-        body: `Resolves ${issue.key}`,
-        state: "open",
-        source_branch: "feature/projection",
-        target_branch: "main",
-        author: "octocat",
-        updated_at: "2026-08-21T10:00:00.000Z",
-      },
+    store.onWorkspaceEvent(event => events.push(event));
+    projectChangeRequest(store, connection.id, "42", {
+      number: 42, title: issue.key, source_branch: `agent/${issue.key}`, body: `Resolves ${issue.key}`, state: "open",
     });
-
-    expect(store.listScmChangeRequestsForIssue(issue.id)).toEqual([
-      expect.objectContaining({
-        provider: "github",
-        externalId: "42",
-        number: 42,
-        body: `Resolves ${issue.key}`,
-        sourceBranch: "feature/projection",
-        targetBranch: "main",
-        author: "octocat",
-      }),
-    ]);
-    expect(events.filter((event) => event.type === "change_request:updated")).toHaveLength(1);
-    expect(events.find((event) => event.type === "change_request:updated")?.payload).toMatchObject({
-      issue_ids: [issue.id],
-    });
+    expect(store.listScmChangeRequestsForIssue(issue.id)).toEqual([]);
+    expect(events.filter(event => event.type === "change_request:updated").map(event => event.payload.issue_ids)).toEqual([[]]);
   });
 
   it("keeps a manual unlink suppressed across later auto-link projection updates", () => {
@@ -894,6 +878,7 @@ describe("SCM connection and canonical event store", () => {
       contentHash: "v1",
       payload: { number: 42, title: `${issue.key} first`, state: "open" },
     });
+    classifyHistoricalLinks([42, issue.id]);
     const changeRequest = store.listScmChangeRequestsForIssue(issue.id)![0]!;
     expect(store.unlinkScmChangeRequestFromIssue(issue.id, changeRequest.id)).toBe(true);
 
@@ -935,6 +920,7 @@ describe("SCM connection and canonical event store", () => {
       },
     });
 
+    classifyHistoricalLinks([42, issue.id]);
     const first = recordChange(store, connection.id, { logicalKey: "change.merged:42:lifecycle" });
     const duplicate = recordChange(store, connection.id, {
       logicalKey: "change.merged:42:lifecycle",
@@ -991,6 +977,7 @@ describe("SCM connection and canonical event store", () => {
       source_branch: `agent/${parent.key}-slice`,
       url: "https://github.com/acme/widgets/pull/42",
     });
+    classifyHistoricalLinks([42, parent.id]);
     expect(store.listScmChangeRequestsForIssue(parent.id)).toHaveLength(1);
 
     const merged = recordChange(store, connection.id, { logicalKey: "change.merged:42:held" });
@@ -1024,6 +1011,7 @@ describe("SCM connection and canonical event store", () => {
       acceptTestIssueDelivery(store, child.id);
       if (grantEnabled) retainLegacyParentGrant(parent.id, owner.id);
       projectChangeRequest(store, connection.id, "42", { number: 42, title: `${parent.key} delivery`, state: "merged" });
+      classifyHistoricalLinks([42, parent.id]);
       recordChange(store, connection.id, { logicalKey: `change.merged:42:hold-${grantEnabled}` });
       expectMergeRecorded(store, parent.id, "in_progress");
       expect(store.listIssueActivity(parent.id).filter((entry) => entry.type === "parent_done_grant_used")).toHaveLength(0);
@@ -1058,6 +1046,7 @@ describe("SCM connection and canonical event store", () => {
       source_branch: `agent/${parent.key}`,
       url: "https://github.com/acme/widgets/pull/42",
     });
+    classifyHistoricalLinks([42, parent.id]);
     recordChange(store, connection.id, { logicalKey: "change.merged:42:closed" });
 
     expectMergeRecorded(store, parent.id, 'in_progress');
@@ -1084,6 +1073,7 @@ describe("SCM connection and canonical event store", () => {
       source_branch: `agent/${owningIssue.key}`,
     });
 
+    classifyHistoricalLinks([42, owningIssue.id], [42, mentionedIssue.id]);
     recordChange(store, connection.id, { logicalKey: "change.merged:42:cross-reference" });
 
     expectMergeRecorded(store, owningIssue.id);
@@ -1112,6 +1102,7 @@ describe("SCM connection and canonical event store", () => {
       source_branch: `agent/${issue.key}-part-two`,
     });
 
+    classifyHistoricalLinks([42, issue.id], [43, issue.id]);
     recordChange(store, connection.id, { logicalKey: "change.merged:42:split-delivery" });
 
     expect(store.getIssue(issue.id)?.status).toBe("todo");
@@ -1133,6 +1124,7 @@ describe("SCM connection and canonical event store", () => {
       source_branch: `agent/${issue.key}`,
     });
 
+    classifyHistoricalLinks([42, issue.id]);
     recordChange(store, connection.id, { logicalKey: "change.merged:42:branch-owner" });
 
     expectMergeRecorded(store, issue.id);
@@ -1151,6 +1143,7 @@ describe("SCM connection and canonical event store", () => {
       source_branch: "release/v0.2.54",
     });
 
+    classifyHistoricalLinks([42, issue.id]);
     recordChange(store, connection.id, { logicalKey: "change.merged:42:release-title" });
 
     expectMergeRecorded(store, issue.id);
@@ -1180,6 +1173,7 @@ describe("SCM connection and canonical event store", () => {
       state: "open",
     });
 
+    classifyHistoricalLinks([42, issue.id], [43, issue.id], [44, issue.id]);
     recordChange(store, connection.id, { logicalKey: "change.merged:42:draft-blocker" });
 
     expectMergeRecorded(store, issue.id);
@@ -1198,6 +1192,7 @@ describe("SCM connection and canonical event store", () => {
       body: `Summary\n\n- Resolves: ${bodyOwnedIssue.key}`,
       state: "merged",
     });
+    classifyHistoricalLinks([42, bodyOwnedIssue.id]);
     const changeRequest = store.listScmChangeRequestsForIssue(bodyOwnedIssue.id)![0]!;
     store.linkScmChangeRequestToIssue(manuallyLinkedIssue.id, changeRequest.id);
 
@@ -1229,6 +1224,7 @@ describe("SCM connection and canonical event store", () => {
       source_branch: `agent/${owner.key}`,
     });
 
+    classifyHistoricalLinks([42, owner.id], [42, mentioned.id]);
     recordChange(store, connection.id, { logicalKey: "change.merged:42:prose-mention" });
 
     expect(store.getIssue(mentioned.id)?.status).toBe("todo");
@@ -1257,6 +1253,7 @@ describe("SCM connection and canonical event store", () => {
       source_branch: "agent/something-else",
     });
 
+    classifyHistoricalLinks([42, issue.id]);
     recordChange(store, connection.id, { logicalKey: "change.merged:42:null-key" });
 
     expect(store.getIssue(issue.id)?.status).toBe("todo");
@@ -1280,6 +1277,7 @@ describe("SCM connection and canonical event store", () => {
       contentHash: "v1",
       payload: { number: 42, title: `${issue.key} retry merge`, state: "merged" },
     });
+    classifyHistoricalLinks([42, issue.id]);
     db!.exec(`
       CREATE TRIGGER fail_merge_completion
       BEFORE INSERT ON multiremi_issue_activity

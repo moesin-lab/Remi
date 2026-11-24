@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it } from "bun:test";
 import { createMultiremiApp } from "@multiremi/api.js";
-import { createStore, resetMultiremiTestEnv } from "./helpers.js";
+import { createResponsibleTestIssue, createStore, resetMultiremiTestEnv } from "./helpers.js";
 
 const originalEncryptionKey = process.env.MULTIREMI_SCM_ENCRYPTION_KEY;
 
@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 describe("Multiremi API — normalized SCM webhooks", () => {
-  it("accepts a signed provider webhook and persists one deduplicated canonical event", async () => {
+  it.each([true, false, undefined])("deduplicates signed webhooks without discovering links with setting %s", async setting => {
     process.env.MULTIREMI_SCM_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
     const store = createStore();
     store.ensureLocalWorkspace();
@@ -29,17 +29,20 @@ describe("Multiremi API — normalized SCM webhooks", () => {
       webhookSecret: "webhook-secret",
       repositoryIds: ["repo_widgets"],
     });
+    store.updateWorkspace("local", { settings: { scm_auto_link_enabled: setting } });
+    const issue = createResponsibleTestIssue(store, { title: "Referenced issue", workspaceId: "local" });
     const body = {
       action: "opened",
       repository: { id: 101, name: "widgets", owner: { login: "acme" }, default_branch: "main" },
       pull_request: {
         id: 9001,
         number: 42,
-        title: "Ship it",
+        title: issue.key,
+        body: `Fixes ${issue.key}`,
         state: "open",
         created_at: "2026-08-21T07:00:00.000Z",
         updated_at: "2026-08-21T07:00:00.000Z",
-        head: { ref: "feature", sha: "abc" },
+        head: { ref: issue.key, sha: "abc" },
         base: { ref: "main", sha: "def" },
       },
     };
@@ -69,6 +72,7 @@ describe("Multiremi API — normalized SCM webhooks", () => {
     expect(events).toHaveLength(1);
     expect(store.listScmEventEvidence(events[0]!.id)).toHaveLength(1);
 
+    expect(store.listScmChangeRequestsForIssue(issue.id)).toEqual([]);
     const duplicate = await send();
     expect(duplicate.status).toBe(202);
     expect((await duplicate.json()).events[0]).toMatchObject({ created: false, evidence_created: false });

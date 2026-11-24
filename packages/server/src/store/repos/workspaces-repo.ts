@@ -1,3 +1,4 @@
+import { assertScmOwnershipReady, deleteScmIssueLinks } from "../scm-ownership.js";
 // Workspaces / members / users / invitations / notification preferences domain, plus the
 // workspace-scoped model-gateway relay config. Extracted verbatim from MultiremiStore
 // (the facade delegates every public method here).
@@ -711,6 +712,9 @@ export class WorkspacesRepo {
   }
 
   private deleteWorkspaceScmState(workspaceId: string): void {
+    if (this.ctx.db.query("SELECT id FROM multiremi_scm_connections WHERE workspace_id = ? LIMIT 1").get(workspaceId)) {
+      assertScmOwnershipReady(this.ctx.db);
+    }
     const connectionIds = "SELECT id FROM multiremi_scm_connections WHERE workspace_id = ?";
     const eventIds = `SELECT id FROM multiremi_scm_events
       WHERE workspace_id = ? OR connection_id IN (${connectionIds})`;
@@ -741,9 +745,8 @@ export class WorkspacesRepo {
        WHERE workspace_id = ? OR connection_id IN (${connectionIds})`,
       [workspaceId, workspaceId],
     );
-    this.ctx.db.run(
-      `DELETE FROM multiremi_scm_issue_links
-       WHERE workspace_id = ? OR change_request_id IN (${changeRequestIds})`,
+    deleteScmIssueLinks(this.ctx.db,
+      `workspace_id = ? OR change_request_id IN (${changeRequestIds})`,
       [workspaceId, workspaceId, workspaceId],
     );
     this.ctx.db.run(

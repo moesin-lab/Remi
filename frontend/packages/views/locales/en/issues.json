@@ -321,7 +321,7 @@
       "error": "Setup failed"
     },
     "change_requests_loading": "Loading…",
-    "change_requests_empty": "No linked code changes yet. Reference this issue identifier in a branch name, title, or description to link one automatically.",
+    "change_requests_empty": "No linked code changes yet.",
     "change_request_github_reference": "GitHub PR #{{number}}",
     "change_request_codebase_reference": "Codebase MR !{{number}}",
     "change_request_generic_reference": "Change #{{number}}",

@@ -16,4 +16,17 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
   id: '20261119_planned_restarts', phase: 'expand', level: 3,
   expandRelease: '0.2.95', release: '0.2.95',
   run: db => { ensureDaemonDrainIdentity(db); ensurePlannedRestarts(db); },
+}, {
+  id: '20261124_scm_link_ownership', phase: 'expand', level: 4,
+  expandRelease: '0.2.95', release: '0.2.95',
+  run: db => {
+    db.exec(`CREATE TABLE IF NOT EXISTS multiremi_scm_link_ownership (
+      link_id TEXT PRIMARY KEY REFERENCES multiremi_scm_issue_links(id) ON DELETE CASCADE,
+      attribution TEXT NOT NULL
+    )`);
+    db.exec(`CREATE TABLE IF NOT EXISTS multiremi_scm_ownership_cutover (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      cursor_id TEXT NOT NULL, complete INTEGER NOT NULL CHECK (complete IN (0, 1))
+    )`);
+  },
 }];

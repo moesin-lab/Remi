@@ -328,8 +328,6 @@
     "feature_co_author_label": "Co-authored-by trailer",
     "feature_co_author_description_prefix": "在智能体提交的 commit 中追加",
     "feature_co_author_description_suffix": "。",
-    "feature_auto_link_label": "自动关联 Issue 与代码变更",
-    "feature_auto_link_description": "根据分支名、标题和描述中的 Issue 编号自动建立关联。",
     "section_repositories": "代码仓库",
     "repositories_shortcut_label": "仓库 URL 仍在「代码仓库」标签页中管理",
     "repositories_shortcut_link": "前往管理 →",

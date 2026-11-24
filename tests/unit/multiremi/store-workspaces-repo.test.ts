@@ -1,3 +1,5 @@
+import { classifyScmLinks } from "@multiremi/store/scm-ownership.js";
+import { linkProjectedTestChangeRequest } from "./helpers.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 // Sibling test for packages/server/src/store/repos/workspaces-repo.ts.
@@ -17,6 +19,7 @@ function createFixture(): { repo: WorkspacesRepo; store: MultiremiStore } {
   db = openSqliteDatabase(":memory:");
   // The store owns migrations and is the lazy cross-domain host the context resolves.
   const store = new MultiremiStore(db);
+  classifyScmLinks(db);
   return { repo: new WorkspacesRepo(new StoreContext(db, () => store)), store };
 }
 
@@ -157,6 +160,8 @@ describe("WorkspacesRepo", () => {
         target_branch: "main",
       },
     });
+    linkProjectedTestChangeRequest(store, issue.id, connection.id, "repo_cleanup", 17);
+    db!.run("INSERT INTO multiremi_scm_link_ownership (link_id, attribution) SELECT id, ? FROM multiremi_scm_issue_links WHERE issue_id = ?", ['["title"]', issue.id]);
     const event = store.recordScmCanonicalEvent({
       workspaceId: workspace.id,
       connectionId: connection.id,
@@ -204,6 +209,7 @@ describe("WorkspacesRepo", () => {
       "multiremi_scm_entity_snapshots",
       "multiremi_scm_change_requests",
       "multiremi_scm_issue_links",
+      "multiremi_scm_link_ownership",
       "multiremi_scm_events",
       "multiremi_scm_effects",
       "multiremi_scm_event_evidence",

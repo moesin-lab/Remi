@@ -1,3 +1,5 @@
+import { classifyScmLinks } from "@multiremi/store/scm-ownership.js";
+import { linkProjectedTestChangeRequest } from "./helpers.js";
 import { createResponsibleTestAutopilot } from './helpers.js';
 import { createResponsibleTestIssue } from './helpers.js';
 import { acceptTestIssueDelivery, seedHistoricalIssueFacts, testWorkspaceMember } from './helpers.js';
@@ -350,6 +352,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
         return db.query(sql).get(...params) as Record<string, unknown> | null;
       },
     });
+    classifyScmLinks(db);
     store.ensureLocalWorkspace();
   });
 
@@ -1551,6 +1554,7 @@ describe.skipIf(!pgAvailable)("MultiremiStore on Postgres (integration)", () => 
       payload: { title: "Projection without a numeric identifier", state: "open" },
     }).applied).toBe(true);
 
+    linkProjectedTestChangeRequest(store, issue.id, connection.id, repositoryId, 42);
     const projected = store.listScmChangeRequestsForIssue(issue.id)!;
     expect(projected).toEqual([
       expect.objectContaining({

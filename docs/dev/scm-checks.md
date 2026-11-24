@@ -86,3 +86,11 @@ kind 为 workflow_run，保留 status、conclusion 和 runAttempt。同一 run I
 
 验证入口：`bun run test tests/unit/multiremi/scm-checks.test.ts tests/unit/multiremi/multiremi-api-scm-checks.test.ts tests/unit/remi/cli-operations.test.ts`。
 测试使用真实 Task 鉴权/HTTP/SQLite，远端 GitHub 为 mock；真实已部署服务的任务凭据查询需另行验收。
+
+## SCM 归属切换
+
+先对共享库执行 level 4 的加法 expand，再停止所有 API slot、后台 SCM writer 及旧交付轮次，排尽在途事务和数据库连接。在整个维护窗口禁用旧实例自动重启并阻断重新连接，包括对 Issue key 的写入。使用新版本的本机 `remi db classify-scm-links`（显式 PostgreSQL `MULTIREMI_DATABASE_URL`）。advisory lock 串行维护命令，离线检查只能观察当时的连接。新安装的空库同样执行此命令以登记完成。候选启动和 `db prepare` 均不执行分类。
+
+每批以 link ID 排序，证据与游标同事务提交。中断后保持隔离，以相同命令续跑；完成后可重复执行。仅完成后恢复新 Server 的 SCM 写入，再启用具备 bind 命令的 CLI 和新 daemon。旧 daemon 创建的 PR/MR 用原 URL 显式 bind 并 list 核对。旧 Server 回滚期间必须继续隔离 SCM 写入；若旧 writer 已再次写入，保持隔离并审计受影响的关联、投影及 Issue key，重新核对后才可切换。重复运行已完成的命令不会重新分类，不能用旧标记证明回退后的数据有效。
+
+poll、webhook、baseline 和 bind 都不会依据标题、分支或正文新增关联，旧 `scm_auto_link_enabled` 设置仅保留序列化兼容。显式 manual 关联具有归属；已存在的 auto/legacy 关联按切换时可证实的分支、标题、声明式正文保存归属。普通提及保持可见，解绑记录继续隐藏。后续文本更新不改变归属，合并只记录活动。切换前已丢失证据的关联可按原 URL 显式绑定，不补录历史活动。

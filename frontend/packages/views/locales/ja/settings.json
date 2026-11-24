@@ -328,8 +328,6 @@
     "feature_co_author_label": "Co-authored-by トレーラー",
     "feature_co_author_description_prefix": "エージェントが作成したコミットに",
     "feature_co_author_description_suffix": "を追加します。",
-    "feature_auto_link_label": "Issue とコード変更を自動リンク",
-    "feature_auto_link_description": "ブランチ名、タイトル、説明の Issue 番号を照合して自動的にリンクします。",
     "section_repositories": "リポジトリ",
     "repositories_shortcut_label": "リポジトリ URL はリポジトリタブにあります",
     "repositories_shortcut_link": "リポジトリを管理 →",

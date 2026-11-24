@@ -33,6 +33,24 @@ export function databaseCommandSpecs(): CommandSpec[] {
       } finally { db.close(); }
     },
   }, {
+    id: 'db.classify-scm-links', path: ['db', 'classify-scm-links'],
+    description: 'Freeze existing SCM link ownership after isolating all old writers',
+    mutation: 'destructive', outputs: ['json'],
+    run: async () => {
+      const db = await openDatabase();
+      try {
+        const { advisoryLock } = await import('@multiremi/store/db/postgres.js');
+        const { MIGRATION_ADVISORY_LOCK_KEY } = await import('@multiremi/store/advisory-locks.js');
+        const { assertSchemaContractClientsOffline } = await import('@multiremi/store/schema-contracts.js');
+        const { classifyScmLinks } = await import('@multiremi/store/scm-ownership.js');
+        advisoryLock(db, MIGRATION_ADVISORY_LOCK_KEY, () => {
+          assertSchemaContractClientsOffline(db);
+          classifyScmLinks(db);
+        });
+        console.log(JSON.stringify({ complete: true }));
+      } finally { db.close(); }
+    },
+  }, {
     id: 'db.contract', path: ['db', 'contract'],
     description: 'Execute declared contract migrations after all PostgreSQL clients have stopped',
     mutation: 'destructive', outputs: ['json'],

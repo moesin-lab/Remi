@@ -1,3 +1,5 @@
+import { classifyScmLinks } from "@multiremi/store/scm-ownership.js";
+import { linkProjectedTestChangeRequest } from "./helpers.js";
 import { createResponsibleTestIssue, acceptTestIssueDelivery, seedHistoricalIssueFacts, testWorkspaceMember } from './helpers.js';
 import { resolveMigrationReportDirectory } from "@multiremi/store/migration-report-directory.js";
 import { issueMessagesPath, requestMessageBody } from "./unified-test-paths.js";
@@ -209,6 +211,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
     await admin.unsafe(`CREATE DATABASE ${TEST_DB}`);
     db = new PostgresSyncDatabase(pgDatabaseUrl(TEST_DB));
     store = new MultiremiStore(db);
+    classifyScmLinks(db);
     store.ensureLocalWorkspace();
     counter = transactionDepthCounter(db);
   });
@@ -666,6 +669,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
         source_branch: `agent/${parent.key}`, url: "https://github.com/acme/pg-mul457/pull/77",
       },
     });
+    linkProjectedTestChangeRequest(store, parent.id, connection.id, repoId, Number(externalId));
     const recordMerge = (logicalKey: string) => store.recordScmCanonicalEvent({
       workspaceId, connectionId: connection.id, repositoryId: repoId,
       type: "change.merged", subjectType: "change_request", subjectId: externalId,
@@ -1289,6 +1293,7 @@ describe.skipIf(!pgAvailable)("MUL-400 S1 on PostgreSQL", () => {
           revisionAt: "2026-08-21T10:00:00.000Z", revision: `v-${externalId}`, contentHash: `change-${externalId}`,
           payload: { number: Number(externalId), title: `${mergedIssue.key}: deliver`, state: "merged", source_branch: "agent/depth", url: `https://github.com/acme/widgets/pull/${externalId}` },
         });
+        linkProjectedTestChangeRequest(store, mergedIssue.id, connection.id, repositoryId, Number(externalId));
         check(`recordScmCanonicalEvent held=${hasOpenChildren}`, () => {
           store.recordScmCanonicalEvent({
             workspaceId, connectionId: connection.id, repositoryId, type: "change.merged",

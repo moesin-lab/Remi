@@ -134,16 +134,57 @@ it("refreshes both observers once at the deadline, backs off after failure, and 
   } finally { vi.useRealTimers(); }
 });
 
-it.each(["workspace", "endpoint", "disabled"])("cancels the previous deadline on %s change", async change => {
+it("retries the first catalog GET after each failed read and restores candidates without saving", async () => {
   vi.useFakeTimers();
   const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
   try {
     bind("e1", null);
-    api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [snapshot(chat, "old", 2, new Date(Date.now() - 297000).toISOString())] });
+    api.getExecutionEndpointCatalog.mockRejectedValue(new Error("offline"));
+    const view = show();
+    await advance(100);
+    const reads = api.getExecutionEndpointCatalog.mock.calls.length;
+    expect(reads).toBeGreaterThan(0);
+    const input = screen.getByLabelText(enSettings.modelGateway.auto_title_model_label);
+    fireEvent.input(input, { target: { value: "draft" } });
+    await advance(299800);
+    expect(api.getExecutionEndpointCatalog).toHaveBeenCalledTimes(reads);
+    await advance(200);
+    expect(api.getExecutionEndpointCatalog).toHaveBeenCalledTimes(reads + 1);
+    expect(api.inspectExecutionEndpoint).not.toHaveBeenCalled();
+    const row = snapshot(chat, "draft-candidate");
+    api.getExecutionEndpointCatalog.mockResolvedValueOnce({ catalogs: [] }).mockResolvedValue({ catalogs: [row] });
+    api.inspectExecutionEndpoint.mockImplementation(async () => {
+      row.last_checked_at = new Date(Date.now() - 299900).toISOString();
+      return { persisted: true, inspection: { checked_at: row.last_checked_at, results: [{ protocol: chat, operation: "models", state: "ok" }] } };
+    });
+    await advance(299800);
+    expect(api.getExecutionEndpointCatalog).toHaveBeenCalledTimes(reads + 1);
+    await advance(300);
+    await advance(1000);
+    expect(api.getExecutionEndpointCatalog).toHaveBeenCalledTimes(reads + 3);
+    expect(api.inspectExecutionEndpoint.mock.calls).toEqual([["ws", { endpoint_id: "e1", protocol: chat, operation: "models" }]]);
+    expect(input).toHaveValue("draft");
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(screen.getByRole("option", { name: /draft-candidate/ })).toBeInTheDocument();
+    expect(api.updateWorkspace).not.toHaveBeenCalled();
+    expect(api.saveSystemModelEndpoints).not.toHaveBeenCalled();
+    view.unmount();
+  } finally { vi.useRealTimers(); }
+});
+
+it.each(["workspace", "endpoint", "disabled", "unmount"].flatMap(change =>
+  [true, false].map(offline => ({ change, offline }))))("cancels the previous deadline on $change change (offline=$offline)", async ({ change, offline }) => {
+  vi.useFakeTimers();
+  const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+  try {
+    bind("e1", null);
+    if (offline) api.getExecutionEndpointCatalog.mockRejectedValue(new Error("offline"));
+    else api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [snapshot(chat, "old", 2, new Date(Date.now() - 297000).toISOString())] });
     const view = show();
     await advance(100);
     expect(api.getExecutionEndpointCatalog).toHaveBeenCalled();
-    if (change === "workspace") {
+    if (change === "unmount") view.unmount();
+    else if (change === "workspace") {
       workspace.id = "next";
       bind(null, null);
       view.reopen();
@@ -157,7 +198,9 @@ it.each(["workspace", "endpoint", "disabled"])("cancels the previous deadline on
       await act(() => view.client.invalidateQueries());
     }
     await advance(50);
+    const reads = api.getExecutionEndpointCatalog.mock.calls.length;
     await advance(300001);
+    expect(api.getExecutionEndpointCatalog).toHaveBeenCalledTimes(reads);
     expect(api.inspectExecutionEndpoint).not.toHaveBeenCalled();
     view.unmount();
   } finally { vi.useRealTimers(); }

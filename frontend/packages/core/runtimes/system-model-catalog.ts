@@ -19,17 +19,29 @@ export function useSystemModelCatalog(workspaceId: string, endpoint: ExecutionEn
   const options = { staleTime: maxAge, retry: false, retryOnMount: false, refetchOnWindowFocus: false, refetchOnReconnect: false } as const;
   const snapshot = useQuery({ ...options, queryKey: key, queryFn: read, enabled });
   const row = snapshot.data;
+  const { isError: readFailed, errorUpdatedAt: readFailedAt, isFetching: reading, refetch: reread } = snapshot;
+  useEffect(() => {
+    if (!enabled || !readFailed || reading) return;
+    const timer = setTimeout(() => {
+      const latest = client.getQueryState(key);
+      if (latest?.status === "error" && latest.fetchStatus === "idle" && latest.errorUpdatedAt === readFailedAt) {
+        void reread({ cancelRefetch: false });
+      }
+    }, Math.max(0, readFailedAt + maxAge - Date.now()));
+    return () => clearTimeout(timer);
+  }, [enabled, readFailed, reading, readFailedAt, client, key, reread]);
   const checkedAt = row && row.revision === endpoint?.revision ? Date.parse(row.last_checked_at) || 0 : 0;
   const expired = checkedAt + maxAge <= Date.now();
   const refresh = useQuery({ ...options, queryKey: [...key, "refresh"], enabled: false,
     queryFn: async () => {
+      const startedAt = Date.now();
       const { inspection, persisted } = await api.inspectExecutionEndpoint(workspaceId, { endpoint_id: endpoint!.id, protocol, operation: "models" });
       const result = inspection.results.find(item => item.protocol === protocol && item.operation === "models");
       const current = await read();
       if (current) client.setQueryData(key, current);
       const confirmed = persisted && current?.revision === endpoint!.revision && current.last_checked_at >= inspection.checked_at;
       return { failed: !confirmed || !result || result.state === "error", code: result?.error_code,
-        checkedAt: confirmed ? Date.parse(current.last_checked_at) : 0 };
+        checkedAt: confirmed ? Math.max(startedAt, Date.parse(current.last_checked_at)) : 0 };
     },
   });
   const { refetch, dataUpdatedAt, errorUpdatedAt, isFetching } = refresh;

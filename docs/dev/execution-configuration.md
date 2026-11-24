@@ -94,7 +94,7 @@ remi runtime endpoint inspect --file inspection.json --json
 remi runtime endpoint catalog <endpoint-id> --json
 ```
 
-`inspection.json` 可使用 `{"endpoint_id":"ep_ID","operation":"models"}`，也可附带草稿 `connection` 和新 `api_key`。测试模型时再添加 `protocol`、`model` 并将 operation 改为 `test`。
+`inspection.json` 可使用 `{"endpoint_id":"ep_ID","operation":"models"}`，也可附带草稿 `connection` 和新 `api_key`。端点编辑器对已保存且连接未修改的端点按 ID 获取模型，关闭重开或从 CLI 读取目录都可见刷新结果；新建、编辑连接或输入临时 key 时获取的是预览。测试模型时再添加 `protocol`、`model` 并将 operation 改为 `test`。
 
 本次未实现 Magpie 的密钥池、额度路由、代理／自定义 CA、任意请求体覆盖或无认证模式。当前 Remi 原生执行适配器仍要求 API Key 或 Runtime 环境变量；页面不提供尚未接通执行层的开关。协议检查不会自动改写协议，也不自动试用不同账号或模型。
 
@@ -118,7 +118,7 @@ remi runtime endpoint catalog <endpoint-id> --json
 
 模型输入框可按 ID 或名称查找已绑定网关的模型，选择后填写原始 ID，也可手输目录之外的值。标题优先使用有凭据和基址的 Chat 端点，其次是 Messages；无法确认路由或命中未绑定端点 ID 的旧 relay 时可手输。摘要的 `openai_model` 使用 Chat 目录，`model` 使用 Messages；`auto` 展示两者，`cli` 使用本机配置和覆盖规则。
 
-页面先读取当前协议的目录快照。缺少快照或端点 revision 变化时立即刷新；页面保持打开时，距上次检查满五分钟会再次刷新。同一工作区、端点、revision 和协议的输入共享请求。失败时保留上次成功的列表和当前输入，五分钟后自动重试，也可点击「刷新模型」立即重试。切换端点或离开页面会取消旧计时，关闭 `fetch_models` 后仅显示手动条目。输入 ID 或名称后可点击候选，或按方向键和 Enter 选中原始 ID；点击对应功能的保存按钮才会写入策略。
+页面先读取当前协议的目录快照。首次读取遇到网络错误时，从本次失败完成起等待五分钟再读快照；连续失败按同一间隔重试。读取成功后，缺少快照或端点 revision 变化时立即刷新；页面保持打开时，距上次检查满五分钟会再次刷新。同一工作区、端点、revision 和协议的输入共享请求。失败时保留上次成功的列表和当前输入，也可点击「刷新模型」立即重试。切换端点或离开页面会取消旧计时，关闭 `fetch_models` 后仅显示手动条目。输入 ID 或名称后可点击候选，或按方向键和 Enter 选中原始 ID；点击对应功能的保存按钮才会写入策略。
 
 设置中的原「模型网关」改为「系统 AI」，保留旧 `?tab=model-gateway` 地址。自动标题、进度摘要引用已有端点，不再独立编辑地址和密钥；这些系统默认连接不覆盖执行能力组。由服务器直接调用的功能只接受存储 API 凭据的端点，本机环境变量凭据不交给服务器。
 

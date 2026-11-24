@@ -184,6 +184,9 @@ pendingTurnBackendTests("shared gateway endpoints", (fixture, backend) => {
       };
       expect(await inspect()).toBe(true);
       expect(await catalogs()).toMatchObject([{ revision: endpoint.revision, models: [{ id: model }] }]);
+      model = "editor-refresh";
+      expect(await inspect({ protocol: undefined })).toBe(true);
+      expect(await catalogs()).toMatchObject([{ protocol: "anthropic-messages", models: [{ id: model }] }]);
       model = "saved-null";
       expect(await inspect({ connection: null })).toBe(true);
       const saved = await catalogs();

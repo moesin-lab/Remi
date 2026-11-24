@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { FeishuSenderAuthorizer } from "@connectors/feishu/config.js";
 import { FeishuInboundRecovery, feishuHistoryEvent, recoverFeishuHistory, type FeishuHistoryMessage } from "@connectors/feishu/inbound-recovery.js";
 import { createFeishuInboundDelivery } from "@connectors/feishu/receive.js";
+import type { FeishuMessageEvent } from "@connectors/feishu/types.js";
 
 const directory = mkdtempSync(join(tmpdir(), "feishu-identity-"));
 afterAll(() => rmSync(directory, { force: true, recursive: true }));
@@ -20,10 +21,11 @@ function fixture() {
     delete event.recovery_source;
     return event;
   };
-  const open = (botOpenId: string | undefined = "ou_bot") => {
+  const open = (botOpenId: string | undefined = "ou_bot", onAuthorize?: () => void) => {
     const journal = new FeishuInboundRecovery(path, () => now);
     const authorize: FeishuSenderAuthorizer = async (sender, context) => {
       calls.authorized.push(sender);
+      onAuthorize?.();
       if (unavailable.has(context.messageId)) throw new Error("offline");
       return true;
     };
@@ -31,11 +33,10 @@ function fixture() {
       calls.inspected.push(request.semantic.external_message_id);
       return { name: "status", snapshot: { chatSessionId: "session", task: null } };
     }, render: () => ({ text: "status", displayName: "Remi" }) };
+    const sendCard = async () => { calls.cards++; return { code: 0, data: { message_id: "om_card" } }; };
     const deliver = createFeishuInboundDelivery({ appId: "cli_fixture", recovery: journal, authorizeSender: authorize,
       botIdentity: { botOpenId, botOpenIdReady: Promise.resolve() }, onMessage: async message => { calls.tasks.push(message.messageId); },
-      client: { request: async () => ({ code: 0, data: { items: [] } }), im: { message: { create: async () => {
-        calls.cards++; return { code: 0, data: { message_id: "om_card" } };
-      } } } } as any });
+      client: { request: async () => ({ code: 0, data: { items: [] } }), im: { message: { create: sendCard, reply: sendCard } } } as any });
     return { journal, accept: (event: ReturnType<typeof live>) => journal.accept(event, deliver), scan: (items: FeishuHistoryMessage[]) =>
       recoverFeishuHistory({ journal, now, deliver, warn: (chat, reason) => calls.warnings.push(`${chat}:${reason}`), list: async params => {
         calls.listed.push(params.container_id);
@@ -44,6 +45,54 @@ function fixture() {
       } }) };
   };
   return { path, open, calls, live, history, unavailable, state: () => JSON.parse(readFileSync(path, "utf8")) };
+}
+
+function groupStatus(test: ReturnType<typeof fixture>) {
+  const item = test.history("om_group", "@_user_1 /status");
+  item.mentions = [{ key: "@_user_1", name: "Remi", id_type: "open_id", id: "ou_bot", tenant_key: "tenant" }];
+  const original: FeishuMessageEvent = {
+    sender: { sender_type: "user", sender_id: {} },
+    message: { message_id: "om_group", chat_id: "oc_one", chat_type: "group", message_type: "text",
+      create_time: item.create_time, content: JSON.stringify({ text: "@_user_1 /status" }),
+      mentions: [{ key: "@_user_1", name: "Remi", tenant_key: "tenant", id: { open_id: "ou_bot", user_id: "bot_user", union_id: "on_bot" } }] },
+  };
+  return { item, original };
+}
+
+it("recovers a rich live group mention from open_id-only history after reopening", async () => {
+  const test = fixture(), first = test.open(), { item, original } = groupStatus(test);
+  await expect(first.accept(original)).rejects.toThrow("identity");
+  first.journal.close();
+  const messages: FeishuMessageEvent["message"][] = [];
+  const reopened = test.open("ou_bot", () => messages.push(test.state().pending.om_group.message));
+  await reopened.scan([item]);
+  await reopened.scan([item]);
+  expect({ lists: test.calls.listed.length, authorized: test.calls.authorized, inspected: test.calls.inspected,
+    cards: test.calls.cards, pending: Object.keys(test.state().pending) }).toEqual({ lists: 2, authorized: ["ou_fixed", "ou_fixed"],
+    inspected: ["om_group"], cards: 1, pending: [] });
+  expect(messages).toEqual([original.message, original.message]);
+});
+
+for (const conflict of ["open_id", "key", "count", "user_id", "union_id", "tenant_key"]) {
+  it(`preserves group pending on conflicting mention ${conflict}`, async () => {
+    const test = fixture(), first = test.open(), { item, original } = groupStatus(test);
+    await expect(first.accept(original)).rejects.toThrow("identity");
+    const prior = test.state().pending.om_group;
+    if (conflict === "open_id" || conflict === "key" || conflict === "count") {
+      if (conflict === "open_id") item.mentions![0].id = "ou_other";
+      if (conflict === "key") item.mentions![0].key = "@_user_2";
+      if (conflict === "count") item.mentions = [];
+      await first.scan([item]);
+    } else {
+      const copy = structuredClone(original), mention = copy.message.mentions![0];
+      copy.sender.sender_id.open_id = "ou_fixed";
+      if (conflict === "tenant_key") mention.tenant_key = "other";
+      if (conflict === "user_id" || conflict === "union_id") mention.id[conflict] = "other";
+      await first.accept(copy);
+    }
+    expect(test.state().pending.om_group).toEqual(prior);
+    expect(test.calls.authorized).toEqual([]); expect(test.calls.inspected).toEqual([]); expect(test.calls.cards).toBe(0);
+  });
 }
 
 it("repairs the review sequence: incomplete live, complete live, reopen and history overlap", async () => {

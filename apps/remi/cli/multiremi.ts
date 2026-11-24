@@ -1,5 +1,6 @@
 import { API_SHUTDOWN_TIMEOUT_MS, resolveSlotConfiguration } from "@multiremi/api/slot-lifecycle.js";
 import { BUILD_COMMIT } from "@shared/version.js";
+import { feishuSessionKey } from "@connectors/feishu/types.js";
 import { bindUpdateCandidate } from "@shared/daemon-update.js";
 /**
  * `remi multiremi` — CLI entry facade.
@@ -667,18 +668,14 @@ export function controlPlaneConciergeHost(deps: {
   boot?: typeof bootFeishuChannel;
 }): FeishuConciergeHost {
   const boot = deps.boot ?? bootFeishuChannel;
-  let noMentionChatIds = new Set<string>();
+  let setGroupIds: ((ids: readonly string[]) => void) | undefined;
   let displayName = "Remi";
   let stopQuestionCardClient: (() => void) | undefined;
   return {
-    setNoMentionChatIds(chatIds) { noMentionChatIds = new Set(chatIds); },
+    setNoMentionChatIds(chatIds) { setGroupIds?.(chatIds); },
     async start(assignment) {
       const daemon = deps.daemon();
       const workspacesRoot = deps.workspacesRoot();
-      // The daemon and workspace root are still mandatory because the channel
-      // submits every message through the canonical Chat/Task path. Sender
-      // identity and membership are classified there using union_id; an
-      // app-scoped open_id must not be used as an admission gate.
       if (!daemon || !workspacesRoot) {
         throw new FeishuConciergeError(
           "the Multiremi daemon is not available to run Feishu tasks",
@@ -686,6 +683,8 @@ export function controlPlaneConciergeHost(deps: {
         );
       }
       const { config, agent } = assignment;
+      let noMentionChatIds = new Set(config.no_mention_chat_ids ?? []);
+      setGroupIds = ids => { noMentionChatIds = new Set(ids); };
       stopQuestionCardClient?.();
       stopQuestionCardClient = registerQuestionCardClient(config.app_id, {
         getRequest: messageId => daemon.getMessageHumanRequest(messageId),
@@ -695,18 +694,26 @@ export function controlPlaneConciergeHost(deps: {
       });
       displayName = agent.name;
       const handle = await boot(
-        async () => true,
+        (openId, context) => daemon.authorizeFeishuBotSender({
+          revision: config.revision,
+          external_session_key: feishuSessionKey(context),
+          sender_open_id: openId || null,
+          sender_user_id: context.senderUserId || null,
+          sender_union_id: context.senderUnionId || null,
+          sender_tenant_key: context.senderTenantKey || null,
+        }),
         {
           daemonPort: daemon.localPort(),
           workspacesRoot,
           ensureTopicWorkspace: (sessionKey, topicId) => daemon.ensureTopicWorkspace(sessionKey, topicId),
           credentials: {
             appId: config.app_id,
-            recoveryChats: config.recovery_chats,
+            recoveryChats: config.recovery_chats ?? [],
             appSecret: config.app_secret,
             domain: config.domain,
           },
           taskHandler: createFeishuTaskHandler(daemon, config.revision, agent.name),
+          wakeWords: [...(config.wake_words ?? [])],
           groupPolicy: { getByChatId: chatId => noMentionChatIds.has(chatId) ? { monitor: true, replyMode: "thread" } : null },
           abortTask: async (sessionKey) => {
             await daemon.cancelFeishuBotSessionTask(config.revision, sessionKey);
@@ -740,6 +747,7 @@ export function controlPlaneConciergeHost(deps: {
       return { botName: agent.name };
     },
     async stop() {
+      setGroupIds = undefined;
       stopQuestionCardClient?.();
       stopQuestionCardClient = undefined;
       const handle = deps.current();
@@ -1344,7 +1352,9 @@ export function createFeishuTaskHandler(
       });
     } catch (error) {
       if (error instanceof MultiremiDaemonHttpError && error.code === "sender_not_allowed") {
-        await replyCard(FEISHU_SENDER_NOT_ALLOWED_MESSAGE, "feishu-sender-not-allowed", displayName);
+        if (!message.metadata?.monitored && !message.metadata?.fromHistory) {
+          await replyCard(FEISHU_SENDER_NOT_ALLOWED_MESSAGE, "feishu-sender-not-allowed", displayName);
+        }
         return;
       }
       throw error;

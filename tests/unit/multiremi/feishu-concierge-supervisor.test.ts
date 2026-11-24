@@ -103,7 +103,7 @@ describe("FeishuConciergeSupervisor", () => {
     await test.supervisor.apply(directive({ no_mention_chat_ids: ["oc_a"] }));
     await test.supervisor.apply(directive({ no_mention_chat_ids: ["oc_b"] }));
     await test.supervisor.apply(directive({ no_mention_chat_ids: [], desired_state: "stopped" }));
-    expect(test.groups).toEqual([["oc_a"], ["oc_b"], []]);
+    expect(test.groups).toEqual([["oc_b"], []]);
     expect(test.starts).toHaveLength(1);
   });
 
@@ -135,6 +135,9 @@ describe("FeishuConciergeSupervisor", () => {
     expect(test.supervisor.snapshot()).toEqual({ state: "online", appliedRevision: 7, botName: "Concierge" });
     expect(test.reports.map((report) => report.state)).toEqual(["starting", "online"]);
     expect(test.reports.at(-1)?.applied_revision).toBe(7);
+    await test.supervisor.tick();
+    expect(test.starts).toHaveLength(1);
+    expect(test.groups).toEqual([]);
   });
 
   it("does not restart a channel that already matches the directive", async () => {

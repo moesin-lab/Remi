@@ -45,7 +45,11 @@ CLI 使用 `remi workspace feishu-bot list|create <workspace>`，读写、启停
 
 命令表只有这三项（`apps/remi/cli/feishu-commands.ts` 的 `FEISHU_COMMANDS`）。已下线的名字**不留别名**：`/esc` 曾是 `/stop` 的同义词，现在与 `/clear` 一样落入提示卡。
 
-带参数或含第二个 `/` 的消息（如 `/data00/home/x 看下`、`/help 怎么用`）按普通消息提交，避免误伤。`receive.ts` 的 `isSlashCommand` 群准入豁免保持不变——这是群聊里不 @ 机器人也能收到 `/stop` 的前提。
+命令分发只处理已准入的消息。私聊、群内 @本机器人、以及免 @ 群中没有 mention 的消息沿用原正文。只 @ 他人的群消息静默。其他群只匹配本条 text 或 post 自写正文开头的机器人响应词（默认 `[]`）。引用、转发、姓名和媒体占位符不能唤醒机器人；未唤醒的 `/ai`、`/ai 查下`、`/stop` 等不会触发任务、回执或权限提示。
+
+匹配先去首尾空白，仅折叠 ASCII 英文字母大小写；若词尾和下一字符都属于 `[A-Za-z0-9_]`，该候选无效。选择最长有效前缀，只剥一次及其后的空白。仅词无正文时静默。`小助理：查下` 匹配 `小助理` 后保留 `：查下`；`/ai` 不匹配 `/aide`。清洗后的正文才进入命令分发。已准入的带参未知命令按普通消息提交。
+
+每个连接实例从当前 assignment 加载机器人响应词。保存配置、清空词表或切换机器人后，已升级的 daemon 自动重新应用对应 revision。旧 daemon 仍需升级才能移除裸斜杠豁免。发送者按当前机器人的访问策略授权；历史补收与仅因免 @ 准入的消息被拒时静默，暂时无法鉴权的持久化入站留待重试。
 
 取消定位分三级（[FeishuBotRepo.cancelSessionTask](../packages/server/src/store/repos/feishu-bot-repo.ts)）：① 会话 key 精确命中（私聊 `chatId`、话题内 `chatId:thread:rootId`）；② 群顶层消息按**同 chat + 同发送者**的未结束任务回退，恰好 1 个才取消，≥2 个回候选卡（列出 Issue key / task id / 状态 / 已运行时长，最多 5 条）而不猜；③ 无候选则回「当前没有正在运行的任务」且不做任何写操作。判定候选沿用 Chat 队列的 pending 状态集合（`queued` / `dispatched` / `running` / `waiting_local_directory` / `awaiting_human`），发送者无法匹配时一律不进候选（fail closed）。
 

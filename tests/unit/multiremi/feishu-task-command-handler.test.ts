@@ -9,6 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { MultiremiDaemon } from "@multiremi/worker/daemon.js";
+import { MultiremiDaemonHttpError } from "@multiremi/worker/client.js";
 import type { IncomingMessage, TaskStreamEvent, TaskStreamMeta } from "@connectors/base.js";
 import { createFeishuTaskHandler } from "../../../apps/remi/cli/multiremi.js";
 import type { MultiremiStore } from "@multiremi/store.js";
@@ -94,6 +95,16 @@ async function run(
 }
 
 describe("Feishu Task command handler", () => {
+  it("suppresses monitor and history denial cards if access changes before submit", async () => {
+    const denied = createFeishuTaskHandler({ submitFeishuBotMessage: async () => {
+      throw new MultiremiDaemonHttpError(409, "POST", "messages", "denied", "sender_not_allowed");
+    } } as unknown as MultiremiDaemon, 1, "Concierge");
+    for (const [monitored, fromHistory] of [[false, false], [true, false], [false, true]]) {
+      const response = await run(denied, { chatId: CHAT, sender: "human", connectorName: "feishu", text: "ordinary",
+        metadata: { chatType: "group", messageId: "om_test", monitored, fromHistory } }, CHAT);
+      expect(response.text.length).toBe(monitored || fromHistory ? 0 : 1);
+    }
+  });
   it("answers /stop without filing new work", async () => {
     const { store, revision } = scaffold();
     const submitted = store.submitFeishuBotMessage("local", "rt_bot", {

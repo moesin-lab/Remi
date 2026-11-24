@@ -126,6 +126,7 @@ export class FeishuConciergeSupervisor {
   private consecutiveFailures = 0;
   private retryAtMs = 0;
   private latestDirective: MultiremiFeishuBotDirective | null = null;
+  private refreshAssignment = false;
 
   constructor(private readonly options: FeishuConciergeSupervisorOptions) {}
 
@@ -160,7 +161,15 @@ export class FeishuConciergeSupervisor {
 
   /** Retry failed starts and status reports without waiting for another directive. */
   async tick(): Promise<void> {
+    if (!this.reconciling && this.state === "online") {
+      await this.report(false);
+      return;
+    }
     if (this.latestDirective) await this.apply(this.latestDirective);
+  }
+
+  connectionRestored(): void {
+    this.refreshAssignment = true;
   }
 
   /** Stop the channel and tell the control plane, e.g. on daemon shutdown. */
@@ -206,8 +215,8 @@ export class FeishuConciergeSupervisor {
 
   private async reconcile(directive: MultiremiFeishuBotDirective): Promise<void> {
     const wantsRunning = directive.desired_state === "running" && directive.config_available;
-    this.options.host.setNoMentionChatIds?.(wantsRunning ? directive.no_mention_chat_ids ?? [] : []);
     if (!wantsRunning) {
+      this.options.host.setNoMentionChatIds?.([]);
       const wasRunning = this.state !== "stopped";
       if (wasRunning) await this.stopChannel();
       this.appliedRevision = directive.revision;
@@ -216,7 +225,8 @@ export class FeishuConciergeSupervisor {
       await this.report(wasRunning || this.appliedRevisionChanged(directive.revision));
       return;
     }
-    if (this.state === "online" && this.appliedRevision === directive.revision) {
+    if (!this.refreshAssignment && this.state === "online" && this.appliedRevision === directive.revision) {
+      this.options.host.setNoMentionChatIds?.(directive.no_mention_chat_ids ?? []);
       await this.report(false);
       return;
     }
@@ -228,6 +238,7 @@ export class FeishuConciergeSupervisor {
       await this.report(false);
       return;
     }
+    this.refreshAssignment = false;
     await this.startChannel(directive.revision);
   }
 

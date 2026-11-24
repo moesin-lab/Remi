@@ -1,3 +1,5 @@
+import type { FeishuBotCommandRequest, FeishuBotCommandResponse, FeishuBotCommandResult } from '@multiremi/contracts/types.js';
+import { describeFeishuCommand, feishuCommandDigest } from '@shared/feishu-command-semantic.js';
 import { normalizeFeishuWakeWords } from "@shared/feishu-wake-words.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 /** Feishu message UUID dedup is one hour; reserve five minutes for transit/clock skew. */
@@ -3959,12 +3961,12 @@ export class FeishuBotRepo {
   }
 
   private withCommandSender<Result>(workspaceId: string, runtimeId: string, revision: number,
-    senderOpenId: string | null | undefined, execute: (appId: string) => Result): Result {
+    senderOpenId: string | null | undefined, execute: (appId: string, domain: FeishuBotDomain) => Result): Result {
     return this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(workspaceId);
       const openId = optionalBoundedString(senderOpenId, "sender_open_id", 512);
       if (!openId) throw new FeishuBotConfigError("Feishu sender identity required", 403, "sender_not_allowed");
-      const row = this.ctx.db.query(`SELECT bot.app_id, bot.sender_access_policy, sender.allowed
+      const row = this.ctx.db.query(`SELECT bot.app_id, bot.domain, bot.sender_access_policy, sender.allowed
         FROM multiremi_feishu_bot_configs bot LEFT JOIN multiremi_feishu_bot_senders sender
         ON sender.workspace_id = bot.workspace_id AND sender.bot_id = bot.bot_id AND sender.app_id = bot.app_id AND sender.open_id = ?
         WHERE bot.workspace_id = ? AND bot.bot_id = ? AND bot.runtime_id = ? AND bot.revision = ? AND bot.enabled = 1`)
@@ -3973,8 +3975,60 @@ export class FeishuBotRepo {
       if (row.sender_access_policy !== "agent" && Number(row.allowed) !== 1) {
         throw new FeishuBotConfigError("Feishu sender is not allowed", 403, "sender_not_allowed");
       }
-      return execute(String(row.app_id));
+      return execute(String(row.app_id), normalizeDomain(row.domain));
     })();
+  }
+
+  executeCommand(workspaceId: string, runtimeId: string, daemonId: string, input: FeishuBotCommandRequest): FeishuBotCommandResponse {
+    const semantic = input?.semantic;
+    const exactId = (value: unknown, max: number) => typeof value === 'string' && value.length > 0 && value.length <= max && value.trim() === value && !value.includes('\0');
+    if (!semantic || !Number.isSafeInteger(input.revision) || !['execute', 'lookup_only'].includes(input.mode)
+      || !exactId(input.bot_id, 512) || !DOMAINS.has(semantic.domain) || !exactId(semantic.app_id, 512)
+      || !exactId(semantic.sender_open_id, 512) || !exactId(semantic.external_message_id, 512)
+      || !exactId(semantic.chat_id, 512) || !exactId(semantic.external_session_key, 1024)
+      || !(semantic.external_session_key === semantic.chat_id || semantic.external_session_key.startsWith(`${semantic.chat_id}:thread:`))
+      || typeof semantic.raw_content !== 'string' || semantic.raw_content.length > 65536 || semantic.raw_content.includes('\0')) {
+      throw new FeishuBotConfigError('Invalid Feishu command envelope', 400, 'invalid_command');
+    }
+    const parsed = describeFeishuCommand(semantic);
+    if (parsed.kind !== 'command' || (parsed.name !== 'new' && parsed.name !== 'stop')
+      || parsed.kind !== semantic.kind || parsed.name !== semantic.name || parsed.args !== semantic.args
+      || parsed.target !== semantic.target || input.digest !== feishuCommandDigest(parsed)) {
+      throw new FeishuBotConfigError('Invalid Feishu command semantics', 400, 'invalid_command');
+    }
+    return this.withCommandSender(workspaceId, runtimeId, input.revision, semantic.sender_open_id, (appId, domain) => {
+      const runtime = this.ctx.db.query(`SELECT daemon_id FROM multiremi_runtimes WHERE id=? AND COALESCE(workspace_id,'local')=?`).get(runtimeId, workspaceId);
+      if (!runtime || runtime.daemon_id !== daemonId) {
+        throw new FeishuBotConfigError('Feishu runtime assignment changed', 409, 'stale_revision');
+      }
+      if (this.botId !== input.bot_id || appId !== semantic.app_id || domain !== semantic.domain) {
+        throw new FeishuBotConfigError('Feishu bot assignment changed', 409, 'stale_revision');
+      }
+      const key = [workspaceId, domain, appId, semantic.external_message_id];
+      const row = this.ctx.db.query(`SELECT bot_id, sender_open_id, digest, result_json FROM multiremi_feishu_command_results
+        WHERE workspace_id=? AND domain=? AND app_id=? AND external_message_id=?`).get(...key);
+      if (row) {
+        if (row.bot_id !== this.botId || row.sender_open_id !== semantic.sender_open_id || row.digest !== input.digest) {
+          throw new FeishuBotConfigError('Event already bound to different command semantics', 409, 'command_conflict');
+        }
+        return { state: 'committed', result: JSON.parse(String(row.result_json)) as FeishuBotCommandResult };
+      }
+      if (input.mode === 'lookup_only') return { state: 'missing' };
+      const sessionKey = semantic.external_session_key;
+      let result: FeishuBotCommandResult;
+      if (parsed.name === 'new') {
+        const { agentName } = this.inspectAuthorizedSession(workspaceId, appId, sessionKey);
+        this.cancelAuthorizedSession(workspaceId, appId, sessionKey, { senderOpenId: semantic.sender_open_id });
+        result = { name: 'new', reset: this.resetAuthorizedSession(workspaceId, appId, sessionKey), agentName: agentName ?? null };
+      } else {
+        result = { name: 'stop', cancel: this.cancelAuthorizedSession(workspaceId, appId, sessionKey,
+          { chatId: semantic.chat_id, senderOpenId: semantic.sender_open_id, target: parsed.target }) };
+      }
+      this.ctx.db.run(`INSERT INTO multiremi_feishu_command_results
+        (workspace_id,domain,app_id,external_message_id,bot_id,sender_open_id,digest,command_name,result_json,completed_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`, ...key, this.botId, semantic.sender_open_id, input.digest, parsed.name, JSON.stringify(result), nowIso());
+      return { state: 'committed', result };
+    });
   }
 
   resetSession(workspaceId: string, runtimeId: string, revision: number, externalSessionKey: string,

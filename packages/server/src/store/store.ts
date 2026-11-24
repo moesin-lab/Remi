@@ -2582,6 +2582,10 @@ runMigrations(this.db);
     return this.feishuBot.forRuntime(workspaceId, runtimeId).reportOutbound(workspaceId, runtimeId, deliveryId, input, now);
   }
 
+  executeFeishuBotCommand(workspaceId: string, runtimeId: string, daemonId: string, input: import('@multiremi/contracts/types.js').FeishuBotCommandRequest) {
+    return this.feishuBot.forRuntime(workspaceId, runtimeId).executeCommand(workspaceId, runtimeId, daemonId, input);
+  }
+
   resetFeishuBotSession(
     workspaceId: string,
     runtimeId: string,

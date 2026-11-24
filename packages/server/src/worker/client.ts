@@ -44,6 +44,7 @@ import type {
   FeishuBotTaskSnapshot,
   FeishuBotCancelResult,
   FeishuBotSessionSnapshot,
+  FeishuBotCommandRequest, FeishuBotCommandResponse,
   FeishuBotAuthorizeSenderRequest,
   FeishuBotAuthorizeSenderResult,
   SubmitFeishuBotMessageInput,
@@ -847,6 +848,24 @@ export class MultiremiDaemonClient {
         ? response.reason
         : null,
     };
+  }
+
+  async executeFeishuBotCommand(runtimeId: string, input: FeishuBotCommandRequest): Promise<FeishuBotCommandResponse> {
+    const path = `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/commands/v1`;
+    try {
+      const response = await this.post<FeishuBotCommandResponse>(path, input);
+      if (response?.state === 'missing' && input.mode === 'lookup_only') return response;
+      if (response?.state === 'committed' && response.result?.name === input.semantic.name) return response;
+      throw new Error('Invalid Feishu command response');
+    } catch (error) {
+      if (error instanceof MultiremiDaemonHttpError && (error.status === 404 || error.status === 405)) {
+        if (error.code === 'runtime_not_found' || /"error"\s*:\s*"runtime not found"/.test(error.responseBody)) {
+          throw new MultiremiDaemonHttpError(409, 'POST', path, error.responseBody, 'stale_revision');
+        }
+        throw new MultiremiDaemonHttpError(error.status, 'POST', path, error.responseBody, 'command_endpoint_unsupported');
+      }
+      throw error;
+    }
   }
 
   async authorizeFeishuBotSender(runtimeId: string, input: FeishuBotAuthorizeSenderRequest): Promise<boolean> {

@@ -1,5 +1,5 @@
 import { foldStoredTrace } from "./trace-pages.js";
-import type { FeishuBotAuthorizeSenderRequest } from "@multiremi/contracts/types.js";
+import type { FeishuBotCommandRequest, FeishuBotAuthorizeSenderRequest } from "@multiremi/contracts/types.js";
 import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution } from "./planned-restart-journal.js";
 import { restartQuestionKey, type PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
@@ -1926,6 +1926,10 @@ export class MultiremiDaemon {
     return this.client.cancelFeishuBotSessionTask(
       this.options.runtimeId!, revision, externalSessionKey, options,
     );
+  }
+
+  executeFeishuBotCommand(input: FeishuBotCommandRequest) {
+    return this.client.executeFeishuBotCommand(this.options.runtimeId!, input);
   }
 
   authorizeFeishuBotSender(input: FeishuBotAuthorizeSenderRequest) {

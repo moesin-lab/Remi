@@ -1,3 +1,5 @@
+import { describeFeishuCommand, feishuCommandDigest } from '@shared/feishu-command-semantic.js';
+import type { FeishuBotCommandRequest, FeishuBotCommandResponse } from '@multiremi/contracts/types.js';
 import { controlPlaneConciergeHost } from "../../../apps/remi/cli/multiremi.js";
 import { FeishuConciergeSupervisor } from "@multiremi/worker/feishu-concierge.js";
 import { processFeishuMessageEvent } from "@connectors/feishu/receive.js";
@@ -889,6 +891,144 @@ describe("Feishu bot control-plane delivery", () => {
     expect(asAdmin.status).toBe(403);
     expect(await asAdmin.json()).toMatchObject({ code: "daemon_token_required" });
   });
+
+  it('binds a Feishu command digest to the exact raw text and target', () => {
+    const semantic = describeFeishuCommand({ domain: 'feishu', app_id: 'app', external_message_id: 'om_1', sender_open_id: 'ou_1',
+      chat_id: 'oc_1', external_session_key: 'oc_1', raw_content: '/STOP MUL-1' });
+    expect(feishuCommandDigest(semantic)).toBe('a70fd1d6be90436ba52db6c1a01cdb7ac23b8c78458f0d8ae5406354297d4661');
+  });
+
+  it.skipIf(process.env.MULTIREMI_TEST_FEISHU_BACKEND !== 'postgres')('serializes Feishu command writers on independent PostgreSQL connections', async () => {
+    const { store } = await scaffold();
+    const url = new URL(process.env.MULTIREMI_TEST_POSTGRES_URL!);
+    url.pathname = String(db!.query('SELECT current_database() AS name').get()!.name);
+    const semantic = describeFeishuCommand({ domain: 'feishu', app_id: 'cli_a1b2c3d4e5f6g7h8', external_message_id: 'om_race', sender_open_id: 'ou_race',
+      chat_id: 'oc_race', external_session_key: 'oc_race', raw_content: '/new' });
+    const task = store.submitFeishuBotMessage('local','rt_a',{ revision: 1, externalSessionKey: 'oc_race',
+      senderOpenId: 'ou_race', externalMessageId: 'om_before', text: 'before' });
+    const input: FeishuBotCommandRequest = { revision: 1, bot_id: 'default', mode: 'execute', semantic, digest: feishuCommandDigest(semantic) };
+    const program = `import { MultiremiStore } from '@multiremi/store.js';
+      import { PostgresSyncDatabase } from '@multiremi/store/db/postgres.js';
+      const db = new PostgresSyncDatabase(process.env.COMMAND_TEST_DB);
+      const store = new MultiremiStore(db);
+      process.on('message', input => {
+        try { process.send(store.executeFeishuBotCommand('local','rt_a','daemon-a',input)); }
+        finally { db.close(); process.disconnect(); }
+      });
+      process.send('ready');`;
+    const workers = Array.from({ length: 2 }, () => {
+      const ready = Promise.withResolvers<void>();
+      const result = Promise.withResolvers<FeishuBotCommandResponse>();
+      const child = Bun.spawn([process.execPath, '-e', program], { env: { ...process.env, COMMAND_TEST_DB: url.toString() },
+        ipc(message) { if (message === 'ready') ready.resolve(); else result.resolve(message as FeishuBotCommandResponse); },
+        onExit(_child, code) { if (code) { ready.reject(new Error(`worker exit ${code}`)); result.reject(new Error(`worker exit ${code}`)); } } });
+      return { ready: ready.promise, result: result.promise, child };
+    });
+    try {
+      await Promise.all(workers.map(worker => worker.ready));
+      for (const worker of workers) worker.child.send(input);
+      const results = await Promise.all(workers.map(worker => worker.result));
+      expect(results[0]).toMatchObject({ state: 'committed', result: { name: 'new', reset: true } });
+      expect(results[1]).toEqual(results[0]);
+      expect(store.getTask(task.taskId)?.status).toBe('cancelled');
+      expect(db!.query('SELECT external_message_id FROM multiremi_feishu_command_results').all()).toEqual([{ external_message_id: 'om_race' }]);
+    } finally { for (const worker of workers) worker.child.kill(); }
+  }, 30000);
+
+  it('fails closed against a server without the versioned Feishu endpoint', async () => {
+    const paths: string[] = [];
+    const server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
+      paths.push(new URL(request.url).pathname);
+      return new Response('Not found', { status: 404 });
+    } });
+    try {
+      const semantic = describeFeishuCommand({ domain: 'feishu', app_id: 'app', external_message_id: 'om', sender_open_id: 'ou',
+        chat_id: 'oc', external_session_key: 'oc', raw_content: '/new' });
+      const client = new MultiremiDaemonClient(server.url.origin);
+      await expect(client.executeFeishuBotCommand('rt_a', { revision: 1, bot_id: 'default', mode: 'execute', semantic,
+        digest: feishuCommandDigest(semantic) })).rejects.toMatchObject({ status: 404, code: 'command_endpoint_unsupported' });
+      expect(paths).toEqual(['/api/daemon/runtimes/rt_a/feishu-bot/commands/v1']);
+    } finally { server.stop(true); }
+  });
+
+  for (const scenario of ['new', 'stop', 'target', 'none'] as const) {
+    it(`commits ${scenario} once and safely recovers its original result over HTTP`, async () => {
+      const { app, store, tokens } = await scaffold();
+      let loseResponse = false;
+      const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
+        const response = await app.fetch(request);
+        if (loseResponse && response.ok) {
+          loseResponse = false;
+          return new Response(null, { status: 503 });
+        }
+        return response;
+      } });
+      const client = new MultiremiDaemonClient(server.url.origin, tokens.rt_a);
+      const base = { domain: 'feishu' as const, app_id: 'cli_a1b2c3d4e5f6g7h8', external_message_id: 'om_cmd', sender_open_id: 'ou_actor',
+        chat_id: 'oc_command', external_session_key: 'oc_command' };
+      const submit = async (id: string) => {
+        const response = await app.request('/api/daemon/runtimes/rt_a/feishu-bot/messages', { method: 'POST', headers: daemonHeaders(tokens.rt_a!),
+          body: JSON.stringify({ ...base, revision: 1, external_message_id: id, text: 'work', chat_type: 'p2p' }) });
+        expect(response.status).toBe(202);
+        return String((await response.json()).taskId);
+      };
+      const request = (raw: string): FeishuBotCommandRequest => {
+        const semantic = describeFeishuCommand({ ...base, raw_content: raw });
+        return { revision: 1, bot_id: 'default', mode: 'execute', semantic, digest: feishuCommandDigest(semantic) };
+      };
+      try {
+        const before = scenario === 'none' ? null : await submit('om_before');
+        const input = request(scenario === 'target' ? `/stop ${before}` : scenario === 'new' ? '/new' : '/stop');
+        const execute = (body: FeishuBotCommandRequest) => client.executeFeishuBotCommand('rt_a', body);
+        expect(await execute({ ...input, mode: 'lookup_only' })).toEqual({ state: 'missing' });
+        if (scenario === 'new') {
+          if (db!.dialect === 'postgres') db!.exec(`ALTER TABLE multiremi_feishu_command_results ADD CONSTRAINT fail_receipt CHECK (digest='fail')`);
+          else db!.exec(`CREATE TRIGGER fail_receipt BEFORE INSERT ON multiremi_feishu_command_results BEGIN SELECT RAISE(ABORT,'fail receipt'); END`);
+          await expect(execute(input)).rejects.toMatchObject({ status: 500 });
+          expect(store.getTask(before!)?.status).toBe('queued');
+          expect(store.inspectFeishuBotSession('local','rt_a',1,base.external_session_key,base.sender_open_id).task?.taskId).toBe(before!);
+          expect(await execute({ ...input, mode: 'lookup_only' })).toEqual({ state: 'missing' });
+          db!.exec(db!.dialect === 'postgres' ? 'ALTER TABLE multiremi_feishu_command_results DROP CONSTRAINT fail_receipt' : 'DROP TRIGGER fail_receipt');
+        }
+        loseResponse = true;
+        const concurrent = await Promise.allSettled([execute(input), execute(input)]);
+        expect(concurrent.filter(reply => reply.status === 'rejected')).toHaveLength(1);
+        const original = concurrent.find(reply => reply.status === 'fulfilled') as PromiseFulfilledResult<FeishuBotCommandResponse>;
+        expect(original.value).toMatchObject({ state: 'committed', result: scenario === 'new' ? { name: 'new', reset: true } :
+          { name: 'stop', cancel: { outcome: scenario === 'none' ? 'none' : 'cancelled', taskId: before } } });
+        if (before) expect(store.getTask(before)?.status).toBe('cancelled');
+        const after = await submit('om_after');
+        for (const mode of ['execute','lookup_only'] as const) expect(await execute({ ...input, mode })).toEqual(original.value);
+        expect(store.getTask(after)?.status).toBe('queued');
+        expect(store.inspectFeishuBotSession('local','rt_a',1,base.external_session_key,base.sender_open_id).task?.taskId).toBe(after);
+        expect(db!.query('SELECT external_message_id FROM multiremi_feishu_command_results').all()).toEqual([{ external_message_id: 'om_cmd' }]);
+        await expect(execute(request('/stop another-target'))).rejects.toMatchObject({ status: 409, code: 'command_conflict' });
+        await expect(execute({ ...input, digest: 'bad' })).rejects.toMatchObject({ status: 400, code: 'invalid_command' });
+        for (const mode of ['execute','lookup_only'] as const) {
+          await expect(execute({ ...input, mode, bot_id: 'other' })).rejects.toMatchObject({ code: 'stale_revision' });
+          await expect(client.executeFeishuBotCommand('rt_b', { ...input, mode })).rejects.toMatchObject({ status: 403 });
+          for (const change of [{ app_id: 'other' }, { domain: 'lark' as const }]) {
+            const semantic = { ...input.semantic, ...change };
+            await expect(execute({ ...input, mode, semantic, digest: feishuCommandDigest(semantic) })).rejects.toMatchObject({ code: 'stale_revision' });
+          }
+        }
+        await expect(client.executeFeishuBotCommand('rt_missing', input)).rejects.toMatchObject({ code: 'stale_revision' });
+        const differentSender = { ...input.semantic, sender_open_id: 'ou_another' };
+        await expect(execute({ ...input, semantic: differentSender, digest: feishuCommandDigest(differentSender) })).rejects.toMatchObject({ code: 'command_conflict' });
+        db!.run("UPDATE multiremi_feishu_bot_configs SET bot_id='replacement' WHERE bot_id='default'");
+        for (const mode of ['execute','lookup_only'] as const) {
+          await expect(execute({ ...input, mode })).rejects.toMatchObject({ code: 'stale_revision' });
+          await expect(execute({ ...input, mode, bot_id: 'replacement' })).rejects.toMatchObject({ code: 'command_conflict' });
+        }
+        db!.run("UPDATE multiremi_feishu_bot_configs SET bot_id='default', runtime_id='rt_b' WHERE bot_id='replacement'");
+        await expect(execute(input)).rejects.toMatchObject({ code: 'stale_revision' });
+        db!.run("UPDATE multiremi_feishu_bot_configs SET runtime_id='rt_a' WHERE bot_id='default'");
+        db!.run("UPDATE multiremi_feishu_bot_configs SET sender_access_policy='allowlist' WHERE bot_id='default'");
+        for (const mode of ['execute','lookup_only'] as const) await expect(execute({ ...input, mode })).rejects.toMatchObject({ code: 'sender_not_allowed' });
+        expect(store.getTask(after)?.status).toBe('queued');
+      } finally { server.stop(true); }
+    }, 30000);
+  }
 
   it("rechecks a preauthorized sender under the command lock after same-revision revocation", async () => {
     const { app, store, tokens, agentId } = await scaffold();

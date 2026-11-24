@@ -1,4 +1,4 @@
-import type { FeishuBotAuthorizeSenderRequest } from "@multiremi/contracts/types.js";
+import type { FeishuBotCommandRequest, FeishuBotAuthorizeSenderRequest } from "@multiremi/contracts/types.js";
 import type { Context, Hono } from "hono";
 import { ensureDaemonProtocolUpgrade } from "../helpers/daemon-protocol-upgrade.js";
 import { CHAT_ATTACHMENT_MAX_BYTES, sanitizeChatAttachmentFilename } from "@multiremi/contracts/attachments.js";
@@ -682,6 +682,22 @@ export function registerDaemonRoutes(app: Hono, deps: RouterDeps): void {
         );
       }
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+  app.post("/api/daemon/runtimes/:runtimeId/feishu-bot/commands/v1", async c => {
+    const runtimeId = c.req.param('runtimeId');
+    const token = currentAccessToken(c);
+    if (token?.type !== 'daemon' || !token.daemonId) return c.json({ error: 'Daemon credential required', code: 'daemon_token_required' }, 403);
+    const denied = denyDaemonTokenRuntimeIdentity(c, store, runtimeId);
+    if (denied) return denied;
+    const runtime = store.getRuntimeLite(runtimeId);
+    if (!runtime) return c.json({ error: 'Feishu runtime unavailable', code: 'stale_revision' }, 409);
+    const body = await readJsonStrict<FeishuBotCommandRequest>(c);
+    if (isJsonApiError(body)) return c.json({ error: 'Invalid Feishu command body', code: 'invalid_command' }, 400);
+    try { return c.json(store.executeFeishuBotCommand(runtime.workspaceId ?? 'local', runtimeId, token.daemonId, body)); }
+    catch (error) {
+      if (error instanceof FeishuBotConfigError) return c.json({ error: error.message, code: error.code }, error.status as 400 | 403 | 409);
+      throw error;
     }
   });
   type SessionCommandBody = { revision: number; external_session_key: string; sender_open_id: string;

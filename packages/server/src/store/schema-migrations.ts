@@ -20,4 +20,12 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [{
   id: '20261124_feishu_bot_wake_words', phase: 'expand', level: 4,
   expandRelease: '0.2.95', release: '0.2.95',
   run: db => { db.exec("ALTER TABLE multiremi_feishu_bot_configs ADD COLUMN wake_words_json TEXT NOT NULL DEFAULT '[]'"); },
+}, {
+  id: '20261125_feishu_command_results', phase: 'expand', level: 5,
+  expandRelease: '0.2.95', release: '0.2.95',
+  run: db => { db.exec(`CREATE TABLE multiremi_feishu_command_results (
+    workspace_id TEXT NOT NULL, domain TEXT NOT NULL, app_id TEXT NOT NULL, external_message_id TEXT NOT NULL,
+    bot_id TEXT NOT NULL, sender_open_id TEXT NOT NULL, digest TEXT NOT NULL, command_name TEXT NOT NULL,
+    result_json TEXT NOT NULL, completed_at TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, domain, app_id, external_message_id))`); },
 }];

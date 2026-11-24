@@ -53,7 +53,7 @@ export class RegisteredCredentialProofs {
     const row = this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get();
     if (!row) throw new SecurityAbort('security_state_unavailable');
     return {expectedRevision:Number(row.security_revision),workspaceIds:[],numberKeys:[],domainTargets:
-      [`authority:${evidence.nodeId}`,`credential:${evidence.identity.credentialId}`].sort()};
+      [`authority:${evidence.nodeId}`,`credential:${evidence.identity.credentialId}`,`grant:${evidence.identity.subject.type}:${evidence.identity.subject.id}`].sort()};
   }
 
   requireCurrent(tx: SecurityTx, proof: CredentialProof): CurrentMaterial {
@@ -72,7 +72,9 @@ export class RegisteredCredentialProofs {
       if (identity.credentialType==='task' && identity.subject.type==='agent' && identity.purpose==='task') {
         const active = this.db.query(`SELECT a.id FROM multiremi_turn_attempts a JOIN multiremi_turns t ON t.id=a.turn_id AND t.current_attempt_id=a.id
           JOIN multiremi_access_tokens c ON c.task_id=a.id AND c.agent_id=t.agent_id AND c.workspace_id=t.workspace_id
-          WHERE a.id=? AND c.id=? AND t.agent_id=? AND a.status='running'`).get(evidence.attemptId,identity.credentialId,identity.subject.id);
+          JOIN multiremi_turn_execution_records execution ON execution.id=a.id
+          WHERE a.id=? AND c.id=? AND t.agent_id=? AND a.status IN ('accepted','running')
+          AND execution.status IN ('dispatched','running','awaiting_human')`).get(evidence.attemptId,identity.credentialId,identity.subject.id);
         if (!active) throw new SecurityAbort('root_authority_revoked');
       } else if (identity.credentialType==='pat' && identity.subject.type==='user' && identity.subject.id.startsWith('usr_') && evidence.attemptId===null) {
         const human = this.db.query(`SELECT u.id FROM multiremi_users u JOIN multiremi_access_tokens t ON t.user_id=u.id

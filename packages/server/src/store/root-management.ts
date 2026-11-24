@@ -7,6 +7,7 @@ import { readVerifiedTrustChallenge, recordedMachineBindingIsCurrent } from './m
 import { assertUnrevokedAncestry, grantAncestryIsCurrent } from './authority-provenance.js';
 import type { AuthorityKernel, AuthorityUse, CredentialProof, CurrentAuthority } from './root-authority-contract.js';
 import { readRecordedGrant } from './root-grants.js';
+import { RegisteredCredentialProofs } from './registered-credential-proof.js';
 import { SecurityAbort, withSecurityTarget, withSecurityWrite, type SecurityTx } from './security-write.js';
 
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -61,7 +62,11 @@ export class RootManagement {
   private readonly actors = new WeakMap<Actor, { tx: SecurityTx; proof: CredentialProof; action: string; target: string }>();
   private readonly dashboardCandidates = new WeakMap<CredentialProof, IndependentDashboardIssuance>();
 
-  constructor(private readonly db: SqlDatabase) {}
+  readonly registeredCredentials: RegisteredCredentialProofs;
+
+  constructor(private readonly db: SqlDatabase) {
+    this.registeredCredentials = new RegisteredCredentialProofs(db);
+  }
 
   private passwordRow(userId: string, writing = false) {
     const lock = writing && this.db.dialect === 'postgres' ? ' FOR SHARE OF p,u' : '';
@@ -113,6 +118,10 @@ export class RootManagement {
   }
 
   plan(proof: CredentialProof, request: AuthorityUse) {
+    if (proof.kind==='dependent') {
+      const plan = onPrimary(() => this.registeredCredentials.plan(proof));
+      return {...plan,domainTargets:[...plan.domainTargets,`management:${request.actualTarget.type}:${request.actualTarget.id}`].sort()};
+    }
     const evidence = this.evidence(proof);
     const state = onPrimary(() => this.db.query('SELECT security_revision FROM multiremi_security_state WHERE singleton=1').get());
     if (!state) throw new SecurityAbort('security_state_unavailable');
@@ -136,18 +145,26 @@ export class RootManagement {
   }
 
   private check(tx: SecurityTx, proof: CredentialProof, request: AuthorityUse): CurrentAuthority {
-    const evidence = this.evidence(proof);
     const target = request.actualTarget;
     if (!target.id || request.use !== 'management' || !(request.action === grantAction && target.type === 'grant'
       || request.action === createAction && target.type === 'user'
       || request.action === trustAction && target.type === 'runtime' || request.action === untrustAction && target.type === 'runtime_trust'
       || request.action === familyAction && target.type === 'credential_family')) throw new SecurityAbort('root_required');
-    this.checkPassword(tx, evidence);
     const state = this.db.query('SELECT feature_activation,security_revision FROM multiremi_security_state WHERE singleton=1').get();
     if (!state) throw new SecurityAbort('security_state_unavailable');
+    const active = Number(state.feature_activation) === 1;
+    if (proof.kind==='dependent') {
+      const material = this.registeredCredentials.requireCurrent(tx,proof);
+      const recordedGrant = readRecordedGrant(this.db,tx,material.subject);
+      return {transport:material.type==='task'?'task':'human',subject:material.subject,attemptId:material.attemptId,recordedGrant,
+        credentialOrigin:{credential:material.credential,familyId:material.familyId,node:material.node},effectiveRoot:false,scope:null,
+        reason:!active?'feature_disabled':!recordedGrant?'no_grant':material.type==='task'?'attempt_not_eligible':'unverified_human_auth',
+        checkedRevision:Number(state.security_revision)};
+    }
+    const evidence = this.evidence(proof);
+    this.checkPassword(tx, evidence);
     const subject = { type: 'user', id: evidence.userId } as const;
     const grant = readRecordedGrant(this.db, tx, subject);
-    const active = Number(state.feature_activation) === 1;
     if (active && grant) {
       const node = this.db.query(`SELECT node_id FROM multiremi_authority_nodes WHERE node_id=? AND generation=? AND kind='grant'
         AND scope='system' AND subject_type='user' AND subject_id=?`).get(grant.authorityNodeId, grant.generation, subject.id);

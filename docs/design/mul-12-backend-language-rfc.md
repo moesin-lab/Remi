@@ -44,9 +44,13 @@ for group in sorted(groups):
 
 ## 哪些成本可能随语言改变
 
+**Edge 已承担具体的运行时适配成本。** 在 Bun 1.3.14 上，原生 WebSocket 客户端会丢失发出的关闭原因，Edge 为上游实现了有界 RFC 6455 TCP 客户端。转发大帧时，部分写入后可能漏掉可写通知，Edge 把恢复延至下一轮事件循环，并仅在拥塞期间用 25 ms 定时器兜底。反方向上，`ServerWebSocket` 没有暂停输入的 API，持续积压触及队列上限时以 1013 关闭。服务端主动关闭 WS 后，`server.stop(true)` 返回的 Promise 还可能一直挂起，故 `Edge.stop()` 调用它关闭监听，但不等待该 Promise。对应实现见 `packages/edge/src/{websocket,index}.ts`，慢读、大帧和停机的本地验证范围见 [Edge 开发说明](../dev/edge.md)。这些行为限定于记录的运行时版本和代理路径；原生传输候选需用同一批故障用例对照，线上发生率及 Go/Rust 收益仍待测。
+
 | 路径与核对位置（仓库根相对路径） | 当前约束及其选型含义 |
 |---|---|
-| `packages/server/src/store/db/{sqlite,postgres,pg-worker}.ts`、`store/repos/`、`store/request-read-cache.ts`（后两处位于 `packages/server/src/`） | 自有 SQL 仓储与事务包装；SQLite 使用 `bun:sqlite`，PG 调用端在 `postgres.ts:441` 同步等待，worker 在 `pg-worker.ts:43` 限每桥一连接。批读、缩短事务、消除重复查询可在现栈做。改异步需追踪事务上下文及提交后通知。换语言本身不能增加 SQLite 写并行度。 |
+| `packages/server/src/api/server.ts`、`frontend/packages/core/api/schemas/tasks.ts` | Hono 承载服务端路由与中间件；根 `package.json` 在 catalog 声明 Zod，前端用它定义响应 schema。迁移 HTTP 实现需让旧客户端照常解析缺省字段、空值和枚举；Zod 在此约束消费端。 |
+| `packages/server/src/render/markdown.ts`、`packages/server/src/store/repos/conversation-log-repo.ts:492`、`packages/connectors/src/feishu/client.ts:31` | 日志写入调用同步 Markdown 渲染，依赖 unified、remark/rehype 与 Shiki/Oniguruma；迁移须对拍 HTML 与渲染版本。飞书适配实际从 `@larksuiteoapi/node-sdk` 创建 HTTP 客户端、WS 客户端与事件分发器；保留 TS 适配层可复用这三处行为。 |
+| `packages/server/src/store/db/{sqlite,postgres,pg-worker}.ts`、`store/repos/`、`store/request-read-cache.ts`（后两处位于 `packages/server/src/`） | 采用非 ORM 的 SQL 仓储，查询与事务由仓库代码显式控制。SQLite 使用 `bun:sqlite`，PG 调用端在 `postgres.ts:441` 同步等待，worker 在 `pg-worker.ts:43` 限每桥一连接。批读、缩短事务、消除重复查询可在现栈做。改异步需追踪事务上下文及提交后通知。换语言本身不能增加 SQLite 写并行度。 |
 | `packages/server/src/api/{hub,peer,realtime-fanout.ts}`、`packages/contracts/src/{live-hub,peer-events}.ts` | 浏览器副本需要授权、补读、背压和重连。现有 peer 是共享数据库进程间的批量通知；重发同一批次、按 epoch/seq 去重，接收方重启可再次投递。扩为独立节点需重新证明引用事件能补读、租约和恢复语义。 |
 | `packages/server/src/api/helpers/{jwt,auth-guards,workspace-context}.ts`、`packages/auth/src/` | API 区分 JWT、access token、daemon 身份与工作区作用域。外置传输不能凭连接成功继承用户权限；需覆盖过期、撤权、跨工作区拒绝。 |
 | `packages/server/src/scm/{github,codebase,poller,webhook,reconcile}.ts`、`packages/connectors/src/feishu/` | 仓库轮询与 webhook、飞书回调与出站卡片都有外部时延或重复交付。重试、去重、密钥和供应商行为需保留。换 HTTP 库不会消除配额或回调乱序。 |

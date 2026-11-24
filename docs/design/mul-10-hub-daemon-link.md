@@ -1,6 +1,6 @@
 # MUL-10 · Hub、daemon、link 与独立 Hub 互联
 
-**状态：提请用户决策。** 建议保留 daemon v2 的单连接与本地执行模型，先让一个 Hub 能显式授权一个 daemon 上的具体 link，再让两个独立 Hub 双边配对。首次联邦仅开放只读发现，远程执行另设准入门槛。Persona 的版本、资料及对应概念待提供；本方案的依据是 Remi 源码和以下故障假设。
+**状态：提请用户决策。** 建议沿用 daemon v2，在 daemon 内管理设备传输连接（link），单独登记受授权的执行或渠道适配器（adapter）。Hub 按 daemon 身份派活，经 link 送达，最终由获授权的 adapter 执行。独立 Hub 首期仅双边配对并披露只读目录，远程执行另设门槛。
 
 ## 基线与缺口
 
@@ -14,13 +14,27 @@
 |Cloud Node|[HTTP 路由](../../packages/server/src/api/routers/cloud-runtime.ts#L17) 声明 local 模式，列举按 owner 过滤，start/stop 更新状态；[存储实现](../../packages/server/src/store/repos/cloud-runtime-nodes-repo.ts#L18) 创建本地实例记录、更新状态，exec 返回格式化回显。|节点记录的 `running` 无法证明机器、daemon 或执行器就绪；云主机仍须完成普通 daemon 注册才能入选。|
 |现有 peer / Live Hub|[实时扇出](../../packages/server/src/api/peer/peer-channel.ts#L1) 在共享数据库的 API 进程之间用共享密钥投递，有界重试、接收方重启后去重记忆消失；超限事件可退为共享库引用。|独立 Hub 无共享库、管理员或密钥。需要独立端点、持久去重和明确披露范围。|
 
+## Persona 固定版本对照
+
+参考版本为 `nwverse/persona@14654c59ecaa2b728adbcb187de53f361179cb31`。第一列区分实现与文档意图；第二列的 Remi 实现定位见上表。最后一列是本 RFC 的选择。
+
+|Persona 证据|Remi 当前事实|建议与理由|
+|---|---|---|
+|**设备与进程。** 运维文档推荐一台常驻 Hub，其他计算机安装 resident node 和独立 Link 服务；仅使用 Web 的客户端无需二者。[部署意图](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/docs/operations/link.md#L7-L19)。`personad` 的 node 接收 RPC 并分发方法。[node 服务](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/node/node.go#L525-L547)、[方法分发](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/node/node.go#L799-L825)。|Server 对一个进程级 daemon 连接按 runtime 派活；云节点记录可以独立存在。|采纳设备常驻服务和连接分工。Remi 的 Hub→daemon→link 表示管理关系；物理数据路径是 Hub ↔ link ↔ daemon 执行侧。首期复用进程内 v2 客户端，避免新增常驻进程和升级依赖。|
+|**Link。** `persona-link` 是设备侧连接助手。主动模式带凭据建立控制连接，按 stream ID 接入 WebSocket，再与本地 node socket 双向复制字节；被动监听也有配对凭据校验。[控制连接](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/link/client_link.go#L95-L104)、[转发](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/link/client_link.go#L613-L639)、[被动认证](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/link/listen.go#L412-L435)。|v2 socket 已按 `rt` 复用；runtime 能力属于执行端。|把 link 限定为可重建的传输连接。provider、第三方订阅、执行器统一称 adapter，拥有独立生命周期及 ACL。首期仅设备出站；Hub 主动入站留待有明确网络需求时评估。|
+|**Hub peer 与设备身份。** 配对码绑定 Hub ID、公钥指纹与期限；发起端校验自身 ID、既有指纹，签发 kind/role 为 peer 的凭据；Hub 间连接在配对身份下运行双向 RPC。[配对](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/hub/peer_pair.go#L76-L107)、[身份校验](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/hub/peer_pair.go#L150-L171)、[连接契约](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/hub/peer_link.go#L21-L32)。|现有 API peer 在同库进程间扇出，daemon 身份仅覆盖本设备授权范围。|区分 Hub 身份与设备身份，采纳显式配对与端点校验。双边 workspace grant 与 mTLS 是 Remi 提案。|
+|**拓扑与权威。** 文档推荐单 Hub，链接多 Hub 属高级部署。[部署说明](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/docs/server/mesh.md#L8-L23)。实现区分 center/member，按下一跳递减 TTL 转发；成员只允许本组 center 打开已知机器的 node 流，center 可按角色过滤并导入成员设备凭据哈希。[角色](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/hub/mesh_group.go#L60-L76)、[路由与导入](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/hub/peer_auth.go#L54-L102)、[节点访问](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/hub/peer_node.go#L78-L99)。|任务 claim 依赖 workspace 锁，跨独立库的写入归属仍需定义。|采纳 Hub 互联，首期选择单跳双边授权、任务 owner 单写；不引入组中心代管设备凭据或隐式转发，以保留独立 workspace 的权限和故障边界。|
+|**任务组织。** assistant 的计划记录通过 conversation 关联任务列表及状态；一次子任务派生按 machine/session 查找上级并携带执行机器与工作目录。[计划持久化](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/db/tasks.go#L13-L40)、[派生任务](https://github.com/nwverse/persona/blob/14654c59ecaa2b728adbcb187de53f361179cb31/server/internal/assistant/task_spawn.go#L48-L81)。|本地 offer 绑定 runtime，任务状态由 Server 维护；跨 Hub owner 引用属于下文提案。|MUL-9 保留组织身份，附实际执行位置及带时间的连接观测。MUL-11 的权限、租约与审核对象是 adapter；重连只恢复传输。MUL-12 可分别测试传输重连与执行收据，不以 Persona 的 Go 实现作为重写依据。|
+
+核验限于上述固定提交的源码与文档。该版本在真实网络中的恢复时延、分区时外部操作的效果，以及与 Remi 取消收据表等价的保证均未验证。
+
 ## 单 Hub 与设备协议
 
-Hub 持有 workspace、授权、路由、任务意图和审计。daemon 是设备上的长生命周期代理，主动出站连接所属 Hub，管理本机凭据、并发、落盘、恢复与各 link。link 是 daemon 注册的适配器实例，可随配置启停；调用上下文绑定 workspace、实例、操作与 attempt。一个执行 link 可以对应既有 runtime，一个收消息的渠道 link 只获准提交入站事件。同机多个 provider 可分别注册，多个设备各有 daemon 身份。外接执行器经 daemon 的受限代理调用，外部账户密钥留在设备密钥库。业务组织模型不因设备离线而迁移。
+Hub 持有 workspace、授权、路由、任务意图和审计。daemon 是设备上的长生命周期代理，主动出站连接所属 Hub，管理本机凭据、并发、落盘、恢复与各 adapter。daemon 管理的 link 负责拨号、鉴权、心跳和重连，断开即结束本次传输代次；重连后使用原 daemon 身份对账。adapter 是 daemon 注册的适配器实例，可随配置启停；调用上下文绑定 workspace、实例、操作与 attempt。一个执行 adapter 可以对应既有 runtime，一个收消息的渠道 adapter 只获准提交入站事件。同机多个 provider 可分别注册，多个设备各有 daemon 身份。外接执行器经 daemon 的受限代理调用，外部账户密钥留在设备密钥库。业务组织模型不因设备离线而迁移。
 
-1. **登记与协商。** 管理员签发限 workspace、单次、短期的登记票；daemon 在 TLS 内兑换可轮换设备身份。沿用 v2 hello/welcome、版本拒绝与升级路径；新增可选 `link.inventory.v1` 能力。协商成功才发送完整清单及单调 `inventory_revision`，包含实例 ID、种类、契约版本、操作、并发及健康。Hub 将声明与已授予权限取交集；替换清单原子退役缺席实例，旧 revision 丢弃。旧客户端继续走原 runtime 路径。
+1. **登记与协商。** 管理员签发限 workspace、单次、短期的登记票；daemon 在 TLS 内兑换可轮换设备身份。沿用 v2 hello/welcome、版本拒绝与升级路径；新增可选 `adapter.inventory.v1` 能力。协商成功才发送完整清单及单调 `inventory_revision`，包含实例 ID、种类、契约版本、操作、并发及健康。Hub 将声明与已授予权限取交集；替换清单原子退役缺席实例，旧 revision 丢弃。旧客户端继续走原 runtime 路径。
 2. **在线与恢复。** 注册后 `ready → draining/offline → reconciling → ready`；心跳关联连接代次，心跳超时隔离路由，旧连接帧不能恢复就绪。临时网络失败用带抖动的指数退避；撤销即停，升级拒绝走既有升级流程。重连交换 active attempts、累计确认和清单版本，先拉取取消/撤销和终态，再恢复 offer。设备不得离线领新任务；已获准执行仅在授权期限内继续，到期冻结外部写入并报告待对账。
-3. **路由与执行。** Hub 在原 workspace 并发、runtime 选择和 drain 校验之内匹配 link 的操作、版本和配额。offer 附 `attempt_id, link_id, operation_id, fence, expires_at`；接收端先持久化唯一执行收据，再接受和启动。相同操作与参数重取收据，重用键且参数不同则拒绝。超时可重送同一操作；只有上一执行确定未启动、已停止或外部系统可兑现 fencing 时才可改派。不可幂等外部调用在“已发出、结果未知”时转人工核对，不能承诺外部副作用恰好一次。
+3. **路由与执行。** Hub 在原 workspace 并发、runtime 选择和 drain 校验之内匹配 adapter 的操作、版本和配额。offer 附 `attempt_id, adapter_id, operation_id, fence, expires_at`；接收端先持久化唯一执行收据，再接受和启动。相同操作与参数重取收据，重用键且参数不同则拒绝。超时可重送同一操作；只有上一执行确定未启动、已停止或外部系统可兑现 fencing 时才可改派。不可幂等外部调用在“已发出、结果未知”时转人工核对，不能承诺外部副作用恰好一次。
 4. **事件与回放。** 心跳可合并；完成、失败、取消回执先进设备 outbox，接收方事务性写入效果及去重记录再 ACK。trace 由执行设备按 attempt 保留，以 `(attempt_id, stream_id, after_seq)` 续读，连续序号才推进游标，重复丢弃，缺口按页补读。慢订阅者被暂停，超保留期返回 `cursor_expired` 和可用范围；索要快照后从快照水位恢复，已清理的历史显式标缺。限制每页字节数、每流积压与租户总量，控制及终态先于 trace；磁盘不足停止接单并报告，保留未确认的可靠记录。
 
 ## 独立 Hub 互联
@@ -41,8 +55,8 @@ Hub 持有 workspace、授权、路由、任务意图和审计。daemon 是设�
 
 |关联提案与依据|同一任务的样例及预期判定|
 |---|---|
-|MUL-9 跨设备视图，`sres_1f1vvqvnk312`|Hub A 的 workspace W 中，Issue、Session、Turn、Attempt 各有 owner 三元引用，例如 `(A,W,issue-7)` → `(A,W,session-2)` → `(A,W,turn-5)` → `(A,W,attempt-1)`。最后一项映射到实际位置 `(Hub B,daemon D1,runtime R1,link L1,local attempt X1)`。Issue 的业务进度、X1 的执行结果、D1 最后在线的观测时间分别记录。D1 失联仅改变连接观测。若事后获准换机重试，在同一 Turn 下新建 attempt-2 并记录 D2 的实际位置，保留原 attempt 及组织归属；冷启动时 provider 原生会话、进程和本地文件可能无法恢复。|
-|MUL-11 扩展一期，`sres_3vri7yo01qy4`，[PR #171](https://github.com/moesin-lab/Remi/pull/171)|既有受信渠道及执行适配器沿既有授权路径接入。第三方 link 一期仅可在一个 workspace 运行经审核的进程外异步订阅。例如 W 内获审订阅器请求该 Turn 的已授权事件：manifest 授予订阅、inventory 声明支持、本地 ACL 允许且租约有效时才投递。缺 manifest、ACL 拒绝或租约过期均拒绝，即使 inventory 宣称支持。请求向 B 订阅或执行 X1 时，一期直接拒绝。若后续阶段获批跨 Hub，除上述交集还须双方 grant 同时覆盖源、目标、操作和数据；一端仅授目录读取即拒绝远程执行。登记能力不会授予权限。|
+|MUL-9 跨设备视图，`sres_1f1vvqvnk312`|Hub A 的 workspace W 中，Issue、Session、Turn、Attempt 各有 owner 三元引用，例如 `(A,W,issue-7)` → `(A,W,session-2)` → `(A,W,turn-5)` → `(A,W,attempt-1)`。最后一项映射到实际位置 `(Hub B,daemon D1,runtime R1,adapter E1,local attempt X1)`。Issue 的业务进度、X1 的执行结果、D1 的 link 连接代次 L1 及最后在线时间分别记录。D1 失联仅改变连接观测。若事后获准换机重试，在同一 Turn 下新建 attempt-2 并记录 D2 的实际位置，保留原 attempt 及组织归属；冷启动时 provider 原生会话、进程和本地文件可能无法恢复。|
+|MUL-11 扩展一期，`sres_3vri7yo01qy4`，[PR #171](https://github.com/moesin-lab/Remi/pull/171)|既有受信渠道及执行适配器沿既有授权路径接入。第三方 adapter 一期仅可在一个 workspace 运行经审核的进程外异步订阅。例如 W 内获审订阅器请求该 Turn 的已授权事件：manifest 授予订阅、inventory 声明支持、本地 ACL 允许且租约有效时才投递。缺 manifest、ACL 拒绝或租约过期均拒绝，即使 inventory 宣称支持。请求向 B 订阅或执行 X1 时，一期直接拒绝。若后续阶段获批跨 Hub，除上述交集还须双方 grant 同时覆盖源、目标、操作和数据；一端仅授目录读取即拒绝远程执行。登记能力不会授予权限。|
 |MUL-12 后端评估，`sres_vkb3t7lprhqr`，[PR #169](https://github.com/moesin-lab/Remi/pull/169) 审阅 SHA `5af687a2ee5a0ff46561a833badf5a4844537db8`|先在现栈记录基线，再以语言无关样例冻结引用、权限拒绝、收据版本及回放结果。只有现栈优化后仍有瓶颈且测量证据支持，才评估单批试点。同一组样例供候选实现复验；协议冻结本身不触发语言迁移或一期扩展远程执行。|
 
 ### 阶段 3 · 取消与完成如何裁决
@@ -63,7 +77,7 @@ Hub 持有 workspace、授权、路由、任务意图和审计。daemon 是设�
 |阶段|需验证的反例与通过条件|切换与回退|
 |---|---|---|
 |0 协议冻结|发布语言无关字段、错误、身份作用域及正反例；两种独立编解码器往返相同，拒绝未知必需特性。MUL-9 提供对象引用，MUL-11 提供 manifest/进程外契约，MUL-12 据此估算迁移。|仅样例，不迁移数据；业务组织与语言选择各自由对应 RFC 决策。|
-|1 本地 link|新旧 Hub/daemon 混版不发送未协商帧；并发重复 offer 仅一次启动；换设备或越 workspace 被拒，旧清单不能将退役 link 复活。|先影子比较路由，再逐 workspace 开启；关闭新路由，排空新增操作，保留旧 runtime ID。|
+|1 本地 adapter|新旧 Hub/daemon 混版不发送未协商帧；并发重复 offer 仅一次启动；换设备或越 workspace 被拒，旧清单不能将退役 adapter 复活。|先影子比较路由，再逐 workspace 开启；关闭新路由，排空新增操作，保留旧 runtime ID。|
 |2 只读 peer|A–B、B–C 已配对时 A 无法列举 C；越权及过期缓存被拒；断网、撤销、轮钥与重启后无旧订阅复活。|每条连接独立开关；撤销导出并清理缓存，本地调度继续。|
 |3 受限远程执行|目标已提交但 ACK 丢失、两端依次重启，只产生同一执行记录；相同键不同参数被拒。按取消裁决表验证两种到达次序、重放、旧 fence 和效果未知的分区。|先限可幂等操作与配额；关闭新 offer，按操作逐一对账，再停回传。未决任务可见。|
 |4 回放与恢复演练|慢流或磁盘满不吞终态；删历史返回明确缺口。断 owner 恢复时旧 writer 被隔离，双方收据与终态收敛；证明对账前保持隔离。|快照与收据在回退窗内保留；降版前停止新协议并验证旧端不会误领未决任务。|
@@ -75,5 +89,5 @@ Hub 持有 workspace、授权、路由、任务意图和审计。daemon 是设�
 |配对范围及拓扑|按需直连、单跳、双边管理员批准；多跳或强制中心均需另做信任及可用性设计。|
 |数据归属与灾备|任务 owner 单写、执行端持收据，分区宁可暂停；若要求自动接管，先另行确定仲裁、外部副作用栅栏和恢复目标。|
 |首发能力与披露|先只读目录，再按 workspace 开启可幂等远程操作；trace 仅按需授权，保留时长、跨域驻留及容量预算由数据所有者确认。|
-|扩展与重写顺序|先共同评审语言无关协议及兼容样例，再决定 Go/Rust 与迁移模块；link 权限随 MUL-11 契约，项目/设备组织归 MUL-9。|
-|Persona 对齐|请提供产品版本、可核验设计材料或目标流程，再逐项比对；在此之前按 Remi 实际需求评审。|
+|扩展与重写顺序|先共同评审语言无关协议及兼容样例，再决定 Go/Rust 与迁移模块；adapter 权限随 MUL-11 契约，项目/设备组织归 MUL-9。|
+|设备部署与 Hub 组模式|建议首期在 daemon 内复用出站连接，不另装 Link 服务；独立 Hub 只做双边单跳配对。若需要 Hub 主动拨设备或组中心统一管理，须另定设备入站授权、凭据托管和分区恢复边界。|

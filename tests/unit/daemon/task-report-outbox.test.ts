@@ -53,6 +53,48 @@ function httpError(status: number, path = "/api/daemon/tasks/x"): MultiremiDaemo
 }
 
 describe("MultiremiTaskReportOutbox", () => {
+  it('records late delivery evidence while serving another lane and a verified post-boundary attempt', async () => {
+    const path = tempPath();
+    const response = deferred<void>();
+    const started = deferred<void>();
+    const sent:string[] = [];
+    const original = track(new MultiremiTaskReportOutbox({path,deliver:async record=>{
+      if (record.taskId === 'P') {started.resolve(); await response.promise;}
+      sent.push(record.taskId);
+    }}));
+    original.enqueue('P','progress',{summary:'in flight'});
+    await started.promise;
+    const blocked = track(new MultiremiTaskReportOutbox({path,canSend:()=>false,deliver:async()=>{}}));
+    const launch = (attempt:string,created:string,lane:string) => {
+      const proof = blocked.preparePolicyReceipt({workspace_id:'w',daemon_id:'d',runtime_id:lane,attempt_id:attempt,offer_generation:'generation',content_hash:'hash'});
+      expect(blocked.transitionPolicyReceipt(proof,'launch')).toBe(true);
+      blocked.recordNewAttempt(proof,created,lane);
+      return proof;
+    };
+    const healthy = launch('R','2020-01-01','other-lane');
+    blocked.enqueue('R','progress',{...healthy});
+    blocked.enqueue('Q','progress',{summary:'ambiguous'});
+    const incident = {source:'bad-lane',handoff:'bad',attempt:null,legacyPaths:[]};
+    const scanned = track(new MultiremiTaskReportOutbox({path,canSend:()=>false,discoverRestartHolds:()=>[incident],deliver:async()=>{}}));
+    const inspect = openSqliteDatabase(path);
+    const bytes = () => inspect.query("SELECT * FROM outbox_events WHERE task_id IN ('P','Q') ORDER BY id").all();
+    const before = bytes();
+    try {
+      expect(scanned.isHeld('R')).toBe(false);
+      scanned.recordHandoffEvidence('bad-lane','bad',null,'2020-01-02');
+      scanned.recordHandoffEvidence('bad-lane','bad',null,'2029-01-02');
+      const fresh = launch('S','2020-01-03','bad-lane');
+      blocked.enqueue('S','progress',{...fresh});
+      blocked.enqueue('unknown-origin','progress',{summary:'unattributed'});
+      response.resolve(); original.pumpAll();
+      await until(()=>sent.includes('R') && sent.includes('S'));
+      expect(scanned.isHeld('unknown-origin')).toBe(true);
+      expect(inspect.query('SELECT * FROM restart_delivery_evidence').all()).toEqual([{event_id:1}]);
+      expect(bytes()).toEqual(before);
+      expect(scanned.uncertainHandoffs()[0]?.server_high).toBe('2020-01-02');
+      expect(inspect.query("SELECT task_id FROM restart_members WHERE handoff='bad' ORDER BY task_id").all()).toEqual([{task_id:'P'},{task_id:'Q'}]);
+    } finally {response.resolve(); inspect.close();}
+  });
   it('retains incident evidence through compaction, restart and overlapping handoff mappings', async () => {
     const path = tempPath();
     const sent: string[] = [];

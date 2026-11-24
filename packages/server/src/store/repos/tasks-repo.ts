@@ -4332,6 +4332,7 @@ ${routing.sql}
   }
 
   private reclaimStaleDispatchedTaskForRuntime(runtimeId: string, excludedAgentIds: string[], supportsPromptPolicy: boolean, negotiated: boolean): MultiremiTaskWithAgent | null {
+    if (negotiated) return null;
     const leases = [...this.acceptedOfferLeases];
     const cutoff = new Date(Date.now() - CLAIM_RESPONSE_RECOVERY_MS).toISOString();
     const now = nowIso();
@@ -4342,7 +4343,7 @@ ${routing.sql}
         AND t.runtime_id = ? AND t.started_at IS NULL
         AND t.dispatched_at IS NOT NULL AND t.dispatched_at < ?
         AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_system_prompts b WHERE b.task_id=claim_attempt.id
-          ${negotiated ? '' : `AND ${this.ctx.db.dialect === 'postgres' ? "b.binding_json::jsonb->>'dispatch'" : "json_extract(b.binding_json,'$.dispatch')"} IS NOT NULL`})
+          AND ${this.ctx.db.dialect === 'postgres' ? "b.binding_json::jsonb->>'dispatch'" : "json_extract(b.binding_json,'$.dispatch')"} IS NOT NULL)
         ${leases.length ? `AND t.id NOT IN (${leases.map(() => "?").join(", ")})` : ""}
         ${excludedAgentIds.length ? `AND t.agent_id NOT IN (${excludedAgentIds.map(() => "?").join(", ")})` : ""}
       ORDER BY t.priority DESC, t.dispatched_at ASC LIMIT 1
@@ -4620,7 +4621,8 @@ ${routing.sql}
          LEFT JOIN multiremi_runtimes code_runtime ON code_runtime.id = code_session.code_runtime_id
          WHERE claim_attempt.status = 'offered' AND t.status = 'queued'
            ${negotiated ? `AND NOT EXISTS (SELECT 1 FROM multiremi_attempt_system_prompts binding WHERE binding.task_id=claim_attempt.id
-             AND COALESCE(${this.ctx.db.dialect === 'postgres' ? "binding.binding_json::jsonb #>> '{dispatch,state}'" : "json_extract(binding.binding_json,'$.dispatch.state')"},'unverified') <> 'revoked')` : ''}
+             AND COALESCE(${this.ctx.db.dialect === 'postgres' ? "binding.binding_json::jsonb #>> '{dispatch,state}'" : "json_extract(binding.binding_json,'$.dispatch.state')"},'unverified') <> 'revoked')
+             AND (t.offered_at IS NULL OR EXISTS(SELECT 1 FROM multiremi_attempt_system_prompts binding WHERE binding.task_id=claim_attempt.id))` : ''}
            AND (t.next_retry_at IS NULL OR t.next_retry_at <= ?)
            AND a.archived_at IS NULL
            AND (t.chat_session_id IS NULL OR project_chat.status = 'active')

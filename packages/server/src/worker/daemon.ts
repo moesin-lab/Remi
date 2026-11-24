@@ -24,7 +24,7 @@ import { existsSync, realpathSync, readFileSync, writeFileSync, renameSync } fro
 import { cpus, homedir, hostname } from "node:os";
 import { multiremiStateDir } from "@shared/home-paths.js";
 import { basename, dirname, join, resolve } from "node:path";
-import { acquireDaemonOutbox, releaseDaemonOutbox, daemonReportTransport, daemonOutboxHasPriority } from "./report-transport.js";
+import { acquireDaemonOutbox, releaseDaemonOutbox, daemonReportTransport, daemonOutboxHasPriority, registerRestartSource } from "./report-transport.js";
 import { acquireDaemonTrace, releaseDaemonTrace, daemonTraceStore, type DaemonTraceTransport } from "./trace-transport.js";
 import { installedExternalCodexCommand, registerDaemonExternalChats } from "./external-chats.js";
 import { CodexExternalChats } from "@daemon/external-chats/index.js";
@@ -1627,6 +1627,8 @@ export class MultiremiDaemon {
       log,
       ...options.protocolClientOptions,
     });
+    registerRestartSource(this.protocolClient,this.legacyOutboxPath,() => PlannedRestartJournal.discover({server:this.options.serverUrl,workspace:this.options.workspaceId ?? 'local',
+      daemon:this.options.daemonId ?? this.options.runtimeName,provider:this.options.provider,legacyPath:this.legacyOutboxPath}));
     this.taskDownlinks = new DaemonTaskDownlinks(this.protocolClient, () => this.options.runtimeId ?? undefined,
       attempt => this.ensureOutbox().reportIdentity(attempt,this.options.runtimeId));
     if (this.options.provider === "codex" && typeof process.getuid === "function") {
@@ -2062,8 +2064,9 @@ export class MultiremiDaemon {
     this.parkedLanesClosing = null;
     const outbox = this.ensureOutbox();
     this.plannedRestartTransfer();
-    this.restartRecoveryCandidates = new Set(this.restartJournal!.entries().map(entry => entry.execution.handoff_id));
-    for (const entry of this.restartJournal!.entries()) outbox.holdAttempt(entry.execution.attempt_id,true);
+    const awaitingRecovery = this.restartJournal!.awaitingRecovery();
+    this.restartRecoveryCandidates = new Set(awaitingRecovery.map(entry => entry.execution.handoff_id));
+    for (const entry of awaitingRecovery) outbox.holdAttempt(entry.execution.attempt_id,true);
     this.startRepoCheckoutServer();
     try {
       await this.registerCurrentRuntime();
@@ -3902,8 +3905,6 @@ export class MultiremiDaemon {
       this.outboxAbort ??= new AbortController();
       this.outbox = acquireDaemonOutbox(this.protocolClient, {
         path: this.outboxPath ?? ":memory:",
-        discoverRestartHolds: () => PlannedRestartJournal.discover({server:this.options.serverUrl,workspace:this.options.workspaceId ?? 'local',
-          daemon:this.options.daemonId ?? this.options.runtimeName,provider:this.options.provider,legacyPath:this.legacyOutboxPath}),
         deliver: (record) => this.deliverOutboxRecord(record),
         ...(this.outboxBackoffMs ? { backoffScheduleMs: this.outboxBackoffMs } : {}),
         ...(this.outboxMaxBytes ? { maxBytes: this.outboxMaxBytes } : {}),
@@ -4510,13 +4511,13 @@ export class MultiremiDaemon {
     }
   }
 
-  private readonly pendingResumedTasks = new Map<string, ReturnType<typeof normalizeDaemonTurnOffer>>();
+  private readonly pendingResumedTasks = new Map<string, () => ReturnType<typeof normalizeDaemonTurnOffer>>();
 
   private async preflightRestart(entry: RestartJournalEntry): Promise<boolean> {
     const scope = entry.execution;
     const proof = entry.checkpoint.policy_receipt;
     const local = this.ensureOutbox().policyReceipt(scope);
-    if (!proof || !local || local.state !== 'launch_claimed' || !samePolicyOffer(local,proof) || proof.turn_id !== scope.turn_id
+    if (this.ensureOutbox().hasIndependentHold(scope.attempt_id,scope.handoff_id) || !proof || !local || local.state !== 'launch_claimed' || !samePolicyOffer(local,proof) || proof.turn_id !== scope.turn_id
       || proof.handoff_id !== scope.handoff_id || proof.prior_restart_generation !== scope.generation
       || !this.protocolClient.sharesCap('turn.restart') || !this.protocolClient.sharesCap('prompt.policy.adopt.v1')) return false;
     const info = await this.taskDownlinks.rpc('task.offer_status',{...proof});
@@ -4549,11 +4550,12 @@ export class MultiremiDaemon {
       }
       try {
         const resumed = await this.restartTransfer!.resume(entry.execution.handoff_id);
-        const task = this.pendingResumedTasks.get(entry.execution.handoff_id)!;
+        const activate = this.pendingResumedTasks.get(entry.execution.handoff_id);
         this.pendingResumedTasks.delete(entry.execution.handoff_id);
         this.resumedRestartIds.add(entry.execution.handoff_id);
-        if (!this.restartJournal!.claimLaunch(resumed)) continue;
-        this.ensureOutbox().holdAttempt(entry.execution.attempt_id,false);
+        if (!activate || this.ensureOutbox().hasIndependentHold(entry.execution.attempt_id,entry.execution.handoff_id) || !this.restartJournal!.claimLaunch(resumed)) continue;
+        this.ensureOutbox().releaseRestartGrant(entry.execution.attempt_id,entry.execution.handoff_id);
+        const task = activate();
         const run = this.handleTask(task).finally(() => this.inflight.delete(run));
         this.inflight.add(run);
         void run.catch(error => log.error(`Resumed task ${task.id} failed: ${String(error)}`));
@@ -4595,6 +4597,7 @@ export class MultiremiDaemon {
           || task.systemPromptPolicy.contentHash !== proof.content_hash) throw new Error('restart_policy_mismatch');
         const generation = Number(result.generation);
         if (generation !== entry.execution.generation + 1) throw new Error("Invalid restart generation");
+        this.pendingResumedTasks.set(entry.execution.handoff_id, () => {
         this.executionGenerations.set(task.id, generation);
         if (identities) this.restartTraceIdentities.set(task.id, { state: identities, trace_head: entry.checkpoint.trace_head });
         this.resumedUsageRuns.set(task.id, entry.consumer_id);
@@ -4612,8 +4615,8 @@ export class MultiremiDaemon {
         const questions = (result.recovered_questions ?? []) as UnifiedMessage[];
         this.restartQuestions.set(task.id, questions);
         for (const question of questions) this.taskDownlinks.registerDecision(question, task.id);
-        // No model may run until transfer.resume has persisted the local receipt.
-        this.pendingResumedTasks.set(entry.execution.handoff_id, task);
+        return task;
+        });
         return { generation };
       },
     });

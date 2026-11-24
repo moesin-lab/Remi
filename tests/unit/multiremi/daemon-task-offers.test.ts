@@ -13,6 +13,10 @@ import { ManualDaemonProtocolClock } from "@multiremi/api/daemon-protocol/clock.
 import { DAEMON_MIN_CLI_VERSION, DAEMON_OFFER_COOLDOWN_MS, DAEMON_OFFER_TIMEOUT_MS } from "@multiremi/contracts/daemon-protocol.js";
 import type { MultiremiTaskWithAgent } from "@multiremi/contracts/types.js";
 import { createLocalStore, resetMultiremiTestEnv, db } from "./helpers.js";
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
 
 const layers: DaemonProtocolLayer[] = [];
 afterEach(async () => {
@@ -55,7 +59,7 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
   const offered = () => frames.filter(frame => frame.t === "task.offer");
   const accept = async (frame = offered().at(-1)!) => {
     if (frame.p.offer_generation) {
-      await send('task.offer_adopt',{attempt_id:frame.p.attempt_id,offer_generation:frame.p.offer_generation,
+      await send('task.offer_adopt',{workspace_id:'local',daemon_id:'dmn_offer',runtime_id:frame.rt,attempt_id:frame.p.attempt_id,offer_generation:frame.p.offer_generation,
         receipt_id:`receipt-${frame.seq}`,content_hash:store.getAttemptSystemPrompt(frame.p.attempt_id)!.contentHash},
         {rt:frame.rt,id:`adopt-${frame.seq}`});
     }
@@ -67,6 +71,43 @@ function fixture(prepare?: (task: MultiremiTaskWithAgent) => Promise<Record<stri
 }
 
 describe("A-3 task offers", () => {
+  it('fences a superseded term, rolls back adoption and races two SQLite writers', async () => {
+    const h = fixture(undefined,1,undefined,false,false);
+    const task = h.task();
+    const rt = h.runtimeIds[0]!;
+    const generation = crypto.randomUUID();
+    h.store.claimTask(rt,{supportsPromptPolicy:true,policyProtocol:'adopt',offerGeneration:generation});
+    h.store.recordTaskOffered(task.id,rt,undefined,generation);
+    const identity = {attempt_id:task.id,runtime_id:rt,workspace_id:'local',daemon_id:'dmn_offer',receipt_id:crypto.randomUUID(),offer_generation:generation,content_hash:h.store.getAttemptSystemPrompt(task.id)!.contentHash};
+    const term = h.store.activateBackgroundTerm('A',()=>{});
+    h.store.activateBackgroundTerm('B',()=>{});
+    expect(()=>withBackgroundTerm(term,()=>h.store.systemPromptsRepo().adoptOffer(identity))).toThrow(StaleLiveTermError);
+    expect(()=>db!.transaction(()=>{ expect(h.store.systemPromptsRepo().adoptOffer(identity)).toBe(true); throw new Error('rollback'); })()).toThrow('rollback');
+    expect(h.store.systemPromptsRepo().offerStatus(identity)).toBe('proposed');
+    expect(h.store.getTask(task.id)?.acceptedAt).toBeNull();
+    const directory = mkdtempSync(join(tmpdir(),'mul3-sqlite-race-'));
+    const file = join(directory,'race.db');
+    try {
+      db!.exec('CREATE TABLE system_prompt_test_barrier(batch TEXT, participant TEXT, PRIMARY KEY(batch,participant))');
+      writeFileSync(file,db!.serialize());
+      const workers = ['adopt','revoke'].map((operation,participant) => Bun.spawn([process.execPath,new URL('../../fixtures/system-prompt-pg-worker.ts',import.meta.url).pathname],{
+        stdout:'pipe',stderr:'pipe',env:{...process.env,SYSTEM_PROMPT_TEST_SQLITE_FILE:file,
+          SYSTEM_PROMPT_TEST_JOB:JSON.stringify({operation,participant:String(participant),batch:'race',workspaceId:'local',identity})}}));
+      try {
+        const results = await Promise.all(workers.map(async worker => {
+          const [out,err,exit] = await Promise.all([new Response(worker.stdout).text(),new Response(worker.stderr).text(),worker.exited]);
+          expect({exit,err}).toEqual({exit:0,err:''});
+          return JSON.parse(out.slice(out.indexOf('SYSTEM_PROMPT_TEST_RESULT:')+'SYSTEM_PROMPT_TEST_RESULT:'.length)).status;
+        }));
+        expect([...results].sort()).toEqual([200,409]);
+        const verify = openSqliteDatabase(file,{readonly:true});
+        try {
+          const row = verify.query('SELECT binding_json FROM multiremi_attempt_system_prompts WHERE task_id=?').get(task.id) as {binding_json:string};
+          expect(JSON.parse(row.binding_json).dispatch.state).toBe(results[0] === 200 ? 'adopted' : 'revoked');
+        } finally {verify.close();}
+      } finally { for (const worker of workers) if (worker.exitCode === null) worker.kill(); }
+    } finally {rmSync(directory,{force:true,recursive:true});}
+  },30_000);
   for (const fenced of [false, true]) {
     for (const accepted of [false, true]) {
       it(`persists an ${accepted ? "accepted" : "explicitly rejected"} offer with ${fenced ? "an active" : "no"} term`, async () => {
@@ -734,7 +775,7 @@ describe("System Prompt policy claim and offer", () => {
     expect(h.store.getTask(other.id)?.waitReason).toBe("daemon_capability_required:prompt.policy.adopt.v1");
     mutateExecutionFixture(db!, "UPDATE multiremi_turn_execution_records SET next_retry_at = ? WHERE id = ?", ["2099-01-01T00:00:00Z", other.id]);
     h.store.resetSystemPrompt("local", { expectedRevision: 2, requestId: "reset" }, actor);
-    expect(h.store.claimTask(h.runtimeIds[1]!)).toBeNull();
+    expect(h.store.claimTask(h.runtimeIds[1]!,{policyProtocol:'legacy'})).toBeNull();
     expect(h.store.getTask(other.id)).toMatchObject({ status: "queued", waitReason: null });
     expect(h.store.getTask(device.id)?.waitReason).toBe("等待项目设备：review");
   });

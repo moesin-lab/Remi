@@ -86,6 +86,7 @@ export function registerDaemonOfferHandler(client: DaemonProtocolClient, options
         if (!samePolicyOffer(receipt,{...desired,receipt_id:receipt.receipt_id})) { respond(false,'policy_offer_mismatch'); return; }
         const accepted = await client.rpc('task.offer_adopt',receipt,frame.rt);
         if (connection !== owner || accepted.state !== 'adopted' || !samePolicyOffer(receipt,accepted) || !client.sharesCap('prompt.policy.adopt.v1') || adoption.held(task.id)) return;
+        if (accepted.grant !== 'first' && (accepted.grant !== 'replay' || !local)) { respond(false,'policy_offer_mismatch'); return; }
         if (outbox.transitionPolicyReceipt(receipt,'launch')) {
           outbox.recordNewAttempt(receipt,task.createdAt,adoption.lane());
           options.run(task);

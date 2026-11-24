@@ -12,20 +12,34 @@ export interface DaemonReportTransport {
 }
 
 const shared = new WeakMap<DaemonProtocolClient, { outbox: MultiremiTaskReportOutbox; owners: number; unsubscribe: () => void }>();
+type DiscoverRestartHolds = NonNullable<MultiremiTaskReportOutboxOptions['discoverRestartHolds']>;
+const restartSources = new WeakMap<DaemonProtocolClient, Map<string,DiscoverRestartHolds>>();
+
+export function registerRestartSource(protocol: DaemonProtocolClient, source: string, discover: DiscoverRestartHolds): void {
+  const sources = restartSources.get(protocol) ?? new Map();
+  sources.set(source,discover);
+  restartSources.set(protocol,sources);
+}
 
 export function acquireDaemonOutbox(protocol: DaemonProtocolClient, options: MultiremiTaskReportOutboxOptions): MultiremiTaskReportOutbox {
   let entry = shared.get(protocol);
   if (!entry) {
     const outbox: MultiremiTaskReportOutbox = new MultiremiTaskReportOutbox({ ...options,
+      discoverRestartHolds: () => {
+        const sources = restartSources.get(protocol);
+        return [...(sources?.values() ?? [])].flatMap(discover => discover()).map(incident => ({...incident,
+          legacyPaths:[...new Set([...incident.legacyPaths,...(sources?.keys() ?? [])])]}));
+      },
       canSend: () => protocol.connectionState() === "connected" && !protocol.uplinkPaused(),
       deliver: async record => {
         if (record.kind === "messages") return options.deliver(record);
-        const checkHold = () => { if (outbox.isHeld(record.taskId)) throw new DaemonProtocolRpcError('restart_policy_unverifiable', true); };
+        const sequence = outbox.incidentSequence();
+        const checkHold = () => { if (outbox.heldSince(record,sequence)) throw new DaemonProtocolRpcError('restart_policy_unverifiable', true); };
         checkHold();
         await deliverCompletionReceipt(protocol, record, checkHold);
         checkHold();
         const reply = await protocol.event(outboxRecordFrame(record) as ReturnType<typeof outboxRecordFrame> & { seq: number });
-        if (record.terminal && !outbox.isHeld(record.taskId)) {
+        if (record.terminal && !outbox.heldSince(record,sequence)) {
           const trace = daemonTraceTransport(protocol);
           if (trace.store.head(record.taskId)) {
             trace.close(record.taskId, record.kind === "turn.complete" ? "completed" : "failed", terminalError(record.payload));
@@ -93,9 +107,12 @@ export function daemonReportTransport(protocol: DaemonProtocolClient, runtime: (
     rpc: (type, payload) => protocol.rpc(type, payload, runtime() ?? undefined),
     upgradeWaiting: () => protocol.connectionState() === "upgrade_wait",
     bestEffort(type, payload) {
-      if (protocol.connectionState() !== "connected") return;
       const taskId = typeof payload.task_id === "string" ? payload.task_id : null;
-      if (taskId && outbox().classifyReport(taskId,payload.receipt_id ?? outbox().reportIdentity(taskId,runtime()).receipt_id)) return;
+      if (taskId && outbox().classifyReport(taskId,payload.receipt_id ?? outbox().reportIdentity(taskId,runtime()).receipt_id)) {
+        outbox().preserveBestEffort(taskId,type,payload);
+        return;
+      }
+      if (protocol.connectionState() !== "connected") return;
       const generation = taskId ? executionGeneration(taskId) : 0;
       try { protocol.send({ t: type, rt: runtime() ?? undefined,
         p: { ...(taskId ? outbox().reportIdentity(taskId,runtime()) : {}), ...(generation ? { generation } : {}), ...payload } }); }

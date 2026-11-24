@@ -10,8 +10,101 @@ import { openSqliteDatabase } from "@multiremi/store/db/sqlite.js";
 import { daemonTraceService } from "@multiremi/api/daemon-protocol/trace-handlers.js";
 import { EMPTY_TURN_TRACE, applyTurnTraceEvents } from "@shared/turn-trace.js";
 import { PlannedRestartJournal } from "@multiremi/worker/planned-restart-journal.js";
+import { MultiremiTaskReportOutbox } from '@multiremi/worker/outbox.js';
 
 useMigratedIntegrationDatabases();
+
+test('an unmapped damaged co-resident journal retains both legacy partitions across welcome, ready, retry and replacement', async () => {
+  const h = await DaemonProtocolHarness.create({database:'sqlite',providers:['claude','codex'],outboxBackoffMs:[5]});
+  try {
+    await h.startDaemon(); await h.settleHeartbeat();
+    const runtime = h.store.listRuntimes().find(row=>row.provider === 'claude')!;
+    const agent = h.store.createAgent({name:'Healthy report lane',provider:'claude',runtimeId:runtime.id});
+    const healthy = h.store.createTask({agentId:agent.id,prompt:'first healthy execution'});
+    await waitFor(()=>h.store.getTask(healthy.id)?.status === 'completed','first execution has a native receipt',8_000);
+    await h.stopDaemon();
+    const path = (prefix:string) => join(h.root,readdirSync(h.root).find(name=>name.startsWith(prefix) && name.endsWith('.db'))!);
+    const shared = path('v2-');
+    const journalPath = path('restart-codex-');
+    const journal = new PlannedRestartJournal(journalPath);
+    const bad = journal.prepare({workspace_id:'local',daemon_id:runtime.daemonId!,runtime_id:'historical-runtime',turn_id:'old-turn',attempt_id:'P',handoff_id:'unknown-handoff',generation:0},
+      {version:1,session_id:null,work_dir:null,trace_head:0,input_ack_seq:0,delivered_message_ids:[]});
+    journal.close();
+    const evidence = openSqliteDatabase(journalPath);
+    const db = openSqliteDatabase(shared);
+    try {
+      evidence.run("UPDATE planned_restart_journal SET payload='{}' WHERE handoff_id=?",[bad.execution.handoff_id]);
+      const seed = new MultiremiTaskReportOutbox({path:shared,canSend:()=>false,deliver:async()=>{}});
+      for (const task of ['P','Q']) seed.enqueue(task,'progress',{runtime_id:runtime.id,summary:'prior progress'});
+      const proof = seed.reportIdentity(healthy.id,runtime.id);
+      expect(proof.receipt_id).toBeString();
+      const high = seed.enqueue(healthy.id,'progress',{...proof,runtime_id:runtime.id,summary:'final healthy progress',final:true});
+      await seed.close();
+      const original = () => db.query("SELECT * FROM outbox_events WHERE task_id IN ('P','Q') ORDER BY id").all();
+      const bytes = original();
+      const journalRow = () => evidence.query('SELECT * FROM planned_restart_journal WHERE handoff_id=?').get(bad.execution.handoff_id);
+      const saved = journalRow();
+      await h.recreateDaemon(); await h.settleHeartbeat();
+      await waitFor(()=>!db.query('SELECT 1 FROM outbox_events WHERE id=?').get(high),'higher unrelated receipt drains',8_000);
+      await waitFor(()=>Boolean(db.query('SELECT 1 FROM restart_uncertain WHERE server_high IS NOT NULL').get()),'discovery boundary reconciled',5_000);
+      const later = h.store.createTask({agentId:agent.id,prompt:'after the discovery boundary'});
+      await waitFor(()=>h.store.getTask(later.id)?.status === 'completed','independent new attempt completes',8_000);
+      await h.disconnect(); await h.reconnect(); await h.recreateDaemon(); await h.settleHeartbeat();
+      expect(original()).toEqual(bytes); expect(journalRow()).toEqual(saved);
+      expect(h.ledger.filter(entry=>['P','Q'].includes(entry.partition))).toHaveLength(0);
+      expect(h.ledger.filter(entry=>['turn.restart.resume','turn.restart.resume_bound','turn.restart.suspend'].includes(entry.type))).toHaveLength(0);
+      expect(evidence.query('SELECT count(*) AS n FROM planned_restart_retries').get()).toEqual({n:0});
+      expect(db.query('SELECT task_id FROM restart_members WHERE handoff=? ORDER BY task_id').all(bad.execution.handoff_id)).toEqual([{task_id:'P'},{task_id:'Q'}]);
+    } finally {db.close();evidence.close();}
+  } finally {await h.dispose();}
+},45_000);
+
+for (const oldServer of [true,false]) test(`unproved prepared journal survives reconnect and cold start with ${oldServer ? 'legacy' : 'adopt'} welcome`, async () => {
+  let calls = 0;
+  const h = await DaemonProtocolHarness.create({database:'sqlite',outboxBackoffMs:[5],providerFactory:()=>({
+    async *sendStream() { calls++; yield {sessionUpdate:'agent_message_chunk',content:[{type:'text',text:'healthy'}]} as any; },
+    getLastResponse:()=>({text:'healthy',sessionId:'healthy',usage:[],toolCalls:[]} as any),close:async()=>{},
+  })});
+  try {
+    await h.startDaemon(); await h.settleHeartbeat(); await h.stopDaemon();
+    const runtime = h.store.listRuntimes()[0]!;
+    const scope = {runtimeId:runtime.id,daemonId:runtime.daemonId!,workspaceId:'local'};
+    const agent = h.store.createAgent({name:'Old checkpoint',provider:'claude',runtimeId:runtime.id});
+    const task = h.store.createTask({agentId:agent.id,prompt:'held',maxAttempts:3});
+    h.store.claimTask(runtime.id); h.store.startTask(task.id);
+    h.store.beginDaemonDrain('local',scope.daemonId);
+    const restarts = h.store.plannedRestarts();
+    const handoff = restarts.request(task.id,scope);
+    const checkpoint = restarts.checkpointReferences(task.id,scope);
+    restarts.suspend(task.id,handoff.handoff_id,0,checkpoint,scope);
+    h.store.undrainDaemon('local',scope.daemonId);
+    const path = join(h.root,readdirSync(h.root).find(name=>name.startsWith('restart-') && name.endsWith('.db'))!);
+    const journal = new PlannedRestartJournal(path);
+    journal.prepare({runtime_id:runtime.id,daemon_id:scope.daemonId,workspace_id:'local',attempt_id:task.id,turn_id:handoff.turn_id,handoff_id:handoff.handoff_id,generation:0},checkpoint);
+    journal.close();
+    const evidence = openSqliteDatabase(path);
+    try {
+      const state = () => ({journal:evidence.query('SELECT * FROM planned_restart_journal').all(),retry:evidence.query('SELECT * FROM planned_restart_retries').all(),
+        usage:h.db.query('SELECT * FROM multiremi_usage_task_scopes WHERE task_id=?').all(task.id),handoff:restarts.get(task.id),attempts:h.store.listTurnAttempts(handoff.turn_id)});
+      const before = state();
+      if (oldServer) (h.layer as any).welcomeCaps = ['offer','turn.restart'];
+      await h.recreateDaemon(); await h.settleHeartbeat();
+      await (h.daemon as any).resumePlannedRestarts();
+      await h.disconnect(); await h.reconnect();
+      await h.recreateDaemon(); await h.settleHeartbeat();
+      await (h.daemon as any).resumePlannedRestarts();
+      expect(h.ledger.filter(entry=>['turn.restart.resume','turn.restart.resume_bound','turn.restart.suspend'].includes(entry.type))).toHaveLength(0);
+      expect(state()).toEqual(before);
+      expect(calls).toBe(0);
+      h.store.updateRuntime(runtime.id,{maxConcurrency:2});
+      const peer = h.store.createAgent({name:'Healthy peer',provider:'claude',runtimeId:runtime.id});
+      const healthy = h.store.createTask({agentId:peer.id,prompt:'independent'});
+      await waitFor(()=>h.store.getTask(healthy.id)?.status === 'completed','healthy peer completes beside held checkpoint',8_000);
+      expect(calls).toBe(1);
+      expect(state()).toEqual(before);
+    } finally {evidence.close();}
+  } finally {await h.dispose();}
+},30_000);
 
 // Real daemon/provider lifetime, disk outbox/journal and authenticated v2 RPCs.
 // Candidate update acceptance is exercised separately with the MUL-27 harness.

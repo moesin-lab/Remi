@@ -2,6 +2,7 @@
 import { createMultiremiApp } from "@multiremi/api.js";
 import { MultiremiStore } from "@multiremi/store.js";
 import { PostgresSyncDatabase } from "@multiremi/store/db/postgres.js";
+import { openSqliteDatabase } from '@multiremi/store/db/sqlite.js';
 import { DEFAULT_SYSTEM_PROMPT_CONTENT } from "@multiremi/contracts/system-prompt-policy.js";
 import type { PolicyOfferIdentity } from '@multiremi/contracts/system-prompt-policy.js';
 
@@ -20,13 +21,14 @@ export type SystemPromptPgJob = SystemPromptPgWrite & {
 if (import.meta.main) {
   const url = process.env.SYSTEM_PROMPT_TEST_URL;
   const encodedJob = process.env.SYSTEM_PROMPT_TEST_JOB;
-  if (!url || !encodedJob) throw new Error("Missing isolated PostgreSQL worker configuration");
-  if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(url).hostname)) throw new Error("Requires local PostgreSQL");
+  const sqliteFile = process.env.SYSTEM_PROMPT_TEST_SQLITE_FILE;
+  if ((!url && !sqliteFile) || !encodedJob) throw new Error("Missing isolated worker configuration");
+  if (url && !["127.0.0.1", "localhost", "[::1]"].includes(new URL(url).hostname)) throw new Error("Requires local PostgreSQL");
   const job = JSON.parse(encodedJob) as SystemPromptPgJob;
-  const db = new PostgresSyncDatabase(url);
+  const db = sqliteFile ? openSqliteDatabase(sqliteFile) : new PostgresSyncDatabase(url!);
   try {
-    db.exec("SET lock_timeout = '10s'");
-    db.exec("SET statement_timeout = '15s'");
+    if (sqliteFile) db.exec('PRAGMA busy_timeout=10000');
+    else { db.exec("SET lock_timeout = '10s'"); db.exec("SET statement_timeout = '15s'"); }
     const store = new MultiremiStore(db);
     const app = createMultiremiApp({ store, authToken: "SYSTEM_PROMPT_TEST_MASTER" });
     db.run("INSERT INTO system_prompt_test_barrier(batch,participant) VALUES(?,?)", [job.batch, job.participant]);

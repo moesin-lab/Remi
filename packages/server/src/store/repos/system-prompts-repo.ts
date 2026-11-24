@@ -255,18 +255,22 @@ export class SystemPromptsRepo {
   }
 
   adoptOffer(identity: PolicyOfferIdentity): boolean {
+    return this.adoptOfferResult(identity) !== null;
+  }
+
+  adoptOfferResult(identity: PolicyOfferIdentity): 'first' | 'replay' | null {
     return this.ctx.db.transaction(() => {
       this.ctx.lockWorkspaceRuntimeLifecycle(identity.workspace_id);
       const state = this.offerStatus(identity);
-      if (state === 'adopted') return true;
-      if (state !== 'proposed') return false;
+      if (state === 'adopted') return 'replay';
+      if (state !== 'proposed') return null;
       const row = runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records SET accepted_at=?
         WHERE id=? AND runtime_id=? AND status='dispatched' AND offered_at IS NOT NULL`, [nowIso(), identity.attempt_id, identity.runtime_id]);
-      if (row.changes !== 1) return false;
+      if (row.changes !== 1) return null;
       const stored = this.storedAttempt(identity.attempt_id)!;
       this.ctx.db.run('UPDATE multiremi_attempt_system_prompts SET binding_json=? WHERE task_id=?', [JSON.stringify({ ...stored, confirmed: true,
         dispatch: { ...stored.dispatch, state: 'adopted', receiptId: identity.receipt_id } }), identity.attempt_id]);
-      return true;
+      return 'first';
     })();
   }
 

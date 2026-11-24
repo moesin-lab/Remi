@@ -166,7 +166,7 @@ export class PlannedRestartJournal {
       const path = provider === scope.provider ? scope.legacyPath : join(directory, `${provider}-${digest([scope.server, scope.workspace, scope.daemon, provider].join('|')).slice(0,16)}.db`);
       return digest(path).slice(0,16) === match[2] ? [{journal:join(directory,name),path}] : [];
     });
-    const incidents: Array<{ source:string; handoff:string; attempt:string|null; legacyPaths:string[] }> = [];
+    const incidents: Array<{ source:string; handoff:string; attempt:string|null; legacyPaths:string[]; awaitingGrant?:boolean }> = [];
     for (const source of sources) {
       const db = openSqliteDatabase(source.journal,{readonly:true});
       try {
@@ -176,7 +176,11 @@ export class PlannedRestartJournal {
           try {
             const entry = this.read(db,handoff);
             if (entry?.execution.workspace_id === scope.workspace && entry.execution.daemon_id === scope.daemon) {
-              if (entry.checkpoint.policy_receipt) continue;
+              if (entry.checkpoint.policy_receipt) {
+                const table = db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='planned_restart_launches'").get();
+                incidents.push({source:source.journal,handoff,attempt:entry.execution.attempt_id,legacyPaths:[],awaitingGrant:!table || !this.launched(db,entry)});
+                continue;
+              }
               attempt = entry.execution.attempt_id;
             }
           } catch {
@@ -203,6 +207,15 @@ export class PlannedRestartJournal {
       try { return [this.get(row.handoff_id)!]; }
       catch { this.hold(row.handoff_id); return []; }
     });
+  }
+
+  private static launched(db: Database, entry: RestartJournalEntry): boolean {
+    return entry.state === 'resumed' && Boolean(db.query('SELECT 1 FROM planned_restart_launches WHERE handoff_id=? AND consumer_id=? AND generation=?')
+      .get(entry.execution.handoff_id,entry.consumer_id,entry.resumed_generation));
+  }
+
+  awaitingRecovery(): RestartJournalEntry[] {
+    return this.entries().filter(entry => !PlannedRestartJournal.launched(this.db,entry));
   }
 
   hold(handoffId: string): void {

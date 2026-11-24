@@ -105,12 +105,14 @@ export class DaemonTaskOffers {
         authorizeReportRuntime(options.store, session, frame.rt);
         if (method === 'task.offer_status' && p.inspect_handoff === true && session.supportsPlannedRestart && typeof p.handoff_id === 'string' && p.handoff_id.length <= 256) {
           const scope = {workspaceId:options.store.getRuntimeLite(frame.rt)?.workspaceId ?? 'local',runtimeId:frame.rt,daemonId:session.daemonId};
-          return withBackgroundTerm(this.generation.term, () => ({ok:true,...options.store.plannedRestarts().inspectHandoff(p.handoff_id,scope)}));
+          const handoff = p.handoff_id;
+          return withBackgroundTerm(this.generation.term, () => ({ok:true,...options.store.plannedRestarts().inspectHandoff(handoff,scope)}));
         }
         if (typeof p.attempt_id !== 'string' || typeof p.content_hash !== 'string' || typeof p.offer_generation !== 'string'
           || typeof p.receipt_id !== 'string' || !p.receipt_id || p.receipt_id.length > 128) return { ok:false, code:'invalid_report' };
         const identity = {workspace_id: options.store.getRuntimeLite(frame.rt)?.workspaceId ?? 'local', daemon_id: session.daemonId, runtime_id:frame.rt,
           attempt_id:p.attempt_id, content_hash:p.content_hash, offer_generation:p.offer_generation, receipt_id:p.receipt_id};
+        if (p.workspace_id !== identity.workspace_id || p.daemon_id !== identity.daemon_id || p.runtime_id !== identity.runtime_id) return {ok:false,code:'authority_revoked',retryable:false};
         return withBackgroundTerm(this.generation.term, () => {
           this.generation.term?.assertCurrent();
           const policy = options.store.systemPromptsRepo();
@@ -119,7 +121,8 @@ export class DaemonTaskOffers {
             const handoff = state === 'adopted' && typeof p.handoff_id === 'string' && session.supportsPlannedRestart ? options.store.plannedRestarts().get(identity.attempt_id) : null;
             return {ok:true,state,...identity,...(handoff?.handoff_id === p.handoff_id && handoff ? {handoff} : {})};
           }
-          if (!policy.adoptOffer(identity)) return {ok:false,code:'policy_offer_mismatch',retryable:false};
+          const grant = policy.adoptOfferResult(identity);
+          if (!grant) return {ok:false,code:'policy_offer_mismatch',retryable:false};
           const pump = this.pumps.get(identity.runtime_id);
           const pending = pump?.pending;
           if (pump && pending?.taskId === identity.attempt_id && pending.generation === identity.offer_generation) {
@@ -130,7 +133,7 @@ export class DaemonTaskOffers {
               pending.inlineRead.seqs,pending.inlineRead.toSeq,pending.inlineRead.coldStart,pending.taskId);
             this.kick(identity.runtime_id);
           }
-          return {ok:true,state:'adopted',...identity};
+          return {ok:true,state:'adopted',grant,...identity};
         });
       });
     }
@@ -376,7 +379,7 @@ export class DaemonTaskOffers {
       policyProtocol: session.supportsPromptPolicy ? 'adopt' : 'legacy',
       supportsPromptPolicy: session.supportsPromptPolicy, policyCapableRuntimeIds: connected.filter(id => this.session(id)?.supportsPromptPolicy),
       policyLegacyRuntimeIds: connected.filter(id => !this.session(id)?.supportsPromptPolicy),
-      continuePolicyScan: () => { pump.dirty = true; } });
+      continuePolicyScan: () => this.scheduleRetry(`policy-page:${runtimeId}`,runtimeId,this.clock.now()+1) });
     if (!task) return;
     pump.preparing = { taskId: task.id, generation };
     try {

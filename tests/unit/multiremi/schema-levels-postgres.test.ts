@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { MultiremiStore } from "@multiremi/store.js";
 import { SCHEMA_MIGRATIONS } from "@multiremi/store/schema-migrations.js";
 import { DEFAULT_SYSTEM_PROMPT_CONTENT, type SystemPromptWriteResult } from "@multiremi/contracts/system-prompt-policy.js";
+import { withBackgroundTerm, StaleLiveTermError } from '@shared/db/live-term.js';
 import type { SystemPromptPgJob, SystemPromptPgWrite } from "../../fixtures/system-prompt-pg-worker.js";
 import { verifyPlannedRestartSchemaUpgrade } from "../../fixtures/planned-restart-schema-upgrade.js";
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -209,6 +210,12 @@ describe.skipIf(!adminUrl)("System Prompt atomicity on real PostgreSQL (requires
     expect(store.recordTaskOffered(task.id,rt.id,undefined,generation)).toBe(true);
     const identity = {workspace_id:workspace.id,daemon_id:daemonId,runtime_id:rt.id,attempt_id:task.id,offer_generation:generation,
       receipt_id:crypto.randomUUID(),content_hash:store.getAttemptSystemPrompt(task.id)!.contentHash};
+    const term = store.activateBackgroundTerm('race-before',()=>{});
+    store.activateBackgroundTerm('race-after',()=>{});
+    expect(()=>withBackgroundTerm(term,()=>store.systemPromptsRepo().adoptOffer(identity))).toThrow(StaleLiveTermError);
+    expect(()=>db.transaction(()=>{expect(store.systemPromptsRepo().adoptOffer(identity)).toBe(true);throw new Error('rollback');})()).toThrow('rollback');
+    expect(store.systemPromptsRepo().offerStatus(identity)).toBe('proposed');
+    expect(store.getTask(task.id)?.acceptedAt).toBeNull();
     const result = await race(workspace.id,[{operation:'adopt',requestId:'a',identity},{operation:'revoke',requestId:'b',identity}]);
     expect(result.map(row=>row.status).sort()).toEqual([200,409]);
     const adopted = result[0]!.status === 200;

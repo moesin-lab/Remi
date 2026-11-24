@@ -75,7 +75,10 @@ export class RegisteredCredentialProofs {
           WHERE a.id=? AND c.id=? AND t.agent_id=? AND a.status='running'`).get(evidence.attemptId,identity.credentialId,identity.subject.id);
         if (!active) throw new SecurityAbort('root_authority_revoked');
       } else if (identity.credentialType==='pat' && identity.subject.type==='user' && identity.subject.id.startsWith('usr_') && evidence.attemptId===null) {
-        if (!this.db.query('SELECT id FROM multiremi_users WHERE id=?').get(identity.subject.id)) throw new SecurityAbort('root_authority_revoked');
+        const human = this.db.query(`SELECT u.id FROM multiremi_users u JOIN multiremi_access_tokens t ON t.user_id=u.id
+          WHERE u.id=? AND t.id=? AND t.type='pat' AND t.purpose IN ('personal','session','cli')
+          AND t.task_id IS NULL AND t.agent_id IS NULL AND t.daemon_id IS NULL`).get(identity.subject.id,identity.credentialId);
+        if (!human) throw new SecurityAbort('root_authority_revoked');
         const origin = this.db.query(`WITH RECURSIVE sources(id) AS (SELECT node_id FROM multiremi_authority_nodes WHERE node_id=?
           UNION SELECT e.parent_id FROM multiremi_authority_edges e JOIN sources s ON s.id=e.child_id WHERE e.dependency='continuous')
           SELECT n.subject_type,n.subject_id,n.kind FROM sources s JOIN multiremi_authority_nodes n ON n.node_id=s.id`).all(binding.node.nodeId);

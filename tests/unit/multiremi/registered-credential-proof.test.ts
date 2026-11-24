@@ -32,6 +32,13 @@ test('registered PAT proves only its current material and true human origin', ()
     expect(proof.kind).toBe('dependent');
     const check = () => withSecurityWrite(db,undefined,proofs.plan(proof),tx=>proofs.requireCurrent(tx,proof));
     expect(check()).toMatchObject({subject:{type:'user',id:'usr_fixture'},type:'pat',purpose:'personal',attemptId:null,credential:{id:'token',version:1},familyId:'family'});
+    db.run("UPDATE multiremi_access_tokens SET daemon_id='synthetic-daemon' WHERE id='token'");
+    expect(check).toThrow('root_authority_revoked');
+    db.run("UPDATE multiremi_access_tokens SET daemon_id=NULL,purpose='daemon' WHERE id='token'");
+    db.run("UPDATE multiremi_credential_version_bindings SET purpose='daemon' WHERE credential_id='token'");
+    expect(proofs.verify(raw).kind).toBe('invalid');
+    db.run("UPDATE multiremi_access_tokens SET purpose='personal' WHERE id='token'");
+    db.run("UPDATE multiremi_credential_version_bindings SET purpose='personal' WHERE credential_id='token'");
     db.run("UPDATE multiremi_authority_nodes SET subject_type='agent' WHERE kind='independent_identity'");
     expect(proofs.verify(raw).kind).toBe('invalid');
     db.run("UPDATE multiremi_authority_nodes SET subject_type='user',revoked_at_ms=1 WHERE kind='independent_identity'");

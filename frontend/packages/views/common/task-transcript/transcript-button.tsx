@@ -60,16 +60,18 @@ export function TranscriptButton({
   // manual refetch. Chat tasks additionally need a scope subscription; issue
   // tasks ride the workspace-wide broadcast.
   const useQueryCache = providedItems === undefined;
+  const observeMessages = open && useQueryCache;
   const { data: liveMessages, isFetching, isError, refetch } = useQuery({
     ...taskMessagesOptions(task.id),
-    enabled: open && useQueryCache,
+    enabled: observeMessages,
+    subscribed: observeMessages,
   });
   const loading = isFetching && !liveMessages;
-  useTaskScopeSubscription(task.id, open && useQueryCache);
+  useTaskScopeSubscription(task.id, observeMessages);
 
   const liveItems = useMemo(
-    () => (liveMessages ? buildTimeline(liveMessages as TaskMessagePayload[]) : undefined),
-    [liveMessages],
+    () => (observeMessages && liveMessages ? buildTimeline(liveMessages as TaskMessagePayload[]) : undefined),
+    [observeMessages, liveMessages],
   );
   const items = providedItems ?? liveItems ?? [];
 

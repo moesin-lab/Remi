@@ -89,9 +89,12 @@ it("preserves row and focus while refreshing, shows current associations and fet
   expect(screen.queryByText("Loading tasks…")).toBeNull();
   await act(async () => finish(page));
   expect(api.listTaskMessages).not.toHaveBeenCalled();
+  const logQuery = client.getQueryCache().find({ queryKey: ["task-messages", "task-1"] });
+  expect(logQuery?.getObserversCount()).toBe(0);
   await user.click(screen.getByLabelText("Open task log"));
   await waitFor(() => expect(api.listTaskMessages).toHaveBeenCalledWith("task-1"));
   expect(screen.getByRole("dialog")).toHaveTextContent("task-1");
+  expect(logQuery?.getObserversCount()).toBe(1);
 });
 
 it("distinguishes request failure, empty page and missing relations", async () => {

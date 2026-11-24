@@ -1,5 +1,17 @@
 import type { SqlDatabase } from './db/postgres.js';
 
+export function expandCredentialVersionBindings(db: SqlDatabase): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS multiremi_credential_version_bindings (
+    credential_id TEXT NOT NULL REFERENCES multiremi_access_tokens(id), material_version INTEGER NOT NULL CHECK(material_version>0),
+    material_digest TEXT NOT NULL, credential_type TEXT NOT NULL, purpose TEXT NOT NULL,
+    subject_type TEXT NOT NULL CHECK(subject_type IN ('user','agent')), subject_id TEXT NOT NULL,
+    family_id TEXT NOT NULL REFERENCES multiremi_credential_families(family_id),
+    authority_node_id TEXT NOT NULL UNIQUE, authority_generation INTEGER NOT NULL, authority_seq BIGINT NOT NULL,
+    expires_at_ms BIGINT NOT NULL CHECK(expires_at_ms>0), PRIMARY KEY(credential_id,material_version),
+    FOREIGN KEY(authority_node_id,authority_generation,authority_seq) REFERENCES multiremi_authority_nodes(node_id,generation,issued_seq)
+  )`);
+}
+
 export function expandRootReceipts(db: SqlDatabase): void {
   db.exec(`CREATE TABLE IF NOT EXISTS multiremi_credential_materials (
     credential_id TEXT PRIMARY KEY NOT NULL REFERENCES multiremi_access_tokens(id),

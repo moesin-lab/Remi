@@ -474,6 +474,9 @@ attempt rather than token renewal or same-attempt resume). Agent create, update,
 and template commands reject read-only root fields. Root runs use the immutable
 per-run env carrier (`MULTIREMI_ROOT_CARRIER=immutable_run_env`) and fail closed
 if `MULTIREMI_TASK_CONTEXT_FILE` is inherited or `MULTIREMI_TOKEN` is missing.
+These CLI declarations target the `/api/root/*` contract; live execution requires
+the corresponding server route handlers and security activation to be wired on the
+integration branch.
 
 Password authentication uses `remi context auth password --file -` with JSON
 containing `email` and `password` on standard input. It saves the returned session

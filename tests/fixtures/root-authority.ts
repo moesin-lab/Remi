@@ -9,15 +9,27 @@
  * keys, or production IDs.
  */
 import {
+  buildDaemonRootRestartResumeReply,
+  buildDaemonRootTaskOfferPayload,
+  classifyDaemonRestartResumeReply,
+  classifyDaemonTaskOfferPayload,
+  evaluateRootDeliveryNegotiation,
+  ROOT_DELIVERY_CAPABILITY,
   ROOT_DELIVERY_JWE_ALG,
   ROOT_DELIVERY_JWE_ENC,
+  ROOT_DELIVERY_MODE,
   ROOT_DELIVERY_PROTOCOL_VERSION,
+  type DaemonRootRestartResumeReply,
+  type DaemonRootRestartResumeRequest,
+  type DaemonRootTaskOfferPayload,
   type RootDeliveryActivationResponse,
+  type RootDeliveryEnvelopePayload,
   type RootDeliveryInstallAckRequest,
   type RootDeliveryInstallAckResponse,
   type RootDeliveryJournalEntry,
   type RootDeliveryJweProtectedHeader,
   type RootDeliveryMachineProof,
+  type RootDeliveryNegotiationInput,
   type RootDeliveryReplayRequest,
   type RootDeliveryReplayResponse,
   type RootDeliveryStatusRequest,
@@ -476,6 +488,7 @@ export const fixtureDeliveryActivationResponse = {
   envelope: "fixture.jwe.compact.placeholder.tag",
   envelope_digest: fixtureDeliveryStatusResponse.envelope_digest,
   frozen_business_payload: {
+    turn_id: "trn_root_fixture_1",
     attempt_id: fixtureDeliveryTuple.attempt_id,
     input_revision: fixtureDeliveryTuple.input_revision,
   },
@@ -561,3 +574,132 @@ export const fixtureDeliveryJournalEntry = {
   start_deadline: fixtureDeliveryStatusResponse.start_deadline,
   updated_at: "2026-11-24T12:01:12.000Z",
 } as const satisfies RootDeliveryJournalEntry;
+
+// ── A2 Initial `task.offer` & `turn.restart.resume` Typed Root Carrier Fixtures ──
+
+export const fixtureRootDeliveryNegotiationInput = {
+  hello_caps: ["offer", "turn.message", "turn.restart", ROOT_DELIVERY_CAPABILITY],
+  welcome_caps: ["turn.restart", ROOT_DELIVERY_CAPABILITY],
+  runtime_capabilities: {
+    root_delivery_protocol: ROOT_DELIVERY_PROTOCOL_VERSION,
+    root_carrier_modes: ["immutable_run_env"],
+  },
+  runtime_trusted: true,
+  consumer_trusted: true,
+} as const satisfies RootDeliveryNegotiationInput;
+
+/** Initial `task.offer` tuple has `handoff_id: null` and `handoff_generation: 0`. */
+export const fixtureInitialRootDeliveryTuple = {
+  ...fixtureDeliveryTuple,
+  receipt_id: "rcpt_initial_fixture_1",
+  handoff_id: null,
+  handoff_generation: 0,
+  checkpoint_digest: null,
+} as const satisfies RootDeliveryTuple;
+
+export const fixtureInitialRootDeliveryEnvelopePayload = {
+  tuple: fixtureInitialRootDeliveryTuple,
+  envelope: "fixture.initial.jwe.compact.placeholder.tag",
+  envelope_digest: "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+  frozen_business_payload: {
+    turn_id: "trn_root_fixture_1",
+    attempt_id: fixtureInitialRootDeliveryTuple.attempt_id,
+    input_revision: fixtureInitialRootDeliveryTuple.input_revision,
+  },
+  start_deadline: fixtureDeliveryStatusResponse.start_deadline,
+  lease_id: fixtureDeliveryStatusResponse.lease_id,
+  fence_term: fixtureDeliveryStatusResponse.fence_term,
+  run_state: "pending_start",
+} as const satisfies RootDeliveryEnvelopePayload;
+
+export const fixtureRootTaskOfferPayload: DaemonRootTaskOfferPayload = buildDaemonRootTaskOfferPayload({
+  turn_id: "trn_root_fixture_1",
+  attempt_id: fixtureInitialRootDeliveryTuple.attempt_id,
+  root_delivery: fixtureInitialRootDeliveryEnvelopePayload,
+});
+
+export const fixtureRootRestartResumeRequest = {
+  delivery_mode: ROOT_DELIVERY_MODE,
+  root_delivery_protocol: ROOT_DELIVERY_PROTOCOL_VERSION,
+  carrier_mode: "immutable_run_env",
+  turn_id: "trn_root_fixture_1",
+  attempt_id: fixtureDeliveryTuple.attempt_id,
+  handoff_id: fixtureDeliveryTuple.handoff_id,
+  generation: fixtureDeliveryTuple.handoff_generation,
+  consumer_id: "cons_fixture_root_resume_1",
+  machine_proof: {
+    ...fixtureMachineProof,
+    consumer_id: "cons_fixture_root_resume_1",
+  },
+} as const satisfies DaemonRootRestartResumeRequest;
+
+export const fixtureResumeRootDeliveryEnvelopePayload = {
+  tuple: fixtureDeliveryTuple,
+  envelope: fixtureDeliveryActivationResponse.envelope,
+  envelope_digest: fixtureDeliveryActivationResponse.envelope_digest,
+  frozen_business_payload: fixtureDeliveryActivationResponse.frozen_business_payload,
+  start_deadline: fixtureDeliveryActivationResponse.start_deadline,
+  lease_id: fixtureDeliveryActivationResponse.lease_id,
+  fence_term: fixtureDeliveryActivationResponse.fence_term,
+  run_state: "pending_start",
+} as const satisfies RootDeliveryEnvelopePayload;
+
+export const fixtureRootRestartResumeReply: DaemonRootRestartResumeReply = buildDaemonRootRestartResumeReply({
+  turn_id: "trn_root_fixture_1",
+  attempt_id: fixtureDeliveryTuple.attempt_id,
+  handoff_id: fixtureDeliveryTuple.handoff_id,
+  generation: fixtureDeliveryTuple.handoff_generation,
+  root_delivery: fixtureResumeRootDeliveryEnvelopePayload,
+  recovered_questions: [],
+});
+
+/**
+ * Compilable reference discriminator for B/C showing fail-closed branching on
+ * `task.offer` BEFORE `normalizeDaemonTurnOffer` / `handleTask`.
+ * Production handlers live in B/C's modules; this helper is fixture/contract evidence only.
+ */
+export function compileExampleRouteOfferFrame(
+  rawPayload: unknown,
+  negotiation: RootDeliveryNegotiationInput,
+):
+  | { readonly branch: "ordinary_handle_task" }
+  | { readonly branch: "protected_root_receiver"; readonly payload: DaemonRootTaskOfferPayload }
+  | { readonly branch: "reject"; readonly code: string; readonly reason: string } {
+  const classified = classifyDaemonTaskOfferPayload(rawPayload);
+  if (classified.kind === "standard") {
+    return { branch: "ordinary_handle_task" };
+  }
+  if (classified.kind === "invalid_root") {
+    return { branch: "reject", code: classified.code, reason: classified.reason };
+  }
+  const negotiated = evaluateRootDeliveryNegotiation(negotiation);
+  if (!negotiated.eligible) {
+    return { branch: "reject", code: negotiated.code, reason: negotiated.reason };
+  }
+  return { branch: "protected_root_receiver", payload: classified.payload };
+}
+
+/**
+ * Compilable reference discriminator for B/C showing fail-closed branching on
+ * `turn.restart.resume` replies BEFORE reading `result.task`.
+ */
+export function compileExampleRouteResumeReply(
+  rawReply: unknown,
+  negotiation: RootDeliveryNegotiationInput,
+):
+  | { readonly branch: "ordinary_resume" }
+  | { readonly branch: "protected_root_receiver"; readonly reply: DaemonRootRestartResumeReply }
+  | { readonly branch: "reject"; readonly code: string; readonly reason: string } {
+  const classified = classifyDaemonRestartResumeReply(rawReply);
+  if (classified.kind === "standard") {
+    return { branch: "ordinary_resume" };
+  }
+  if (classified.kind === "invalid_root") {
+    return { branch: "reject", code: classified.code, reason: classified.reason };
+  }
+  const negotiated = evaluateRootDeliveryNegotiation(negotiation);
+  if (!negotiated.eligible) {
+    return { branch: "reject", code: negotiated.code, reason: negotiated.reason };
+  }
+  return { branch: "protected_root_receiver", reply: classified.payload };
+}

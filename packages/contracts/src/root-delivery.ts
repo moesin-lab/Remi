@@ -15,10 +15,16 @@
  *   never legacy disk context file fallback.
  */
 
+import { hasDaemonCapability } from "./daemon-compatibility.js";
+
 export const ROOT_DELIVERY_JWE_ALG = "RSA-OAEP-256" as const;
 export const ROOT_DELIVERY_JWE_ENC = "A256GCM" as const;
 export const ROOT_DELIVERY_MIN_RSA_BITS = 3072 as const;
 export const ROOT_DELIVERY_PROTOCOL_VERSION = 1 as const;
+export const ROOT_DELIVERY_CAPABILITY = "root.delivery" as const;
+export const ROOT_DELIVERY_MODE = "root_envelope" as const;
+export const STANDARD_DELIVERY_MODE = "standard" as const;
+export type DaemonDeliveryMode = typeof STANDARD_DELIVERY_MODE | typeof ROOT_DELIVERY_MODE;
 
 export const ROOT_CARRIER_MODES = ["immutable_run_env"] as const;
 export type RootCarrierMode = (typeof ROOT_CARRIER_MODES)[number];
@@ -284,6 +290,748 @@ export const ROOT_DELIVERY_FORBIDDEN_STATUS_FIELDS = [
   "material_digest",
   "materialDigest",
 ] as const;
+
+/** Plaintext credential / digest fields forbidden on wire root offers, resumes, and frozen business payloads. */
+export const ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS = [
+  "auth_token",
+  "authToken",
+  "raw",
+  "raw_token",
+  "rawToken",
+  "token",
+  "bearer",
+  "plaintext",
+  "material_digest",
+  "materialDigest",
+] as const;
+
+/** Top-level ordinary offer/resume fields forbidden on typed root delivery frames to prevent downgrade to `handleTask`. */
+export const ROOT_OFFER_FORBIDDEN_ORDINARY_FIELDS = [
+  "prompt",
+  "input_from_seq",
+  "input_to_seq",
+  "input_messages",
+  "task",
+] as const;
+
+export type RootDeliveryNegotiationErrorCode =
+  | "root_delivery_unsupported"
+  | "root_runtime_untrusted";
+
+export type DaemonRootWireRejectCode =
+  | "root_delivery_invalid"
+  | "root_delivery_unsupported";
+
+export interface RootDeliveryRuntimeCapabilities {
+  /** Must equal `ROOT_DELIVERY_PROTOCOL_VERSION` (1); missing means unsupported. */
+  readonly root_delivery_protocol?: number;
+  /** Must include `"immutable_run_env"`; missing means unsupported. */
+  readonly root_carrier_modes?: readonly RootCarrierMode[];
+}
+
+/**
+ * Inputs required to negotiate root delivery eligibility for a daemon connection
+ * and target Runtime. Capability advertisement is a prerequisite, NEVER a substitute
+ * for active server-side Runtime/consumer trust.
+ */
+export interface RootDeliveryNegotiationInput {
+  readonly hello_caps: readonly string[];
+  readonly welcome_caps: readonly string[];
+  readonly runtime_capabilities?: RootDeliveryRuntimeCapabilities | null;
+  readonly runtime_trusted: boolean;
+  readonly consumer_trusted?: boolean;
+}
+
+export type RootDeliveryNegotiationResult =
+  | {
+      readonly eligible: true;
+      readonly delivery_mode: typeof ROOT_DELIVERY_MODE;
+      readonly root_delivery_protocol: typeof ROOT_DELIVERY_PROTOCOL_VERSION;
+      readonly carrier_mode: RootCarrierMode;
+    }
+  | {
+      readonly eligible: false;
+      readonly code: RootDeliveryNegotiationErrorCode;
+      readonly reason: string;
+      readonly downgrade_allowed: false;
+    };
+
+/**
+ * Evaluates whether a connection + Runtime may send/receive typed root delivery.
+ * Fails closed on any missing capability, version mismatch, unsupported carrier,
+ * or untrusted Runtime/consumer. Never authorizes downgrading a root attempt to
+ * an ordinary plaintext `task.offer` or `turn.restart.resume` reply.
+ */
+export function evaluateRootDeliveryNegotiation(
+  input: RootDeliveryNegotiationInput,
+): RootDeliveryNegotiationResult {
+  if (!hasDaemonCapability(input.hello_caps, ROOT_DELIVERY_CAPABILITY)) {
+    return {
+      eligible: false,
+      code: "root_delivery_unsupported",
+      reason: `Daemon hello.caps is missing required "${ROOT_DELIVERY_CAPABILITY}" capability.`,
+      downgrade_allowed: false,
+    };
+  }
+  if (!hasDaemonCapability(input.welcome_caps, ROOT_DELIVERY_CAPABILITY)) {
+    return {
+      eligible: false,
+      code: "root_delivery_unsupported",
+      reason: `Server welcome.caps did not negotiate "${ROOT_DELIVERY_CAPABILITY}".`,
+      downgrade_allowed: false,
+    };
+  }
+  const runtimeCaps = input.runtime_capabilities;
+  if (!runtimeCaps || runtimeCaps.root_delivery_protocol !== ROOT_DELIVERY_PROTOCOL_VERSION) {
+    return {
+      eligible: false,
+      code: "root_delivery_unsupported",
+      reason: `Runtime capability root_delivery_protocol must equal ${ROOT_DELIVERY_PROTOCOL_VERSION}.`,
+      downgrade_allowed: false,
+    };
+  }
+  if (
+    !Array.isArray(runtimeCaps.root_carrier_modes)
+    || !runtimeCaps.root_carrier_modes.includes("immutable_run_env")
+  ) {
+    return {
+      eligible: false,
+      code: "root_delivery_unsupported",
+      reason: `Runtime capability root_carrier_modes must include "immutable_run_env".`,
+      downgrade_allowed: false,
+    };
+  }
+  if (!input.runtime_trusted || input.consumer_trusted === false) {
+    return {
+      eligible: false,
+      code: "root_runtime_untrusted",
+      reason: "Target Runtime or consumer is not actively trusted for root delivery.",
+      downgrade_allowed: false,
+    };
+  }
+  return {
+    eligible: true,
+    delivery_mode: ROOT_DELIVERY_MODE,
+    root_delivery_protocol: ROOT_DELIVERY_PROTOCOL_VERSION,
+    carrier_mode: "immutable_run_env",
+  };
+}
+
+/**
+ * Typed initial `task.offer` payload for an eligible root execution (MUL-1 A2).
+ *
+ * Security invariants:
+ * - `delivery_mode: "root_envelope"` explicitly branches the daemon receiver to the
+ *   protected root delivery path BEFORE `normalizeDaemonTurnOffer` / `handleTask`.
+ * - Reuses `RootDeliveryEnvelopePayload` verbatim so initial offer, restart resume,
+ *   and `delivery.receipt.replay` share one immutable recipient-bound JWE payload.
+ * - Forbids plaintext secrets (`auth_token`, `raw`, `token`, ...) and top-level
+ *   ordinary offer fields (`prompt`, `input_from_seq`, `input_to_seq`, `input_messages`),
+ *   ensuring legacy parsers reject it instead of downgrading into `handleTask`.
+ */
+export interface DaemonRootTaskOfferPayload {
+  readonly delivery_mode: typeof ROOT_DELIVERY_MODE;
+  readonly root_delivery_protocol: typeof ROOT_DELIVERY_PROTOCOL_VERSION;
+  readonly carrier_mode: RootCarrierMode;
+  readonly turn_id: string;
+  readonly attempt_id: string;
+  readonly root_delivery: RootDeliveryEnvelopePayload;
+}
+
+export interface DaemonStandardTaskOfferPayload {
+  readonly delivery_mode?: typeof STANDARD_DELIVERY_MODE;
+  readonly root_delivery?: never;
+  readonly root_delivery_protocol?: never;
+  readonly carrier_mode?: never;
+  readonly turn_id: string;
+  readonly attempt_id: string;
+  readonly input_from_seq: number;
+  readonly input_to_seq: number;
+  readonly input_messages: readonly unknown[];
+  readonly [key: string]: unknown;
+}
+
+export type DaemonTaskOfferPayload =
+  | DaemonStandardTaskOfferPayload
+  | DaemonRootTaskOfferPayload;
+
+/** Typed `turn.restart.resume` RPC request for an eligible root attempt (MUL-1 A2). */
+export interface DaemonRootRestartResumeRequest {
+  readonly delivery_mode: typeof ROOT_DELIVERY_MODE;
+  readonly root_delivery_protocol: typeof ROOT_DELIVERY_PROTOCOL_VERSION;
+  readonly carrier_mode: RootCarrierMode;
+  readonly turn_id: string;
+  readonly attempt_id: string;
+  readonly handoff_id: string;
+  readonly generation: number;
+  readonly consumer_id: string;
+  readonly machine_proof: RootDeliveryMachineProof;
+}
+
+export interface DaemonStandardRestartResumeRequest {
+  readonly delivery_mode?: typeof STANDARD_DELIVERY_MODE;
+  readonly root_delivery_protocol?: never;
+  readonly carrier_mode?: never;
+  readonly machine_proof?: never;
+  readonly turn_id: string;
+  readonly attempt_id: string;
+  readonly handoff_id: string;
+  readonly generation: number;
+  readonly consumer_id: string;
+}
+
+export type DaemonRestartResumeRequestPayload =
+  | DaemonStandardRestartResumeRequest
+  | DaemonRootRestartResumeRequest;
+
+/**
+ * Typed `turn.restart.resume` RPC reply for an eligible root attempt (MUL-1 A2).
+ *
+ * Security invariants:
+ * - Reuses `RootDeliveryEnvelopePayload` verbatim (`envelope`, `envelope_digest`,
+ *   `tuple`, `frozen_business_payload`, `lease_id`, `fence_term`, `run_state`).
+ * - Top-level `task` is absent (`task?: never`) so a legacy resume consumer reading
+ *   `result.task` fails closed rather than entering ordinary `handleTask`.
+ */
+export interface DaemonRootRestartResumeReply {
+  readonly ok: true;
+  readonly delivery_mode: typeof ROOT_DELIVERY_MODE;
+  readonly root_delivery_protocol: typeof ROOT_DELIVERY_PROTOCOL_VERSION;
+  readonly carrier_mode: RootCarrierMode;
+  readonly turn_id: string;
+  readonly attempt_id: string;
+  readonly handoff_id: string;
+  readonly generation: number;
+  readonly root_delivery: RootDeliveryEnvelopePayload;
+  readonly recovered_questions: readonly unknown[];
+  readonly task?: never;
+}
+
+export interface DaemonStandardRestartResumeReply {
+  readonly ok: true;
+  readonly delivery_mode?: typeof STANDARD_DELIVERY_MODE;
+  readonly root_delivery?: never;
+  readonly root_delivery_protocol?: never;
+  readonly carrier_mode?: never;
+  readonly generation: number;
+  readonly task: Readonly<Record<string, unknown>>;
+  readonly recovered_questions: readonly unknown[];
+}
+
+export type DaemonRestartResumeReplyPayload =
+  | DaemonStandardRestartResumeReply
+  | DaemonRootRestartResumeReply;
+
+export type DaemonTaskOfferClassification =
+  | { readonly kind: "standard" }
+  | { readonly kind: "root"; readonly payload: DaemonRootTaskOfferPayload }
+  | { readonly kind: "invalid_root"; readonly code: DaemonRootWireRejectCode; readonly reason: string };
+
+export type DaemonRestartResumeRequestClassification =
+  | { readonly kind: "standard" }
+  | { readonly kind: "root"; readonly payload: DaemonRootRestartResumeRequest }
+  | { readonly kind: "invalid_root"; readonly code: DaemonRootWireRejectCode; readonly reason: string };
+
+export type DaemonRestartResumeReplyClassification =
+  | { readonly kind: "standard" }
+  | { readonly kind: "root"; readonly payload: DaemonRootRestartResumeReply }
+  | { readonly kind: "invalid_root"; readonly code: DaemonRootWireRejectCode; readonly reason: string };
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown, maxLen = 512): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= maxLen;
+}
+
+function isNonNegativeInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
+
+function findForbiddenField(
+  record: Readonly<Record<string, unknown>>,
+  forbidden: readonly string[],
+): string | null {
+  for (const field of forbidden) {
+    if (field in record && record[field] !== undefined) return field;
+  }
+  return null;
+}
+
+const ROOT_DELIVERY_TUPLE_KEYS: ReadonlySet<string> = new Set([
+  "receipt_id",
+  "receipt_version",
+  "delivery_version",
+  "material_version",
+  "attempt_id",
+  "handoff_id",
+  "handoff_generation",
+  "run_generation",
+  "consumer_id",
+  "runtime_id",
+  "daemon_id",
+  "incarnation",
+  "recipient_key_id",
+  "recipient_key_fingerprint",
+  "execution_config_epoch",
+  "execution_digest",
+  "input_revision",
+  "input_digest",
+  "checkpoint_digest",
+  "grant_id",
+  "grant_generation",
+  "material_expires_at",
+  "business_payload_digest",
+]);
+
+function validateRootDeliveryTupleShape(value: unknown): string | null {
+  if (!isPlainRecord(value)) return "root_delivery.tuple must be an object";
+  const secretField = findForbiddenField(value, ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
+  if (secretField) return `root_delivery.tuple must not contain secret field "${secretField}"`;
+  const keys = Object.keys(value);
+  if (keys.length !== ROOT_DELIVERY_TUPLE_KEYS.size || keys.some((key) => !ROOT_DELIVERY_TUPLE_KEYS.has(key))) {
+    return "root_delivery.tuple must contain the exact 23 RootDeliveryTuple fields";
+  }
+  const requiredNonEmptyStrings = [
+    "receipt_id",
+    "attempt_id",
+    "consumer_id",
+    "runtime_id",
+    "daemon_id",
+    "incarnation",
+    "recipient_key_id",
+    "recipient_key_fingerprint",
+    "execution_digest",
+    "input_digest",
+    "material_expires_at",
+    "business_payload_digest",
+  ] as const;
+  for (const field of requiredNonEmptyStrings) {
+    if (!isNonEmptyString(value[field])) return `root_delivery.tuple.${field} must be a non-empty string`;
+  }
+  const nullableStrings = ["handoff_id", "checkpoint_digest", "grant_id"] as const;
+  for (const field of nullableStrings) {
+    if (value[field] !== null && !isNonEmptyString(value[field])) {
+      return `root_delivery.tuple.${field} must be null or a non-empty string`;
+    }
+  }
+  if (value.grant_generation !== null && !isNonNegativeInt(value.grant_generation)) {
+    return "root_delivery.tuple.grant_generation must be null or a non-negative integer";
+  }
+  const nonNegativeInts = [
+    "receipt_version",
+    "delivery_version",
+    "material_version",
+    "handoff_generation",
+    "run_generation",
+    "execution_config_epoch",
+    "input_revision",
+  ] as const;
+  for (const field of nonNegativeInts) {
+    if (!isNonNegativeInt(value[field])) return `root_delivery.tuple.${field} must be a non-negative integer`;
+  }
+  if (!isPositiveInt(value.receipt_version) || !isPositiveInt(value.delivery_version) || !isPositiveInt(value.material_version)) {
+    return "root_delivery.tuple receipt/delivery/material versions must be >= 1";
+  }
+  return null;
+}
+
+function validateRootDeliveryEnvelopePayloadShape(value: unknown): string | null {
+  if (!isPlainRecord(value)) return "root_delivery must be an object";
+  const secretField = findForbiddenField(value, ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
+  if (secretField) return `root_delivery must not contain plaintext secret field "${secretField}"`;
+  const tupleErr = validateRootDeliveryTupleShape(value.tuple);
+  if (tupleErr) return tupleErr;
+  if (!isNonEmptyString(value.envelope, 65536)) return "root_delivery.envelope must be a non-empty JWE compact string";
+  if (!isNonEmptyString(value.envelope_digest)) return "root_delivery.envelope_digest must be a non-empty string";
+  if (!isPlainRecord(value.frozen_business_payload)) {
+    return "root_delivery.frozen_business_payload must be an object";
+  }
+  const payloadSecret = findForbiddenField(value.frozen_business_payload, ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
+  if (payloadSecret) {
+    return `root_delivery.frozen_business_payload must not contain plaintext secret field "${payloadSecret}"`;
+  }
+  if (value.start_deadline !== null && !isNonEmptyString(value.start_deadline)) {
+    return "root_delivery.start_deadline must be null or a non-empty ISO string";
+  }
+  if (value.lease_id !== null && !isNonEmptyString(value.lease_id)) {
+    return "root_delivery.lease_id must be null or a non-empty string";
+  }
+  if (value.fence_term !== null && !isNonEmptyString(value.fence_term)) {
+    return "root_delivery.fence_term must be null or a non-empty string";
+  }
+  if (value.run_state !== "pending_start" && value.run_state !== "running") {
+    return `root_delivery.run_state must be "pending_start" or "running"`;
+  }
+  return null;
+}
+
+function validateMachineProofShape(value: unknown): string | null {
+  if (!isPlainRecord(value)) return "machine_proof must be an object";
+  const secretField = findForbiddenField(value, ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
+  if (secretField) return `machine_proof must not contain secret field "${secretField}"`;
+  const fields = [
+    "consumer_id",
+    "runtime_id",
+    "daemon_id",
+    "incarnation",
+    "recipient_key_id",
+    "recipient_key_fingerprint",
+    "nonce",
+    "signature",
+    "signed_at",
+  ] as const;
+  for (const field of fields) {
+    if (!isNonEmptyString(value[field], 4096)) return `machine_proof.${field} must be a non-empty string`;
+  }
+  return null;
+}
+
+function hasRootWireIndicators(record: Readonly<Record<string, unknown>>, extraKeys: readonly string[] = []): boolean {
+  if ("delivery_mode" in record && record.delivery_mode !== undefined && record.delivery_mode !== STANDARD_DELIVERY_MODE) {
+    return true;
+  }
+  for (const key of ["root_delivery", "root_delivery_protocol", "carrier_mode", ...extraKeys]) {
+    if (key in record && record[key] !== undefined) return true;
+  }
+  return false;
+}
+
+export function assertRootWirePayloadHasNoPlaintextSecrets(
+  value: Readonly<Record<string, unknown>>,
+  label = "root wire payload",
+): void {
+  const field = findForbiddenField(value, ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
+  if (field) {
+    throw new Error(`${label} must not expose plaintext secret field "${field}"`);
+  }
+}
+
+/**
+ * Classifies an inbound `task.offer` frame payload BEFORE `normalizeDaemonTurnOffer`.
+ * Any frame carrying root indicators that fails validation returns `invalid_root`
+ * and MUST be rejected without downgrading to `"standard"` / `handleTask`.
+ */
+export function classifyDaemonTaskOfferPayload(payload: unknown): DaemonTaskOfferClassification {
+  if (!isPlainRecord(payload)) {
+    return { kind: "standard" };
+  }
+  if (!hasRootWireIndicators(payload)) {
+    return { kind: "standard" };
+  }
+  if (payload.delivery_mode !== ROOT_DELIVERY_MODE) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: `Root task.offer must set delivery_mode="${ROOT_DELIVERY_MODE}".`,
+    };
+  }
+  if (payload.root_delivery_protocol !== ROOT_DELIVERY_PROTOCOL_VERSION) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_unsupported",
+      reason: `Unsupported root_delivery_protocol: expected ${ROOT_DELIVERY_PROTOCOL_VERSION}.`,
+    };
+  }
+  if (payload.carrier_mode !== "immutable_run_env") {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_unsupported",
+      reason: `Unsupported root carrier_mode: expected "immutable_run_env".`,
+    };
+  }
+  const secretField = findForbiddenField(payload, ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
+  if (secretField) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: `Root task.offer must not carry plaintext secret field "${secretField}".`,
+    };
+  }
+  const ordinaryField = findForbiddenField(payload, ROOT_OFFER_FORBIDDEN_ORDINARY_FIELDS);
+  if (ordinaryField) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: `Root task.offer must not carry ordinary offer field "${ordinaryField}".`,
+    };
+  }
+  if (!isNonEmptyString(payload.turn_id) || !isNonEmptyString(payload.attempt_id)) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root task.offer requires non-empty turn_id and attempt_id.",
+    };
+  }
+  const envelopeErr = validateRootDeliveryEnvelopePayloadShape(payload.root_delivery);
+  if (envelopeErr) {
+    return { kind: "invalid_root", code: "root_delivery_invalid", reason: envelopeErr };
+  }
+  const delivery = payload.root_delivery as RootDeliveryEnvelopePayload;
+  if (delivery.tuple.attempt_id !== payload.attempt_id) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root task.offer attempt_id does not match root_delivery.tuple.attempt_id.",
+    };
+  }
+  if (delivery.tuple.handoff_id !== null) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Initial root task.offer must have root_delivery.tuple.handoff_id === null.",
+    };
+  }
+  if (delivery.frozen_business_payload.turn_id !== payload.turn_id) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root task.offer turn_id must match root_delivery.frozen_business_payload.turn_id.",
+    };
+  }
+  return {
+    kind: "root",
+    payload: payload as unknown as DaemonRootTaskOfferPayload,
+  };
+}
+
+/**
+ * Classifies an inbound `turn.restart.resume` RPC request on the server.
+ * Any request carrying root indicators that fails validation returns `invalid_root`
+ * and MUST be rejected rather than falling back to ordinary plaintext resume.
+ */
+export function classifyDaemonRestartResumeRequest(payload: unknown): DaemonRestartResumeRequestClassification {
+  if (!isPlainRecord(payload)) {
+    return { kind: "standard" };
+  }
+  if (!hasRootWireIndicators(payload, ["machine_proof"])) {
+    return { kind: "standard" };
+  }
+  if (payload.delivery_mode !== ROOT_DELIVERY_MODE) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: `Root turn.restart.resume request must set delivery_mode="${ROOT_DELIVERY_MODE}".`,
+    };
+  }
+  if (payload.root_delivery_protocol !== ROOT_DELIVERY_PROTOCOL_VERSION) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_unsupported",
+      reason: `Unsupported root_delivery_protocol: expected ${ROOT_DELIVERY_PROTOCOL_VERSION}.`,
+    };
+  }
+  if (payload.carrier_mode !== "immutable_run_env") {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_unsupported",
+      reason: `Unsupported root carrier_mode: expected "immutable_run_env".`,
+    };
+  }
+  const secretField = findForbiddenField(payload, ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
+  if (secretField) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: `Root turn.restart.resume request must not carry plaintext secret field "${secretField}".`,
+    };
+  }
+  if (
+    !isNonEmptyString(payload.turn_id)
+    || !isNonEmptyString(payload.attempt_id)
+    || !isNonEmptyString(payload.handoff_id)
+    || !isNonNegativeInt(payload.generation)
+    || typeof payload.consumer_id !== "string"
+    || payload.consumer_id.length < 16
+    || payload.consumer_id.length > 256
+  ) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root turn.restart.resume request requires turn_id, attempt_id, handoff_id, generation, and consumer_id (16..256 chars).",
+    };
+  }
+  const proofErr = validateMachineProofShape(payload.machine_proof);
+  if (proofErr) {
+    return { kind: "invalid_root", code: "root_delivery_invalid", reason: proofErr };
+  }
+  const proof = payload.machine_proof as RootDeliveryMachineProof;
+  if (proof.consumer_id !== payload.consumer_id) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root turn.restart.resume machine_proof.consumer_id must match request consumer_id.",
+    };
+  }
+  return {
+    kind: "root",
+    payload: payload as unknown as DaemonRootRestartResumeRequest,
+  };
+}
+
+/**
+ * Classifies a `turn.restart.resume` RPC reply on the daemon BEFORE reading `result.task`.
+ * Any reply carrying root indicators that fails validation returns `invalid_root`
+ * and MUST be rejected rather than downgrading to ordinary `normalizeDaemonTurnOffer(result.task)`.
+ */
+export function classifyDaemonRestartResumeReply(payload: unknown): DaemonRestartResumeReplyClassification {
+  if (!isPlainRecord(payload)) {
+    return { kind: "standard" };
+  }
+  if (!hasRootWireIndicators(payload)) {
+    return { kind: "standard" };
+  }
+  if (payload.ok !== true) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root turn.restart.resume reply must set ok=true.",
+    };
+  }
+  if (payload.delivery_mode !== ROOT_DELIVERY_MODE) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: `Root turn.restart.resume reply must set delivery_mode="${ROOT_DELIVERY_MODE}".`,
+    };
+  }
+  if (payload.root_delivery_protocol !== ROOT_DELIVERY_PROTOCOL_VERSION) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_unsupported",
+      reason: `Unsupported root_delivery_protocol: expected ${ROOT_DELIVERY_PROTOCOL_VERSION}.`,
+    };
+  }
+  if (payload.carrier_mode !== "immutable_run_env") {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_unsupported",
+      reason: `Unsupported root carrier_mode: expected "immutable_run_env".`,
+    };
+  }
+  const secretField = findForbiddenField(payload, ROOT_DELIVERY_FORBIDDEN_WIRE_SECRET_FIELDS);
+  if (secretField) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: `Root turn.restart.resume reply must not carry plaintext secret field "${secretField}".`,
+    };
+  }
+  const ordinaryField = findForbiddenField(payload, ROOT_OFFER_FORBIDDEN_ORDINARY_FIELDS);
+  if (ordinaryField) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: `Root turn.restart.resume reply must not carry ordinary field "${ordinaryField}".`,
+    };
+  }
+  if (
+    !isNonEmptyString(payload.turn_id)
+    || !isNonEmptyString(payload.attempt_id)
+    || !isNonEmptyString(payload.handoff_id)
+    || !isPositiveInt(payload.generation)
+    || !Array.isArray(payload.recovered_questions)
+  ) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root turn.restart.resume reply requires turn_id, attempt_id, handoff_id, generation >= 1, and recovered_questions array.",
+    };
+  }
+  const envelopeErr = validateRootDeliveryEnvelopePayloadShape(payload.root_delivery);
+  if (envelopeErr) {
+    return { kind: "invalid_root", code: "root_delivery_invalid", reason: envelopeErr };
+  }
+  const delivery = payload.root_delivery as RootDeliveryEnvelopePayload;
+  if (delivery.tuple.attempt_id !== payload.attempt_id) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root turn.restart.resume reply attempt_id does not match root_delivery.tuple.attempt_id.",
+    };
+  }
+  if (delivery.tuple.handoff_id !== payload.handoff_id) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root turn.restart.resume reply handoff_id does not match root_delivery.tuple.handoff_id.",
+    };
+  }
+  if (delivery.tuple.handoff_generation !== payload.generation) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root turn.restart.resume reply generation does not match root_delivery.tuple.handoff_generation.",
+    };
+  }
+  if (delivery.frozen_business_payload.turn_id !== payload.turn_id) {
+    return {
+      kind: "invalid_root",
+      code: "root_delivery_invalid",
+      reason: "Root turn.restart.resume reply turn_id must match root_delivery.frozen_business_payload.turn_id.",
+    };
+  }
+  return {
+    kind: "root",
+    payload: payload as unknown as DaemonRootRestartResumeReply,
+  };
+}
+
+/** Validated builder for initial root `task.offer` wire payloads. */
+export function buildDaemonRootTaskOfferPayload(input: {
+  readonly turn_id: string;
+  readonly attempt_id: string;
+  readonly root_delivery: RootDeliveryEnvelopePayload;
+  readonly carrier_mode?: RootCarrierMode;
+}): DaemonRootTaskOfferPayload {
+  const candidate: DaemonRootTaskOfferPayload = {
+    delivery_mode: ROOT_DELIVERY_MODE,
+    root_delivery_protocol: ROOT_DELIVERY_PROTOCOL_VERSION,
+    carrier_mode: input.carrier_mode ?? "immutable_run_env",
+    turn_id: input.turn_id,
+    attempt_id: input.attempt_id,
+    root_delivery: input.root_delivery,
+  };
+  const classified = classifyDaemonTaskOfferPayload(candidate);
+  if (classified.kind !== "root") {
+    throw new Error(classified.kind === "invalid_root" ? classified.reason : "Invalid root task.offer payload");
+  }
+  return classified.payload;
+}
+
+/** Validated builder for root `turn.restart.resume` RPC success replies. */
+export function buildDaemonRootRestartResumeReply(input: {
+  readonly turn_id: string;
+  readonly attempt_id: string;
+  readonly handoff_id: string;
+  readonly generation: number;
+  readonly root_delivery: RootDeliveryEnvelopePayload;
+  readonly recovered_questions?: readonly unknown[];
+  readonly carrier_mode?: RootCarrierMode;
+}): DaemonRootRestartResumeReply {
+  const candidate: DaemonRootRestartResumeReply = {
+    ok: true,
+    delivery_mode: ROOT_DELIVERY_MODE,
+    root_delivery_protocol: ROOT_DELIVERY_PROTOCOL_VERSION,
+    carrier_mode: input.carrier_mode ?? "immutable_run_env",
+    turn_id: input.turn_id,
+    attempt_id: input.attempt_id,
+    handoff_id: input.handoff_id,
+    generation: input.generation,
+    root_delivery: input.root_delivery,
+    recovered_questions: input.recovered_questions ?? [],
+  };
+  const classified = classifyDaemonRestartResumeReply(candidate);
+  if (classified.kind !== "root") {
+    throw new Error(classified.kind === "invalid_root" ? classified.reason : "Invalid root turn.restart.resume reply");
+  }
+  return classified.payload;
+}
 
 export function assertStatusResponseHasNoSecrets(value: Readonly<Record<string, unknown>>): void {
   for (const field of ROOT_DELIVERY_FORBIDDEN_STATUS_FIELDS) {

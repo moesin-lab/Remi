@@ -87,6 +87,60 @@ export function readTaskContextFile(path: string): TaskContextFile | null {
   }
 }
 
+export interface RootImmutableRunEnvInput {
+  readonly token: string;
+  readonly turnId: string;
+  readonly attemptId: string;
+  readonly receiptId: string;
+  readonly deliveryVersion: number;
+  readonly runGeneration: number;
+  readonly baseEnv?: Readonly<Record<string, string | undefined>>;
+}
+
+/**
+ * Builds the isolated process environment for a verified root execution run.
+ * Explicitly removes `MULTIREMI_TASK_CONTEXT_FILE` so root credentials never
+ * mix with or fall back to an ordinary task context file.
+ */
+export function buildRootImmutableRunEnv(input: RootImmutableRunEnvInput): Record<string, string> {
+  const token = text(input.token);
+  const turnId = text(input.turnId);
+  const attemptId = text(input.attemptId);
+  const receiptId = text(input.receiptId);
+  if (!token) throw new Error(ROOT_CARRIER_VIOLATION_MESSAGES.root_immutable_env_missing);
+  if (!turnId || !attemptId || !receiptId) {
+    throw new Error("Root immutable run env requires non-empty turnId, attemptId, and receiptId.");
+  }
+  if (!Number.isSafeInteger(input.deliveryVersion) || input.deliveryVersion < 1) {
+    throw new Error("Root immutable run env requires deliveryVersion >= 1.");
+  }
+  if (!Number.isSafeInteger(input.runGeneration) || input.runGeneration < 1) {
+    throw new Error("Root immutable run env requires runGeneration >= 1.");
+  }
+  const result: Record<string, string> = {};
+  if (input.baseEnv) {
+    for (const [key, value] of Object.entries(input.baseEnv)) {
+      if (value === undefined || key === TASK_CONTEXT_FILE_ENV) continue;
+      result[key] = value;
+    }
+  }
+  result[ROOT_CARRIER_MODE_ENV] = ROOT_CARRIER_IMMUTABLE_ENV;
+  result[ROOT_RECEIPT_ID_ENV] = receiptId;
+  result[ROOT_DELIVERY_VERSION_ENV] = String(input.deliveryVersion);
+  result[ROOT_RUN_GENERATION_ENV] = String(input.runGeneration);
+  result.MULTIREMI_TOKEN = token;
+  result.MULTIREMI_TURN_ID = turnId;
+  result.MULTIREMI_ATTEMPT_ID = attemptId;
+  return result;
+}
+
+/** Fail-closed guard preventing ordinary task-context file paths from carrying a root run. */
+export function assertOrdinaryTaskContextOnly(env: Readonly<Record<string, string | undefined>>): void {
+  if (text(env[ROOT_CARRIER_MODE_ENV]) !== null) {
+    throw new Error(ROOT_CARRIER_VIOLATION_MESSAGES.root_context_file_forbidden);
+  }
+}
+
 /**
  * The task's token, turn and attempt:
  * - When `MULTIREMI_ROOT_CARRIER` is declared, strictly resolves from immutable run env

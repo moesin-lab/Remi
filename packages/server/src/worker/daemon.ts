@@ -1621,7 +1621,7 @@ export class MultiremiDaemon {
       daemonId: this.options.daemonId ?? this.options.runtimeName,
       cliVersion: multiremiVersion,
       launchedBy: this.options.launchedBy,
-      caps: ["offer", "turn.message", "input_unread", "trace.read", "trace.subscribe", "wiki.fetch"],
+      caps: ["offer", "turn.message", "input_unread", "trace.read", "trace.subscribe", "wiki.fetch", "prompt.policy.v1"],
       log,
       ...options.protocolClientOptions,
     });
@@ -5717,6 +5717,7 @@ export class MultiremiDaemon {
         sha256: promptArtifact.sha256,
         // ADR 0023: Remi's part of the AGENTS.md in effect, for the transcript's session notes. Never the local context.
         instructions: promptArtifact.instructions,
+        system_prompt_policy: task.systemPromptPolicy ?? null,
       });
       if (previousTrace?.turn && this.resumedUsageRuns.has(task.id)) trace.restarted(this.executionGenerations.get(task.id)!);
       signal.throwIfAborted();

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SessionLogEntrySchema } from "./session-log";
+import { SystemPromptSlotsSchema } from "./workspaces";
 export const MessageAttachmentSchema = z.object({
   id: z.string(), workspaceId: z.string(), issueId: z.string().nullable(), commentId: z.string().nullable(),
   chatSessionId: z.string().nullable(), chatMessageId: z.string().nullable(), uploaderType: z.string(), uploaderId: z.string(),
@@ -85,6 +86,19 @@ export const AttemptSchema = z.object({
   execution_thinking_level: z.string().nullable().optional(),
   fallback_switched: z.boolean().optional(), switch_reason: z.string().nullable().optional(),
 }).loose();
+export const TurnSystemPromptPolicySchema = z.object({
+  format: z.number().int().default(1),
+  workspaceId: z.string(),
+  documentId: z.string().nullable().default(null),
+  versionId: z.string().nullable().default(null),
+  versionNumber: z.number().int().nonnegative().nullable().default(null),
+  mode: z.string(),
+  defaultRevision: z.string(),
+  content: SystemPromptSlotsSchema.optional(),
+  contentHash: z.string(),
+  legacyCompatible: z.boolean().default(false),
+}).loose();
+
 export const TurnInputSchema = z.object({
   from_seq: z.number().int().nonnegative(), to_seq: z.number().int().nonnegative(), messages: z.array(MessageSchema), legacy_prompt: z.string().nullable(),
   // ADR 0023, display only (absent from older servers): what one attempt sent the agent as its first
@@ -92,6 +106,8 @@ export const TurnInputSchema = z.object({
   sent_attempt_id: z.string().nullish().catch(null).transform(value => value ?? null),
   sent_prompt: z.string().nullish().catch(null).transform(value => value ?? null),
   instructions: z.string().nullish().catch(null).transform(value => value || null),
-});
+  // MUL-3, display only (absent from older servers): adopted workspace system-prompt policy binding.
+  system_prompt_policy: TurnSystemPromptPolicySchema.nullish().catch(null).transform(value => value ?? null),
+}).loose();
 export const TurnDetailSchema = z.object({ turn: TurnSchema, attempts: z.array(AttemptSchema).optional(), input: TurnInputSchema.optional() });
 export const TurnsPageSchema = z.object({ turns: z.array(TurnSchema), next_cursor: z.string().nullable() });

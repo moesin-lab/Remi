@@ -328,7 +328,7 @@ export class DaemonTaskOffers {
     // Status/input notifications do not create work. Avoid a locked claim and
     // heartbeat write when this workspace has no queued or offered turn.
     if (!runtime || !store.hasPendingTaskOffers(runtime.workspaceId ?? "local")) return;
-    const task = store.claimTask(runtimeId, { supportsBinarySkillFiles: true });
+    const task = store.claimTask(runtimeId, { supportsBinarySkillFiles: true, supportsPromptPolicy: session.supportsPromptPolicy });
     if (!task) return;
     pump.preparing = task.id;
     try {

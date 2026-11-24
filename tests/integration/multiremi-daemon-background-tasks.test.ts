@@ -1,3 +1,4 @@
+import { DEFAULT_SYSTEM_PROMPT_CONTENT } from "@multiremi/contracts/system-prompt-policy.js";
 // Background tasks with keep-alive on demand (PR 6 §2), end to end through a
 // real daemon, server and AcpProvider over the scripted ACP agent
 // (tests/fixtures/acp/fake-subagent-agent.ts).
@@ -498,6 +499,41 @@ describe("Bun Multiremi daemon background tasks (PR 6)", () => {
     expect(agentLog(logPath).filter((entry) => entry.kind === "async_task_stop")).toEqual([expect.objectContaining({ id: "bash-1", stopped: true })]);
     const closed = d.snapshots.find((snapshot) => snapshot.state === "closed")!;
     expect(closed.tasks[0]).toMatchObject({ status: "stopped", stop_reason: "config_changed" });
+  }, 60_000);
+
+  it("a policy-only edit replaces parked provider instructions and records the frozen adopted version", async () => {
+    const { store, agent, daemon, d } = await bed("policy-only");
+    const logPath = join(workDir!, "agent.jsonl");
+    daemon(scriptedAcp({ logEnv: ["CLAUDE_CONFIG_DIR"], prompts: [
+      [...bash("bash-1", "toolu_srv", "python3 -m http.server"), chunk("Started."), { resolve: "end_turn" }],
+      [chunk("Fresh process.")],
+    ] }, logPath, "claude"));
+    const chat = store.createChatSession({ agentId: agent.id });
+    const first = store.sendChatMessage(chat.id, { body: "Start a server" }).task;
+    await waitFor(() => finished(store, first.id), "the first turn");
+    await waitFor(() => d.snapshots.some(snapshot => snapshot.state === "parked"), "parked before policy edit");
+    const before = store.getAttemptSystemPrompt(first.id)!;
+    const changed = store.editSystemPrompt("local", { expectedRevision: 0, requestId: "policy-only",
+      content: { ...DEFAULT_SYSTEM_PROMPT_CONTENT, common: "POLICY-ONLY NEW INSTRUCTIONS" } },
+    { type: "human", operatorId: "local", userId: "local", displayName: "Tester" });
+    const second = store.sendChatMessage(chat.id, { body: "Again" }).task;
+    await waitFor(() => finished(store, second.id), "the second turn with edited policy");
+    expect(store.getTask(second.id)?.status).toBe("completed");
+    expect(processes(logPath).size).toBe(2);
+    expectNoOverlap(logPath);
+    expect(d.snapshots.find(snapshot => snapshot.state === "closed")?.tasks[0])
+      .toMatchObject({ status: "stopped", stop_reason: "config_changed" });
+    expect(store.getAttemptSystemPrompt(first.id)).toEqual(before);
+    const binding = store.getAttemptSystemPrompt(second.id)!;
+    expect(binding.versionId).toBe(changed.document.currentVersionId);
+    const actual = await waitFor(() => store.getTaskPrompt(second.id), "recorded actual instructions");
+    expect(actual.systemPromptPolicy).toEqual(binding);
+    expect(actual.instructions).toContain("POLICY-ONLY NEW INSTRUCTIONS");
+    expect(actual.prompt).not.toContain("POLICY-ONLY NEW INSTRUCTIONS");
+    const homes = agentLog(logPath).filter(entry => entry.kind === "started").map(entry => entry.env?.CLAUDE_CONFIG_DIR);
+    expect(homes).toHaveLength(2);
+    expect(homes[1]).toBeTruthy();
+    expect(readFileSync(join(homes[1]!, "AGENTS.md"), "utf8")).toContain("POLICY-ONLY NEW INSTRUCTIONS");
   }, 60_000);
 
   it("(11) Codex parks without a doorbell, and the next turn adopts the process", async () => {

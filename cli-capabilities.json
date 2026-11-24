@@ -977,6 +977,139 @@
       "hidden": false,
       "migration_status": "native"
     },
+    "workspace.system-prompt.get": {
+      "command": "remi workspace system-prompt get",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.get",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.set": {
+      "command": "remi workspace system-prompt set",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.system-prompt.set",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.reset": {
+      "command": "remi workspace system-prompt reset",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.system-prompt.reset",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.history": {
+      "command": "remi workspace system-prompt history",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.history",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.version": {
+      "command": "remi workspace system-prompt version",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.version",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.restore": {
+      "command": "remi workspace system-prompt restore",
+      "aliases": [],
+      "auth": [
+        "human"
+      ],
+      "capability": "workspace.system-prompt.restore",
+      "mutation": "write",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.diff": {
+      "command": "remi workspace system-prompt diff",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.diff",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
+    "workspace.system-prompt.preview": {
+      "command": "remi workspace system-prompt preview",
+      "aliases": [],
+      "auth": [
+        "human",
+        "task"
+      ],
+      "capability": "workspace.system-prompt.preview",
+      "mutation": "read",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ],
+      "hidden": false,
+      "migration_status": "native"
+    },
     "workspace.prompt.get": {
       "command": "remi workspace prompt get",
       "aliases": [],

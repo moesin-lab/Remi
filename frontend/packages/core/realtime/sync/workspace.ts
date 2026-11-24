@@ -36,6 +36,7 @@ export function applyWorkspaceUpdatedToCache(
   payload: WorkspaceUpdatedPayload,
 ): void {
   const next = payload.workspace;
+  const workspaceId = next?.id ?? (payload as { workspace_id?: string }).workspace_id;
   if (next?.id) {
     const cached =
       qc
@@ -44,6 +45,9 @@ export function applyWorkspaceUpdatedToCache(
     if (!cached || cached.issue_prefix !== next.issue_prefix) {
       qc.invalidateQueries({ queryKey: issueKeys.all(next.id) });
     }
+  }
+  if (workspaceId) {
+    qc.invalidateQueries({ queryKey: workspaceKeys.systemPrompt(workspaceId) });
   }
   qc.invalidateQueries({ queryKey: workspaceKeys.list() });
 }

@@ -32,6 +32,7 @@ function truncateOfferStrings(response: Payload, runtimeId: string, budget: numb
   const visit = (value: any, command: string, executionBinding = false) => {
     if (!value || typeof value !== "object") return;
     for (const [key, child] of Object.entries(value)) {
+      if (key === "system_prompt_policy") continue;
       if (typeof child === "string" && (key === "jsonl" || key === "content_jsonl")) {
         const entries = child.split("\n").filter(Boolean).map(line => JSON.parse(line));
         projections.push({ owner: value, key, entries });

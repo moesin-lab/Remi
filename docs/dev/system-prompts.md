@@ -8,7 +8,7 @@ summary: 五槽行为文案、受保护运行协议、不可变版本与按尝�
 
 MUL-3 将工作区的默认行为文案与平台运行协议分开。共享文本与 DTO 定义于
 [system-prompt-policy.ts](../../packages/contracts/src/system-prompt-policy.ts)，服务端和 daemon 的
-[哈希目录](../../packages/contracts/src/system-prompt-policy-hash.ts)对格式版本和固定顺序的完整文档计算 SHA-256。
+[shared 运行时哈希目录](../../packages/shared/src/system-prompt-policy-hash.ts)对格式版本和固定顺序的完整文档计算 SHA-256。
 浏览器只依赖前者，不引入 Node crypto。此文档描述开发契约；测试及集成状态以 PR 对应 SHA 的执行证据为准。
 
 文档包含五个纯文字槽位，保存时必须完整提交；空字符串是有效自定义，不代表跟随默认。
@@ -44,6 +44,22 @@ task hard deny 与 CLI parity deny 同步维护。原 appendix 的既有权限�
 当 custom 或服务端默认偏离首版等价基线时，claim 前要求 prompt.policy.v1；无合格 daemon 时应提供可诊断等待原因。
 用户文字优先让出指令预算；只读协议自身超限必须显式失败。
 
-API、CLI 与验收入口见[CLI 契约](../cli-command-migration.md)、[每轮输入与指令文件](../adr/0023-turn-input-and-provider-agents-md.md)
-及[测试规范](../../TESTING.md)。首批共享契约回归位于
-[system-prompt-policy.test.ts](../../tests/unit/contracts/system-prompt-policy.test.ts)。
+查看和修改入口为工作区设置的 Prompts 页，以及 `remi workspace system-prompt` 的
+`get|set|reset|history|version|restore|diff|preview` 子命令；参数和文件格式见[CLI 契约](../cli-command-migration.md)。
+API 统一挂在 `/api/workspaces/:id/system-prompt`：GET 当前状态、PUT 完整保存，
+POST `/reset` 和 `/restore` 追加版本，GET `/versions` 和 `/versions/:versionId` 查看历史，
+POST `/preview` 预览当前或未保存正文。写入须携带 `expectedRevision` 与唯一 `requestId`；
+网络结果不确定时重用同一请求，收到 409 后保留草稿并重新读取，不能自动覆盖并发修改。
+预览使用明确的 Issue 场景，不包含宿主机本地上下文；实际轮次的输入可查看所绑定版本和正文哈希。
+
+组装路径见[每轮输入与指令文件](../adr/0023-turn-input-and-provider-agents-md.md)，验证方法见[测试规范](../../TESTING.md)。
+针对性回归入口如下；执行结果必须以目标 SHA 的测试输出为准。
+
+| 范围 | 测试入口 |
+|---|---|
+| 文本边界、规范哈希与受保护句子 | [共享契约](../../tests/unit/contracts/system-prompt-policy.test.ts) |
+| 版本、默认升级、CAS/幂等、权限、审计、实际输入与清理 | [SQLite/API](../../tests/unit/multiremi/system-prompt-policy.test.ts) |
+| 两进程首次保存竞争、幂等重放竞争与 level-4 迁移回滚 | [PostgreSQL](../../tests/unit/multiremi/system-prompt-policy-postgres.test.ts)；须设置本机 `MULTIREMI_TEST_POSTGRES_URL`，否则明确跳过；CI schema job 提供 PostgreSQL 16 |
+| capability、claim 重绑、offer 完整性 | [daemon offers](../../tests/unit/multiremi/daemon-task-offers.test.ts) |
+| 指令文件采用与驻留进程配置替换 | [后台集成](../../tests/integration/multiremi-daemon-background-tasks.test.ts)；脚本化 ACP，不证明外部模型服从性 |
+| 八个 CLI 命令的 HTTP/输出与 task deny | [CLI](../../tests/unit/remi/cli-workspace-system-prompt.test.ts)；回环 HTTP fixture，不替代领域 API 测试 |

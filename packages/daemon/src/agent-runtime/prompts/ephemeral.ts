@@ -14,8 +14,10 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { attachmentIdsFromText } from "@multiremi/contracts/attachments.js";
-import { CHAT_ARTIFACT_DELIVERY_CONTRACT, ISSUE_ARTIFACT_DELIVERY_CONTRACT } from "@multiremi/contracts/artifact-delivery.js";
-import { CODE_DELIVERY_CONTRACT, mergedWorkspacePrompt, REMI_CLI_COMMUNICATION } from "@multiremi/contracts/remi-rules.js";
+import { CHAT_ARTIFACT_DELIVERY_PROTOCOL, ISSUE_ARTIFACT_DELIVERY_PROTOCOL } from "@multiremi/contracts/artifact-delivery.js";
+import { CODE_DELIVERY_PROTOCOL, mergedWorkspacePrompt, REMI_CLI_COMMUNICATION } from "@multiremi/contracts/remi-rules.js";
+import { DEFAULT_SYSTEM_PROMPT_CONTENT, normalizeSystemPromptContent, type SystemPromptContent } from "@multiremi/contracts/system-prompt-policy.js";
+import { hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
 import { parseUnreadRange } from "@multiremi/contracts/session-input.js";
 import { guardBlockedSlashCommand } from "@multiremi/contracts/slash-commands.js";
 import type { AgentTask } from "@daemon/contracts/types.js";
@@ -97,6 +99,17 @@ export function buildTaskPromptArtifact(task: AgentTask, opts: BuildTaskPromptOp
   };
 }
 
+/** Resolve the server's frozen snapshot; only a server predating the policy wire may omit it. */
+function taskSystemPromptContent(task: AgentTask): SystemPromptContent {
+  const binding = task.systemPromptPolicy ?? task.system_prompt_policy;
+  if (binding == null) return DEFAULT_SYSTEM_PROMPT_CONTENT;
+  if (binding.format !== 1 || binding.workspaceId !== task.workspaceId
+    || !["default", "custom"].includes(binding.mode)) throw new Error("Invalid system prompt policy binding");
+  const content = normalizeSystemPromptContent(binding.content);
+  if (hashSystemPromptContent(content) !== binding.contentHash) throw new Error("System prompt policy content hash mismatch");
+  return content;
+}
+
 /** A piece of the instructions: fixed text, or a user-written body that may be shortened. */
 type InstructionPiece = string | { body: string; rest: string };
 
@@ -110,6 +123,8 @@ export function buildAgentInstructions(task: AgentTask, opts: BuildTaskPromptOpt
   task = taskPromptContext(task);
   const privateChat = isPrivateChatTask(task);
   const platform = opts.platform ?? process.platform;
+  const policy = taskSystemPromptContent(task);
+  const policyRest = `read the rest with \`remi workspace system-prompt get ${task.workspaceId}\``;
   const pieces: InstructionPiece[] = [];
   const fixed = (...lines: string[]) => { for (const line of lines) pieces.push(line); };
   const variable = (body: string | null | undefined, rest: string) => { if (body?.trim()) pieces.push({ body: body.trim(), rest }); };
@@ -165,10 +180,18 @@ export function buildAgentInstructions(task: AgentTask, opts: BuildTaskPromptOpt
     fixed(`Use \`remi message list ${conversation}\` to read this ${task.chatSessionId && !productSession ? "Chat" : "Session"}'s earlier messages (\`--from X --to Y\` reads the messages after seq X up to seq Y). You don't need it to answer what is in front of you: read only when you need context you don't have, or when a note asks you to.`);
   }
   if (privateChat) section(chatRepositoryNotes(task, opts.chatRepoAutoCheckout));
+  if (policy.common.trim()) {
+    fixed("", "## Common Behavior");
+    variable(policy.common, policyRest);
+  }
   const codeWork = Boolean(task.issue || boundIssue || task.project || task.repos?.length || task.runtimeWorkspace);
   fixed("", "## Delivery");
-  if (codeWork) fixed(CODE_DELIVERY_CONTRACT, "");
-  fixed(task.chatSessionId ? CHAT_ARTIFACT_DELIVERY_CONTRACT : ISSUE_ARTIFACT_DELIVERY_CONTRACT);
+  if (codeWork) {
+    variable(policy.code_delivery, policyRest);
+    fixed(CODE_DELIVERY_PROTOCOL, "");
+  }
+  variable(task.chatSessionId ? policy.chat_delivery : policy.issue_delivery, policyRest);
+  fixed(task.chatSessionId ? CHAT_ARTIFACT_DELIVERY_PROTOCOL : ISSUE_ARTIFACT_DELIVERY_PROTOCOL);
 
   // Workspace.
   const workspacePrompt = typeof (task.workspacePrompt ?? task.workspace_prompt) === "string"
@@ -275,34 +298,33 @@ export function buildAgentInstructions(task: AgentTask, opts: BuildTaskPromptOpt
   appendAvailableRepositories(repositories, task, opts.repoCheckouts ?? [], privateChat);
   section(repositories);
 
-  if (!task.chatSessionId || productSession) {
-    fixed("", "## Finishing", "When finished, summarize what changed, how it was verified, and any remaining risks.");
+  if ((!task.chatSessionId || productSession) && policy.finishing.trim()) {
+    fixed("", "## Finishing");
+    variable(policy.finishing, policyRest);
   }
   return fitInstructionPieces(pieces, opts.instructionsMaxBytes ?? Number.POSITIVE_INFINITY);
 }
 
 /** Shortens the longest user-written piece until the instructions fit; a fixed note is never cut. */
-function fitInstructionPieces(pieces: InstructionPiece[], maxBytes: number): string {
-  const render = () => `${pieces.map(piece => typeof piece === "string" ? piece : piece.body).join("\n").replace(/\n{3,}/g, "\n\n").trim()}\n`;
-  const MIN_CHARS = 200;
+export function fitInstructionPieces(pieces: InstructionPiece[], maxBytes: number): string {
+  const limits = pieces.map(piece => typeof piece === "string" ? 0 : piece.body.length);
+  const shortened = (piece: { body: string; rest: string }, keep: number) => {
+    // Do not split a UTF-16 surrogate pair while trimming Unicode text.
+    if (keep > 0 && /[\uD800-\uDBFF]/.test(piece.body[keep - 1]!)) keep--;
+    return keep >= piece.body.length ? piece.body
+      : `${piece.body.slice(0, keep)}\n… (${piece.body.length - keep} characters omitted; ${piece.rest})`;
+  };
+  const render = () => `${pieces.map((piece, index) => typeof piece === "string" ? piece : shortened(piece, limits[index]!))
+    .join("\n").replace(/\n{3,}/g, "\n\n").trim()}\n`;
   for (let text = render(); Buffer.byteLength(text) > maxBytes; text = render()) {
     let index = -1;
     for (let i = 0; i < pieces.length; i++) {
-      const piece = pieces[i]!;
-      if (typeof piece !== "string" && piece.body.length > MIN_CHARS
-        && (index < 0 || piece.body.length > (pieces[index] as { body: string }).body.length)) index = i;
+      if (typeof pieces[i] !== "string" && limits[i]! > 0
+        && (index < 0 || limits[i]! > limits[index]!)) index = i;
     }
-    if (index < 0) {
-      // Only fixed notes are left over the budget: keep their head, cut on a character boundary.
-      let head = text.slice(0, Math.max(0, maxBytes - 64));
-      while (Buffer.byteLength(head) > maxBytes - 64) head = head.slice(0, Math.floor(head.length * 0.9));
-      return `${head}\n… (the rest of these notes is omitted)\n`;
-    }
-    const piece = pieces[index] as { body: string; rest: string };
-    // A character is at least one byte, so dropping `over` of them (plus room for the note) always shrinks enough.
-    const keep = Math.max(MIN_CHARS, piece.body.length - (Buffer.byteLength(text) - maxBytes) - 160);
-    const body = `${piece.body.slice(0, keep)}\n… (${piece.body.length - keep} characters omitted; ${piece.rest})`;
-    pieces[index] = keep > MIN_CHARS ? { body, rest: piece.rest } : body;
+    if (index < 0) throw new Error(`Protected instruction budget exceeded: ${Buffer.byteLength(text)} bytes > ${maxBytes} bytes`);
+    // Keep read pointers even when every user-written body must shrink to zero.
+    limits[index] = Math.max(0, limits[index]! - (Buffer.byteLength(text) - maxBytes) - 160);
   }
   return render();
 }

@@ -137,7 +137,7 @@ export function parseParkedLanes(value: unknown): DaemonParkedLane[] {
  * daemon parks only against a server that handles the `lane.background_*`
  * frames. An older server answers `[]`.
  */
-export const DAEMON_SERVER_WELCOME_CAPS: readonly DaemonProtocolCap[] = ["lane.background", "input_unread", "turn.restart"];
+export const DAEMON_SERVER_WELCOME_CAPS: readonly DaemonProtocolCap[] = ["lane.background", "input_unread", "turn.restart", "prompt.policy.v1"];
 
 /** `welcome.caps`: what the hello declared and this server supports, in the hello's order. */
 export function negotiateWelcomeCaps(helloCaps: readonly string[],

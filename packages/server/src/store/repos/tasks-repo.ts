@@ -1,4 +1,5 @@
 import { ExecutionModelPolicyError } from "@multiremi/contracts/execution-endpoint.js";
+import { requiresPromptPolicyCapability } from "@shared/system-prompt-policy-hash.js";
 import { PlannedRestarts } from "../planned-restarts.js";
 import { readCurrentTurnRow } from "@multiremi/store/execution-reads.js";
 import { readAttemptTurn, readTurnRow } from "@multiremi/store/execution-reads.js";
@@ -715,6 +716,7 @@ class AgentPluginReadinessChangedError extends Error {}
 
 export interface ClaimTaskOptions {
   supportsBinarySkillFiles?: boolean;
+  supportsPromptPolicy?: boolean;
 }
 
 /** Keyset position for `listTasksChunk`: the full `created_at DESC, id DESC` sort key. */
@@ -3372,6 +3374,20 @@ export class TasksRepo {
       // fence, serialized with begin/undrain by the workspace lifecycle lock.
       if (this.ctx.runtimes().hasCliUpdateDrainForRuntime(runtimeId)) return null;
 
+      // Policy edits share W with claim. Qualify before any task becomes dispatched,
+      // including stale offers, so an old daemon never enters claim/rescind churn.
+      const workspaceId = lockedRuntime.workspaceId ?? "local";
+      const policy = this.ctx.systemPrompts().getSystemPrompt(workspaceId);
+      if (!options.supportsPromptPolicy && requiresPromptPolicyCapability(policy.document.mode, policy.currentDefault.revision)) {
+        const reason = "daemon_capability_required:prompt.policy.v1";
+        runTurnExecutionMutation(this.ctx.db, `UPDATE multiremi_turn_execution_records
+          SET wait_reason = ?, updated_at = ?
+          WHERE workspace_id = ? AND status IN ('queued', 'dispatched')
+            AND (runtime_id IS NULL OR runtime_id = ?) AND (wait_reason IS NULL OR wait_reason != ?)`,
+        [reason, nowIso(), workspaceId, runtimeId, reason]);
+        return null;
+      }
+
       this.resetStaleChatWorkspaceTasks(lockedRuntime.workspaceId ?? "local");
       // Recovery must examine stale dispatches even when their Agent can no
       // longer run here. It rechecks eligibility and requeues incompatible
@@ -3464,6 +3480,9 @@ export class TasksRepo {
       const task = this.captureRelayIssueLogWindowWithinTransaction(
         this.snapshotTaskExecution(hydrated, lockedRuntime, deferredEvents),
       );
+      this.ctx.systemPrompts().bindAttemptSystemPrompt(task.id, workspaceId, {
+        legacyCompatible: !options.supportsPromptPolicy,
+      });
       this.ctx.taskTraces().markTaskTraceDaemon(task.id, runtimeId);
       // Check the actual hydrated payload, including both linked and legacy
       // inline skills. Older daemons ignore encoding and would write base64
@@ -5277,6 +5296,7 @@ ${placementAfter.sql}
   recordTaskPrompt(taskId: string, input: RecordTaskPromptInput): MultiremiTaskPromptArtifact {
     const task = this.getTask(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
+    this.ctx.systemPrompts().validateAttemptSystemPrompt(taskId, input.systemPromptPolicy);
     if (input.mode !== "bootstrap" && input.mode !== "delta") throw new Error("prompt mode must be bootstrap or delta");
     if (!input.prompt) throw new Error("assembled prompt is required");
     if (Buffer.byteLength(input.prompt, "utf8") > TASK_PROMPT_MAX_BYTES) {
@@ -5309,6 +5329,7 @@ ${placementAfter.sql}
       prompt: String(row.prompt),
       sha256: String(row.sha256),
       assembledAt: String(row.assembled_at),
+      systemPromptPolicy: this.ctx.systemPrompts().getAttemptSystemPrompt(taskId),
       instructions: typeof row.instructions === "string" && row.instructions ? row.instructions : null,
     };
   }

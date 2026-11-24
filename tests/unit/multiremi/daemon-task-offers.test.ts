@@ -1,3 +1,7 @@
+import { DEFAULT_SYSTEM_PROMPT_CONTENT } from "@multiremi/contracts/system-prompt-policy.js";
+import { CURRENT_SYSTEM_PROMPT_DEFAULT, hashSystemPromptContent } from "@shared/system-prompt-policy-hash.js";
+import { daemonTaskClaimResponse } from "@multiremi/api/wire/tasks.js";
+import { fitTaskOfferToBudget } from "@multiremi/api/daemon-protocol/offer-budget.js";
 import { currentBackgroundTerm, withBackgroundTerm, StaleLiveTermError } from "@shared/db/live-term.js";
 import { DatabaseUnavailableError } from "@shared/db/recovery.js";
 import { createResponsibleTestIssue } from './helpers.js';
@@ -685,5 +689,125 @@ describe("A-3 task offers", () => {
     const h = fixture(); await h.hello(); const task = h.task();
     await h.send("runtime.ready", { active_task_ids: [] }, { rt: "rt_foreign" }); await h.layer.drain();
     expect(h.store.getTask(task.id)?.status).toBe("queued");
+  });
+});
+
+
+describe("System Prompt policy claim and offer", () => {
+  const actor = { type: "human" as const, operatorId: "local", userId: "local", displayName: "Tester" };
+  const edit = (store: ReturnType<typeof createLocalStore>, common: string, requestId: string) =>
+    store.editSystemPrompt("local", { expectedRevision: store.getSystemPrompt("local").document.revision,
+      requestId, content: { ...DEFAULT_SYSTEM_PROMPT_CONTENT, common } }, actor);
+
+  it("permits baseline defaults on old daemons, but leaves custom policy queued with a diagnostic before claim", async () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    edit(h.store, "CUSTOM POLICY", "custom");
+    h.offers.start();
+    await h.hello();
+    expect(h.offered()).toHaveLength(0);
+    expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", waitReason: "daemon_capability_required:prompt.policy.v1" });
+    expect(h.store.getAttemptSystemPrompt(task.id)).toBeNull();
+    const claim = h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true });
+    expect(claim?.id).toBe(task.id);
+    expect(h.store.getAttemptSystemPrompt(task.id)).toMatchObject({ mode: "custom", legacyCompatible: false,
+      content: expect.objectContaining({ common: "CUSTOM POLICY" }) });
+  });
+
+  it("freezes atomically at claim, rebinds the same rejected offer id, and preserves accepted/running snapshots", () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    const first = h.store.claimTask(h.runtimeIds[0]!)!;
+    const baseline = h.store.getAttemptSystemPrompt(task.id)!;
+    expect(baseline).toMatchObject({ mode: "default", legacyCompatible: true, versionId: null });
+    edit(h.store, "AFTER CLAIM", "edit1");
+    expect(daemonTaskClaimResponse(h.store, first).system_prompt_policy).toEqual(baseline);
+    expect(h.store.requeueTaskOffer(task.id, h.runtimeIds[0]!, "rejected")).toBe(true);
+    expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+    const rebound = h.store.getAttemptSystemPrompt(task.id)!;
+    expect(rebound.content.common).toBe("AFTER CLAIM");
+    h.store.recordTaskOffered(task.id, h.runtimeIds[0]!);
+    h.store.acceptTaskOffer(task.id, h.runtimeIds[0]!);
+    h.store.startTask(task.id);
+    edit(h.store, "AFTER START", "edit2");
+    expect(h.store.getAttemptSystemPrompt(task.id)).toEqual(rebound);
+    expect(daemonTaskClaimResponse(h.store, h.store.getTaskWithAgent(task.id)!).system_prompt_policy).toEqual(rebound);
+  });
+
+  it("rebinds a stale preaccept dispatch with the same task id", () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true });
+    const first = h.store.getAttemptSystemPrompt(task.id)!;
+    edit(h.store, "STALE RECLAIM POLICY", "stale-edit");
+    db!.run("UPDATE multiremi_turn_attempts SET accepted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", [task.id]);
+    expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+    const rebound = h.store.getAttemptSystemPrompt(task.id)!;
+    expect(rebound.content.common).toBe("STALE RECLAIM POLICY");
+    expect(rebound).not.toEqual(first);
+  });
+
+  it("rolls back both the claim and its binding if binding persistence fails", () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    const repo = h.store.systemPromptsRepo();
+    const bind = repo.bindAttemptSystemPrompt.bind(repo);
+    const probe = spyOn(repo, "bindAttemptSystemPrompt").mockImplementation((...args) => {
+      bind(...args);
+      throw new Error("injected post-bind failure");
+    });
+    try {
+      expect(() => h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })).toThrow("injected post-bind failure");
+      expect(h.store.getTask(task.id)?.status).toBe("queued");
+      expect(h.store.getAttemptSystemPrompt(task.id)).toBeNull();
+    } finally { probe.mockRestore(); }
+    expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+  });
+
+  it("keeps reset-to-baseline compatible with old daemons", () => {
+    const h = fixture(undefined, 1, undefined, false, false);
+    const task = h.task();
+    h.store.resetSystemPrompt("local", { expectedRevision: 0, requestId: "baseline-reset" }, actor);
+    expect(h.store.claimTask(h.runtimeIds[0]!)?.id).toBe(task.id);
+    expect(h.store.getAttemptSystemPrompt(task.id)).toMatchObject({ mode: "default", legacyCompatible: true,
+      defaultRevision: CURRENT_SYSTEM_PROMPT_DEFAULT.revision });
+  });
+
+  for (const reset of [false, true]) {
+    it(`requires policy capability after server default upgrades for ${reset ? "reset" : "never-customized"} workspaces`, () => {
+      const h = fixture(undefined, 1, undefined, false, false);
+      const task = h.task();
+      if (reset) h.store.resetSystemPrompt("local", { expectedRevision: 0, requestId: "reset" }, actor);
+      const repo = h.store.systemPromptsRepo();
+      // Dependency-injected catalog simulates a later server release without changing the frozen legacy baseline.
+      const catalog = { ...CURRENT_SYSTEM_PROMPT_DEFAULT, revision: "future-server-default",
+        content: { ...DEFAULT_SYSTEM_PROMPT_CONTENT, common: "NEW SERVER DEFAULT" } };
+      const probe = spyOn(repo as any, "catalog").mockReturnValue(catalog);
+      try {
+        expect(h.store.claimTask(h.runtimeIds[0]!)).toBeNull();
+        expect(h.store.getTask(task.id)).toMatchObject({ status: "queued", waitReason: "daemon_capability_required:prompt.policy.v1" });
+        expect(h.store.claimTask(h.runtimeIds[0]!, { supportsPromptPolicy: true })?.id).toBe(task.id);
+        expect(h.store.getAttemptSystemPrompt(task.id)).toMatchObject({ mode: "default", defaultRevision: catalog.revision,
+          content: catalog.content, legacyCompatible: false });
+      } finally { probe.mockRestore(); }
+    });
+  }
+
+  it("preserves the entire frozen subtree through ordinary and emergency offer compression", () => {
+    const content = { common: "😀".repeat(7_000), code_delivery: "", chat_delivery: "", issue_delivery: "", finishing: "" };
+    const binding = { format: 1, workspaceId: "local", documentId: "doc", versionId: "version", versionNumber: 2,
+      mode: "custom", defaultRevision: CURRENT_SYSTEM_PROMPT_DEFAULT.revision, legacyCompatible: false,
+      content, contentHash: hashSystemPromptContent(content) };
+    const payload = { turn_id: "turn", system_prompt_policy: binding, agent: { id: "agent", instructions: "x".repeat(1_200_000) } };
+    const fitted = fitTaskOfferToBudget(payload, "runtime", 16 * 1024);
+    expect(fitted.response.system_prompt_policy).toEqual(binding);
+    expect(fitted.report.steps).toContain("strings");
+    // Protected content itself can exceed a soft budget; it must never be corrupted to meet one.
+    expect(fitted.report.bytes).toBeGreaterThan(16 * 1024);
+    const emergency = { turn_id: "turn", system_prompt_policy: binding,
+      execution_connection: { id: "conn", token: "t".repeat(1_100_000) } };
+    const result = fitTaskOfferToBudget(emergency, "runtime", 16 * 1024);
+    expect(result.report.steps).toContain("protected_strings");
+    expect(result.response.system_prompt_policy).toEqual(binding);
   });
 });

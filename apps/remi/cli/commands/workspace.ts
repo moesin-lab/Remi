@@ -1,4 +1,5 @@
 import { FEISHU_BOT_OPTION, feishuBotPath } from "./feishu-bot-scope.js";
+import { workspaceSystemPromptCommandSpecs } from "./workspace-system-prompt.js";
 import { STORAGE_SETTINGS_DEFAULTS, STORAGE_SETTINGS_KEYS, type WorkspaceStorageResponse } from "@multiremi/contracts/storage.js";
 import {
   CliError,
@@ -335,6 +336,7 @@ export function workspaceCommandSpecs(): CommandSpec[] {
       const response = await client.request({ method: "DELETE", path: feishuBotPath(`/api/workspaces/${encodePath(String(workspace.id))}/feishu-bot`, invocation) });
       renderResource(invocation, response.data);
     }),
+    ...workspaceSystemPromptCommandSpecs(),
     scopedRead("workspace.prompt.get", ["workspace", "prompt", "get"], "Read the workspace prompt", "/prompts"),
     scopedRead("workspace.prompt.template", ["workspace", "prompt", "template"], "Read the platform prompt template", "/prompt-template"),
     scopedWrite("workspace.prompt.update", ["workspace", "prompt", "update"], "Update the workspace prompt", "/prompts", "PUT", [

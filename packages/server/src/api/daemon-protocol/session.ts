@@ -245,6 +245,7 @@ export class DaemonProtocolSession {
   /** Set once `hello` is accepted; empty before that. */
   daemonId = "";
   supportsWikiFetch = false;
+  supportsPromptPolicy = false;
   /**
    * PR 6: both sides hold `lane.background` (the hello declared it and the
    * welcome echoed it). Only then does the daemon park, and only then does the
@@ -753,6 +754,7 @@ export class DaemonProtocolSession {
     this.supportsWikiFetch = hasDaemonCapability(parsed.hello.caps, "wiki.fetch");
     const welcomeCaps = negotiateWelcomeCaps(parsed.hello.caps, this.options.welcomeCaps);
     this.supportsLaneBackground = hasDaemonCapability(welcomeCaps, "lane.background");
+    this.supportsPromptPolicy = hasDaemonCapability(welcomeCaps, "prompt.policy.v1");
     this.supportsPlannedRestart = hasDaemonCapability(welcomeCaps, "turn.restart");
     this.supportsInputUnread = hasDaemonCapability(welcomeCaps, "input_unread");
     this.advertisedRuntimeIdList = parsed.hello.runtimes.map((runtime) => runtime.runtime_id);

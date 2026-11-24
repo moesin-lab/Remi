@@ -4,6 +4,8 @@ import { LiveTermFence, liveTermDatabase } from "./live-term-fence.js";
 import { readAttemptTurn } from "@multiremi/store/execution-reads.js";
 import { createId } from "@multiremi/ids.js";
 import { ExecutionBindingStatesRepo } from "@multiremi/store/repos/execution-binding-states-repo.js";
+import { SystemPromptsRepo } from "@multiremi/store/repos/system-prompts-repo.js";
+import type { SystemPromptActor, SystemPromptEditInput, SystemPromptRestoreInput, SystemPromptWriteInput } from "@multiremi/contracts/system-prompt-policy.js";
 import { ExecutionProfilesRepo } from "@multiremi/store/repos/execution-profiles-repo.js";
 import { ExecutionEndpointsRepo } from "@multiremi/store/repos/execution-endpoints-repo.js";
 import { getExecutionGroup, listExecutionGroups, saveExecutionGroup, deleteExecutionGroup } from "@multiremi/store/execution-groups.js";
@@ -584,6 +586,7 @@ export class MultiremiStore {
   private runtimes: RuntimesRepo;
   private executionBindingStates: ExecutionBindingStatesRepo;
   private executionProfiles: ExecutionProfilesRepo;
+  private systemPrompts: SystemPromptsRepo;
   private daemonProfiles: DaemonProfilesRepo;
   private runtimeProvisions: RuntimeProvisionsRepo;
   private daemonRetirement: DaemonRetirementRepo;
@@ -659,6 +662,7 @@ export class MultiremiStore {
     this.runtimeWorkspaces = new RuntimeWorkspacesRepo(this.ctx);
     this.executionBindingStates = new ExecutionBindingStatesRepo(this.ctx);
     this.executionProfiles = new ExecutionProfilesRepo(this.ctx);
+    this.systemPrompts = new SystemPromptsRepo(this.ctx);
     this.daemonProfiles = new DaemonProfilesRepo(this.ctx);
     this.runtimeProvisions = new RuntimeProvisionsRepo(this.ctx);
     this.daemonRetirement = new DaemonRetirementRepo(this.ctx);
@@ -964,6 +968,23 @@ runMigrations(this.db);
   executionProfilesRepo() {
     return this.executionProfiles;
   }
+
+  systemPromptsRepo() { return this.systemPrompts; }
+  getSystemPrompt(workspaceId: string) { return this.systemPrompts.getSystemPrompt(workspaceId); }
+  editSystemPrompt(workspaceId: string, input: SystemPromptEditInput, actor: SystemPromptActor) {
+    return this.systemPrompts.editSystemPrompt(workspaceId, input, actor);
+  }
+  resetSystemPrompt(workspaceId: string, input: SystemPromptWriteInput, actor: SystemPromptActor) {
+    return this.systemPrompts.resetSystemPrompt(workspaceId, input, actor);
+  }
+  restoreSystemPrompt(workspaceId: string, input: SystemPromptRestoreInput, actor: SystemPromptActor) {
+    return this.systemPrompts.restoreSystemPrompt(workspaceId, input, actor);
+  }
+  listSystemPromptVersions(workspaceId: string, options: { cursor?: string; limit?: number } = {}) {
+    return this.systemPrompts.listSystemPromptVersions(workspaceId, options);
+  }
+  getSystemPromptVersion(workspaceId: string, versionId: string) { return this.systemPrompts.getSystemPromptVersion(workspaceId, versionId); }
+  getAttemptSystemPrompt(taskId: string) { return this.systemPrompts.getAttemptSystemPrompt(taskId); }
   listExecutionProfiles(workspaceId: string) {
     return this.executionProfiles.list(workspaceId);
   }

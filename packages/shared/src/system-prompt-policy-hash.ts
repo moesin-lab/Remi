@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { DEFAULT_SYSTEM_PROMPT_CONTENT, serializeSystemPromptContent, type SystemPromptContent, type SystemPromptDefault, type SystemPromptMode } from "./system-prompt-policy.js";
+import { DEFAULT_SYSTEM_PROMPT_CONTENT, serializeSystemPromptContent, type SystemPromptContent, type SystemPromptDefault, type SystemPromptMode } from "@multiremi/contracts/system-prompt-policy.js";
 
-/** Server/daemon helper kept separate so browser DTO imports stay free of Node builtins. */
+/** Runtime hashing stays outside the browser-safe contracts package. */
 export function hashSystemPromptContent(content: SystemPromptContent): string {
   return createHash("sha256").update(serializeSystemPromptContent(content)).digest("hex");
 }

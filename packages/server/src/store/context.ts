@@ -865,6 +865,7 @@ export interface RuntimesSurface {
   executionBindingStatesRepo(): import("@multiremi/store/repos/execution-binding-states-repo.js").ExecutionBindingStatesRepo;
   getAgentExecutionProfile(runtimeId: string|null, agent: MultiremiAgent): import("@multiremi/contracts/runtime-connection.js").RuntimeConnectionProfile|null;
   executionProfilesRepo(): import("@multiremi/store/repos/execution-profiles-repo.js").ExecutionProfilesRepo;
+  systemPromptsRepo(): import("./repos/system-prompts-repo.js").SystemPromptsRepo;
   isDaemonRetired(workspaceId: string, daemonId: string): boolean;
   getRuntimeCodexProfile(id: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
   getRuntimeExecutionProfile(id: string, provider: string): import("@multiremi/contracts/codex-profile").RuntimeCodexProfile | null;
@@ -1107,6 +1108,10 @@ export class StoreContext {
       "UPDATE multiremi_issues SET lifecycle_state = lifecycle_state WHERE id = ?",
       [issueId],
     );
+  }
+
+  systemPrompts(): import("./repos/system-prompts-repo.js").SystemPromptsRepo {
+    return this.host.systemPromptsRepo();
   }
 
   // Lazy cross-domain accessors. A carved-out repo reaches a domain it does not own through these,

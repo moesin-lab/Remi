@@ -344,6 +344,72 @@ unrefreshed snapshots; new explicit selections return
 `model_execution_catalog_unknown` until discovery finishes. The saved model and
 thinking level are preserved. Custom Runtime connections keep their own catalogs.
 
+## Workspace System Prompt (MUL-3)
+
+`remi workspace system-prompt` manages workspace default behavior separately from
+`workspace prompt get|update`, which retains its independent appendix semantics.
+The five editable text slots are `common`, `code_delivery`, `chat_delivery`,
+`issue_delivery`, and `finishing`; runtime protocols and dynamic context remain
+read-only. These are new canonical commands; the existing appendix commands are
+not renamed or deprecated.
+
+```text
+remi workspace system-prompt get <workspace> [--output json]
+remi workspace system-prompt set <workspace> --file policy.json --expected-revision <n>
+    [--request-id <id>] [--change-note <text>] [--base-default-revision <revision>]
+remi workspace system-prompt reset <workspace> --expected-revision <n> [--request-id <id>] [--change-note <text>]
+remi workspace system-prompt history <workspace> [--limit <n>] [--cursor <nextCursor>]
+remi workspace system-prompt version <workspace> <version-id>
+remi workspace system-prompt restore <workspace> <version-id> --expected-revision <n> [--request-id <id>] [--change-note <text>]
+remi workspace system-prompt diff <workspace> <from-version-id> <to-version-id>
+remi workspace system-prompt diff <workspace> [from-version-id] --against-default
+remi workspace system-prompt preview <workspace> [--file policy.json | --stdin]
+```
+
+`set --file` and `set --stdin` accept a JSON object containing exactly all five
+string slots, not a request envelope. Empty strings intentionally clear custom
+slots; they do not select default mode. `--file -` also reads stdin. For example:
+
+```json
+{"common":"Use concise reports.","code_delivery":"","chat_delivery":"","issue_delivery":"","finishing":"Explain verification."}
+```
+
+Use `get --output json` to load `document.revision`, `currentDefault.revision`,
+`baseDefault`, and `defaultUpdated`. Extract `.content` to a file for editing;
+pass the originally loaded current default revision as `--base-default-revision`
+when retaining that editing baseline. Saves apply to subsequent runs; resident
+sessions may restart when necessary. The complete default text output of `get`
+also serves the runtime read-back pointer `remi workspace system-prompt get <workspace>`.
+
+All writes require `--expected-revision` (including `0` for a virtual default).
+They accept `--request-id`, generating one UUID per invocation when omitted.
+On an HTTP write failure, the error hint retains that ID: retry the identical
+request with the same ID, revision, content, and note to recover an idempotent
+result. The CLI does not automatically retry writes. A 409 retains the server
+conflict details; reload and compare before submitting a new edit.
+
+Every independent `reset` records a new version and follows the current platform
+default, including future default upgrades. `restore` always creates a new custom
+version with the historical snapshot's exact text, even when restoring an old
+default/reset version. It does not resume following future defaults; use `reset`
+for that. History JSON preserves `{versions,nextCursor}`; version JSON preserves
+the complete camelCase snapshot and actor audit fields. JSONL emits one version
+per line. Text history shows the next cursor when another page exists.
+
+`diff` computes line changes locally from two authorized historical snapshots or
+from current/a historical snapshot to `currentDefault.content`. It does not
+reconstruct historical defaults from today's catalog. Without a historical
+argument, `--against-default` compares current effective content. `preview`
+submits optional five-slot content without saving and shows a synthetic runtime
+structure, not an actual model input or host-local instructions.
+
+`set`, `reset`, and `restore` are human-only workspace administration; they are
+explicitly excluded from task parity and the server also rejects task writes.
+Task credentials may read current content/history/version, compare snapshots,
+and preview within their workspace scope. All commands support generated help
+and `--output table|json|jsonl`. HTTP mapping, stdin, conflicts, and task capability
+boundaries are covered by [the System Prompt CLI tests](../tests/unit/remi/cli-workspace-system-prompt.test.ts).
+
 ## Canonical command tree
 
 Shared gateway endpoints use `remi runtime endpoint list|get|create|update|delete`.

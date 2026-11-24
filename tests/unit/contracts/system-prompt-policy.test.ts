@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { DEFAULT_SYSTEM_PROMPT_CONTENT, MAX_SYSTEM_PROMPT_CODE_POINTS, normalizeSystemPromptContent, serializeSystemPromptContent } from "../../../packages/contracts/src/system-prompt-policy.js";
-import { CURRENT_SYSTEM_PROMPT_DEFAULT, LEGACY_BASELINE_DEFAULT_REVISION, hashSystemPromptContent, requiresPromptPolicyCapability } from "../../../packages/contracts/src/system-prompt-policy-hash.js";
+import { CURRENT_SYSTEM_PROMPT_DEFAULT, LEGACY_BASELINE_DEFAULT_REVISION, hashSystemPromptContent, requiresPromptPolicyCapability } from "../../../packages/shared/src/system-prompt-policy-hash.js";
 import { CODE_DELIVERY_PROTOCOL } from "../../../packages/contracts/src/remi-rules.js";
 import { CHAT_ARTIFACT_DELIVERY_PROTOCOL, ISSUE_ARTIFACT_DELIVERY_PROTOCOL } from "../../../packages/contracts/src/artifact-delivery.js";
 

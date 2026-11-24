@@ -265,7 +265,8 @@ export function registerDaemonReportHandlers(layer: DaemonProtocolLayer, store: 
                 || (p.instructions !== undefined && typeof p.instructions !== "string")) reject();
               try {
                 store.recordTaskPrompt(taskId, { mode: p.mode as "bootstrap" | "delta", prompt: p.prompt as string, sha256: p.sha256 as string,
-                  ...(typeof p.instructions === "string" ? { instructions: p.instructions } : {}) });
+                  ...(typeof p.instructions === "string" ? { instructions: p.instructions } : {}),
+                  ...(p.system_prompt_policy !== undefined ? { systemPromptPolicy: p.system_prompt_policy as import("@multiremi/contracts/system-prompt-policy.js").SystemPromptPolicyBinding } : {}) });
               }
               catch { reject(); }
               break;

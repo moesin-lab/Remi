@@ -128,8 +128,7 @@ export function postgresInventoryTarget(env: NodeJS.ProcessEnv) {
   if (sslMode && !['disable','prefer','require','verify-ca','verify-full'].includes(sslMode)) {
     throw new Error('Unsupported PGSSLMODE for PostgreSQL inventory adoption');
   }
-  const requireTls = sslMode && ['require','verify-ca','verify-full'].includes(sslMode);
-  return Object.freeze({ url: requireTls ? `${url}?sslmode=${sslMode}` : url, target,
+  return Object.freeze({ url: sslMode ? `${url}?sslmode=${sslMode}` : url, target,
     key: `postgres://${host}:${port}/${encodeURIComponent(database)}` });
 }
 

@@ -40,7 +40,9 @@ it('rejects ambiguous endpoints, implicit database names and alternative routing
 });
 
 for (const [address, hostname] of [['127.0.0.1','127.0.0.1'], ['[0:0:0:0:0:0:0:1]','::1']]) {
-  it(`checks actual Bun worker client options for ${address} without opening a database connection`, () => {
+  it.each([
+    [undefined, 0], ['disable', 0], ['prefer', 1], ['require', 2], ['verify-ca', 3], ['verify-full', 4],
+  ] as const)(`checks actual Bun worker client options for ${address} with PGSSLMODE=%s`, (mode, expectedMode) => {
     const dir = mkdtempSync(join(tmpdir(), 'scm-options-'));
     try {
       const workerFile = join(dir, 'options-worker.ts');
@@ -51,16 +53,17 @@ for (const [address, hostname] of [['127.0.0.1','127.0.0.1'], ['[0:0:0:0:0:0:0:1
         const { options } = connect(url, true, target);
         postMessage({ key, host: options.hostname, port: options.port, database: options.database,
           adapter: options.adapter, auth: options.username === 'fixture' && options.password === 'secret', socket: !!options.path,
-          tlsMode: options.sslMode });`);
+          configuredMode: new URL(url).searchParams.get('sslmode'), tlsMode: options.sslMode });`);
       const probe = Bun.spawnSync([process.execPath, '-e', `
         const worker = new Worker(process.argv[1]);
         worker.onerror = () => process.exit(1);
         worker.onmessage = event => { console.log(JSON.stringify(event.data)); process.exit(0); };`, workerFile], {
-        timeout: 4000, env: { PATH: process.env.PATH, HOME: dir, PGSSLMODE: 'verify-full', BUN_INSTALL_CACHE_DIR: join(dir,'install'),
+        timeout: 4000, env: { PATH: process.env.PATH, HOME: dir, ...(mode && { PGSSLMODE: mode }), BUN_INSTALL_CACHE_DIR: join(dir,'install'),
           BUN_RUNTIME_TRANSPILER_CACHE_PATH: join(dir,'transpiler'), MULTIREMI_DATABASE_URL: fixtureUrl.replace('127.0.0.1',address) } });
       expect(probe.exitCode, probe.stderr.toString()).toBe(0);
       expect(JSON.parse(probe.stdout.toString())).toEqual({ key: `postgres://${hostname === '::1' ? '[::1]' : hostname}:5432/MiX%20Case`,
-        host: hostname, port: 5432, database: 'MiX Case', adapter: 'postgres', auth: true, socket: false, tlsMode: 4 });
+        host: hostname, port: 5432, database: 'MiX Case', adapter: 'postgres', auth: true, socket: false,
+        configuredMode: mode ?? null, tlsMode: expectedMode });
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 }

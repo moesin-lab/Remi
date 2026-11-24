@@ -108,7 +108,7 @@ kind 为 workflow_run，保留 status、conclusion 和 runAttempt。同一 run I
 - 具备**独立受控、确认属于目标库的历史快照**时，针对隔离副本使用 `--export-inventory`，保存原始输出字节。需由独立的备份/审计管理方核验来源、版本、快照时间及旧 writer 隔离记录，并从受控副本计算文件 SHA-256。确认这份记录先于旧 writer 重入。level 5 还须确认所有历史强度已有可信依据。若无这样的记录，继续保持停写。
 - 支持主机独立预置的 `/etc/remi/scm-cutover-anchors.json`。`/etc`、`/etc/remi` 和文件必须由 root 持有、禁止组及其他用户写入，路径不得含符号链接。审核操作员不应拥有修改该文件的权限。`targets` 按 `sqlite:<规范绝对路径>` 或 `postgres://<主机>:<端口>/<库名>` 分别列出目标的 `sha256`。有独立连续隔离证明的旧部分分类才可登记 `continuousIsolation:true`。凭据、查询参数和调用者提供的哈希不用于选择信任来源。主机不能提供此来源时保持隔离。
 - PostgreSQL 历史采纳要求 `MULTIREMI_DATABASE_URL` 指定真实监听 IP、显式端口和区分大小写的库名，例如 `postgres://127.0.0.1:5432/Remi` 或 `postgres://[::1]:5432/Remi`。管理员须独立确认直连拓扑和对应 IP 键，DNS 名（含 localhost）、代理、池化器和端口转发均不适用。无法确认时保持隔离。清除 `PGDATABASE`、`PG_DATABASE`、`PGPORT`、`PG_PORT`、`PGHOST`、`PG_HOST`、`PGHOSTADDR`、`PG_HOSTADDR`、`PGSERVICE`、`PGSERVICEFILE` 和 `PGOPTIONS`。凭据仅用于认证，保留 TLS 验证。CLI 先以指定目标查受管 pin，worker 核对实际驱动参数；同一写事务获取迁移锁、排查其他连接并验证后端库名、IP 和端口。身份不符即中止，不能据此改选 pin。
-- 端点要求 TLS 时可设置 `PGSSLMODE=require`、`verify-ca` 或 `verify-full`；使用 `verify-full` 时证书须覆盖指定 IP。如果无法验证，请保持隔离并核对证书。
+- 未设置 `PGSSLMODE` 时沿用驱动默认行为。显式设置 `disable` 会关闭 TLS，`prefer` 会优先尝试 TLS。端点要求 TLS 时可设置 `require`、`verify-ca` 或 `verify-full`。使用 `verify-full` 时证书须覆盖指定 IP。如果无法验证，请保持隔离并核对证书。
 - 目标离线 CLI 使用 `--adopt-inventory <历史文件>` 校验预置摘要并保存历史完整基线。之后使用同一查询、审核和 `--finalize` 流程。原 level 4 已处理的缺行只能在最终提交时补弱 `[]`；未处理尾页仅在有连续隔离证明且快照一致时续跑。已证强度与 inactive 保留。level 5 无来源的缺行不可恢复。从当前文件自身计算哈希并自行注册会破坏来源证明，维护过程不提供注册命令。
 
 捕获中断后继续隔离，再执行 `--hold-for-rollback`。若完整预捕获摘要已落库且仍与现状一致，可以补齐缺页；缺少该摘要或内容已变则维持停写。存储量随基线与差异行数增长，维护锁窗包括全量枚举和重验。前后快照只能证明端点，证明期间行为需可信日志。旧版不识别新门禁，数据库锁及连接清点不能替代进程隔离。

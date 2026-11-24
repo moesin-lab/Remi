@@ -1248,6 +1248,50 @@ export type MultiremiTaskStatus =
 
 export type MultiremiTaskHumanRequestKind = "permission" | "question";
 
+export type RepositoryActivityView = "active" | "history";
+export type RepositoryActivityRelation = "direct" | "issue_pr" | "project_context";
+
+export interface RepositoryActivityQuery {
+  view?: RepositoryActivityView;
+  status?: MultiremiTaskStatus;
+  agent_id?: string;
+  q?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface RepositoryActivityChangedPayload {
+  workspace_id: string;
+  repository_ids: string[];
+}
+
+export interface RepositoryActivityItem {
+  task_id: string;
+  status: MultiremiTaskStatus;
+  relation: RepositoryActivityRelation;
+  agent: { id: string; name: string | null } | null;
+  issue: { id: string; key: string; title: string } | null;
+  issue_session: { id: string; title: string } | null;
+  attempt: number;
+  created_at: string;
+  started_at: string | null;
+  ended_at: string | null;
+  progress_summary: string | null;
+  wait_reason: string | null;
+  failure_reason: string | null;
+  error_summary: string | null;
+  worktree: { branch: string | null; status: string } | null;
+  change_requests: { id: string; number: number | null; state: MultiremiScmChangeRequestState; url: string | null }[];
+  change_request_count: number;
+}
+
+export interface RepositoryActivityResponse {
+  items: RepositoryActivityItem[];
+  next_cursor: string | null;
+  has_more: boolean;
+  as_of: string;
+}
+
 export type MultiremiTaskHumanRequestStatus = "pending" | "responded" | "timeout" | "cancelled";
 
 export interface MultiremiTaskHumanRequest {

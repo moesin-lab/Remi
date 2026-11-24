@@ -191,6 +191,10 @@ compatibility. JSON request input remains available through `--data` or `--file`
 
 ### Repository checkout defaults
 
+`remi repo activity <repository-id> --view history --status failed --output json` lists repository executions, newest first. The default view is `active`. Use `--agent-id` and `--query` to filter by executor and Issue key or title. Pass `next_cursor` to `--cursor` with the same filters and `--limit` (default 30, maximum 100). Task credentials can retrieve their own execution within their workspace.
+
+The API derives membership from the direct execution target, then current linked change requests, then the Issue project's current repository resources. Project membership describes available context. Rebinding resources or unlinking a change request can change historical results. Branch information comes from the Issue's current worktree report.
+
 `remi repo checkout <repository-or-url>` without `--ref` prefers the workspace
 repository's configured `default_branch`. Direct URLs use a best-effort lookup
 in the repository directory; lookup failures do not prevent checkout. If the

@@ -728,12 +728,14 @@ export function startMultiremiServer(options: MultiremiApiOptions & { port?: num
   const unsubscribeTaskEnqueued = store.onTaskEnqueued((task) => {
     notifyDaemonTaskAvailable(daemonWebSockets, store, task);
     notifyBrowserTaskEvent(browserWebSockets, browserScopeWebSockets, "task:queued", task);
+    store.notifyTaskRepositoryActivity(task);
   });
   const unsubscribeTaskEvent = store.onTaskEvent((event) => {
     if (event.type === "task:waiting_local_directory") {
       notifyDaemonTaskEvent(daemonWebSockets, event.type, event.task);
     }
     notifyBrowserTaskEvent(browserWebSockets, browserScopeWebSockets, event.type, event.task);
+    store.notifyTaskRepositoryActivity(event.task);
   });
   const unsubscribeTaskMessages = store.onTaskMessages(({ task, messages }) => {
     notifyBrowserTaskMessages(store, browserWebSockets, browserScopeWebSockets, task, messages);

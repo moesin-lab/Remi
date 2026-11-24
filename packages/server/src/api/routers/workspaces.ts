@@ -85,6 +85,8 @@ import {
 } from "../../prompts/workspace-settings.js";
 import { buildPlatformPromptTemplatePreview } from "../../prompts/platform-template.js";
 import { listWorkspaceRepositories } from "../helpers/repositories.js";
+import { currentTaskAccessToken, currentWorkspaceRoleStrict } from "../wire/context.js";
+import { ActivityQueryError } from "../../store/repository-activity.js";
 import {
   discoverGatewayModels,
   probeGatewayModels,
@@ -489,6 +491,24 @@ export function registerWorkspaceRoutes(app: Hono, deps: RouterDeps): void {
       if (error instanceof WorkspaceRepositoryError) {
         return c.json({ error: error.message }, error.status);
       }
+      throw error;
+    }
+  });
+  app.get("/api/workspaces/:id/repos/:repositoryId/activity", (c) => {
+    const workspaceId = c.req.param("id");
+    const denied = denyCurrentUserWorkspaceAccess(c, store, workspaceId);
+    if (denied) return denied;
+    const token = currentTaskAccessToken(c);
+    if (token && (!token.taskId || token.workspaceId !== workspaceId)) return c.json({ error: "forbidden" }, 403);
+    try {
+      const repository = listWorkspaceRepositories(store, workspaceId).find(repo => repo.id === c.req.param("repositoryId"));
+      if (!repository) return c.json({ error: "repository not found" }, 404);
+      const role = currentWorkspaceRoleStrict(c, store, workspaceId);
+      const privateAgentOwner = role === "owner" || role === "admin" ? null : authenticatedRequestUserId(c);
+      return c.json(store.listRepositoryActivity({ workspaceId, repository, taskId: token?.taskId ?? null, privateAgentOwner }, c.req.query()));
+    } catch (error) {
+      if (error instanceof ActivityQueryError) return c.json({ error: error.message }, 400);
+      if (error instanceof WorkspaceRepositoryError) return c.json({ error: error.message }, error.status);
       throw error;
     }
   });

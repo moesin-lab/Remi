@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { BooleanWithDefaultSchema, OptionalStringSchema } from "./primitives";
+import { BooleanWithDefaultSchema, OptionalBooleanSchema, OptionalStringSchema } from "./primitives";
 
 export interface AppConfigResponse {
   cdn_domain: string;
@@ -10,6 +10,12 @@ export interface AppConfigResponse {
   analytics_environment?: string;
   daemon_server_url?: string;
   workspace_creation_disabled?: boolean;
+  /**
+   * Read-only primary security activation flag reported by `GET /api/config`.
+   * Only an explicit `false` means JWT registration is disabled; `true` or
+   * `undefined` (missing/unknown/malformed) must never default to `false`.
+   */
+  jwt_registration_required?: boolean;
 }
 
 export const AppConfigSchema = z.object({
@@ -21,6 +27,7 @@ export const AppConfigSchema = z.object({
   analytics_environment: OptionalStringSchema,
   daemon_server_url: OptionalStringSchema,
   workspace_creation_disabled: BooleanWithDefaultSchema(false).optional(),
+  jwt_registration_required: OptionalBooleanSchema,
 }).loose();
 
 export const EMPTY_APP_CONFIG: AppConfigResponse = {

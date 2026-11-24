@@ -157,7 +157,7 @@ node scripts/local-profile.mjs stable token
 node scripts/local-profile.mjs dev token
 ```
 
-命令使用该 profile 外部 `api.env` 中的 `JWT_SECRET`，离线签发有效期 24 小时、身份为 `local` 的会话 JWT；不会输出永久主令牌或签名密钥。它沿用本机 `local` 用户的既有权限，工作区列表按该用户的成员关系过滤。登录时 `/api/me` 设置 HttpOnly Cookie，供附件预览和原生下载使用；到期后重新运行命令并登录。会话密钥不要放进 Git、URL 或截图。复制整个 stable 配置目录给 dev 会连带复制身份与加密密钥，应让脚本为 dev 单独初始化。
+命令先向所选环境的本机 API 发起只读探测（`stable` 探测 `http://127.0.0.1:16120/api/config`，`dev` 探测 `http://127.0.0.1:16220/api/config`，5 秒超时、`redirect: "error"`），读取主库 `multiremi_security_state.feature_activation` 对应的只读布尔字段 `jwt_registration_required`（主库安全状态不可用时 `/api/config` 返回 `503`），绝不根据本地 env 文件自行推定关闭态。仅当返回值为精确布尔 `false` 时，才继续使用该 profile 外部 `api.env` 中的 `JWT_SECRET` 离线签发有效期 24 小时、身份为 `local` 的会话 JWT；不会输出永久主令牌或签名密钥。当 API 不可达、返回非 2xx 或响应不可解析时，命令 fail-closed 拒绝并提示 `Cannot verify JWT registration state; start the selected profile API and authenticate online`；当 `jwt_registration_required` 为 `true`、缺失或非布尔未知值时（绝不默认按 `false` 处理），命令拒绝离线签发并提示 `Offline JWT mint is disabled when registration is required or unknown; use online authentication with a trusted source adapter`。在激活域内，请通过具备可信来源的在线认证（如 `POST /auth/password` 经主库持久密码证明并登记精确 compact JWT 材料）登录；续期、派生、PAT 与 daemon 签发入口在对应来源适配器就绪前仍保持 `503` 门禁。离线签发的关闭态 JWT 沿用本机 `local` 用户的既有权限，工作区列表按该用户的成员关系过滤；登录时 `/api/me` 设置 HttpOnly Cookie，供附件预览和原生下载使用，到期后重新运行命令并登录。会话密钥不要放进 Git、URL 或截图。复制整个 stable 配置目录给 dev 会连带复制身份与加密密钥，应让脚本为 dev 单独初始化。
 
 ## 日常操作与升级
 

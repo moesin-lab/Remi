@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
 import { api } from "../api";
 import type { ExecutionEndpoint } from "../api/schemas/execution-endpoints";
 import { runtimeKeys } from "./queries";
@@ -9,7 +10,8 @@ const maxAge = 5 * 60 * 1000;
 export function useSystemModelCatalog(workspaceId: string, endpoint: ExecutionEndpoint | undefined, protocol: SystemProtocol) {
   const client = useQueryClient();
   const enabled = !!endpoint && endpoint.connection.options?.fetch_models !== false;
-  const key = [...runtimeKeys.all(workspaceId), "system-model-catalog", endpoint?.id, endpoint?.revision, protocol];
+  const key = useMemo(() => [...runtimeKeys.all(workspaceId), "system-model-catalog", endpoint?.id, endpoint?.revision, protocol],
+    [workspaceId, endpoint?.id, endpoint?.revision, protocol]);
   const read = async () => {
     const response = await api.getExecutionEndpointCatalog(workspaceId, endpoint!.id);
     return response.catalogs.find(row => row.protocol === protocol && row.revision <= endpoint!.revision) ?? null;
@@ -17,17 +19,33 @@ export function useSystemModelCatalog(workspaceId: string, endpoint: ExecutionEn
   const options = { staleTime: maxAge, retry: false, retryOnMount: false, refetchOnWindowFocus: false, refetchOnReconnect: false } as const;
   const snapshot = useQuery({ ...options, queryKey: key, queryFn: read, enabled });
   const row = snapshot.data;
-  const expired = !row || row.revision !== endpoint?.revision || !(Date.parse(row.last_checked_at) >= Date.now() - maxAge);
-  const refresh = useQuery({ ...options, queryKey: [...key, "refresh"], enabled: enabled && snapshot.isSuccess && expired,
+  const checkedAt = row && row.revision === endpoint?.revision ? Date.parse(row.last_checked_at) || 0 : 0;
+  const expired = checkedAt + maxAge <= Date.now();
+  const refresh = useQuery({ ...options, queryKey: [...key, "refresh"], enabled: false,
     queryFn: async () => {
       const { inspection, persisted } = await api.inspectExecutionEndpoint(workspaceId, { endpoint_id: endpoint!.id, protocol, operation: "models" });
       const result = inspection.results.find(item => item.protocol === protocol && item.operation === "models");
       const current = await read();
       if (current) client.setQueryData(key, current);
-      if (result?.state === "error") return { failed: true, code: result.error_code };
-      return { failed: !persisted || !result || current?.revision !== endpoint!.revision || current.last_checked_at < inspection.checked_at };
+      const confirmed = persisted && current?.revision === endpoint!.revision && current.last_checked_at >= inspection.checked_at;
+      return { failed: !confirmed || !result || result.state === "error", code: result?.error_code,
+        checkedAt: confirmed ? Date.parse(current.last_checked_at) : 0 };
     },
   });
+  const { refetch, dataUpdatedAt, errorUpdatedAt, isFetching } = refresh;
+  const confirmedAt = refresh.data?.checkedAt ?? 0;
+  const lastAttempt = confirmedAt > dataUpdatedAt - maxAge ? confirmedAt : dataUpdatedAt;
+  useEffect(() => {
+    if (!enabled || !snapshot.isSuccess || isFetching) return;
+    const deadline = Math.max(checkedAt, lastAttempt, errorUpdatedAt) + maxAge;
+    const run = () => {
+      const latest = client.getQueryState([...key, "refresh"]);
+      if (latest?.fetchStatus !== "idle" || latest.dataUpdatedAt !== dataUpdatedAt || latest.errorUpdatedAt !== errorUpdatedAt) return;
+      void refetch({ cancelRefetch: false });
+    };
+    const timer = setTimeout(run, Math.max(0, deadline - Date.now()));
+    return () => clearTimeout(timer);
+  }, [enabled, snapshot.isSuccess, isFetching, checkedAt, lastAttempt, dataUpdatedAt, errorUpdatedAt, client, key, refetch]);
   const failed = snapshot.isError || refresh.isError || refresh.data?.failed || row?.state === "error";
   return {
     models: (enabled ? row?.models : undefined) ?? endpoint?.connection.options?.manual_models ?? [],

@@ -72,12 +72,122 @@ function snapshot(protocol: string, id: string, revision = 2, checked = new Date
   return { protocol, revision, models_revision: revision, last_checked_at: checked, last_success_at: checked,
     state: "ok", models: [{ id, name: `Display ${id}` }] };
 }
-function options(field: string) {
-  return Array.from(document.querySelectorAll<HTMLOptionElement>(`#${field}-models option`)).map(option => option.value);
+async function expectOptions(field: string, ids: readonly string[]) {
+  const input = document.getElementById(field) as HTMLInputElement;
+  const original = input.value;
+  await userEvent.click(input);
+  await userEvent.clear(input);
+  await waitFor(() => {
+    const listId = input.getAttribute("aria-controls");
+    const options = listId ? document.getElementById(listId)?.querySelectorAll('[role="option"]') : undefined;
+    expect(Array.from(options ?? [], option => option.firstElementChild?.textContent)).toEqual(ids);
+  });
+  await userEvent.keyboard("{Escape}");
+  fireEvent.change(input, { target: { value: original } });
+  await userEvent.tab();
 }
 const titleField = "issue-auto-title-model";
 const chatField = "progress-summary-openai-model";
 const messagesField = "progress-summary-claude-model";
+
+it.each([["opaque-3", "keyboard"], ["Blue Orc", "keyboard"], ["blue orc", "mouse"]])("selects %s by %s and reopens the saved ID", async (prefix, method) => {
+  bind("e1", null);
+  const row = { ...snapshot(chat, "opaque-39"), models: [{ id: "opaque-39", name: "Blue Orchid" }] };
+  api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [row] });
+  api.updateWorkspace.mockImplementation(async (_ws, { settings }) => ({ ...workspace, settings }));
+  const view = show();
+  const input = await screen.findByLabelText(enSettings.modelGateway.auto_title_model_label);
+  await userEvent.clear(input);
+  await userEvent.type(input, prefix);
+  if (method === "keyboard") await userEvent.keyboard("{ArrowDown}{Enter}");
+  else await userEvent.click(await screen.findByRole("option", { name: /Blue Orchid/ }));
+  expect(input).toHaveValue("opaque-39");
+  expect(api.updateWorkspace).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: enSettings.modelGateway.auto_title_save }));
+  workspace.settings = api.updateWorkspace.mock.calls[0]![1].settings;
+  view.unmount(); show();
+  expect(await screen.findByLabelText(enSettings.modelGateway.auto_title_model_label)).toHaveValue("opaque-39");
+});
+
+it("refreshes both observers once at the deadline, backs off after failure, and cancels on unmount", async () => {
+  vi.useFakeTimers();
+  const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+  try {
+    bind("e1", null);
+    api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [snapshot(chat, "old", 2, new Date(Date.now() - 297000).toISOString())] });
+    api.inspectExecutionEndpoint.mockRejectedValue(new Error("offline"));
+    const view = show();
+    await advance(100);
+    fireEvent.input(screen.getByLabelText(enSettings.modelGateway.auto_title_model_label), { target: { value: "draft" } });
+    await advance(2899);
+    expect(api.inspectExecutionEndpoint).not.toHaveBeenCalled();
+    await advance(1);
+    expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(1);
+    await advance(299999);
+    expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText(enSettings.modelGateway.auto_title_model_label)).toHaveValue("draft");
+    view.unmount();
+    await advance(300001);
+    expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
+});
+
+it.each(["workspace", "endpoint", "disabled"])("cancels the previous deadline on %s change", async change => {
+  vi.useFakeTimers();
+  const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+  try {
+    bind("e1", null);
+    api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [snapshot(chat, "old", 2, new Date(Date.now() - 297000).toISOString())] });
+    const view = show();
+    await advance(100);
+    expect(api.getExecutionEndpointCatalog).toHaveBeenCalled();
+    if (change === "workspace") {
+      workspace.id = "next";
+      bind(null, null);
+      view.reopen();
+    } else if (change === "endpoint") {
+      bind(null, null);
+      await act(() => view.client.invalidateQueries({ queryKey: ["system-model-endpoints", "ws"] }));
+    } else {
+      api.listExecutionEndpoints.mockResolvedValue({ endpoints: [{ id: "e1", revision: 3, connection: {
+        auth_mode: "api_key", protocols: [chat], options: { fetch_models: false },
+      } }] });
+      await act(() => view.client.invalidateQueries());
+    }
+    await advance(50);
+    await advance(300001);
+    expect(api.inspectExecutionEndpoint).not.toHaveBeenCalled();
+    view.unmount();
+  } finally { vi.useRealTimers(); }
+});
+
+it.each(["ok", "error"])("uses the persisted %s check time for the next deadline even when its response arrives later", async state => {
+  vi.useFakeTimers();
+  const advance = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+  try {
+    bind("e1", null);
+    const row = snapshot(chat, "cached", 2, new Date(Date.now() - 297000).toISOString());
+    api.getExecutionEndpointCatalog.mockImplementation(async () => ({ catalogs: [{ ...row }] }));
+    api.inspectExecutionEndpoint.mockImplementation(async () => {
+      row.last_checked_at = new Date().toISOString();
+      row.state = state;
+      await new Promise(resolve => setTimeout(resolve, 500));
+      return { persisted: true, inspection: { checked_at: row.last_checked_at, results: [{ protocol: chat, operation: "models", state }] } };
+    });
+    const view = show();
+    await advance(100);
+    await advance(2900);
+    expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(1);
+    await advance(500);
+    await advance(299499);
+    expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(1);
+    await advance(1);
+    expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(2);
+    view.unmount();
+  } finally { vi.useRealTimers(); }
+});
 
 it("shares automatic and manual refreshes, keeps protocol catalogs separate, and only saves explicitly", async () => {
   bind("e1", "e1");
@@ -89,17 +199,19 @@ it("shares automatic and manual refreshes, keeps protocol catalogs separate, and
     return { persisted: true, inspection: { checked_at: row.last_checked_at, results: [{ protocol, operation: "models", state: "ok" }] } };
   });
   show();
-  await waitFor(() => expect(options(titleField)).toEqual(["chat-id"]));
-  expect(options(chatField)).toEqual(["chat-id"]);
-  expect(options(messagesField)).toEqual(["claude-id"]);
-  expect(document.querySelector(`#${titleField}-models option`)).toHaveAttribute("label", "Display chat-id");
+  await screen.findByLabelText(enSettings.modelGateway.auto_title_model_label);
+  await expectOptions(titleField, ["chat-id"]);
+  await expectOptions(chatField, ["chat-id"]);
+  await expectOptions(messagesField, ["claude-id"]);
   expect(api.inspectExecutionEndpoint.mock.calls).toEqual([["ws", { endpoint_id: "e1", operation: "models", protocol: chat }]]);
   await userEvent.click(screen.getAllByRole("button", { name: enSettings.modelGateway.catalog_refresh })[0]!);
   await waitFor(() => expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(2));
   expect(api.saveSystemModelEndpoints).not.toHaveBeenCalled();
   expect(api.updateWorkspace).not.toHaveBeenCalled();
-  const choice = document.querySelector<HTMLOptionElement>(`#${titleField}-models option`)!;
-  fireEvent.input(screen.getByLabelText(enSettings.modelGateway.auto_title_model_label), { target: { value: choice.value } });
+  const title = screen.getByLabelText(enSettings.modelGateway.auto_title_model_label);
+  await userEvent.clear(title);
+  await userEvent.type(title, "chat-i");
+  await userEvent.click(await screen.findByRole("option", { name: /Display chat-id/ }));
   expect(api.updateWorkspace).not.toHaveBeenCalled();
   api.updateWorkspace.mockImplementation(async (_id, { settings }) => ({ ...workspace, settings }));
   await userEvent.click(screen.getByRole("button", { name: enSettings.modelGateway.auto_title_save }));
@@ -113,13 +225,17 @@ it("shows an expired snapshot immediately and ignores an unpersisted response fr
   let finish!: (result: unknown) => void;
   api.inspectExecutionEndpoint.mockReturnValue(new Promise(resolve => { finish = resolve; }));
   show();
-  await waitFor(() => expect(options(titleField)).toEqual(["old-id"]));
+  const input = await screen.findByLabelText(enSettings.modelGateway.auto_title_model_label);
+  await userEvent.clear(input);
+  await userEvent.type(input, "id");
+  expect(await screen.findByRole("option", { name: /old-id/ })).toBeInTheDocument();
   expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(1);
   expect(screen.getAllByText(/Loading models/).length).toBeGreaterThan(0);
   api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [snapshot(chat, "new-revision-id", 3)] });
   await act(async () => { finish({ persisted: false, inspection: { results: [{ protocol: chat, operation: "models", state: "ok", models: [{ id: "unconfirmed-id" }] }] } }); });
   await waitFor(() => expect(screen.getAllByText(/Model discovery failed/)).toHaveLength(2));
-  expect(options(titleField)).toEqual(["old-id"]);
+  expect(screen.getAllByRole("option").filter(option => option.closest('[role="listbox"]')).map(option => option.textContent)).toEqual(["old-idDisplay old-id"]);
+  expect(input).toHaveValue("id");
   expect(api.inspectExecutionEndpoint).toHaveBeenCalledTimes(1);
 });
 
@@ -133,8 +249,9 @@ it("keeps old models after an embedded failure, accepts manual IDs and reopens l
   const view = show();
   await waitFor(() => expect(screen.getAllByText(/upstream_timeout/)).toHaveLength(2));
   expect(screen.getAllByText(/Last successful check/)).toHaveLength(2);
-  expect(options(chatField)).toEqual(["cached-id"]);
-  const input = screen.getByDisplayValue("retired-id");
+  await expectOptions(chatField, ["cached-id"]);
+  const input = screen.getByLabelText(enSettings.modelGateway.progress_openai_model_label);
+  expect(input).toHaveValue("retired-id");
   await userEvent.clear(input);
   await userEvent.type(input, "custom-id");
   expect(api.updateWorkspace).not.toHaveBeenCalled();
@@ -142,7 +259,7 @@ it("keeps old models after an embedded failure, accepts manual IDs and reopens l
   workspace.settings = api.updateWorkspace.mock.calls[0]![1].settings;
   expect(workspace.settings).toMatchObject({ extra: true, progress_summary: { model: "other-id", openai_model: "custom-id" } });
   view.unmount(); show();
-  expect(await screen.findByDisplayValue("custom-id")).toBeInTheDocument();
+  expect(await screen.findByLabelText(enSettings.modelGateway.progress_openai_model_label)).toHaveValue("custom-id");
   expect(api.saveSystemModelEndpoints).not.toHaveBeenCalled();
 });
 
@@ -151,8 +268,9 @@ it.each([[codex, []], [{ ...codex, hasToken: false }, ["anthropic-id"]], [{ ...c
   api.getRelayConfig.mockResolvedValue({ codex: legacy, claude });
   api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [snapshot(messages, "anthropic-id")] });
   show();
-  await waitFor(() => expect(options(messagesField)).toEqual(["anthropic-id"]));
-  await waitFor(() => expect(options(titleField)).toEqual(expected));
+  await screen.findByLabelText(enSettings.modelGateway.auto_title_model_label);
+  await expectOptions(messagesField, ["anthropic-id"]);
+  await expectOptions(titleField, expected);
   expect(api.inspectExecutionEndpoint).not.toHaveBeenCalled();
 });
 
@@ -161,7 +279,7 @@ it("only shows manual models when discovery is disabled", async () => {
   api.listExecutionEndpoints.mockResolvedValue({ endpoints: [{ id: "e1", revision: 3, connection: { auth_mode: "api_key", protocols: [chat], options: { fetch_models: false, manual_models: [{ id: "manual-id" }] } } }] });
   show();
   expect(await screen.findByText(enSettings.modelGateway.catalog_disabled)).toBeInTheDocument();
-  expect(options(chatField)).toEqual(["manual-id"]);
+  await expectOptions(chatField, ["manual-id"]);
   expect(api.getExecutionEndpointCatalog).not.toHaveBeenCalled();
   expect(api.inspectExecutionEndpoint).not.toHaveBeenCalled();
 });
@@ -195,8 +313,9 @@ it.each(["workspace", "endpoint"])("ignores a late refresh after changing %s", a
   await waitFor(() => expect(screen.queryByRole("button", { name: enSettings.modelGateway.catalog_refresh })).not.toBeInTheDocument());
   api.getExecutionEndpointCatalog.mockResolvedValue({ catalogs: [snapshot(chat, "late-id")] });
   await act(async () => { finish({ persisted: true, inspection: { results: [{ protocol: chat, operation: "models", state: "ok" }] } }); });
-  expect(options(chatField)).toEqual([]);
-  expect(options(titleField)).toEqual([]);
+  await screen.findByLabelText(enSettings.modelGateway.auto_title_model_label);
+  await expectOptions(chatField, []);
+  await expectOptions(titleField, []);
   expect(api.saveSystemModelEndpoints).not.toHaveBeenCalled();
   expect(api.updateWorkspace).not.toHaveBeenCalled();
 });

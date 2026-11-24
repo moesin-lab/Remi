@@ -1,22 +1,36 @@
-import type { ComponentProps } from "react";
+import { Autocomplete } from "@base-ui/react/autocomplete";
+import { useState } from "react";
 import { useSystemModelCatalog, type ExecutionEndpoint, type SystemProtocol } from "@multiremi/core/runtimes";
 import { Button } from "@multiremi/ui/components/ui/button";
 import { Input } from "@multiremi/ui/components/ui/input";
 import { useT } from "../../i18n";
 
-type Props = ComponentProps<typeof Input> & { workspaceId: string; endpoint?: ExecutionEndpoint; protocol: SystemProtocol; pending?: boolean; inactive?: boolean };
+type Props = { id: string; value: string; onValueChange: (value: string) => void; placeholder: string; className: string;
+  workspaceId: string; endpoint?: ExecutionEndpoint; protocol: SystemProtocol; pending?: boolean; inactive?: boolean };
 
-export function SystemModelInput({ workspaceId, endpoint, protocol, pending, inactive, ...input }: Props) {
+export function SystemModelInput({ workspaceId, endpoint, protocol, pending, inactive, value, onValueChange, ...input }: Props) {
   const { t } = useT("settings");
   const catalog = useSystemModelCatalog(workspaceId, inactive ? undefined : endpoint, protocol);
-  const listId = `${input.id}-models`;
   const disabled = endpoint?.connection.options?.fetch_models === false;
+  const [open, setOpen] = useState(false);
+  const term = value.trim().toLowerCase();
+  const matches = catalog.models.filter(model => model.id.toLowerCase().includes(term) || model.name?.toLowerCase().includes(term));
   return <>
-    <Input {...input} list={inactive ? undefined : listId} />
+    <Autocomplete.Root items={catalog.models} filteredItems={matches} value={value} onValueChange={onValueChange} openOnInputClick modal={false}
+      open={open && !inactive && matches.length > 0} onOpenChange={setOpen} itemToStringValue={model => model.id}>
+      <Autocomplete.Input {...input} render={<Input />} />
+      {!inactive && <Autocomplete.Portal>
+        <Autocomplete.Positioner sideOffset={4} className="z-50 w-(--anchor-width)">
+          <Autocomplete.Popup className="max-h-56 overflow-y-auto rounded-md border bg-popover text-popover-foreground shadow-md">
+            <Autocomplete.List>{(model: (typeof catalog.models)[number]) => <Autocomplete.Item key={model.id} value={model}
+              className="cursor-pointer px-2 py-1 text-sm data-highlighted:bg-accent">
+              <span className="break-all font-mono">{model.id}</span>{model.name && model.name !== model.id && <span className="ml-2">{model.name}</span>}
+            </Autocomplete.Item>}</Autocomplete.List>
+          </Autocomplete.Popup>
+        </Autocomplete.Positioner>
+      </Autocomplete.Portal>}
+    </Autocomplete.Root>
     {!inactive && <>
-      <datalist id={listId}>
-        {catalog.models.map(model => <option key={model.id} value={model.id} label={model.name ?? model.id} />)}
-      </datalist>
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         {endpoint && <span>{protocol}</span>}
         <span role="status">

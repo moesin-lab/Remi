@@ -1,3 +1,4 @@
+import { findRootReadonlyFields } from "@multiremi/contracts/root-authority.js";
 import {
   CliError,
   ResourceResolver,
@@ -89,17 +90,19 @@ function agentSpecs(): CommandSpec[] {
     }, [legacyAlias(["multiremi", "agent", "get"], "remi agent get")]),
     spec("agent.create", ["agent", "create"], "Create an agent", "write", HUMAN, [], [...INPUT_OPTIONS, ...AGENT_FIELDS], async (invocation) => {
       const client = await clientFor(invocation);
+      const body = rejectReadonlyRootFields(await requestBody(invocation, agentBody(invocation, true)));
       const response = await client.request({
         method: "POST",
         path: "/api/agents",
-        body: await requestBody(invocation, agentBody(invocation, true)),
+        body,
       });
       renderResource(invocation, response.data);
     }),
     spec("agent.update", ["agent", "update"], "Update an agent", "write", HUMAN, [ref("agent")], [...INPUT_OPTIONS, ...AGENT_FIELDS], async (invocation) => {
       const client = await clientFor(invocation);
       const agent = await resolveAgent(client, invocation, positional(invocation, 0, "agent"));
-      const response = await client.request({ method: "PUT", path: `/api/agents/${encodePath(String(agent.id))}`, body: await requestBody(invocation, agentBody(invocation, false)) });
+      const body = rejectReadonlyRootFields(await requestBody(invocation, agentBody(invocation, false)));
+      const response = await client.request({ method: "PUT", path: `/api/agents/${encodePath(String(agent.id))}`, body });
       renderResource(invocation, response.data);
     }, [
       { path: ["agent", "edit"], deprecatedSince: DEPRECATED_SINCE, replacement: "remi agent update" },
@@ -183,10 +186,11 @@ function agentSpecs(): CommandSpec[] {
     }),
     spec("agent.template.create", ["agent", "template", "create"], "Create an agent from a template", "write", HUMAN, [ref("template")], [...INPUT_OPTIONS, ...AGENT_FIELDS], async (invocation) => {
       const client = await clientFor(invocation);
-      const response = await client.request({ method: "POST", path: "/api/agents/from-template", body: await requestBody(invocation, {
+      const body = rejectReadonlyRootFields(await requestBody(invocation, {
         ...agentBody(invocation, true),
         template_slug: positional(invocation, 0, "template"),
-      }) });
+      }));
+      const response = await client.request({ method: "POST", path: "/api/agents/from-template", body });
       renderResource(invocation, response.data);
     }),
     agentChildRead("agent.skill.list", ["agent", "skill", "list"], "List an agent's skills", "skills", "skills"),
@@ -498,6 +502,17 @@ function legacyAlias(path: string[], replacement: string, hidden = false): Comma
 }
 
 function ref(name: string) { return { name, required: true } as const; }
+
+function rejectReadonlyRootFields(body: Record<string, unknown>): Record<string, unknown> {
+  const readonlyFields = findRootReadonlyFields(body);
+  if (readonlyFields.length > 0) {
+    throw new CliError(
+      "usage",
+      `Read-only root field(s) cannot be written on agent payloads: ${readonlyFields.join(", ")}. Use \`remi root grant\` instead.`,
+    );
+  }
+  return body;
+}
 
 function agentBody(invocation: CommandInvocation, creating: boolean): Record<string, unknown> {
   return {

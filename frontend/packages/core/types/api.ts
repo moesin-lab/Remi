@@ -232,6 +232,11 @@ export interface PersonalAccessToken {
   expires_at: string | null;
   last_used_at: string | null;
   created_at: string;
+  family_id?: string | null;
+  origin_attempt_id?: string | null;
+  authenticated_subject?: { type: "user" | "agent"; id: string } | null;
+  beneficiary_user_id?: string | null;
+  is_agent_origin?: boolean;
 }
 
 export interface CreatePersonalAccessTokenRequest {

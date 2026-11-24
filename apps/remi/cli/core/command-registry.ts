@@ -56,6 +56,8 @@ export interface CommandSpec {
   aliases?: readonly CommandAlias[];
   capability?: string;
   auth?: readonly CliIdentity[];
+  /** True when the server dynamically authorizes effective system root (including eligible root tasks). */
+  rootConditional?: boolean;
   mutation?: CliMutation;
   outputs?: readonly CliOutputMode[];
   positionals?: readonly CliPositionalSpec[];
@@ -74,6 +76,7 @@ export interface CommandInventoryEntry {
   aliases: readonly CommandAlias[];
   capability: string | null;
   auth: readonly CliIdentity[];
+  rootConditional: boolean;
   mutation: CliMutation;
   outputs: readonly CliOutputMode[];
   parse: "strict" | "passthrough";
@@ -186,9 +189,13 @@ function taskParityCommandSpec(spec: CommandSpec): CommandSpec {
   const humanAllowed = spec.auth?.includes("human") === true;
   const denied = TASK_PARITY_DENIED_COMMAND_IDS.has(spec.id)
     || TASK_PARITY_DENIED_COMMAND_PREFIXES.some((prefix) => spec.id.startsWith(prefix));
-  return humanAllowed && !spec.auth?.includes("task") && !denied
-    ? { ...spec, auth: [...(spec.auth ?? []), "task"] }
-    : spec;
+  if (humanAllowed && !spec.auth?.includes("task")) {
+    if (!denied) return { ...spec, auth: [...(spec.auth ?? []), "task"] };
+    if (spec.rootConditional === undefined && !spec.retired && spec.capability) {
+      return { ...spec, rootConditional: true };
+    }
+  }
+  return spec;
 }
 
 export interface CommandExecutionOptions {
@@ -262,6 +269,7 @@ export class CommandRegistry {
       aliases: (spec.aliases ?? []).map((alias) => ({ ...alias, path: [...alias.path] })),
       capability: spec.capability ?? null,
       auth: [...(spec.auth ?? [])],
+      rootConditional: Boolean(spec.rootConditional),
       mutation: spec.mutation ?? "read",
       outputs: [...(spec.outputs ?? [])],
       parse: spec.parse ?? "strict",

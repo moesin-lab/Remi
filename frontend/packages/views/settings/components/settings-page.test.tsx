@@ -10,16 +10,27 @@ const statusRef = vi.hoisted(() => ({
   isPending: false,
   isSuccess: false,
 }));
+const rootContextRef = vi.hoisted(() => ({
+  data: null as { capabilities: { can_manage_root: boolean; can_manage_runtime_trust?: boolean; can_revoke_credential_family?: boolean; can_read_root_audit?: boolean } } | null,
+}));
 
 vi.mock("@tanstack/react-query", () => ({
-  useQuery: () => ({
-    data: statusRef.data,
-    isPending: statusRef.isPending,
-    isSuccess: statusRef.isSuccess,
-  }),
+  useQuery: (opts?: { queryKey?: readonly unknown[] }) => {
+    if (opts?.queryKey?.[0] === "root") {
+      return { data: rootContextRef.data, isPending: false, isSuccess: Boolean(rootContextRef.data) };
+    }
+    return {
+      data: statusRef.data,
+      isPending: statusRef.isPending,
+      isSuccess: statusRef.isSuccess,
+    };
+  },
 }));
 vi.mock("@multiremi/core/platform-lifecycle", () => ({
   platformStatusOptions: () => ({ queryKey: ["platform-lifecycle", "status"] }),
+}));
+vi.mock("@multiremi/core/root", () => ({
+  rootContextOptions: () => ({ queryKey: ["root", "context"] }),
 }));
 vi.mock("@multiremi/core/paths", () => ({
   useCurrentWorkspace: () => ({ name: "Acme" }),
@@ -48,6 +59,7 @@ vi.mock("./model-gateway-tab", () => ({ ModelGatewayTab: () => <div /> }));
 vi.mock("./labs-tab", () => ({ LabsTab: () => <div /> }));
 vi.mock("./storage-tab", () => ({ StorageTab: () => <div /> }));
 vi.mock("./platform-tab", () => ({ PlatformTab: () => <div /> }));
+vi.mock("./root-tab", () => ({ RootTab: () => <div /> }));
 
 import { SettingsPage } from "./settings-page";
 
@@ -62,6 +74,7 @@ describe("SettingsPage platform tab visibility", () => {
     statusRef.data = null;
     statusRef.isPending = false;
     statusRef.isSuccess = false;
+    rootContextRef.data = null;
   });
 
   it("shows the Version & Services tab optimistically while status is loading", () => {
@@ -94,5 +107,12 @@ describe("SettingsPage platform tab visibility", () => {
   it("hides the tab when the status request fails (e.g. 403)", () => {
     render(<SettingsPage />, { wrapper: Wrapper });
     expect(screen.queryByRole("tab", { name: /Version & Services/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /Root Authority/ })).not.toBeInTheDocument();
+  });
+
+  it("shows the Root Authority tab only when server capabilities allow root management", () => {
+    rootContextRef.data = { capabilities: { can_manage_root: true } };
+    render(<SettingsPage />, { wrapper: Wrapper });
+    expect(screen.getByRole("tab", { name: /Root Authority/ })).toBeInTheDocument();
   });
 });

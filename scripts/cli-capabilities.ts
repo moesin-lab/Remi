@@ -18,6 +18,7 @@ export interface CliManifestCommand {
   command: string;
   aliases: string[];
   auth: string[];
+  root_conditional?: boolean;
   capability: string | null;
   mutation: "read" | "write" | "destructive";
   output: string[];
@@ -61,6 +62,7 @@ export interface CliRuntimeCapabilities {
   commands: Record<string, {
     command: string;
     auth: string[];
+    root_conditional?: boolean;
     capability: string;
     output: string[];
   }>;
@@ -84,6 +86,7 @@ export function cliRuntimeCapabilities(manifest: CliCapabilitiesManifest): CliRu
       .map(([id, command]) => [id, {
         command: command.command,
         auth: command.auth,
+        ...(command.root_conditional ? { root_conditional: true } : {}),
         capability: command.capability!,
         output: command.output,
       }])),
@@ -189,6 +192,9 @@ export function validateCliCapabilities(
       if (command.capability !== entry.capability) errors.push(`${entry.id} capability differs from Registry`);
       if (command.mutation !== entry.mutation) errors.push(`${entry.id} mutation differs from Registry`);
       if (JSON.stringify(command.auth) !== JSON.stringify(entry.auth)) errors.push(`${entry.id} auth differs from Registry`);
+      if (Boolean(command.root_conditional) !== entry.rootConditional) {
+        errors.push(`${entry.id} root_conditional differs from Registry`);
+      }
       if (JSON.stringify(command.output) !== JSON.stringify(entry.outputs)) errors.push(`${entry.id} outputs differ from Registry`);
       const aliases = entry.aliases.map((alias) => `remi ${alias.path.join(" ")}`);
       if (JSON.stringify(command.aliases) !== JSON.stringify(aliases)) errors.push(`${entry.id} aliases differ from Registry`);

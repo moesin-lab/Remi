@@ -10129,6 +10129,116 @@
             "allowed": true
           },
           {
+            "id": "root.audit.list",
+            "command": "remi root audit list",
+            "capability": "root.audit.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.context",
+            "command": "remi root context",
+            "capability": "root.context",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.credential-family.revoke",
+            "command": "remi root credential-family revoke",
+            "capability": "root.credential-family.revoke",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.grant.create",
+            "command": "remi root grant create",
+            "capability": "root.grant.create",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.grant.list",
+            "command": "remi root grant list",
+            "capability": "root.grant.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.grant.revoke",
+            "command": "remi root grant revoke",
+            "capability": "root.grant.revoke",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.runtime-trust.get",
+            "command": "remi root runtime-trust get",
+            "capability": "root.runtime-trust.get",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.runtime-trust.grant",
+            "command": "remi root runtime-trust grant",
+            "capability": "root.runtime-trust.grant",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.runtime-trust.list",
+            "command": "remi root runtime-trust list",
+            "capability": "root.runtime-trust.list",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
+            "id": "root.runtime-trust.revoke",
+            "command": "remi root runtime-trust revoke",
+            "capability": "root.runtime-trust.revoke",
+            "outputs": [
+              "table",
+              "json",
+              "jsonl"
+            ],
+            "allowed": true
+          },
+          {
             "id": "runtime.activity",
             "command": "remi runtime activity",
             "capability": "runtime.activity",

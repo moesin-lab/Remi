@@ -526,5 +526,12 @@
     "model_routing": "모델 라우팅 · {{provider}}",
     "model_routing_hint": "선택한 모델과 사고 수준에 맞는 실행 그룹 및 Runtime을 찾습니다. 모델을 선택하지 않으면 호환 Runtime의 기본 모델을 사용합니다.",
     "fixed_group": "고정 실행 그룹 · {{group}}"
+  },
+  "root": {
+    "badge_effective": "시스템 Root",
+    "badge_granted_ineffective": "Root 부여됨(새 attempt 필요)",
+    "tooltip_effective": "시스템 root {{generation}}세대가 활성화됨(normal/maintainer/supervisor 역할과 직교).",
+    "tooltip_attempt_not_eligible": "Agent에 시스템 root가 부여되었으나 이 attempt는 권한 부여 이전에 생성되었습니다. 새 attempt를 시작하세요.",
+    "tooltip_ineffective_reason": "Agent에 시스템 root가 부여되었으나 현재 미적용({{reason}})."
   }
 }

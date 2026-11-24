@@ -7,7 +7,15 @@ export const PersonalAccessTokenSchema = z.object({
   expires_at: z.string().nullable(),
   last_used_at: z.string().nullable(),
   created_at: z.string(),
-});
+  family_id: z.string().nullable().optional(),
+  origin_attempt_id: z.string().nullable().optional(),
+  authenticated_subject: z.object({
+    type: z.enum(["user", "agent"]),
+    id: z.string(),
+  }).nullable().optional(),
+  beneficiary_user_id: z.string().nullable().optional(),
+  is_agent_origin: z.boolean().optional(),
+}).loose();
 
 export const PersonalAccessTokenListSchema = z.array(PersonalAccessTokenSchema);
 

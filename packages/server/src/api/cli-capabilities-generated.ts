@@ -48,6 +48,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.create",
       "output": [
         "table",
@@ -73,6 +74,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.delete",
       "output": [
         "table",
@@ -202,6 +204,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.organizer.update",
       "output": [
         "table",
@@ -227,6 +230,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.issue-topics.set",
       "output": [
         "table",
@@ -252,6 +256,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.ssh-mesh.update",
       "output": [
         "table",
@@ -264,6 +269,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.ssh-mesh.rotate",
       "output": [
         "table",
@@ -354,6 +360,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.relay.reveal",
       "output": [
         "table",
@@ -431,6 +438,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.bot-menu.update",
       "output": [
         "table",
@@ -443,6 +451,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.bot-menu.publish",
       "output": [
         "table",
@@ -455,6 +464,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.bot-menu.publish-status",
       "output": [
         "table",
@@ -467,6 +477,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.list",
       "output": [
         "table",
@@ -479,6 +490,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.create",
       "output": [
         "table",
@@ -491,6 +503,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.get",
       "output": [
         "table",
@@ -503,6 +516,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.status",
       "output": [
         "table",
@@ -515,6 +529,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.candidates",
       "output": [
         "table",
@@ -527,6 +542,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.audit",
       "output": [
         "table",
@@ -539,6 +555,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.sender.list",
       "output": [
         "table",
@@ -551,6 +568,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.sender.allow",
       "output": [
         "table",
@@ -563,6 +581,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.sender.revoke",
       "output": [
         "table",
@@ -575,6 +594,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.set",
       "output": [
         "table",
@@ -587,6 +607,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.test",
       "output": [
         "table",
@@ -599,6 +620,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.deploy",
       "output": [
         "table",
@@ -611,6 +633,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.stop",
       "output": [
         "table",
@@ -623,6 +646,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.register",
       "output": [
         "table",
@@ -635,6 +659,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.register-status",
       "output": [
         "table",
@@ -647,6 +672,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.register-cancel",
       "output": [
         "table",
@@ -659,6 +685,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.feishu-bot.delete",
       "output": [
         "table",
@@ -749,6 +776,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.storage.set",
       "output": [
         "table",
@@ -761,6 +789,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "workspace.operator",
       "output": [
         "table",
@@ -773,6 +802,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.get",
       "output": [
         "table",
@@ -785,6 +815,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.update",
       "output": [
         "table",
@@ -797,6 +828,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.onboarding.update",
       "output": [
         "table",
@@ -809,6 +841,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.onboarding.complete",
       "output": [
         "table",
@@ -821,6 +854,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.onboarding.cloud-waitlist",
       "output": [
         "table",
@@ -833,6 +867,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.onboarding.runtime-bootstrap",
       "output": [
         "table",
@@ -845,6 +880,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "account.onboarding.no-runtime-bootstrap",
       "output": [
         "table",
@@ -857,6 +893,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "member.get",
       "output": [
         "table",
@@ -869,6 +906,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "token.list",
       "output": [
         "table",
@@ -881,6 +919,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "token.create",
       "output": [
         "table",
@@ -893,6 +932,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "token.renew",
       "output": [
         "table",
@@ -905,6 +945,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "token.delete",
       "output": [
         "table",
@@ -1205,6 +1246,147 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "task"
       ],
       "capability": "repo.checkout",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.context": {
+      "command": "remi root context",
+      "auth": [
+        "human",
+        "task",
+        "daemon",
+        "share"
+      ],
+      "capability": "root.context",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.grant.list": {
+      "command": "remi root grant list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.grant.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.grant.create": {
+      "command": "remi root grant create",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.grant.create",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.grant.revoke": {
+      "command": "remi root grant revoke",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.grant.revoke",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.runtime-trust.list": {
+      "command": "remi root runtime-trust list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.runtime-trust.list",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.runtime-trust.get": {
+      "command": "remi root runtime-trust get",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.runtime-trust.get",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.runtime-trust.grant": {
+      "command": "remi root runtime-trust grant",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.runtime-trust.grant",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.runtime-trust.revoke": {
+      "command": "remi root runtime-trust revoke",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.runtime-trust.revoke",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.credential-family.revoke": {
+      "command": "remi root credential-family revoke",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.credential-family.revoke",
+      "output": [
+        "table",
+        "json",
+        "jsonl"
+      ]
+    },
+    "root.audit.list": {
+      "command": "remi root audit list",
+      "auth": [
+        "human",
+        "task"
+      ],
+      "root_conditional": true,
+      "capability": "root.audit.list",
       "output": [
         "table",
         "json",
@@ -2669,6 +2851,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "share.get",
       "output": [
         "table",
@@ -2681,6 +2864,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "share.create",
       "output": [
         "table",
@@ -2693,6 +2877,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "share.extend",
       "output": [
         "table",
@@ -2705,6 +2890,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "share.delete",
       "output": [
         "table",
@@ -3016,6 +3202,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "message.question.continue",
       "output": [
         "table",
@@ -3041,6 +3228,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.sources",
       "output": [
         "table",
@@ -3053,6 +3241,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.models",
       "output": [
         "table",
@@ -3065,6 +3254,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.list",
       "output": [
         "table",
@@ -3077,6 +3267,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.get",
       "output": [
         "table",
@@ -3089,6 +3280,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.send",
       "output": [
         "table",
@@ -3101,6 +3293,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.receipt",
       "output": [
         "table",
@@ -3113,6 +3306,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.interrupt",
       "output": [
         "table",
@@ -3125,6 +3319,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "chat.external.respond",
       "output": [
         "table",
@@ -3189,6 +3384,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "agent.supervisor.set",
       "output": [
         "table",
@@ -3201,6 +3397,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "agent.role.set",
       "output": [
         "table",
@@ -4098,6 +4295,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "human",
         "daemon"
       ],
+      "root_conditional": true,
       "capability": "runtime.codex-profile.get",
       "output": [
         "table",
@@ -4110,6 +4308,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.codex-profile.set",
       "output": [
         "table",
@@ -4123,6 +4322,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "human",
         "daemon"
       ],
+      "root_conditional": true,
       "capability": "runtime.claude-profile.get",
       "output": [
         "table",
@@ -4135,6 +4335,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.claude-profile.set",
       "output": [
         "table",
@@ -4160,6 +4361,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.workspace.create",
       "output": [
         "table",
@@ -4185,6 +4387,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.workspace.rename",
       "output": [
         "table",
@@ -4197,6 +4400,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.workspace.archive",
       "output": [
         "table",
@@ -4238,6 +4442,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
         "human",
         "daemon"
       ],
+      "root_conditional": true,
       "capability": "runtime.create",
       "output": [
         "table",
@@ -4263,6 +4468,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.delete",
       "output": [
         "table",
@@ -4275,6 +4481,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.archive-agents-and-delete",
       "output": [
         "table",
@@ -4341,6 +4548,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.release.start",
       "output": [
         "table",
@@ -4367,6 +4575,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.command.run",
       "output": [
         "table",
@@ -4392,6 +4601,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.gc",
       "output": [
         "table",
@@ -4581,6 +4791,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.status",
       "output": [
         "table",
@@ -4593,6 +4804,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.health",
       "output": [
         "table",
@@ -4605,6 +4817,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.ready",
       "output": [
         "table",
@@ -4617,6 +4830,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.list",
       "output": [
         "table",
@@ -4629,6 +4843,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.create",
       "output": [
         "table",
@@ -4641,6 +4856,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.delete",
       "output": [
         "table",
@@ -4653,6 +4869,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.start",
       "output": [
         "table",
@@ -4665,6 +4882,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.stop",
       "output": [
         "table",
@@ -4677,6 +4895,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.reboot",
       "output": [
         "table",
@@ -4689,6 +4908,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.status",
       "output": [
         "table",
@@ -4701,6 +4921,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "runtime.cloud.node.exec",
       "output": [
         "table",
@@ -4713,6 +4934,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "daemon.drain",
       "output": [
         "table",
@@ -4738,6 +4960,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "daemon.undrain",
       "output": [
         "table",
@@ -4828,6 +5051,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "daemon.retire",
       "output": [
         "table",
@@ -5035,6 +5259,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "autopilot.trigger.rotate-token",
       "output": [
         "table",
@@ -5047,6 +5272,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "autopilot.trigger.set-secret",
       "output": [
         "table",
@@ -5306,6 +5532,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.add",
       "output": [
         "table",
@@ -5331,6 +5558,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.authorization.start",
       "output": [
         "table",
@@ -5343,6 +5571,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.authorization.get",
       "output": [
         "table",
@@ -5355,6 +5584,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.update",
       "output": [
         "table",
@@ -5367,6 +5597,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.delete",
       "output": [
         "table",
@@ -5379,6 +5610,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.connection.check",
       "output": [
         "table",
@@ -5430,6 +5662,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.source.add",
       "output": [
         "table",
@@ -5442,6 +5675,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.source.update",
       "output": [
         "table",
@@ -5454,6 +5688,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.source.delete",
       "output": [
         "table",
@@ -5466,6 +5701,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.source.available-conversations",
       "output": [
         "table",
@@ -5569,6 +5805,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.message.create-issue",
       "output": [
         "table",
@@ -5594,6 +5831,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.proposal.approve",
       "output": [
         "table",
@@ -5606,6 +5844,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "messaging.proposal.reject",
       "output": [
         "table",
@@ -5618,6 +5857,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.route.list",
       "output": [
         "table",
@@ -5630,6 +5870,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.route.set",
       "output": [
         "table",
@@ -5642,6 +5883,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.route.unset",
       "output": [
         "table",
@@ -5654,6 +5896,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.chat.list",
       "output": [
         "table",
@@ -5705,6 +5948,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.source.add",
       "output": [
         "table",
@@ -5717,6 +5961,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.source.update",
       "output": [
         "table",
@@ -5729,6 +5974,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.source.delete",
       "output": [
         "table",
@@ -5741,6 +5987,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.endpoint.list",
       "output": [
         "table",
@@ -5753,6 +6000,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.endpoint.check",
       "output": [
         "table",
@@ -5765,6 +6013,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.source.available-chats",
       "output": [
         "table",
@@ -5829,6 +6078,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.messages.create-issue",
       "output": [
         "table",
@@ -5880,6 +6130,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.proposals.approve",
       "output": [
         "table",
@@ -5892,6 +6143,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "feishu.proposals.reject",
       "output": [
         "table",
@@ -5943,6 +6195,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "notification.channel.create",
       "output": [
         "table",
@@ -5955,6 +6208,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "notification.channel.update",
       "output": [
         "table",
@@ -5967,6 +6221,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "notification.channel.delete",
       "output": [
         "table",
@@ -5992,6 +6247,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "notification.delivery.retry",
       "output": [
         "table",
@@ -6342,6 +6598,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "platform.settings.update",
       "output": [
         "table",
@@ -6406,6 +6663,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.balance",
       "output": [
         "table",
@@ -6418,6 +6676,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.transaction.list",
       "output": [
         "table",
@@ -6430,6 +6689,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.batch.list",
       "output": [
         "table",
@@ -6442,6 +6702,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.topup.list",
       "output": [
         "table",
@@ -6454,6 +6715,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.tier.list",
       "output": [
         "table",
@@ -6466,6 +6728,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.checkout.create",
       "output": [
         "table",
@@ -6478,6 +6741,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.checkout.get",
       "output": [
         "table",
@@ -6490,6 +6754,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "billing.portal.create",
       "output": [
         "table",
@@ -6515,6 +6780,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "lark.install.begin",
       "output": [
         "table",
@@ -6540,6 +6806,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "lark.installation.delete",
       "output": [
         "table",
@@ -6552,6 +6819,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "lark.binding.redeem",
       "output": [
         "table",
@@ -6564,6 +6832,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "lark.daemon.install",
       "output": [
         "table",
@@ -6576,6 +6845,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "lark.daemon.status",
       "output": [
         "table",
@@ -6588,6 +6858,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.password",
       "output": [
         "table",
@@ -6600,6 +6871,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.password-account.set",
       "output": [
         "table",
@@ -6612,6 +6884,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.lark",
       "output": [
         "table",
@@ -6624,6 +6897,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.google",
       "output": [
         "table",
@@ -6636,6 +6910,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.send-code",
       "output": [
         "table",
@@ -6648,6 +6923,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.verify-code",
       "output": [
         "table",
@@ -6660,6 +6936,7 @@ export const CLI_CAPABILITIES_RUNTIME = {
       "auth": [
         "human"
       ],
+      "root_conditional": true,
       "capability": "context.auth.logout",
       "output": [
         "table",

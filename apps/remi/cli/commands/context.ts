@@ -1,5 +1,5 @@
 import { loadMultiremiConfig } from "@multiremi/config.js";
-import { taskCredential } from "../core/task-context.js";
+import { taskCarrierInfo, taskCredential } from "../core/task-context.js";
 import {
   CliApiClient,
   CliError,
@@ -65,10 +65,21 @@ export async function runContextCommand(invocation: CommandInvocation): Promise<
       query: stringOption(invocation, "query"),
     },
   });
+  const carrier = taskCarrierInfo();
   const value = {
     ...response.data,
     capabilities,
-    local: { cwd: process.cwd() },
+    local: {
+      cwd: process.cwd(),
+      ...(carrier ? {
+        root_carrier: {
+          mode: carrier.mode,
+          receipt_id: carrier.receiptId,
+          delivery_version: carrier.deliveryVersion,
+          run_generation: carrier.runGeneration,
+        },
+      } : {}),
+    },
   };
   const renderer = new CliRenderer();
   const mode = outputMode(invocation);
@@ -96,6 +107,28 @@ function contextRows(value: unknown): ContextRow[] {
   const rows: ContextRow[] = [];
   const workspace = recordValue(value.workspace);
   if (workspace) rows.push(row("workspace", workspace));
+  const identity = recordValue(value.identity);
+  if (identity) {
+    const subject = recordValue(identity.authenticated_subject);
+    if (subject) {
+      const subjectType = stringValue(subject.type) ?? "-";
+      const subjectId = stringValue(subject.id) ?? "-";
+      const originSuffix = identity.is_agent_origin === true ? " (agent-origin)" : "";
+      rows.push({ type: "subject", id: subjectId, name: `${subjectType}${originSuffix}`, status: stringValue(identity.type) ?? "-" });
+    }
+  }
+  const root = recordValue(value.root);
+  if (root) {
+    const granted = root.agent_granted_root === true || root.granted === true;
+    const effective = root.current_attempt_effective_root === true || root.effective_root === true || root.effective === true;
+    const reason = stringValue(root.effective_reason_code) ?? stringValue(root.reason_code) ?? "-";
+    rows.push({
+      type: "root",
+      id: stringValue(root.grant_id) ?? "-",
+      name: `granted=${String(granted)} effective=${String(effective)}`,
+      status: reason,
+    });
+  }
   const current = recordValue(value.current);
   for (const type of ["agent", "task", "chat", "issue", "session", "project", "runtime"] as const) {
     const item = recordValue(current?.[type]);

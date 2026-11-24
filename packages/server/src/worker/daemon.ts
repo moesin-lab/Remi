@@ -1,4 +1,5 @@
 import { foldStoredTrace } from "./trace-pages.js";
+import type { FeishuBotAuthorizeSenderRequest } from "@multiremi/contracts/types.js";
 import { PlannedRestartJournal, PlannedRestartTransfer, type RestartExecution } from "./planned-restart-journal.js";
 import { restartQuestionKey, type PlannedRestartCheckpoint } from "@multiremi/contracts/planned-restart.js";
 import { DEFAULT_DAEMON_DRAIN_MS } from "@multiremi/contracts/daemon-drain.js";
@@ -1727,6 +1728,7 @@ export class MultiremiDaemon {
       onStateChange: () => { this.taskDownlinks.connectionChanged(); this.wakeClaim(); },
       readyToConnect: () => this.supervisorReady(),
       onConnected: () => {
+        this.feishuConcierge?.connectionRestored();
         // welcome follows the server's authenticated target-version hello transition.
         this.updateConfirmation ??= this.confirmRuntimeUpdate().catch(error => {
           log.warn(`Update confirmation deferred: ${error instanceof Error ? error.message : String(error)}`);
@@ -1924,6 +1926,10 @@ export class MultiremiDaemon {
     return this.client.cancelFeishuBotSessionTask(
       this.options.runtimeId!, revision, externalSessionKey, options,
     );
+  }
+
+  authorizeFeishuBotSender(input: FeishuBotAuthorizeSenderRequest) {
+    return this.client.authorizeFeishuBotSender(this.options.runtimeId!, input);
   }
 
   inspectFeishuBotSession(revision: number, externalSessionKey: string) {

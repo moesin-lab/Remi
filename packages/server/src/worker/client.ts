@@ -44,6 +44,8 @@ import type {
   FeishuBotTaskSnapshot,
   FeishuBotCancelResult,
   FeishuBotSessionSnapshot,
+  FeishuBotAuthorizeSenderRequest,
+  FeishuBotAuthorizeSenderResult,
   SubmitFeishuBotMessageInput,
   SubmitFeishuBotMessageResult,
 } from "@multiremi/contracts/types.js";
@@ -845,6 +847,14 @@ export class MultiremiDaemonClient {
         ? response.reason
         : null,
     };
+  }
+
+  async authorizeFeishuBotSender(runtimeId: string, input: FeishuBotAuthorizeSenderRequest): Promise<boolean> {
+    const result = await this.post<FeishuBotAuthorizeSenderResult>(
+      `/api/daemon/runtimes/${encodeURIComponent(runtimeId)}/feishu-bot/authorize-sender`, input,
+    );
+    if (typeof result?.allowed !== "boolean") throw new Error("Invalid Feishu sender authorization response");
+    return result.allowed;
   }
 
   async inspectFeishuBotSession(

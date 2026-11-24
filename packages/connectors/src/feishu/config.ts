@@ -1,6 +1,7 @@
 export type FeishuDomainName = "feishu" | "lark" | "bytedance";
 
 export interface FeishuChannelConfig {
+  wakeWords?: readonly string[];
   recoveryChats?: Array<{ chat_id: string; chat_type: "p2p" | "group" }>;
   appId: string;
   appSecret: string;
@@ -32,5 +33,5 @@ export interface GroupPolicy {
   } | null;
 }
 
-/** Resolve whether a Feishu sender belongs to the configured Multiremi workspace. */
-export type FeishuSenderAuthorizer = (senderOpenId: string) => Promise<boolean>;
+/** Apply the current bot's sender access policy to the inbound identity. */
+export type FeishuSenderAuthorizer = (senderOpenId: string, context: import("./types.js").FeishuMessageContext) => Promise<boolean>;

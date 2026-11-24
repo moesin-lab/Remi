@@ -1,4 +1,6 @@
 import { controlPlaneConciergeHost } from "../../../apps/remi/cli/multiremi.js";
+import { FeishuConciergeSupervisor } from "@multiremi/worker/feishu-concierge.js";
+import { processFeishuMessageEvent } from "@connectors/feishu/receive.js";
 import { MultiremiDaemon } from "@multiremi/worker/daemon.js";
 import { sendMessageFeishu } from "@connectors/feishu/send.js";
 import { FEISHU_OUTBOUND_DEDUPE_SAFE_WINDOW_MS } from "@multiremi/store/repos/feishu-bot-repo.js";
@@ -168,6 +170,47 @@ function queuedClient(test: Scaffold, canSend = () => true, timeoutMs = 30_000) 
 }
 
 describe("Feishu bot control-plane delivery", () => {
+  it("applies saved words before the next inbound event and authorizes through the daemon HTTP route", async () => {
+    const fixture = await scaffold();
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: fixture.app.fetch });
+    const client = new MultiremiDaemonClient(String(server.url).replace(/\/$/, ""), fixture.tokens.rt_a);
+    const sender = { sender_open_id: "ou_external", external_session_key: "oc_group:thread:root" };
+    const save = (change: Record<string, unknown>) => fixture.app.request("/api/workspaces/local/feishu-bot", { method: "PUT", headers: MASTER,
+      body: JSON.stringify({ agent_id: fixture.agentId, runtime_id: "rt_a", app_id: "cli_a1b2c3d4e5f6g7h8", domain: "feishu", enabled: true, ...change }) });
+    let receive: ((word: string) => Promise<string | null>) | null = null;
+    const supervisor = new FeishuConciergeSupervisor({ fetchConfig: () => client.getFeishuBotConfig("rt_a"), report: async () => {}, host: {
+      stop: async () => { receive = null; },
+      start: async ({ config }) => {
+        receive = async word => {
+          const parsed = await processFeishuMessageEvent({ request: async () => ({}) } as any, { sender: { sender_id: { open_id: sender.sender_open_id } },
+            message: { chat_id: "oc_group", root_id: "root", message_id: crypto.randomUUID(), message_type: "text", chat_type: "group",
+              content: JSON.stringify({ text: `${word}正文` }) } }, "ou_bot", { durableIntake: true, wakeWords: config.wake_words,
+            authorizeSender: () => client.authorizeFeishuBotSender("rt_a", { ...sender, revision: config.revision }), onDenied: async () => {} });
+          return parsed?.rawContent ?? null;
+        };
+        return {};
+      },
+    } });
+    try {
+      for (const words of [[], ["甲"], ["乙"], []]) {
+        const saved = await save({ wake_words: words });
+        expect(saved.status).toBe(200);
+        const directive = (await (await heartbeat(fixture, "rt_a")).json()).feishu_bot;
+        expect(directive.wake_words).toEqual(words);
+        await supervisor.apply(directive);
+        for (const word of ["甲", "乙"]) expect(await receive!(word)).toBe(words.includes(word) ? "正文" : null);
+      }
+      const staleRevision = supervisor.snapshot().appliedRevision;
+      const saved = await save({ sender_access_policy: "allowlist" });
+      expect(saved.status).toBe(200);
+      const current = await client.getFeishuBotConfig("rt_a");
+      expect(await client.authorizeFeishuBotSender("rt_a", { ...sender, revision: current!.config.revision })).toBe(false);
+      await expect(client.authorizeFeishuBotSender("rt_a", { ...sender, revision: staleRevision })).rejects.toMatchObject({ status: 409 });
+    } finally {
+      await supervisor.shutdown();
+      server.stop(true);
+    }
+  });
   it("reuses a stable Feishu UUID after the daemon loses its send acknowledgement", async () => {
     const test = await scaffold();
     await report(test, "rt_a", { applied_revision: 1, state: "online" });
@@ -765,7 +808,7 @@ describe("Feishu bot control-plane delivery", () => {
 
     expect(ack.status).toBe(200);
     const body = await ack.json();
-    expect(body.feishu_bot).toEqual({ revision: 1, desired_state: "running", config_available: true, no_mention_chat_ids: [] });
+    expect(body.feishu_bot).toEqual({ revision: 1, desired_state: "running", config_available: true, no_mention_chat_ids: [], wake_words: [] });
     // The whole ack, not just the directive: a credential must not ride along
     // in `workspace_settings` or any other field either.
     expect(JSON.stringify(body)).not.toContain(APP_SECRET);

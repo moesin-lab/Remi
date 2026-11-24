@@ -94,6 +94,27 @@ it("denies overlapping history without repeated cards while retaining live denia
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+it("keeps a live wake-word command durable through a temporary authorization failure", async () => {
+  const path = join(dedupTestRoot, "retry-auth.json");
+  const journal = new FeishuInboundRecovery(path);
+  const event = feishuHistoryEvent({ message_id: crypto.randomUUID(), msg_type: "text", sender: { id_type: "open_id", id: "ou_retry", sender_type: "user" },
+    body: { content: JSON.stringify({ text: "助手 /stop" }) } }, "oc_group", "group")!;
+  delete event.recovery_source;
+  let available = false;
+  const commands: string[] = [];
+  const deliver = createFeishuInboundDelivery({ client: { request: async () => ({}) } as any, recovery: journal, appId: "cli_test",
+    wakeWords: ["助手"], botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() },
+    authorizeSender: async () => { if (!available) throw new Error("offline"); return true; }, onMessage: async message => { commands.push(message.rawContent); } });
+  await expect(journal.accept(event, deliver)).rejects.toThrow("temporarily unavailable");
+  expect(commands).toEqual([]);
+  expect(Object.keys(JSON.parse(readFileSync(path, "utf8")).pending)).toEqual([event.message.message_id]);
+  available = true;
+  await journal.replay(deliver);
+  await journal.accept(event, deliver);
+  expect(commands).toEqual(["/stop"]);
+  expect(JSON.parse(readFileSync(path, "utf8")).pending).toEqual({});
+});
+
 it("skips replayed commands, advances past an offline stop, and preserves ordinary slash requests", async () => {
   const root = mkdtempSync(join(tmpdir(), "feishu-commands-")), path = join(root, "journal.json"), now = Date.now();
   const client = { request: async () => ({ data: { users: [{ name: "Member" }] } }) } as any;
@@ -103,7 +124,7 @@ it("skips replayed commands, advances past an offline stop, and preserves ordina
     msg_type: "text", sender: { id_type: "open_id", id: "ou_member", sender_type: "user" }, body: { content: JSON.stringify({ text }) } }, "oc_private", "p2p")!;
   try {
     const journal = new FeishuInboundRecovery(path, () => now);
-    const deliver = createFeishuInboundDelivery({ client, recovery: journal, appId: "cli_test", authorizeSender: async () => true,
+    const deliver = createFeishuInboundDelivery({ client, recovery: journal, appId: "cli_test", wakeWords: ["助手"], authorizeSender: async () => true,
       botIdentity: { botOpenId: "ou_bot", botOpenIdReady: Promise.resolve() },
       onMessage: async message => {
         const command = resolveFeishuCommand(message.rawContent);
@@ -115,10 +136,12 @@ it("skips replayed commands, advances past an offline stop, and preserves ordina
     await journal.accept({ ...previousNew, recovery_source: undefined }, deliver);
     expect(newCount).toBe(1);
     const offlineStop = item("om_offline_stop", "/stop", now - 3000);
+    const groupStop = item("om_group_stop", "助手 /stop", now - 3000);
+    Object.assign(groupStop.message, { chat_type: "group", chat_id: "oc_group" });
     const ordinary = item("om_ordinary", "/data00/home/x 看下", now - 2000);
     const help = item("om_help_request", "/help 怎么用", now - 1000);
     for (let overlap = 0; overlap < 2; overlap++) {
-      for (const event of [previousNew, offlineStop, ordinary, help]) await journal.accept(event, deliver);
+      for (const event of [previousNew, offlineStop, groupStop, ordinary, help]) await journal.accept(event, deliver);
     }
     expect(newCount).toBe(1);
     expect(stopCount).toBe(0);
@@ -126,6 +149,7 @@ it("skips replayed commands, advances past an offline stop, and preserves ordina
     const state = JSON.parse(readFileSync(path, "utf8"));
     expect(state.pending).toEqual({});
     expect(state.skipped).toContainEqual(expect.objectContaining({ status: "skipped", messageId: "om_offline_stop", command: "stop" }));
+    expect(state.skipped).toContainEqual(expect.objectContaining({ messageId: "om_group_stop", command: "stop" }));
     expect(state.chats.oc_private.through).toBe(now - 1000);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
